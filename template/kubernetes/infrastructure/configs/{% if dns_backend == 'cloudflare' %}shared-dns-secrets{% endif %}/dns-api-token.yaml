@@ -1,0 +1,29 @@
+---
+# One ClusterExternalSecret fans the DNS provider token out to every namespace
+# labelled <label-domain>/dns-api-token=true (cert-manager for DNS-01,
+# external-dns, the DDNS job). A new consumer just adds the label.
+#
+# remoteRef.key is the item TITLE in the secret backend and .property is the
+# FIELD name. The token needs Zone:Read + DNS:Edit on the external zone only.
+apiVersion: external-secrets.io/v1
+kind: ClusterExternalSecret
+metadata:
+  name: dns-api-token
+spec:
+  namespaceSelectors:
+    - matchLabels:
+        ${cluster_node_label_domain}/dns-api-token: "true"
+  externalSecretName: dns-api-token
+  externalSecretSpec:
+    refreshInterval: 24h
+    secretStoreRef:
+      kind: ClusterSecretStore
+      name: ${cluster_secret_store}
+    target:
+      name: dns-api-token
+      creationPolicy: Owner
+    data:
+      - secretKey: api-token
+        remoteRef:
+          key: Cloudflare DNS Token
+          property: credential

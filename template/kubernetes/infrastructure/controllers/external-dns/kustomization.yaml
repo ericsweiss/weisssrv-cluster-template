@@ -1,0 +1,15 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: external-dns
+resources:
+  - namespace.yaml
+  - release.yaml
+  - networkpolicy.yaml
+
+components:
+  - ../../../components/netpol-baseline
+  - ../../../components/netpol-egress-dns
+  - ../../../components/netpol-egress-apiserver
+  # DNS provider API.
+  - ../../../components/netpol-egress-public

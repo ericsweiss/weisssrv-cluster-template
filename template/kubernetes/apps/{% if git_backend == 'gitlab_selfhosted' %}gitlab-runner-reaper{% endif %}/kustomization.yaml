@@ -1,0 +1,25 @@
+---
+# NOTE: deliberately NO top-level `namespace:`. Kustomize's namespace transformer
+# OVERRIDES each resource's explicit metadata.namespace, which would drag the two
+# RoleBindings out of the runner namespaces and silently break the cross-namespace
+# grant. Every resource here carries its own namespace instead.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - networkpolicy.yaml
+  - rbac.yaml
+  - cronjob.yaml
+
+components:
+  - ../../components/netpol-baseline
+patches:
+  # No namespace transformer here (see above), so namespace the shared
+  # default-deny-ingress explicitly.
+  - target:
+      kind: NetworkPolicy
+      name: default-deny-ingress
+    patch: |
+      - op: add
+        path: /metadata/namespace
+        value: gitlab-runner-reaper

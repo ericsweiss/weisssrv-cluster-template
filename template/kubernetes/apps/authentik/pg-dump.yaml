@@ -1,0 +1,117 @@
+---
+# Nightly logical backup of the bundled PostgreSQL. The data volume is only a
+# crash-consistent block snapshot; this adds a restorable logical dump (gzipped
+# plain SQL, DROP-if-exists) on a file-walkable NFS dataset, which is what the
+# offsite backup can actually pick up.
+#
+# Restore: gunzip -c <file> | psql -h authentik-postgresql -U authentik authentik
+#
+# Runs at 02:30 UTC. Add spec.timeZone if you need it aligned with local
+# overnight maintenance windows, and stagger it against your other dump jobs.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: authentik-pg-dump
+  namespace: authentik
+  labels:
+    app.kubernetes.io/name: authentik-pg-dump
+    app.kubernetes.io/component: backup
+spec:
+  schedule: "30 2 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: authentik-pg-dump
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 2000
+            fsGroup: 2000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: pg-dump
+              # Same major as the server so pg_dump matches.
+              image: postgres:${postgresql_version}
+              imagePullPolicy: IfNotPresent
+              # bash, not sh: dash has no pipefail, and without it a failed
+              # pg_dump still gzips to exit 0 — a truncated dump would rotate in
+              # as "successful" and no staleness alert would ever fire.
+              command: ["/bin/bash", "-ec"]
+              # Shell vars are written $var, never ${var}: the braced form is
+              # reserved for Flux postBuild substitution, and the lint gate
+              # rejects any ${x} that is not a known substitution key.
+              args:
+                - |
+                  set -o pipefail
+                  # NetworkPolicy ipset propagation to remote nodes lags pod
+                  # creation by ~5-15s: a fresh job pod's first SYN is silently
+                  # dropped at the database node. A job that dials the instant it
+                  # starts loses that race on every backoff attempt, so wait —
+                  # bounded — until the server is actually reachable.
+                  for i in $(seq 1 30); do
+                    if pg_isready -q; then break; fi
+                    if [ "$i" = 30 ]; then echo "postgres unreachable after 150s" >&2; exit 1; fi
+                    sleep 5
+                  done
+                  ts="$(date +%Y%m%d-%H%M%S)"
+                  out="/backups/authentik-$ts.sql.gz"
+                  echo "pg_dump $PGDATABASE -> $out"
+                  pg_dump --clean --if-exists | gzip -c > "$out.tmp"
+                  mv "$out.tmp" "$out"
+                  ls -1t /backups/authentik-*.sql.gz 2>/dev/null \
+                    | tail -n +$((RETENTION + 1)) \
+                    | while IFS= read -r f; do rm -f "$f"; done
+                  echo "done; kept:"; ls -1t /backups/authentik-*.sql.gz
+              env:
+                - name: PGHOST
+                  value: authentik-postgresql.authentik.svc.cluster.local
+                - name: PGPORT
+                  value: "5432"
+                - name: PGUSER
+                  value: authentik
+                - name: PGDATABASE
+                  value: authentik
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: authentik-secrets
+                      key: postgresql-password
+                - name: RETENTION
+                  value: "7"
+                - name: HOME
+                  value: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: authentik-pg-dump
+            - name: tmp
+              emptyDir: {}

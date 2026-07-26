@@ -1,0 +1,32 @@
+---
+# TLS for the Grafana UI (internal only).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: grafana-tls
+  namespace: observability
+spec:
+  secretName: grafana-internal-tls
+  issuerRef:
+    name: ${cluster_issuer}
+    kind: ClusterIssuer
+  commonName: "grafana.${cluster_internal_domain}"
+  dnsNames:
+    - "grafana.${cluster_internal_domain}"
+  renewBefore: 720h
+---
+# TLS for the Loki push API (internal only), used by host-side log collectors.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: loki-tls
+  namespace: observability
+spec:
+  secretName: loki-internal-tls
+  issuerRef:
+    name: ${cluster_issuer}
+    kind: ClusterIssuer
+  commonName: "loki.${cluster_internal_domain}"
+  dnsNames:
+    - "loki.${cluster_internal_domain}"
+  renewBefore: 720h

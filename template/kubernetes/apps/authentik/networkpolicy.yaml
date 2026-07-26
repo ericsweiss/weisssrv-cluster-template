@@ -1,0 +1,123 @@
+---
+# Server: HTTP from Traefik, metrics from observability.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-server-ingress
+  namespace: authentik
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: authentik
+      app.kubernetes.io/component: server
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 9000
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 9300
+
+---
+# PostgreSQL: reachable only from authentik pods and the dump CronJob.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-from-authentik
+  namespace: authentik
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: authentik
+      app.kubernetes.io/name: postgresql
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: authentik
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: authentik-pg-dump
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# Dump CronJob egress: PostgreSQL only (DNS comes from the shared component).
+# NFS is mounted by the kubelet on the node, not by the pod, so it is not policed
+# here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-pg-dump
+  namespace: authentik
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: authentik-pg-dump
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: authentik
+              app.kubernetes.io/name: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# Server + worker egress: PostgreSQL, the kube-apiserver (the worker drives the
+# Kubernetes integration / embedded outpost), and the SMTP relay for password
+# resets and notifications. Cluster DNS and public HTTPS (blueprints, GeoIP) come
+# from the shared components in kustomization.yaml.
+#
+# The apiserver rule allowlists the SERVER NODE range, not the in-cluster API
+# VIP: kube-proxy DNATs the VIP before NetworkPolicy evaluation, so a rule on the
+# VIP never matches the packet that is actually sent.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-authentik
+  namespace: authentik
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: authentik
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: authentik
+              app.kubernetes.io/name: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - ipBlock:
+            cidr: ${cluster_apiserver_egress_cidr}
+      ports:
+        - protocol: TCP
+          port: 6443
+    - to:
+        - ipBlock:
+            cidr: ${cluster_lan_cidr}
+      ports:
+        # Submission + STARTTLS only; nothing here dials cleartext 25.
+        - protocol: TCP
+          port: 587

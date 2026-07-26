@@ -1,0 +1,32 @@
+---
+# Pins k3s's bundled CoreDNS at 2 replicas. k3s owns that Deployment as an AddOn
+# and resets replicas on every server restart/upgrade, so a replicas patch is a
+# no-op — an HPA scales it back within seconds instead.
+#
+# With minReplicas == maxReplicas this is a replica pin, not an autoscaler: the
+# metrics block only exists because the v2 HPA schema requires one, and its
+# threshold can never fire. Raise maxReplicas to make it real.
+#
+# Topology spread is soft-only for the same AddOn-ownership reason: the
+# scheduler's default spreading may still co-locate both replicas, which the PDB
+# cannot prevent. Disabling the bundled AddOn and shipping your own CoreDNS
+# manifest is the durable fix.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: coredns
+  namespace: kube-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: coredns
+  minReplicas: 2
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 90

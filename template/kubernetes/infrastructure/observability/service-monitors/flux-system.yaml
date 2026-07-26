@@ -1,0 +1,21 @@
+---
+# Flux controller metrics. The controllers expose :8080/metrics, but only some of
+# them have Services and those Services do not expose the metrics port — so this
+# is a PodMonitor, selecting on the label every controller pod carries.
+# Feeds the platform.gitops alert group and the Flux dashboard.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: flux-system
+  namespace: observability
+spec:
+  namespaceSelector:
+    matchNames:
+      - flux-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  podMetricsEndpoints:
+    - port: http-prom
+      interval: 30s
+      path: /metrics

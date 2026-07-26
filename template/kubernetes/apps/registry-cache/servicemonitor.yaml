@@ -1,0 +1,19 @@
+---
+# Native registry metrics from the debug listener (:5001), enabled by
+# REGISTRY_HTTP_DEBUG_PROMETHEUS_ENABLED. Prometheus discovers ServiceMonitors in
+# every namespace, so this ships with the module rather than with the
+# observability stage. The observability -> :5001 ingress is opened
+# (Prometheus-pod-scoped) in networkpolicy.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: registry-cache
+  namespace: registry-cache
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: registry-cache
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics

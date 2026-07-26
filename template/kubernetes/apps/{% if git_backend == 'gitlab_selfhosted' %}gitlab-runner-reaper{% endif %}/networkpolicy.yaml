@@ -1,0 +1,36 @@
+# The reaper only talks to the kube-API. Nothing serves traffic, so ingress is
+# denied outright by the netpol-baseline component.
+---
+# Egress: cluster DNS + the kube-apiserver. The apiserver rule targets the SERVER
+# NODE range: kube-proxy DNATs the in-cluster API VIP before NetworkPolicy
+# evaluation, so a rule on the VIP never matches the packet actually sent.
+# podSelector {} is safe — this namespace holds only the reaper. This policy is
+# itself the default-deny (only what is listed is permitted).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: reaper-egress
+  namespace: gitlab-runner-reaper
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: ${cluster_apiserver_egress_cidr}
+      ports:
+        - protocol: TCP
+          port: 6443

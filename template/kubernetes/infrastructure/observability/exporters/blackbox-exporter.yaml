@@ -1,0 +1,108 @@
+---
+# Blackbox prober — synthetic probes of the endpoints Prometheus cannot scrape:
+# ingress paths, TLS chains, off-cluster hosts. Feeds EndpointDown,
+# BlackboxExporterDown and BlackboxCertExpiringSoon.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: blackbox-exporter
+  namespace: observability
+spec:
+  interval: 30m
+  releaseName: blackbox-exporter
+  chart:
+    spec:
+      chart: prometheus-blackbox-exporter
+      version: "${helm_chart_versions_prometheus_blackbox_exporter}"
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+        namespace: flux-system
+      interval: 12h
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    config:
+      modules:
+        http_2xx:
+          prober: http
+          timeout: 10s
+          http:
+            valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+            follow_redirects: true
+            preferred_ip_protocol: ip4
+            tls_config:
+              insecure_skip_verify: false
+        # For endpoints behind SSO: an unauthenticated probe is answered by the
+        # identity provider with a redirect or a 401/403. Accepting those still
+        # proves ingress + TLS + backend reachability, which is what the probe is
+        # for — it deliberately does NOT prove an authenticated session.
+        http_sso:
+          prober: http
+          timeout: 10s
+          http:
+            valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+            valid_status_codes: [200, 301, 302, 401, 403]
+            follow_redirects: false
+            preferred_ip_protocol: ip4
+            tls_config:
+              insecure_skip_verify: false
+        dns_resolution:
+          prober: dns
+          timeout: 5s
+          dns:
+            query_name: ${cluster_internal_domain}
+            query_type: A
+            valid_rcodes:
+              - NOERROR
+        icmp_ping:
+          prober: icmp
+          timeout: 5s
+        tcp_connect:
+          prober: tcp
+          timeout: 5s
+    serviceMonitor:
+      enabled: true
+      defaults:
+        interval: 60s
+      # STARTER LIST — only targets this template guarantees exist. Every entry is
+      # derived from cluster-config, so there are no literals to update when the
+      # domain changes. Add your own below; see README for the pattern (and note
+      # that a target which is legitimately offline much of the time needs its own
+      # gated alert, not a bare EndpointDown).
+      targets:
+        - name: grafana
+          url: https://grafana.${cluster_internal_domain}
+          module: http_2xx
+        - name: sso
+          url: https://auth.${cluster_internal_domain}
+          module: http_sso
+        # loki-push returns 401 without credentials, which http_sso accepts —
+        # this probes the ingress + TLS + Loki hop, not auth.
+        - name: loki-push
+          url: https://loki.${cluster_internal_domain}
+          module: http_sso
+        - name: kube-api-vip
+          url: ${cluster_api_vip}:6443
+          module: tcp_connect
+        - name: smtp-relay
+          url: ${cluster_smtp_host}:587
+          module: tcp_connect
+        # Examples to copy (they need site values this template does not carry):
+        #   - name: dns-01
+        #     url: 10.0.0.150:53
+        #     module: dns_resolution
+        #   - name: public-ingress
+        #     url: https://www.${cluster_external_domain}
+        #     module: http_2xx
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        memory: 64Mi

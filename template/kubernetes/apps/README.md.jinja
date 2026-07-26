@@ -1,0 +1,51 @@
+# kubernetes/apps
+
+Workloads, one directory per module, reconciled by the `apps` Flux Kustomization.
+
+Every module here is **generic platform machinery**, not an application you run
+for its own sake. Your actual apps go in one of two places:
+
+- **in this repo** — add a directory following the same shape (namespace,
+  workload, NetworkPolicy, VPA, kustomization) and list it in
+  `kustomization.yaml`;
+- **in their own repo** — onboard it as a tenant, so it deploys from its own git
+  history with its own CI. See
+  `kubernetes/clusters/{{ cluster_name }}/tenants/README.md`.
+
+## Modules in this cluster
+
+| Module | What it is | Disable by |
+|---|---|---|
+| `authentik` | SSO/identity provider (OIDC + ForwardAuth) | removing the entry — but also un-wire Grafana OIDC and every `authentik-auth` middleware reference |
+| `registry-cache` | pull-through container registry cache for CI | removing the entry |
+| `vm-ingress` | pattern for fronting off-cluster hosts with cluster ingress | removing the entry |
+{%- if vpn_tailscale %}
+| `tailnet-dns` | split-horizon resolver for tailnet clients | removing the entry + dropping the Split-DNS nameserver from the tailnet policy |
+{%- endif %}
+{%- if git_backend == 'gitlab_selfhosted' %}
+| `gitlab-runner` | shared, non-privileged CI runner (untagged jobs) | removing the entry |
+| `gitlab-runner-privileged` | trusted CI runner (root + DinD) for this repo's own deploys | removing the entry |
+| `gitlab-runner-reaper` | GCs leaked runner job pods and their per-job Secrets | removing the entry |
+{%- endif %}
+
+Each module has a README covering what it does, when you want it, what to
+configure and how to remove it. **Read `gitlab-runner-privileged/README.md`
+before registering that runner** — its registration scope, not its tag, is what
+keeps root+DinD execution off untrusted projects.
+
+## House style for a new module
+
+- A dedicated namespace with Pod Security Standards labels: `enforce` at the
+  strictest level the workload actually tolerates, `warn`/`audit` at
+  `restricted` so drift is visible without breaking admission.
+- `components/netpol-baseline` for default-deny ingress, plus the shared egress
+  components (`netpol-egress-dns`, `netpol-egress-public`,
+  `netpol-egress-apiserver`) rather than hand-written copies. Adding ANY egress
+  policy makes egress default-deny for the pods it selects — enumerate every
+  path the workload needs.
+- A VPA (`Initial` for single-replica apps, `Off` for stateful ones you tune by
+  hand, and never CPU-controlled where an HPA owns CPU).
+- Its own ServiceMonitor/PodMonitor and PrometheusRule if it has metrics —
+  Prometheus discovers both in every namespace, so nothing needs editing in the
+  observability stage.
+- No literal domains, IPs or CIDRs: use the `${cluster_*}` substitution keys.

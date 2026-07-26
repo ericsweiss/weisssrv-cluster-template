@@ -1,0 +1,70 @@
+---
+# Ingress:
+#   :5000 from the CI runner namespace only. A pull of the ClusterIP is DNAT'd to
+#     this pod but the SOURCE is unchanged, so a namespaceSelector is the right
+#     grain. Change the namespace name if your CI runs elsewhere.
+#   :5001 from the Prometheus pod only — the debug listener also serves /debug
+#     endpoints, so admitting the whole observability namespace over-shares.
+# Kubelet health probes are node-local and not gated by NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-registry-cache-ingress
+  namespace: registry-cache
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: registry-cache
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gitlab-runner-privileged
+      ports:
+        - protocol: TCP
+          port: 5000
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 5001
+
+---
+# Egress: the upstream fetch only. This assumes a SELF-HOSTED upstream fronted by
+# this cluster's ingress — kube-proxy DNATs the VIP to the Traefik pod, which a
+# namespaceSelector matches (an ipBlock on the VIP would not). For a public
+# upstream, swap this for the shared netpol-egress-public component.
+#
+# DNS comes from the netpol-egress-dns component (kustomization.yaml). No LAN
+# egress, no kube-apiserver (the SA token is not mounted).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-registry-upstream
+  namespace: registry-cache
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: registry-cache
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+        # Belt-and-braces: the namespaceSelector matches post-DNAT; the VIP
+        # ipBlock also admits the pre-DNAT form so a CNI change cannot silently
+        # break the fetch.
+        - ipBlock:
+            cidr: ${cluster_metallb_internal_vip}/32
+      ports:
+        - protocol: TCP
+          port: 443

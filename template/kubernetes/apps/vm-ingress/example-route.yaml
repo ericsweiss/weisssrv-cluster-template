@@ -1,0 +1,76 @@
+# TEMPLATE — copy, edit, rename, then add YOUR file to kustomization.yaml.
+# Not reconciled as-is: the address below is a placeholder.
+#
+# Four things vary per backend: the name, the backend address, the port, and the
+# hostname. Everything else is the pattern.
+---
+# 1. Selectorless ClusterIP Service — nothing populates its endpoints
+#    automatically, which is the point.
+apiVersion: v1
+kind: Service
+metadata:
+  name: example-backend
+  namespace: vm-ingress
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8443
+      targetPort: 8443
+      protocol: TCP
+---
+# 2. Hand-managed EndpointSlice carrying the backend's address. The
+#    kubernetes.io/service-name label is what binds it to the Service above; the
+#    managed-by label stops the endpoints controller from touching it.
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: example-backend
+  namespace: vm-ingress
+  labels:
+    kubernetes.io/service-name: example-backend
+    endpointslice.kubernetes.io/managed-by: manual
+addressType: IPv4
+ports:
+  - port: 8443
+    protocol: TCP
+endpoints:
+  - addresses:
+      - 203.0.113.10   # <-- REPLACE with the backend's LAN address
+    conditions:
+      ready: true
+---
+# 3. IngressRoute. This one is internal-only: lan-tailscale-only keeps it off the
+#    public internet. For a public route, drop that middleware, add the
+#    external-dns target annotation, and switch to the external wildcard secret —
+#    and put an auth middleware in front unless the backend authenticates well on
+#    its own.
+#
+#    scheme: https + serversTransport are for an HTTPS backend; drop both lines
+#    for a plain HTTP one.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: example
+  namespace: vm-ingress
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`example.${cluster_internal_domain}`)
+      kind: Rule
+      middlewares:
+        - name: lan-tailscale-only
+          namespace: traefik
+        - name: hsts-header
+          namespace: traefik
+      services:
+        - name: example-backend
+          port: 8443
+          scheme: https
+          serversTransport: vm-tls-wildcard
+  tls:
+    # Issued into THIS namespace by certificate.yaml — enable that file alongside
+    # this one. (cert-manager writes the Secret into the Certificate's own
+    # namespace; Traefik only reads Secrets from the route's namespace.) Use the
+    # external wildcard for a public route.
+    secretName: internal-wildcard-tls

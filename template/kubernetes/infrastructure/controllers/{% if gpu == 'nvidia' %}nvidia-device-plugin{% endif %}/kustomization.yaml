@@ -1,0 +1,12 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The RuntimeClass is cluster-scoped; kustomize leaves it namespaceless.
+namespace: nvidia-device-plugin
+resources:
+  - namespace.yaml
+  - runtimeclass.yaml
+  - release.yaml
+
+components:
+  - ../../../components/netpol-baseline

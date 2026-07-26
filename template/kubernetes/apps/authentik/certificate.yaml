@@ -1,0 +1,32 @@
+---
+# Certificates must live in the same namespace as the IngressRoutes that
+# reference their Secrets.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: authentik-tls
+  namespace: authentik
+spec:
+  secretName: authentik-external-tls
+  issuerRef:
+    name: ${cluster_issuer}
+    kind: ClusterIssuer
+  commonName: "auth.${cluster_external_domain}"
+  dnsNames:
+    - "auth.${cluster_external_domain}"
+  renewBefore: 720h
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: authentik-tls-internal
+  namespace: authentik
+spec:
+  secretName: authentik-internal-tls
+  issuerRef:
+    name: ${cluster_issuer}
+    kind: ClusterIssuer
+  commonName: "auth.${cluster_internal_domain}"
+  dnsNames:
+    - "auth.${cluster_internal_domain}"
+  renewBefore: 720h

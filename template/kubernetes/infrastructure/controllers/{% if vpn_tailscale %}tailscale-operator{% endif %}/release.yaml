@@ -1,0 +1,46 @@
+---
+# Watches for Services with loadBalancerClass: tailscale and gives each one a
+# real tailnet device that L3-forwards to the backing Service.
+#
+# oauth.* is deliberately unset so the chart consumes the pre-existing
+# `operator-oauth` Secret that ESO renders (externalsecret.yaml).
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: tailscale-operator
+  namespace: tailscale
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: tailscale-operator
+      version: "${helm_chart_versions_tailscale_operator}"
+      sourceRef:
+        kind: HelmRepository
+        name: tailscale
+        namespace: flux-system
+      interval: 12h
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    operatorConfig:
+      hostname: tailscale-operator
+      # The chart ships resources: {} (BestEffort); give it a floor and a memory
+      # ceiling. The operator VPA right-sizes it on natural restarts.
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          memory: 256Mi
+    proxyConfig:
+      # Tag applied to every proxy device; grant it in the tailnet ACL.
+      defaultTags: "tag:k8s"
+    apiServerProxyConfig:
+      # Ingress/egress proxies only — not the in-process Kubernetes API proxy.
+      mode: "false"

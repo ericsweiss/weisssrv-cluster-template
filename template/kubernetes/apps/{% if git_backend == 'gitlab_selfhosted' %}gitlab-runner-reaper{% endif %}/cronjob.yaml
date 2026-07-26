@@ -1,0 +1,347 @@
+---
+# Deletes leaked runner job pods and their orphaned per-job dockercfg Secrets in
+# both runner namespaces. The guard model (three independent selectors per object
+# class, plus grace windows measured from the right timestamp) is documented in
+# README.md — read it before changing any selector or age constant.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gitlab-runner-reaper
+  namespace: gitlab-runner-reaper
+spec:
+  schedule: "*/15 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      # Hard ceiling; the script's soft BUDGET_SECONDS exits cleanly before this,
+      # so a big backlog is never hard-killed into a failed Job.
+      activeDeadlineSeconds: 120
+      # Delete the reaper's own finished pods, so it does not itself leak.
+      ttlSecondsAfterFinished: 3600
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: true
+          serviceAccountName: gitlab-runner-reaper
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reaper
+              # Digest-pinned because this is a pod-DELETING workload. A
+              # busybox/Alpine image is NOT a substitute: its `date -d <RFC3339>`
+              # cannot parse the timestamps, which would silently make the reaper
+              # a no-op.
+              image: python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
+              command:
+                - python3
+                - -c
+                - |
+                  import json
+                  import os
+                  import ssl
+                  import time
+                  import urllib.error
+                  import urllib.request
+                  from datetime import datetime, timezone
+                  from urllib.parse import urlencode
+
+                  NAMESPACES = os.environ["NAMESPACES"].split()
+                  LABEL = os.environ["RUNNER_CLASS_LABEL"]
+                  MAX_AGE_MINUTES = int(os.environ.get("MAX_AGE_MINUTES", "30"))
+                  # Leaked dockercfg Secrets have no termination time, so their
+                  # clock runs from creationTimestamp — with a much longer floor,
+                  # since no job runs that long, which structurally protects any
+                  # in-flight job's Secret.
+                  MAX_SECRET_AGE_MINUTES = int(os.environ.get("MAX_SECRET_AGE_MINUTES", "180"))
+                  # Soft cap below activeDeadlineSeconds: stop cleanly and let the
+                  # next run continue, instead of a hard kill marking the Job failed.
+                  BUDGET_SECONDS = int(os.environ.get("BUDGET_SECONDS", "90"))
+                  # A long urlopen started near the budget could overrun the
+                  # deadline; keep it short so the soft stop actually wins.
+                  API_TIMEOUT_SECONDS = int(os.environ.get("API_TIMEOUT_SECONDS", "10"))
+                  # Small page: pod objects are large, so this stays well under the
+                  # 64Mi limit.
+                  PAGE = int(os.environ.get("PAGE_LIMIT", "25"))
+
+                  SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+                  with open(f"{SA}/token") as fh:
+                      TOKEN = fh.read().strip()
+                  API = "https://kubernetes.default.svc"
+                  CTX = ssl.create_default_context(cafile=f"{SA}/ca.crt")
+                  HDRS = {"Authorization": f"Bearer {TOKEN}"}
+
+                  def api(method, path, body=None):
+                      data = json.dumps(body).encode() if body is not None else None
+                      headers = dict(HDRS)
+                      if data is not None:
+                          headers["Content-Type"] = "application/json"
+                      req = urllib.request.Request(
+                          API + path, method=method, headers=headers, data=data)
+                      with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS, context=CTX) as r:
+                          resp = r.read().decode()
+                          return json.loads(resp) if resp else {}
+
+                  def iter_terminal_pods(ns, phase):
+                      # Paged: a large backlog must not OOM the container before
+                      # anything is deleted. urlencode so the label key's '/' and
+                      # the field selector's '=' are encoded correctly.
+                      params = {"labelSelector": LABEL,
+                                "fieldSelector": f"status.phase={phase}",
+                                "limit": str(PAGE)}
+                      while True:
+                          resp = api(
+                              "GET", f"/api/v1/namespaces/{ns}/pods?{urlencode(params)}")
+                          yield from resp.get("items", [])
+                          cont = resp.get("metadata", {}).get("continue")
+                          if not cont:
+                              return
+                          params["continue"] = cont
+
+                  def parse_ts(ts):
+                      # Kubernetes RFC3339 ends in 'Z'; fromisoformat needs +00:00.
+                      return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+                  def terminal_age_minutes(pod, now):
+                      # Age from the NEWEST container termination across ALL status
+                      # lists: a pod that fails in an INIT container has its
+                      # finishedAt only there, and its regular containers never
+                      # start. For a status with no parseable terminated.finishedAt:
+                      # KEEP the pod if that container actually STARTED (has a
+                      # containerID) — ambiguous; SKIP a never-started container so
+                      # it cannot block reaping. NEVER fall back to
+                      # startTime/creationTimestamp.
+                      status = pod.get("status", {})
+                      statuses = (status.get("initContainerStatuses", [])
+                                  + status.get("containerStatuses", [])
+                                  + status.get("ephemeralContainerStatuses", []))
+                      finished = []
+                      for cs in statuses:
+                          term = (cs.get("state", {}) or {}).get("terminated") or {}
+                          fa = term.get("finishedAt")
+                          if not fa:
+                              if cs.get("containerID"):
+                                  return None
+                              continue
+                          try:
+                              finished.append(parse_ts(fa))
+                          except (TypeError, ValueError):
+                              return None
+                      if not finished:
+                          return None
+                      return int((now - max(finished)).total_seconds() // 60)
+
+                  def is_executor_name(name):
+                      # Guard 3: executor pods are
+                      # runner-<id>-project-<n>-concurrent-<n>-<hash>; a manager is
+                      # gitlab-runner[-privileged]-<hash>.
+                      return (name.startswith("runner-")
+                              and "-project-" in name
+                              and "-concurrent-" in name)
+
+                  def delete_pod(ns, name, uid):
+                      # Delete EXACTLY the pod we listed: the uid precondition makes
+                      # the API reject (409) if this name now refers to a newer pod.
+                      api("DELETE", f"/api/v1/namespaces/{ns}/pods/{name}",
+                          {"apiVersion": "v1", "kind": "DeleteOptions",
+                           "gracePeriodSeconds": 0,
+                           "preconditions": {"uid": uid}})
+
+                  def iter_dockercfg_secrets(ns):
+                      # Server-side type filter, so the SA never lists the runner
+                      # token or SA-token secrets at all.
+                      params = {"fieldSelector": "type=kubernetes.io/dockercfg",
+                                "limit": str(PAGE)}
+                      while True:
+                          resp = api(
+                              "GET", f"/api/v1/namespaces/{ns}/secrets?{urlencode(params)}")
+                          yield from resp.get("items", [])
+                          cont = resp.get("metadata", {}).get("continue")
+                          if not cont:
+                              return
+                          params["continue"] = cont
+
+                  def live_pod_refs(ns):
+                      # One paged pod list -> (live pod UIDs, secret names any pod
+                      # references via imagePullSecrets). A Secret is KEPT while
+                      # either link still points at a pod.
+                      uids = set()
+                      pull_secrets = set()
+                      params = {"limit": str(PAGE)}
+                      while True:
+                          resp = api(
+                              "GET", f"/api/v1/namespaces/{ns}/pods?{urlencode(params)}")
+                          for pod in resp.get("items", []):
+                              uid = pod.get("metadata", {}).get("uid")
+                              if uid:
+                                  uids.add(uid)
+                              for ref in pod.get("spec", {}).get("imagePullSecrets") or []:
+                                  if ref.get("name"):
+                                      pull_secrets.add(ref["name"])
+                          cont = resp.get("metadata", {}).get("continue")
+                          if not cont:
+                              return uids, pull_secrets
+                          params["continue"] = cont
+
+                  def is_runner_secret_name(name):
+                      # Guard 2: per-job credentials secrets share the executor
+                      # pod's prefix; the runner token secret never does.
+                      return name.startswith("runner-")
+
+                  def secret_referenced(secret, live_uids, pull_secrets):
+                      # Guard 3: still owned/used by a live pod -> keep.
+                      meta = secret.get("metadata", {})
+                      if meta.get("name") in pull_secrets:
+                          return True
+                      for owner in meta.get("ownerReferences") or []:
+                          if owner.get("uid") in live_uids:
+                              return True
+                      return False
+
+                  def creation_age_minutes(obj, now):
+                      ts = obj.get("metadata", {}).get("creationTimestamp")
+                      if not ts:
+                          return None
+                      try:
+                          return int((now - parse_ts(ts)).total_seconds() // 60)
+                      except (TypeError, ValueError):
+                          return None
+
+                  def delete_secret(ns, name, uid):
+                      api("DELETE", f"/api/v1/namespaces/{ns}/secrets/{name}",
+                          {"apiVersion": "v1", "kind": "DeleteOptions",
+                           "preconditions": {"uid": uid}})
+
+                  def main():
+                      start = time.monotonic()
+                      now = datetime.now(timezone.utc)
+                      deleted = 0
+                      deleted_secrets = 0
+                      had_errors = False
+                      budget_hit = False
+                      for ns in NAMESPACES:
+                          if budget_hit:
+                              break
+                          # A field selector is AND-only and cannot OR phases.
+                          for phase in ("Succeeded", "Failed"):
+                              if budget_hit:
+                                  break
+                              try:
+                                  for pod in iter_terminal_pods(ns, phase):
+                                      if time.monotonic() - start > BUDGET_SECONDS:
+                                          print(f"BUDGET {BUDGET_SECONDS}s reached; "
+                                                "leaving remaining pods for the next run", flush=True)
+                                          budget_hit = True
+                                          break
+                                      name = pod["metadata"]["name"]
+                                      if not is_executor_name(name):
+                                          print(f"SKIP   {ns}/{name} (name guard)", flush=True)
+                                          continue
+                                      age = terminal_age_minutes(pod, now)
+                                      if age is None:
+                                          print(f"KEEP   {ns}/{name} (phase={phase} age=unknown)", flush=True)
+                                          continue
+                                      if age < MAX_AGE_MINUTES:
+                                          print(f"KEEP   {ns}/{name} (phase={phase} age={age}m < {MAX_AGE_MINUTES}m)", flush=True)
+                                          continue
+                                      try:
+                                          delete_pod(ns, name, pod["metadata"]["uid"])
+                                          print(f"DELETE {ns}/{name} (phase={phase} age={age}m)", flush=True)
+                                          deleted += 1
+                                      except urllib.error.HTTPError as e:
+                                          # 404 = already gone (manager won the race);
+                                          # 409 = uid precondition lost. Both harmless.
+                                          if e.code in (404, 409):
+                                              print(f"GONE   {ns}/{name} (already deleted or replaced)", flush=True)
+                                          else:
+                                              print(f"ERROR delete {ns}/{name}: HTTP {e.code}", flush=True)
+                                              had_errors = True
+                                      except urllib.error.URLError as e:
+                                          print(f"ERROR delete {ns}/{name}: {e}", flush=True)
+                                          had_errors = True
+                              except urllib.error.URLError as e:
+                                  # A list/paging failure (broken RBAC, API outage)
+                                  # must FAIL the Job, not silently no-op.
+                                  print(f"ERROR list {ns}/{phase}: {e}", flush=True)
+                                  had_errors = True
+                          # Secrets after pods, so a leaked pair clears over
+                          # consecutive runs (guard 3 keeps a Secret while its pod
+                          # still exists).
+                          if budget_hit:
+                              break
+                          try:
+                              live_uids, pull_secrets = live_pod_refs(ns)
+                              for secret in iter_dockercfg_secrets(ns):
+                                  if time.monotonic() - start > BUDGET_SECONDS:
+                                      print(f"BUDGET {BUDGET_SECONDS}s reached; "
+                                            "leaving remaining secrets for the next run", flush=True)
+                                      budget_hit = True
+                                      break
+                                  name = secret["metadata"]["name"]
+                                  if not is_runner_secret_name(name):
+                                      print(f"SKIP   secret {ns}/{name} (name guard)", flush=True)
+                                      continue
+                                  if secret_referenced(secret, live_uids, pull_secrets):
+                                      print(f"KEEP   secret {ns}/{name} (referenced by live pod)", flush=True)
+                                      continue
+                                  age = creation_age_minutes(secret, now)
+                                  if age is None:
+                                      print(f"KEEP   secret {ns}/{name} (age=unknown)", flush=True)
+                                      continue
+                                  if age < MAX_SECRET_AGE_MINUTES:
+                                      print(f"KEEP   secret {ns}/{name} (age={age}m < {MAX_SECRET_AGE_MINUTES}m)", flush=True)
+                                      continue
+                                  try:
+                                      delete_secret(ns, name, secret["metadata"]["uid"])
+                                      print(f"DELETE secret {ns}/{name} (age={age}m)", flush=True)
+                                      deleted_secrets += 1
+                                  except urllib.error.HTTPError as e:
+                                      if e.code in (404, 409):
+                                          print(f"GONE   secret {ns}/{name} (already deleted or replaced)", flush=True)
+                                      else:
+                                          print(f"ERROR delete secret {ns}/{name}: HTTP {e.code}", flush=True)
+                                          had_errors = True
+                                  except urllib.error.URLError as e:
+                                      print(f"ERROR delete secret {ns}/{name}: {e}", flush=True)
+                                      had_errors = True
+                          except urllib.error.URLError as e:
+                              print(f"ERROR list secrets {ns}: {e}", flush=True)
+                              had_errors = True
+                      print(f"reaper done: deleted={deleted} secrets={deleted_secrets}", flush=True)
+                      if had_errors:
+                          # Non-zero so the Job fails, backoffLimit retries, and a
+                          # persistent failure surfaces (failed Job history +
+                          # KubeJobFailed) instead of a silent no-op. A clean budget
+                          # stop exits 0 — partial progress is not failure.
+                          raise SystemExit(1)
+
+                  main()
+              env:
+                - name: NAMESPACES
+                  value: "gitlab-runner-privileged gitlab-runner"
+                # Guard 1: the label every executor pod carries and no manager pod
+                # does. Must match pod_labels in BOTH runner releases.
+                - name: RUNNER_CLASS_LABEL
+                  value: "${cluster_node_label_domain}/runner-class"
+                - name: MAX_AGE_MINUTES
+                  value: "30"
+                - name: MAX_SECRET_AGE_MINUTES
+                  value: "180"
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 64Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL

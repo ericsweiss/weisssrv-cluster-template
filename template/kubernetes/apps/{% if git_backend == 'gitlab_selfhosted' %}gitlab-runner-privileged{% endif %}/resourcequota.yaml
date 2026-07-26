@@ -1,0 +1,43 @@
+---
+# Aggregate bounds for the privileged-runner namespace, sized to admit
+# `concurrent` (release.yaml) plus a churn buffer.
+#
+# requests.* are the scheduler's reservation and should match REAL per-job usage
+# (~1.5 cpu, ~1Gi), so the scheduler — not this quota — caps effective
+# parallelism and queues the rest. limits.memory is an admission ceiling for
+# DECLARED limits, not a reservation.
+#
+# The `pods` dimension needs headroom well above `concurrent`: Terminating pods
+# still count, so a thin buffer 403s under churn and GitLab reports that as
+# runner_system_failure.
+#
+# Deliberately NO cpu / limits.cpu dimension: a CPU-limit quota forces EVERY pod
+# in the namespace to declare a CPU limit, which would reject the runner manager
+# (no CPU limit, on purpose). CPU is bounded via requests.cpu; memory via both.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: gitlab-runner-privileged-quota
+  namespace: gitlab-runner-privileged
+spec:
+  hard:
+    requests.cpu: "24"
+    requests.memory: 22Gi
+    limits.memory: 64Gi
+    pods: "22"
+---
+# Defaults so a pod created without explicit resources still counts against the
+# quota. Memory only — never a default CPU limit (see above).
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: gitlab-runner-privileged-limits
+  namespace: gitlab-runner-privileged
+spec:
+  limits:
+    - type: Container
+      default:
+        memory: 1Gi
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi

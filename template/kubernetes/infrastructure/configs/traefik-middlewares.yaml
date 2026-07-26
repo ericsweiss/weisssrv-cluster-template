@@ -1,0 +1,54 @@
+---
+# Platform middlewares, referenced from IngressRoutes in several stages
+# (the Traefik dashboard in controllers/, the secrets-backend ingress here, the
+# observability ingress, and app routes). They live in the configs stage so they
+# exist before the routes that use them.
+#
+# A missing middleware fails CLOSED: Traefik disables the router and returns 404
+# until it reconciles — an availability concern on cold boot, not an exposure.
+
+# Internal-only allowlist: LAN + tailnet + in-cluster pods.
+#
+# The pod CIDR is included because traefik-internal runs with
+# externalTrafficPolicy: Local to preserve client source IPs — which means
+# in-cluster callers (blackbox probes, service-to-service calls through the
+# ingress) also arrive with their real pod IP and would otherwise get 403.
+# Traffic cannot be spoofed from that range: the pod CIDR is routable only
+# inside the cluster's CNI.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: lan-tailscale-only
+  namespace: traefik
+spec:
+  ipAllowList:
+    sourceRange:
+      - ${cluster_lan_cidr}
+      - ${cluster_tailnet_cidr}
+      - ${cluster_pod_cidr}
+
+---
+# Same, minus the pod CIDR — for front doors that no in-cluster workload should
+# reach through the ingress (the secrets backend, whose ClusterIP path is
+# already scoped by its own NetworkPolicy).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: lan-tailscale-strict
+  namespace: traefik
+spec:
+  ipAllowList:
+    sourceRange:
+      - ${cluster_lan_cidr}
+      - ${cluster_tailnet_cidr}
+
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: hsts-header
+  namespace: traefik
+spec:
+  headers:
+    stsSeconds: 31536000
+    stsIncludeSubdomains: true

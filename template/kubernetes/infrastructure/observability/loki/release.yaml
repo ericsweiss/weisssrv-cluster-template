@@ -1,0 +1,147 @@
+---
+# Loki in single-binary (monolithic) mode, pinned to the storage node for its
+# local WAL + chunk volume. Ingested by the in-cluster Alloy DaemonSet (container
+# logs) and by host-side collectors via the authenticated push ingress.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: loki
+  namespace: observability
+spec:
+  interval: 30m
+  releaseName: loki
+  timeout: 10m
+  chart:
+    spec:
+      chart: loki
+      version: "${helm_chart_versions_loki}"
+      sourceRef:
+        kind: HelmRepository
+        name: grafana-community
+        namespace: flux-system
+      interval: 12h
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    deploymentMode: Monolithic  # Renamed from SingleBinary in chart 12.0.0; the singleBinary: values block name is unchanged.
+
+    loki:
+      auth_enabled: false
+      commonConfig:
+        replication_factor: 1
+      schemaConfig:
+        configs:
+          - from: "2024-01-01"
+            store: tsdb
+            object_store: filesystem
+            schema: v13
+            index:
+              prefix: index_
+              period: 24h
+      storage:
+        type: filesystem
+        filesystem:
+          chunks_directory: /var/loki/chunks
+          rules_directory: /var/loki/rules
+      limits_config:
+        retention_period: 720h
+        max_query_length: 720h
+        # Ingestion caps so a log storm cannot fill the volume before the
+        # time-based compactor deletion catches up.
+        ingestion_rate_mb: 8
+        ingestion_burst_size_mb: 16
+        per_stream_rate_limit: 4MB
+        per_stream_rate_limit_burst: 8MB
+      compactor:
+        retention_enabled: true
+        delete_request_store: filesystem
+        working_directory: /var/loki/compactor
+      # Ruler: evaluate LogQL alerting rules in-process (ruler.replicas stays 0,
+      # so this runs under the monolithic -target=all) and push firing alerts to
+      # Alertmanager. The rule files are delivered by the k8s-sidecar into
+      # /rules/fake — with auth_enabled:false the single tenant is "fake" and the
+      # ruler's local storage scans <directory>/<tenant>/, so files landing
+      # anywhere else are silently ignored (see kustomization.yaml).
+      rulerConfig:
+        wal:
+          dir: /var/loki/ruler-wal
+        storage:
+          type: local
+          local:
+            directory: /rules
+        rule_path: /var/loki/ruler-rule-tmp
+        alertmanager_url: http://kube-prometheus-stack-alertmanager.observability.svc:9093
+        enable_alertmanager_v2: true
+        enable_api: true
+        evaluation_interval: 1m
+        poll_interval: 1m
+
+    # Routes each loki_rule ConfigMap into the tenant subdir via the
+    # k8s-sidecar-target-directory annotation set in kustomization.yaml.
+    # singleBinary.sidecar and sidecar.rules.enabled stay at chart defaults.
+    sidecar:
+      rules:
+        folderAnnotation: k8s-sidecar-target-directory
+
+    singleBinary:
+      replicas: 1
+      persistence:
+        enabled: true
+        size: 75Gi
+        # storageClass "-" is LOAD-BEARING; do not "simplify" it to "". The chart
+        # renders the volumeClaimTemplate storageClassName via `{{- with $storageClass }}`:
+        # the "-" sentinel emits a literal `storageClassName: ""` (bind ONLY the
+        # pre-provisioned loki-data PV), whereas a plain "" is falsy to `with` and
+        # DROPS the field, letting the cluster-default class capture the claim
+        # onto a node bootdisk that no backup covers. StatefulSet
+        # volumeClaimTemplates are immutable, so recovering from that drift needs
+        # an operator rebind — the LocalPathPVExists alert catches a recurrence.
+        storageClass: "-"
+      nodeSelector:
+        ${cluster_node_label_domain}/nas: "true"
+      tolerations:
+        - key: ${cluster_node_label_domain}/nas
+          operator: Equal
+          value: "true"
+          effect: PreferNoSchedule
+      resources:
+        requests:
+          cpu: 100m
+          memory: 512Mi
+        limits:
+          memory: 1Gi
+
+    backend:
+      replicas: 0
+    read:
+      replicas: 0
+    write:
+      replicas: 0
+
+    monitoring:
+      serviceMonitor:
+        enabled: true
+      selfMonitoring:
+        enabled: false
+        grafanaAgent:
+          installOperator: false
+
+    gateway:
+      enabled: false
+
+    test:
+      enabled: false
+
+    lokiCanary:
+      enabled: false
+
+    chunksCache:
+      enabled: false
+
+    resultsCache:
+      enabled: false

@@ -1,0 +1,102 @@
+---
+# Shared, non-privileged GitLab Runner. The fields shared with the privileged
+# sibling (chart, timeouts, gitlabUrl, replicas, rbac, manager resources,
+# affinity, tolerations) come from components/gitlab-runner-common; only this
+# runner's deltas live here.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: gitlab-runner
+  namespace: gitlab-runner
+spec:
+  releaseName: gitlab-runner
+  values:
+    # MUST stay at or below what the ResourceQuota admits: a job pod sums to ~5Gi
+    # of memory limits and the manager counts too, so a 40Gi ceiling admits ~7.
+    # Set it higher and the runner submits pods the quota 403s — GitLab reports
+    # that as a job failure with no retry. At the right value the overflow waits
+    # in GitLab's queue instead. Move it in lockstep with the quota.
+    concurrent: 7
+
+    runners:
+      name: k3s-runner-shared
+
+      # Secret created by ESO (externalsecret.yaml).
+      secret: gitlab-runner-token
+
+      # Explicit routing tag, in addition to untagged jobs.
+      tags: "k8s-deploy"
+
+      # The default runner for projects that specify no tags.
+      runUntagged: true
+
+      # ACCEPTED RISK: protected:false lets this runner accept jobs from
+      # unprotected branches, which is what makes MR pipelines work. It is
+      # acceptable ONLY because this runner is non-privileged and its job pods are
+      # egress-contained (see networkpolicy.yaml). Set true in a team environment.
+      protected: false
+
+      executor: kubernetes
+
+      config: |
+        [[runners]]
+          # Keep clones on the internal path too (see gitlabUrl in the shared
+          # component). A [[runners]] scalar — must precede any sub-table.
+          clone_url = "https://${cluster_git_host}"
+
+          # Running as non-root, containers may have no /etc/passwd entry, so HOME
+          # is unset and git tries to write //.gitconfig. Point both at a writable
+          # path (the emptyDir mounted at the bottom of this config).
+          environment = ["HOME=/home/gitlab-runner", "GIT_CONFIG_GLOBAL=/home/gitlab-runner/.gitconfig"]
+
+          # TOML sections are POSITIONAL: every key after a [section] header
+          # belongs to that section until the next header. ALL scalar keys must
+          # therefore come BEFORE any sub-table — a past layout had cpu/memory
+          # limits silently parsed as pod_labels, with chart defaults applied
+          # instead, and pull_policy swallowed by a volume table.
+          [runners.kubernetes]
+            namespace = "gitlab-runner"
+            # Default CI job image, digest-pinned for reproducibility (the tag is
+            # kept for readability; the digest is authoritative). Refresh with
+            # `docker buildx imagetools inspect <image>:<tag>`.
+            image = "debian:trixie@sha256:d07d1b51c39f51188e60be9b64e6bf769fa94e187f092bc32b91305cfa34ba5a"
+            privileged = false
+
+            cpu_limit = "2"
+            cpu_request = "500m"
+            memory_limit = "4Gi"
+            memory_request = "1Gi"
+
+            # Token-less, RBAC-less job SA — NOT the manager SA, whose Role could
+            # read the runner token and exec into concurrent jobs.
+            service_account = "gitlab-runner-jobs"
+
+            pull_policy = ["if-not-present"]
+
+            # Let a job pick a CPU-compatibility class and nothing else. The regex
+            # constrains the LABEL KEY shape, so a job cannot target an arbitrary
+            # node by, say, kubernetes.io/hostname.
+            node_selector_overwrite_allowed = "^[a-z0-9.-]+/cpu=(modern|legacy)$"
+
+            # NetworkPolicy selector: shared job pods get internet-only egress.
+            # Keep pod_labels LAST (TOML positionality note above).
+            [runners.kubernetes.pod_labels]
+              "${cluster_node_label_domain}/runner-class" = "shared"
+
+            # Non-root is appropriate here: this runner does kubectl/helm/lint
+            # work. It has no SSH reach, no DinD and no privileged execution — for
+            # those, use the privileged runner.
+            [runners.kubernetes.pod_security_context]
+              run_as_non_root = true
+              run_as_user = 1000
+              run_as_group = 1000
+              fs_group = 1000
+
+            # Writable HOME for non-root execution (the default HOME is read-only).
+            [[runners.kubernetes.volumes.empty_dir]]
+              name = "home"
+              mount_path = "/home/gitlab-runner"
+
+    serviceAccount:
+      create: true
+      name: gitlab-runner

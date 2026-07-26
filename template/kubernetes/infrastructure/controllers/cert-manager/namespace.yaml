@@ -1,0 +1,14 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cert-manager
+  labels:
+    app.kubernetes.io/name: cert-manager
+    app.kubernetes.io/managed-by: flux
+    # Opts this namespace into the shared DNS-provider token fan-out
+    # (configs/shared-dns-secrets/).
+    ${cluster_node_label_domain}/dns-api-token: "true"
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

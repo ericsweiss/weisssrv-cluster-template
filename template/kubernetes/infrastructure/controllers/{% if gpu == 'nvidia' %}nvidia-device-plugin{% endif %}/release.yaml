@@ -1,0 +1,63 @@
+---
+# Advertises the node's GPU to the kubelet as the nvidia.com/gpu extended
+# resource. Telemetry comes from DCGM in the observability stage, not here.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: nvidia-device-plugin
+  namespace: nvidia-device-plugin
+spec:
+  interval: 30m
+  releaseName: nvidia-device-plugin
+  chart:
+    spec:
+      chart: nvidia-device-plugin
+      version: "${helm_chart_versions_nvidia_device_plugin}"
+      sourceRef:
+        kind: HelmRepository
+        name: nvidia
+        namespace: flux-system
+      interval: 12h
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    runtimeClassName: nvidia
+    nodeSelector:
+      ${cluster_node_label_domain}/gpu: nvidia
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+    # NULL, not {}: the chart REQUIRES one of the Node Feature Discovery labels
+    # by default, and Helm deep-merges maps — an empty map leaves that
+    # requirement in place and the DaemonSet sits at DESIRED=0. Null removes the
+    # key so the nodeSelector above governs. Delete this only if you run NFD/GFD.
+    affinity:
+      nodeAffinity: null
+    resources:
+      requests:
+        cpu: 25m
+        memory: 32Mi
+      limits:
+        memory: 64Mi
+    # Time-slicing: advertise the single physical GPU as 4 shareable units so
+    # several pods can co-schedule on it. This shares COMPUTE, not VRAM — the
+    # co-scheduled workloads must fit in the card's memory together.
+    # `default: any` selects map.any on nodes without a per-node config label.
+    config:
+      default: any
+      map:
+        any: |-
+          version: v1
+          flags:
+            migStrategy: none
+          sharing:
+            timeSlicing:
+              resources:
+                - name: nvidia.com/gpu
+                  replicas: 4

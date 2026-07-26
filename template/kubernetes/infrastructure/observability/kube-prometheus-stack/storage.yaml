@@ -1,0 +1,36 @@
+---
+# Prometheus TSDB volume: a hostPath on the storage node, backed by a dedicated
+# block device mounted at /mnt/prometheus-data (provisioned by the storage host's
+# Ansible role, not by Kubernetes). Data survives pod and node-VM recreation
+# because the device lives on the hypervisor.
+#
+# Node affinity uses the storage-node LABEL rather than a hostname, so replacing
+# the node does not require editing this file.
+#
+# No PVC here: the chart creates one from the Prometheus StatefulSet's
+# volumeClaimTemplate, which references this PV by name (volumeName).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: prometheus-data
+  labels:
+    type: local
+    app: prometheus
+spec:
+  capacity:
+    storage: 150Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /mnt/prometheus-data
+    type: Directory
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: ${cluster_node_label_domain}/nas
+              operator: In
+              values:
+                - "true"

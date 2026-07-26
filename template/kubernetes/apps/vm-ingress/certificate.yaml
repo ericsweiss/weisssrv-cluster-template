@@ -1,0 +1,29 @@
+# TEMPLATE — enable together with your first route (add BOTH this file and your
+# route file to kustomization.yaml). Not reconciled as-is, because an unused
+# certificate is a pointless ACME order.
+#
+# cert-manager writes the Secret into the Certificate's OWN namespace, and
+# Traefik only reads Secrets from the IngressRoute's namespace — so this
+# namespace needs its own copy of the wildcard, even though infrastructure/configs
+# already issues one elsewhere.
+#
+# Each copy fires its own ACME order: STAGGER renewBefore against the other copies
+# (the anchor in infrastructure/configs/wildcard-certificates.yaml uses 720h) or
+# they all renew in the same window and burn the duplicate-certificate rate limit
+# together.
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: internal-wildcard
+  namespace: vm-ingress
+spec:
+  secretName: internal-wildcard-tls
+  issuerRef:
+    name: ${cluster_issuer}
+    kind: ClusterIssuer
+  commonName: "*.${cluster_internal_domain}"
+  dnsNames:
+    - "*.${cluster_internal_domain}"
+    - ${cluster_internal_domain}
+  renewBefore: 660h

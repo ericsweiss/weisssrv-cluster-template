@@ -1,0 +1,75 @@
+---
+# Egress: the resolver forwards non-Traefik names to the LAN resolvers on :53.
+# Scoped to the LAN CIDR rather than to specific resolver /32s, which are
+# inventory data — narrow it if you generate this from the inventory.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-upstream-dns
+  namespace: tailnet-dns
+spec:
+  podSelector:
+    matchLabels:
+      app: tailnet-dns
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: ${cluster_lan_cidr}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Ingress: queries arrive from the ts-dns proxy pod the Tailscale operator
+# creates. Kubelet probes are host-sourced and exempt.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-ts-proxy
+  namespace: tailnet-dns
+spec:
+  podSelector:
+    matchLabels:
+      app: tailnet-dns
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tailscale
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Ingress: Prometheus scrapes :9153 via the PodMonitor. Scoped to the Prometheus
+# pod rather than the whole observability namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-observability-scrape
+  namespace: tailnet-dns
+spec:
+  podSelector:
+    matchLabels:
+      app: tailnet-dns
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9153

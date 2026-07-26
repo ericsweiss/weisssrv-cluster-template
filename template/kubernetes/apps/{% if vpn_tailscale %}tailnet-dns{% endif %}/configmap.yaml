@@ -1,0 +1,46 @@
+---
+# Corefile for the tailnet split-horizon resolver. See README.md — in
+# particular, the two cluster-config keys this file cannot work without.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tailnet-dns-corefile
+  namespace: tailnet-dns
+data:
+  Corefile: |
+    # Override zone: names that must resolve to a real LAN address rather than
+    # to Traefik. List the direct-IP names your DNS layer defines here, and keep
+    # this in sync with that rewrite list.
+    ${cluster_nas_host} ${cluster_smtp_host} {
+        errors
+        forward . ${cluster_upstream_dns_servers}
+        cache 30
+    }
+
+    # Default: every other internal name is Traefik-fronted, so answer with a
+    # CNAME to the Traefik tailnet device. The client's MagicDNS resolves that
+    # to the device's tailnet address and connects over the mesh. Query types
+    # other than A/AAAA fall through to the LAN resolvers.
+    ${cluster_internal_domain} {
+        errors
+        template IN A ${cluster_internal_domain} {
+            answer "{{ .Name }} 60 IN CNAME traefik-tailnet.${cluster_tailnet_dns_suffix}."
+        }
+        template IN AAAA ${cluster_internal_domain} {
+            answer "{{ .Name }} 60 IN CNAME traefik-tailnet.${cluster_tailnet_dns_suffix}."
+        }
+        forward . ${cluster_upstream_dns_servers}
+        cache 30
+    }
+
+    # Catch-all (Split-DNS already scopes queries to the internal domain, so this
+    # is belt-and-braces) plus the health/readiness/metrics endpoints.
+    .:53 {
+        errors
+        forward . ${cluster_upstream_dns_servers}
+        cache 30
+        health :8080
+        ready :8181
+        prometheus :9153
+        reload
+    }

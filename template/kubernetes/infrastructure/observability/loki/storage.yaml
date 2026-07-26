@@ -1,0 +1,31 @@
+---
+# Loki chunks + WAL: a hostPath on the storage node, pre-bound to storage-loki-0
+# (the PVC name the StatefulSet's volumeClaimTemplate creates).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: loki-data
+  labels:
+    type: local
+    app: loki
+spec:
+  capacity:
+    storage: 75Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: observability
+    name: storage-loki-0
+  hostPath:
+    path: /mnt/loki-data
+    type: Directory
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: ${cluster_node_label_domain}/nas
+              operator: In
+              values:
+                - "true"

@@ -1,0 +1,64 @@
+---
+# CRDs: this chart ships them as templates gated by values.crds.enabled (not a
+# crds/ directory), so Flux's install/upgrade crds policy has no effect —
+# crds.enabled is what manages them and crds.keep is what stops an uninstall or
+# a failed-install remediation from taking every Certificate with it.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cert-manager
+  namespace: cert-manager
+spec:
+  interval: 30m
+  releaseName: cert-manager
+  # CRD upgrades take minutes while the controller revalidates existing
+  # resources; a short timeout would trigger a remediation uninstall mid-upgrade.
+  timeout: 10m
+  chart:
+    spec:
+      chart: cert-manager
+      version: "${helm_chart_versions_cert_manager}"
+      sourceRef:
+        kind: HelmRepository
+        name: jetstack
+        namespace: flux-system
+      interval: 12h
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    crds:
+      enabled: true
+      keep: true
+    replicaCount: 1
+    prometheus:
+      enabled: true
+      servicemonitor:
+        enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+    webhook:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 128Mi
+    cainjector:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 128Mi
+    global:
+      leaderElection:
+        namespace: cert-manager

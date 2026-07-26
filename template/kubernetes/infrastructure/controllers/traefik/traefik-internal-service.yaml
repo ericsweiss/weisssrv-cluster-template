@@ -1,0 +1,28 @@
+---
+# Second LoadBalancer for the INTERNAL VIP, selecting the same Traefik pods.
+# Separation is at the DNS/network layer; exposure is enforced by the
+# lan-tailscale-only middleware on the routes themselves.
+apiVersion: v1
+kind: Service
+metadata:
+  name: traefik-internal
+  namespace: traefik
+  annotations:
+    metallb.io/loadBalancerIPs: "${cluster_metallb_internal_vip}"
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  allocateLoadBalancerNodePorts: false
+  selector:
+    app.kubernetes.io/name: traefik
+    # Chart instance label is <releaseName>-<namespace>; update if either changes.
+    app.kubernetes.io/instance: traefik-traefik
+  ports:
+    - name: web
+      port: 80
+      targetPort: web
+      protocol: TCP
+    - name: websecure
+      port: 443
+      targetPort: websecure
+      protocol: TCP

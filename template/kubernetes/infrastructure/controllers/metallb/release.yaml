@@ -1,0 +1,68 @@
+---
+# L2 load balancer for the ingress VIPs. Pools + L2Advertisement live in the
+# configs stage (they are CRs this chart's CRDs define).
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: metallb
+  namespace: metallb-system
+spec:
+  interval: 30m
+  releaseName: metallb
+  chart:
+    spec:
+      chart: metallb
+      version: "${helm_chart_versions_metallb}"
+      sourceRef:
+        kind: HelmRepository
+        name: metallb
+        namespace: flux-system
+      interval: 12h
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    # crds.enabled MUST stay true. With it false, a chart version change renders
+    # the CRD templates as deletions and takes every IPAddressPool +
+    # L2Advertisement with them — i.e. every LoadBalancer IP goes <pending>.
+    crds:
+      enabled: true
+    prometheus:
+      serviceMonitor:
+        enabled: true
+      # The chart authorises exactly ONE (ServiceAccount, namespace) pair to
+      # scrape through its kube-rbac-proxy — it must be Prometheus's identity,
+      # not MetalLB's own.
+      serviceAccount: kube-prometheus-stack-prometheus
+      namespace: observability
+    speaker:
+      # No nodeSelector: the speaker is the ARP announcer and should run on
+      # every node that can carry a VIP. Restrict it only if your VIPs must
+      # live on a specific uplink.
+      tolerations: []
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 256Mi
+      frr:
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            memory: 256Mi
+    controller:
+      nodeSelector: {}
+      tolerations: []
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          memory: 256Mi

@@ -1,0 +1,32 @@
+---
+# Stage 5/5 — observability stack. Deliberately downstream of configs and
+# NOT upstream of apps: a failed metrics/logging upgrade must not freeze
+# reconciliation of every workload.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infrastructure-observability
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 15m
+  dependsOn:
+    - name: infrastructure-configs
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/infrastructure/observability
+  prune: true
+  wait: true
+  # Both ConfigMaps come from infrastructure-sources, which must be Ready
+  # before this stage runs — optional:false so a missing one fails loudly
+  # instead of rendering empty versions/domains.
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: cluster-versions
+        optional: false
+      - kind: ConfigMap
+        name: cluster-config
+        optional: false

@@ -1,0 +1,31 @@
+---
+# Third Service selecting the same Traefik pods, exposed as a real tailnet
+# device by the Tailscale operator (a single Service cannot be both MetalLB and
+# tailscale). Plain TCP passthrough, so SNI/Host survive and Traefik terminates
+# the internal wildcard cert exactly as for a LAN client — remote clients reach
+# internal apps over the mesh instead of via subnet routing to a VIP.
+apiVersion: v1
+kind: Service
+metadata:
+  name: traefik-tailnet
+  namespace: traefik
+  annotations:
+    tailscale.com/hostname: "traefik-tailnet"
+    # Sizes the operator-created proxy pod (its chart default request is ~1Mi
+    # against a ~55Mi working set) — see tailscale-operator/proxyclass.yaml.
+    tailscale.com/proxy-class: default-proxyclass
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tailscale
+  selector:
+    app.kubernetes.io/name: traefik
+    app.kubernetes.io/instance: traefik-traefik
+  ports:
+    - name: web
+      port: 80
+      targetPort: web
+      protocol: TCP
+    - name: websecure
+      port: 443
+      targetPort: websecure
+      protocol: TCP

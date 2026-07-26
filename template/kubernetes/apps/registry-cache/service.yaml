@@ -1,0 +1,21 @@
+---
+# :5000 is the registry API consumed by CI job pods; :5001 is the debug listener
+# scraped by Prometheus. No LoadBalancer and no ingress — cluster-internal only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry-cache
+  namespace: registry-cache
+  labels:
+    app.kubernetes.io/name: registry-cache
+spec:
+  selector:
+    app.kubernetes.io/name: registry-cache
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+    - name: metrics
+      port: 5001
+      targetPort: metrics
+  type: ClusterIP

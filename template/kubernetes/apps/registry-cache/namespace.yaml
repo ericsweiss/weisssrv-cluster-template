@@ -1,0 +1,15 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: registry-cache
+  labels:
+    app.kubernetes.io/name: registry-cache
+    app.kubernetes.io/part-of: registry-cache
+    app.kubernetes.io/managed-by: flux
+    # enforce baseline / warn+audit restricted: the pod already applies
+    # restricted-style hardening, but the upstream image is used verbatim and is
+    # not guaranteed to start under a strict restricted enforce.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

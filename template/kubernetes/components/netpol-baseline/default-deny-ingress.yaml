@@ -1,0 +1,11 @@
+---
+# Body is identical in every namespace (empty podSelector = all pods), so it is
+# defined once; the including kustomization supplies the namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress

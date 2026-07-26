@@ -1,0 +1,164 @@
+# Tenant wiring
+
+Each external repo that deploys into this cluster gets one YAML file here plus a
+matching entry in `kustomization.yaml` (Kustomize requires explicit resource
+listings). The file carries the tenant's secret store, Flux `GitRepository`,
+reconciliation `ServiceAccount` + RoleBindings, and top-level `Kustomization`.
+
+Removal is the inverse: delete the file and its `kustomization.yaml` line. Flux
+prunes the Kustomization (and everything it created, including ESO-owned
+Secrets), the GitRepository, the secret store and the namespace.
+
+## The tenant side of the contract
+
+A tenant repo needs a `kubernetes/flux/` directory that `kustomize build`
+resolves cleanly, and CI that lints it. **weisssrv-app-template** generates
+exactly that — manifests, lint + kubeconform + secret-scan pipeline, and the
+namespace/PSS conventions this cluster expects. Point new tenants at it rather
+than at a hand-rolled tree.
+
+Two things the tenant must match, and one this repo owes them:
+
+- **Path.** The `Kustomization.spec.path` below is `./kubernetes/flux`; the
+  app-template puts manifests there. Change one and change the other.
+- **Namespace.** The tenant's manifests must be namespace-agnostic (the
+  `targetNamespace` on the Kustomization sets it) or hard-code the namespace this
+  file creates. Mixing the two produces resources in two namespaces, only one of
+  which Flux prunes.
+- **Deploys happen cluster-side.** Tenant CI lints and builds; it does not
+  `kubectl apply`. Flux pulls. A tenant that also deploys from CI will fight the
+  reconciler.
+
+Nothing about tenant onboarding requires the app-template — a hand-authored
+`kubernetes/flux/` works identically. It just means writing the pipeline and the
+conventions again.
+
+## Example
+
+```yaml
+# {{ cluster_name }}/tenants/example-app.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: example-app
+  labels:
+    app.kubernetes.io/managed-by: flux
+    fluxcd.io/tenant: example-app
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+# One-time bootstrap (NOT Flux-managed), scoped to this tenant so revocation is
+# independent:
+#   op connect token create {{ cluster_name }}-example-app-eso \
+#     --server <EXISTING_SERVER_ID> --vaults <vault>
+#   kubectl -n example-app create secret generic onepassword-connect-token \
+#     --from-literal=token=<CONNECT_TOKEN>
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: onepassword-example-app
+spec:
+  provider:
+    onepassword:
+      connectHost: http://onepassword-connect.external-secrets.svc.cluster.local:8080
+      vaults:
+        <vault>: 1
+      auth:
+        secretRef:
+          connectTokenSecretRef:
+            name: onepassword-connect-token
+            namespace: example-app
+            key: token
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: example-app
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: https://{{ git_host }}/{{ git_namespace }}/example-app
+  ref:
+    branch: main
+  # Private repo: create a deploy token, put its secret in flux-system, and
+  # reference it here with secretRef.name.
+---
+# Without serviceAccountName, kustomize-controller applies tenant manifests with
+# its own cluster-admin credentials. The SA must live in the Kustomization's OWN
+# namespace (flux-system) — kustomize-controller impersonates
+# system:serviceaccount:<Kustomization namespace>:<name>. The RoleBindings then
+# grant that SA rights in the tenant namespace and nowhere else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: example-app-flux
+  namespace: flux-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: example-app-flux-admin
+  namespace: example-app
+subjects:
+  - kind: ServiceAccount
+    name: example-app-flux
+    namespace: flux-system
+roleRef:
+  kind: ClusterRole
+  name: admin
+  apiGroup: rbac.authorization.k8s.io
+---
+# Fills admin's CRD gaps — see tenant-crd-editor.yaml.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: example-app-flux-crd-editor
+  namespace: example-app
+subjects:
+  - kind: ServiceAccount
+    name: example-app-flux
+    namespace: flux-system
+roleRef:
+  kind: ClusterRole
+  name: tenant-crd-editor
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: example-app
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 10m
+  # Mirror the platform's apps.yaml: wait for the CRD chain so a fresh
+  # bootstrap does not apply tenant CRs before ESO/cert-manager/Traefik exist.
+  dependsOn:
+    - name: infrastructure-configs
+  serviceAccountName: example-app-flux
+  sourceRef:
+    kind: GitRepository
+    name: example-app
+  path: ./kubernetes/flux
+  prune: true
+  targetNamespace: example-app
+  wait: true
+```
+
+## Before onboarding the first tenant
+
+- **Vault isolation.** A tenant `ClusterSecretStore` pointing at the shared
+  vault can read every item in it. Acceptable for a single-operator homelab;
+  give tenants their own vault (or their own Connect server) otherwise.
+- **Traefik cross-namespace refs.** The platform runs the Traefik CRD provider
+  with `allowCrossNamespace: true` so app IngressRoutes can use the shared
+  middlewares in the `traefik` namespace. A tenant-authored IngressRoute can
+  therefore also reference another namespace's Service. Scope the provider per
+  tenant, add a validating policy, or set it back to `false` before opening the
+  cluster to untrusted authors.
+- **Namespace ownership** is cooperative: nothing stops a tenant manifest from
+  targeting a platform namespace today. An admission policy engine
+  (Kyverno/OPA) is the durable fix.

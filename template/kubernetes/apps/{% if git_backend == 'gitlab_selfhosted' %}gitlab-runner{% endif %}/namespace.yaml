@@ -1,0 +1,15 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitlab-runner
+  labels:
+    app.kubernetes.io/name: gitlab-runner
+    app.kubernetes.io/part-of: gitlab
+    app.kubernetes.io/managed-by: flux
+    # enforce: baseline is the admission half of the trust boundary — it blocks
+    # this untrusted runner's job pods from escalating to privileged/host*. The
+    # privileged runner lives in its own namespace precisely so this can stay.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

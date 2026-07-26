@@ -1,0 +1,69 @@
+---
+# Least-privilege, cross-namespace shape:
+#   - one ServiceAccount in the reaper's own namespace
+#   - one ClusterRole granting ONLY pods list/delete + secrets list/delete. NOT
+#     `get`: the script lists each collection and deletes by name, never reading a
+#     single object. No create/update/patch, no configmaps.
+#   - two NAMESPACED RoleBindings. A RoleBinding referencing a ClusterRole scopes
+#     those verbs to the binding's namespace ONLY, so pod/secret delete is
+#     confined to exactly the two runner namespaces. This is deliberately NOT a
+#     ClusterRoleBinding.
+#
+# `list secrets` returns Secret DATA (Kubernetes has no list-without-data). The
+# script narrows server-side to type=kubernetes.io/dockercfg, so runner tokens and
+# SA tokens are never returned; the residual exposure of those ephemeral registry
+# blobs is inherent, and is mitigated by the digest-pinned image, the fixed
+# no-input script, and this dedicated single-purpose SA.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gitlab-runner-reaper
+  namespace: gitlab-runner-reaper
+  labels:
+    app.kubernetes.io/managed-by: flux
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gitlab-runner-reaper
+  labels:
+    app.kubernetes.io/managed-by: flux
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gitlab-runner-reaper
+  namespace: gitlab-runner-privileged
+  labels:
+    app.kubernetes.io/managed-by: flux
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gitlab-runner-reaper
+subjects:
+  - kind: ServiceAccount
+    name: gitlab-runner-reaper
+    namespace: gitlab-runner-reaper
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gitlab-runner-reaper
+  namespace: gitlab-runner
+  labels:
+    app.kubernetes.io/managed-by: flux
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gitlab-runner-reaper
+subjects:
+  - kind: ServiceAccount
+    name: gitlab-runner-reaper
+    namespace: gitlab-runner-reaper

@@ -1,0 +1,94 @@
+---
+# External Secrets Operator. Provider selection happens per-store, not here —
+# see infrastructure/configs/cluster-secret-store.yaml.
+#
+# CRDs ship as chart templates gated by installCRDs (not a crds/ directory), so
+# Flux's crds policy has no effect; the resource-policy annotation is what stops
+# an uninstall or rollback cascading into every ExternalSecret.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: external-secrets
+  namespace: external-secrets
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: external-secrets
+      version: "${helm_chart_versions_external_secrets}"
+      sourceRef:
+        kind: HelmRepository
+        name: external-secrets
+        namespace: flux-system
+      interval: 12h
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    serviceMonitor:
+      enabled: true
+    installCRDs: true
+    crds:
+      annotations:
+        helm.sh/resource-policy: keep
+    replicaCount: 2
+    leaderElect: true
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/name
+                    operator: In
+                    values: [external-secrets]
+              topologyKey: kubernetes.io/hostname
+    webhook:
+      replicaCount: 2
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          memory: 128Mi
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values: [external-secrets-webhook]
+                topologyKey: kubernetes.io/hostname
+    certController:
+      replicaCount: 2
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          memory: 128Mi
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values: [external-secrets-cert-controller]
+                topologyKey: kubernetes.io/hostname
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 256Mi

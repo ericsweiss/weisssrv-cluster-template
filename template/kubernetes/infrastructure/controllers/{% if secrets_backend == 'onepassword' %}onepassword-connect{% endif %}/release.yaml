@@ -1,0 +1,90 @@
+---
+# 1Password Connect: connect-sync pulls vault data into a local encrypted cache,
+# connect-api serves ESO reads from it. No cloud round-trip per secret.
+#
+# Bootstrap Secrets (created ONCE by hand in the external-secrets namespace —
+# the only manually created Secrets in the cluster; see the template's
+# PRE-SETUP.md at https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/PRE-SETUP.md):
+#   op-credentials             1password-credentials.json
+#   onepassword-connect-token  Connect access token
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: onepassword-connect
+  namespace: external-secrets
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: connect
+      version: "${helm_chart_versions_onepassword_connect}"
+      sourceRef:
+        kind: HelmRepository
+        name: onepassword-connect
+        namespace: flux-system
+      interval: 12h
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    connect:
+      # Empty on purpose: the chart then mounts the pre-existing op-credentials
+      # Secret instead of expecting the credentials inline.
+      credentials_base64: ""
+      serviceType: ClusterIP
+      replicas: 2
+      # Chart-native HPA on CPU only; the Connect VPA is memory-only so the two
+      # never drive the same resource. replicas stays equal to minReplicas so
+      # the static count cannot flap against the HPA.
+      hpa:
+        enabled: true
+        minReplicas: 2
+        maxReplicas: 3
+        avgCpuUtilization: 80
+        avgMemoryUtilization: 0
+      # Preferred, not required: a hard one-per-host rule leaves the third
+      # replica unschedulable on a small cluster and blocks failover during a
+      # drain. The PDB is what guards voluntary disruption.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: onepassword-connect
+                topologyKey: kubernetes.io/hostname
+      api:
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            memory: 256Mi
+      sync:
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            memory: 256Mi
+    operator:
+      create: false
+  # Connect never calls the Kubernetes API, and the chart exposes no automount
+  # value — patch the token projection off the rendered Deployment.
+  postRenderers:
+    - kustomize:
+        patches:
+          - patch: |
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: onepassword-connect
+              spec:
+                template:
+                  spec:
+                    automountServiceAccountToken: false

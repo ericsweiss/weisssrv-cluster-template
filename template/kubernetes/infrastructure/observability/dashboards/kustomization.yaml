@@ -1,0 +1,84 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Pinned explicitly (the parent sets it too): the generated ConfigMaps must land
+# in observability for the Grafana sidecar to discover them, and this keeps the
+# directory rendering correctly when built standalone.
+namespace: observability
+# Names must stay STABLE (no content-hash suffix) or the sidecar loses track of a
+# dashboard on every edit and orphan ConfigMaps accumulate.
+generatorOptions:
+  disableNameSuffixHash: true
+configMapGenerator:
+  - name: grafana-dashboard-cluster-overview
+    files:
+      - cluster-overview.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+      annotations:
+        grafana_folder: "Infrastructure"
+  - name: grafana-dashboard-flux
+    files:
+      - flux-cluster.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+      annotations:
+        grafana_folder: "Infrastructure"
+  - name: grafana-dashboard-alerts-overview
+    files:
+      - alerts-overview.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+      annotations:
+        grafana_folder: "Infrastructure"
+  - name: grafana-dashboard-node-exporter-full
+    files:
+      - node-exporter-full.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+      annotations:
+        grafana_folder: "Infrastructure"
+  - name: grafana-dashboard-prometheus-self
+    files:
+      - prometheus-self.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+      annotations:
+        grafana_folder: "Infrastructure"
+  - name: grafana-dashboard-alertmanager-self
+    files:
+      - alertmanager-self.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+      annotations:
+        grafana_folder: "Infrastructure"
+  - name: grafana-dashboard-cert-manager
+    files:
+      - cert-manager.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+      annotations:
+        grafana_folder: "Infrastructure"
+  - name: grafana-dashboard-blackbox
+    files:
+      - blackbox.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+      annotations:
+        grafana_folder: "Infrastructure"
+  - name: grafana-dashboard-traefik-official
+    files:
+      - traefik-official.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+      annotations:
+        grafana_folder: "Networking"

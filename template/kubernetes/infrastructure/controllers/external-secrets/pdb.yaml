@@ -1,0 +1,39 @@
+---
+# The controller runs 2 replicas with leader election — one reconciler plus a
+# warm standby (ESO does not shard ExternalSecrets, so the second replica buys
+# HA, not throughput; that is also why there is no HPA). Keep one up across
+# drains so the secret-sync path is never fully offline.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: external-secrets
+  namespace: external-secrets
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: external-secrets
+---
+# The webhook is on the synchronous admission path for ExternalSecret /
+# SecretStore writes — keep one replica so those never briefly fail closed.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: external-secrets-webhook
+  namespace: external-secrets
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: external-secrets-webhook
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: external-secrets-cert-controller
+  namespace: external-secrets
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: external-secrets-cert-controller

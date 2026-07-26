@@ -1,0 +1,51 @@
+---
+# Grafana UI, internal only. Grafana handles OIDC natively, so no forward-auth
+# middleware — but lan-tailscale-only still keeps it off the public internet.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: grafana
+  namespace: observability
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`grafana.${cluster_internal_domain}`)
+      kind: Rule
+      middlewares:
+        - name: lan-tailscale-only
+          namespace: traefik
+        - name: hsts-header
+          namespace: traefik
+      services:
+        - name: kube-prometheus-stack-grafana
+          port: 80
+  tls:
+    secretName: grafana-internal-tls
+---
+# Loki push API over TLS, so host-side collectors can ship journald without the
+# plaintext NodePort hop. loki-push-auth adds basic auth because Loki itself runs
+# auth_enabled=false.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: loki
+  namespace: observability
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`loki.${cluster_internal_domain}`)
+      kind: Rule
+      middlewares:
+        - name: lan-tailscale-only
+          namespace: traefik
+        - name: hsts-header
+          namespace: traefik
+        - name: loki-push-auth
+          namespace: observability
+      services:
+        - name: loki
+          port: 3100
+  tls:
+    secretName: loki-internal-tls

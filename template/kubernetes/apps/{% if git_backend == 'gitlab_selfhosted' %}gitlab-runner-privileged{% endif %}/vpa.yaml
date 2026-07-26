@@ -1,0 +1,16 @@
+---
+# The runner MANAGER pod only; job pods are sized by the executor config.
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: gitlab-runner-privileged
+  namespace: gitlab-runner-privileged
+spec:
+  targetRef: {apiVersion: apps/v1, kind: Deployment, name: gitlab-runner-privileged}
+  updatePolicy: {updateMode: Initial}
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        minAllowed: {cpu: 25m, memory: 64Mi}
+        maxAllowed: {cpu: 500m, memory: 512Mi}
+        controlledResources: [cpu, memory]

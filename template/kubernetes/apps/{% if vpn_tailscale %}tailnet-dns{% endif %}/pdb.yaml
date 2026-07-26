@@ -1,0 +1,15 @@
+---
+# The Deployment runs 2 replicas, but topologySpreadConstraints use
+# whenUnsatisfiable: ScheduleAnyway — both can land on one node. Without this
+# PDB a single node drain (kured rolls every node for coordinated reboots) could
+# evict both and take tailnet DNS offline until reschedule.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tailnet-dns
+  namespace: tailnet-dns
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: tailnet-dns

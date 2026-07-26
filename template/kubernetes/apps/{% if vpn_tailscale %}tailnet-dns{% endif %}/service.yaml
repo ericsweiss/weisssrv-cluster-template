@@ -1,0 +1,29 @@
+---
+# Exposes the resolver to the tailnet as its own device with a stable MagicDNS
+# name (ts-dns.<suffix>). Its tailnet address is what you set as the Split-DNS
+# nameserver for the internal domain. UDP+TCP 53 on one LoadBalancer Service
+# (MixedProtocolLBService, GA since k8s 1.26).
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-dns
+  namespace: tailnet-dns
+  annotations:
+    tailscale.com/hostname: "ts-dns"
+    # Sizes the operator-created proxy pod (its chart default request is far
+    # below the real working set).
+    tailscale.com/proxy-class: default-proxyclass
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tailscale
+  selector:
+    app: tailnet-dns
+  ports:
+    - name: dns-udp
+      port: 53
+      targetPort: dns-udp
+      protocol: UDP
+    - name: dns-tcp
+      port: 53
+      targetPort: dns-tcp
+      protocol: TCP

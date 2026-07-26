@@ -1,0 +1,35 @@
+---
+# The monitoring.coreos.com CRDs, installed in their own stage BEFORE the
+# controllers stage: on a fresh cluster the Traefik chart renders a
+# ServiceMonitor and hard-fails when that API is absent, and the CRDs otherwise
+# only arrive with kube-prometheus-stack two stages later.
+#
+# This chart ships the CRDs as Helm-owned templates, so kube-prometheus-stack
+# must NOT also ship them (crds.enabled:false there).
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: prometheus-operator-crds
+  namespace: prometheus-operator-crds
+spec:
+  interval: 30m
+  releaseName: prometheus-operator-crds
+  timeout: 10m
+  chart:
+    spec:
+      chart: prometheus-operator-crds
+      version: "${helm_chart_versions_prometheus_operator_crds}"
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+        namespace: flux-system
+      interval: 12h
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  # Values left at chart defaults: all CRDs enabled, matching the set
+  # kube-prometheus-stack expects.

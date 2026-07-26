@@ -1,0 +1,91 @@
+---
+# Cluster identity, addressing and backend names for Flux postBuild
+# substitution — the sibling of cluster-versions. Every stage after sources
+# substitutes from BOTH, which is why no manifest under kubernetes/ contains a
+# literal domain, VIP or CIDR.
+#
+# Filled once by copier from the answers file; regenerate it from the Ansible
+# inventory later if you prefer (keep the key names either way — they are a
+# contract with every manifest in this tree). Renaming a key does NOT fail the
+# build: Flux and envsubst both render an unknown ${placeholder} as an EMPTY
+# STRING. `tests/test_cluster_invariants.py` is what catches that.
+#
+# Key names must match the Flux postBuild identifier grammar
+# [A-Za-z_][A-Za-z0-9_]* and must not collide with a cluster-versions key.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-config
+  namespace: flux-system
+data:
+  cluster_name: "{{ cluster_name }}"
+
+  # Split-horizon DNS: internal names resolve on the LAN/tailnet only; external
+  # names are published to the public zone.
+  cluster_internal_domain: "{{ internal_domain }}"
+  cluster_external_domain: "{{ external_domain }}"
+
+  # Prefix for node role labels and taints (<prefix>/ingress, <prefix>/gpu,
+  # <prefix>/nas, ...). The Ansible k3s layer MUST label nodes with this same
+  # prefix or the affinity rules below never match.
+  cluster_node_label_domain: "{{ internal_domain }}"
+
+  cluster_lan_cidr: "{{ lan_cidr }}"
+  cluster_pod_cidr: "{{ k3s_pod_cidr | default('10.42.0.0/16') }}"
+  cluster_service_cidr: "{{ k3s_service_cidr | default('10.43.0.0/16') }}"
+  # CGNAT range (RFC 6598) that Tailscale allocates from — a constant, kept here
+  # so ingress allowlists stay declarative.
+  cluster_tailnet_cidr: "100.64.0.0/10"
+
+  cluster_k3s_api_vip: "{{ k3s_api_vip }}"
+  # Alias kept for manifests that spell it without the k3s_ segment.
+  cluster_api_vip: "{{ k3s_api_vip }}"
+  # Pod egress to the apiserver must allow the SERVER NODE IPs, not the VIP:
+  # kube-proxy DNATs the in-cluster API VIP before NetworkPolicy evaluation.
+  # Widened to the LAN because the server roster is inventory data rather than a
+  # copier answer — narrow it to the server /32s if you generate this file from
+  # the inventory.
+  cluster_apiserver_egress_cidr: "{{ lan_cidr }}"
+
+  cluster_metallb_public_vip: "{{ metallb_public_vip }}"
+  cluster_metallb_internal_vip: "{{ metallb_internal_vip }}"
+
+  # cert-manager
+  cluster_issuer: "letsencrypt-prod"
+  cluster_acme_email: "{{ admin_email }}"
+
+  # Secrets backend: the ClusterSecretStore every ExternalSecret references.
+  cluster_secret_store: "{{ 'onepassword-cluster' if secrets_backend == 'onepassword' else '' }}"
+{%- if secrets_backend == 'onepassword' %}
+  cluster_secrets_vault: "{{ onepassword_vault }}"
+{%- endif %}
+
+  cluster_git_host: "{{ git_host }}"
+  # Prefix every alert's runbook_url gets.
+  cluster_runbook_base_url: "https://{{ git_host }}/{{ git_namespace }}/{{ git_repo | default(cluster_name) }}/-/blob/main/docs"
+
+  # Host-side services the platform talks to. Defaults follow the starter
+  # inventory's names — rename hosts there and these follow, but change them
+  # HERE, never in the manifests.
+  cluster_nas_host: "{{ nas_host | default('pve-nas-01.' ~ internal_domain) }}"
+  cluster_smtp_host: "{{ smtp_host | default('smtp-relay.' ~ internal_domain) }}"
+  cluster_alert_email: "{{ alert_email | default(admin_email) }}"
+  # LAN resolvers that in-cluster forwarders point at, space-separated
+  # (the dns-01 / dns-02 addresses in the inventory).
+  cluster_upstream_dns_servers: "{{ upstream_dns_servers | default(lan_prefix ~ '.21 ' ~ lan_prefix ~ '.22') }}"
+  # Prometheus job name the host node-exporters register under.
+  cluster_node_exporter_job_regex: "{{ node_exporter_job_regex | default('node-exporter') }}"
+{%- if vpn_tailscale %}
+
+  # MagicDNS suffix of your tailnet, from the Tailscale admin console DNS page.
+  # The tailnet resolver hands out CNAMEs into it, so a wrong value silently
+  # breaks remote access to internal names.
+  cluster_tailnet_dns_suffix: "{{ tailnet_dns_suffix | default('CHANGEME.ts.net') }}"
+{%- endif %}
+{%- if dns_backend == 'cloudflare' %}
+
+  # Records the DDNS CronJob keeps pointed at the current public IPv4.
+  # Comma-separated "<name>:<proxied-on-create>"; add hostnames that must bypass
+  # the Cloudflare proxy (large uploads, non-HTTP ports) as ":false".
+  cluster_ddns_records: "{{ external_domain }}:true"
+{%- endif %}

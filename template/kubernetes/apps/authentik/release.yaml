@@ -1,0 +1,275 @@
+---
+# authentik — the cluster's identity provider. Chart and image versions come from
+# the versions ConfigMap; hostnames and backend addresses from cluster-config.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: authentik
+  namespace: authentik
+spec:
+  interval: 30m
+  releaseName: authentik
+  # Upgrades run PostgreSQL schema migrations that routinely take 5-10 minutes.
+  # Flux's 5m default would trigger remediation mid-migration.
+  timeout: 15m
+  chart:
+    spec:
+      chart: authentik
+      version: "${authentik_version}"
+      sourceRef:
+        kind: HelmRepository
+        name: authentik
+        namespace: flux-system
+      interval: 12h
+  install:
+    timeout: 15m
+    remediation:
+      retries: 3
+  upgrade:
+    timeout: 15m
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  # Image tags are substituted by the apps Kustomization's postBuild. Inline refs
+  # (rather than valuesFrom) avoid Flux's cross-namespace limit:
+  # HelmRelease.spec.valuesFrom[].namespace is not supported, so a referenced
+  # ConfigMap would have to live in this namespace. (chart sourceRef DOES support
+  # cross-namespace, which is why it points at flux-system.)
+  values:
+    # No canonical-domain value: the chart has none, and the OIDC issuer and
+    # redirect URLs derive from the request Host — so both the internal and the
+    # external hostname work without further config.
+    authentik:
+      email:
+        host: ${cluster_smtp_host}
+        port: 587
+        use_tls: true
+        use_ssl: false
+        from: "Authentik SSO <authentik@${cluster_internal_domain}>"
+        # Credentials arrive via AUTHENTIK_EMAIL__* env below.
+        username: ""
+        password: ""
+
+      error_reporting:
+        enabled: false
+
+      postgresql:
+        host: '{{ .Release.Name }}-postgresql'
+        name: authentik
+        user: authentik
+        password: ""  # from existingSecret
+
+    server:
+      # Chart-native HPA rather than a standalone one: with server.autoscaling on,
+      # the chart omits .spec.replicas from the Deployment, so a helm upgrade
+      # cannot reset it and churn against the HPA. CPU is owned here; vpa.yaml
+      # scopes the server to memory only so the two never contend.
+      autoscaling:
+        enabled: true
+        minReplicas: 2
+        maxReplicas: 4
+        metrics:
+          - type: Resource
+            resource:
+              name: cpu
+              target:
+                type: Utilization
+                averageUtilization: 75
+        # Damp HPA flap: the server idles well under the trip point, but
+        # sub-minute login bursts and background task reconciles cross it. Without
+        # a stabilization window it jumps to max dozens of times a day and parks
+        # there long enough to flap KubeHpaMaxedOut. Genuine sustained load still
+        # scales out.
+        behavior:
+          scaleUp:
+            stabilizationWindowSeconds: 120
+            policies:
+              - type: Pods
+                value: 1
+                periodSeconds: 60
+          scaleDown:
+            stabilizationWindowSeconds: 300
+            policies:
+              - type: Pods
+                value: 1
+                periodSeconds: 120
+
+      pdb:
+        enabled: true
+        minAvailable: 1
+
+      # NOTE: the SA token mount stays ENABLED — authentik drives its
+      # integration/outpost controller through the Kubernetes API. seccompProfile
+      # is the only hardening the chart cleanly exposes at pod level here.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+
+      image:
+        tag: "${authentik_version}"
+
+      env:
+        - name: AUTHENTIK_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: secret-key
+        - name: AUTHENTIK_POSTGRESQL__PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: postgresql-password
+        - name: AUTHENTIK_EMAIL__USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: smtp-username
+        - name: AUTHENTIK_EMAIL__PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: smtp-password
+
+      # The CPU request is sized so the HPA's 75% target sits well above idle
+      # draw — otherwise the threshold trips at near-idle and the HPA pins to
+      # maxReplicas. The VPA manages memory only here, so this stays static.
+      resources:
+        requests:
+          cpu: 200m
+          memory: 1Gi
+        limits:
+          memory: 1Gi
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: server
+                    app.kubernetes.io/name: authentik
+                topologyKey: kubernetes.io/hostname
+
+      metrics:
+        enabled: true
+        serviceMonitor:
+          enabled: true
+
+      ingress:
+        enabled: false  # Traefik IngressRoute instead
+
+    worker:
+      replicas: 1
+
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+
+      image:
+        tag: "${authentik_version}"
+
+      # The worker's healthcheck writes a PID file to /dev/shm; without this
+      # volume it fails with "open /dev/shm/authentik-worker.pid: no such file".
+      # The chart's keys are additionalVolumes/additionalVolumeMounts, not volumes.
+      additionalVolumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+
+      additionalVolumeMounts:
+        - name: shm
+          mountPath: /dev/shm
+
+      # Generous probe timing — the worker can be slow while processing tasks.
+      livenessProbe:
+        exec:
+          command:
+            - ak
+            - healthcheck
+        initialDelaySeconds: 30
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 5
+
+      startupProbe:
+        exec:
+          command:
+            - ak
+            - healthcheck
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        timeoutSeconds: 10
+        failureThreshold: 30
+
+      env:
+        - name: AUTHENTIK_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: secret-key
+        - name: AUTHENTIK_POSTGRESQL__PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: postgresql-password
+        - name: AUTHENTIK_EMAIL__USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: smtp-username
+        - name: AUTHENTIK_EMAIL__PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: smtp-password
+
+      resources:
+        requests:
+          cpu: 100m
+          memory: 768Mi
+        limits:
+          memory: 1536Mi
+
+    # Bundled PostgreSQL. Move to an external/HA database if this becomes
+    # load-bearing for more than SSO.
+    postgresql:
+      enabled: true
+      image:
+        tag: "${postgresql_version}"
+      auth:
+        username: authentik
+        database: authentik
+        existingSecret: authentik-secrets
+        secretKeys:
+          adminPasswordKey: postgresql-admin-password
+          userPasswordKey: postgresql-password
+      primary:
+        persistence:
+          enabled: true
+          size: 10Gi
+          storageClass: ""
+          existingClaim: authentik-postgres-data
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            memory: 512Mi
+        # Pinned to the storage node, where the data volume lives.
+        nodeSelector:
+          ${cluster_node_label_domain}/nas: "true"
+        tolerations:
+          - key: ${cluster_node_label_domain}/nas
+            operator: Equal
+            value: "true"
+            effect: PreferNoSchedule
+
+    # authentik dropped the bundled Redis dependency in 2025.10 — all state now
+    # lives in PostgreSQL.
+    redis:
+      enabled: false
+
+    serviceAccount:
+      create: true

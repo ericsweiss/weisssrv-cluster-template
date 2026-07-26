@@ -1,0 +1,131 @@
+---
+# Privileged (infrastructure) GitLab Runner. Shared fields come from
+# components/gitlab-runner-common; only this runner's deltas live here.
+#
+# READ THE README BEFORE CHANGING THE TAG OR REGISTRATION: the registration
+# scope, not the tag, is what keeps root+DinD execution off untrusted projects.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: gitlab-runner-privileged
+  namespace: gitlab-runner-privileged
+spec:
+  releaseName: gitlab-runner-privileged
+  values:
+    # Size to the schedulable pool, NOT above it: overflow above pool capacity
+    # parks as Pending pods, and pod-Pending time burns the JOB timeout clock, so
+    # jobs get killed without ever starting. At or below capacity the overflow
+    # waits in GitLab's queue, where that clock does not run. Keep this and
+    # requests.cpu in the ResourceQuota in lockstep. See README (Sizing).
+    concurrent: 9
+
+    runners:
+      name: k3s-runner-infrastructure
+
+      secret: gitlab-runner-privileged-token
+
+      # Only jobs that ask for this tag land here...
+      tags: "infrastructure"
+      # ...and untagged jobs never do (they go to the shared runner).
+      runUntagged: false
+
+      # ACCEPTED RISK: lets this privileged runner execute MR pipelines from
+      # UNPROTECTED feature branches. Deliberate — every job in this repo's
+      # pipeline is tagged for this runner, so protected:true would silently break
+      # MR CI (feature branches are not protected).
+      #
+      # The isolation boundary is the runner REGISTRATION SCOPE, not the tag: tags
+      # are cooperative routing, and any project on the instance can declare
+      # tags:[infrastructure]. The registration behind this token MUST be a
+      # PROJECT runner locked to this repository — never an instance runner.
+      protected: false
+
+      executor: kubernetes
+
+      config: |
+        # TOML sections are POSITIONAL: every key after a [section] header belongs
+        # to that section until the next header. All scalar [runners.kubernetes]
+        # keys must come BEFORE any sub-table — a mid-section pod_labels table
+        # once swallowed every key after it and the runner crash-looped on first
+        # render.
+        [[runners]]
+          # A [[runners]] scalar — must precede the [runners.kubernetes] sub-table.
+          clone_url = "https://${cluster_git_host}"
+
+          [runners.kubernetes]
+            namespace = "gitlab-runner-privileged"
+            # A start burst can transiently exceed placement capacity; the default
+            # poll_timeout (180s) would fail a merely-Pending pod as
+            # runner_system_failure. A scalar key — keep it above the sub-tables.
+            poll_timeout = 1200
+            # Default CI job image, digest-pinned (the tag is kept for
+            # readability; the digest is authoritative).
+            image = "python:3.11@sha256:9800957d2a88867f853ce6072ae1669e37fa269cc6f76009fa1aef4757f62212"
+            privileged = true
+
+            # Build container: the CPU REQUEST is the scheduler's per-node
+            # reservation, so it must reflect what a converge actually uses
+            # (~0.9 cpu driving tasks). Under-reserving lets the scheduler
+            # over-pack small nodes and jobs inflate several-fold.
+            cpu_limit = "4"
+            cpu_request = "900m"
+            memory_limit = "1Gi"
+            memory_request = "384Mi"
+
+            # DinD service container: holds the test workload.
+            service_cpu_limit = "2"
+            service_cpu_request = "500m"
+            service_memory_limit = "2Gi"
+            service_memory_request = "512Mi"
+
+            # Helper (clone + artifacts) — tiny.
+            helper_cpu_request = "100m"
+            helper_memory_limit = "256Mi"
+            helper_memory_request = "128Mi"
+
+            service_account = "gitlab-runner-privileged"
+
+            # No pod_security_context: DinD needs a root Docker daemon. This is
+            # the whole reason this tier exists in its own namespace.
+
+            pull_policy = ["if-not-present"]
+
+            # Let a job pick a CPU-compatibility class and nothing else — the
+            # regex constrains the LABEL KEY shape, so a job cannot target an
+            # arbitrary node.
+            node_selector_overwrite_allowed = "^[a-z0-9.-]+/cpu=(modern|legacy)$"
+
+            # HARD-exclude CI job pods from the storage node. A soft taint is not
+            # enough: a large burst spills onto it once the rest of the fleet
+            # fills, and a memory-tight storage host then swaps other guests' cold
+            # pages. DoesNotExist (not NotIn, which would require the key on every
+            # node) keeps every unlabelled node eligible.
+            [runners.kubernetes.affinity.node_affinity]
+              [runners.kubernetes.affinity.node_affinity.required_during_scheduling_ignored_during_execution]
+                [[runners.kubernetes.affinity.node_affinity.required_during_scheduling_ignored_during_execution.node_selector_terms]]
+                  [[runners.kubernetes.affinity.node_affinity.required_during_scheduling_ignored_during_execution.node_selector_terms.match_expressions]]
+                    key = "${cluster_node_label_domain}/nas"
+                    operator = "DoesNotExist"
+
+            # Spread job pods across agents: simultaneous same-node DinD container
+            # starts race the cgroup setup and die at prepare, which is the
+            # dominant flake class. Soft, so the scheduler still packs under
+            # pressure rather than leaving jobs Pending.
+            [runners.kubernetes.affinity.pod_anti_affinity]
+              [[runners.kubernetes.affinity.pod_anti_affinity.preferred_during_scheduling_ignored_during_execution]]
+                weight = 100
+                [runners.kubernetes.affinity.pod_anti_affinity.preferred_during_scheduling_ignored_during_execution.pod_affinity_term]
+                  topology_key = "kubernetes.io/hostname"
+                  [runners.kubernetes.affinity.pod_anti_affinity.preferred_during_scheduling_ignored_during_execution.pod_affinity_term.label_selector]
+                    [[runners.kubernetes.affinity.pod_anti_affinity.preferred_during_scheduling_ignored_during_execution.pod_affinity_term.label_selector.match_expressions]]
+                      key = "${cluster_node_label_domain}/runner-class"
+                      operator = "In"
+                      values = ["infrastructure"]
+
+            # NetworkPolicy selector. Keep pod_labels LAST (positionality note).
+            [runners.kubernetes.pod_labels]
+              "${cluster_node_label_domain}/runner-class" = "infrastructure"
+
+    serviceAccount:
+      create: true
+      name: gitlab-runner-privileged
