@@ -1,0 +1,1007 @@
+# https://taskfile.dev
+#
+# Two lifecycles live here. Ansible (`infra:*`, `dns:*`, `storage:*`, `k3s:*`)
+# owns the hosts and the k3s layer; everything INSIDE the cluster is reconciled
+# by Flux from kubernetes/ on push, so the `flux:*` tasks are bootstrap,
+# validation and operational control — never deployment.
+#
+# Secrets are never values in this file: every `env:` entry is an op://
+# REFERENCE that `op run` resolves at execution time, and every item named below
+# must exist in the {{ onepassword_vault }} vault; the template's PRE-SETUP.md
+# lists them: https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/PRE-SETUP.md
+version: '3'
+
+# Host roster (PVE_HOSTS, K3S_SERVERS, …) generated from the inventory into
+# scripts/hosts.env by `task hosts:sync`, loaded here as env vars AND template
+# vars. Editing hosts.yml without re-running that task leaves this stale.
+dotenv: ['scripts/hosts.env']
+
+vars:
+  ANSIBLE_DIR: ./ansible
+  TERRAFORM_DIR: ./terraform
+  INVENTORY: ./inventories/prod
+  CLUSTER_NAME: {{ cluster_name }}
+  ADMIN_USER: {{ admin_user }}
+  API_VIP: {{ k3s_api_vip }}
+  OP_VAULT: {{ onepassword_vault }}
+  GIT_HOST: {{ git_host }}
+  GIT_NAMESPACE: {{ git_namespace }}
+  CLUSTER_DIR: kubernetes/clusters/{{ cluster_name }}
+  VERSIONS_CM: kubernetes/infrastructure/sources/versions-configmap.yaml
+  CLUSTER_CM: kubernetes/infrastructure/sources/cluster-config.yaml
+  # Checkout of weisssrv-lib used to refresh the vendored copies in scripts/
+  # (`task lib:sync`); nothing at run time reads from it.
+  LIB_DIR: .weisssrv-lib
+  LIB_URL: {{ lib_url | default('https://git.ericsweiss.com/eric/weisssrv-lib.git') }}
+  LIB_REF: {{ lib_ref }}
+  # GitLab-managed Terraform state. The API takes the URL-encoded project PATH
+  # wherever it documents a numeric ID, so nothing needs looking up after the
+  # project exists; pass `TF_STATE_PROJECT=<id>` on the command line if your
+  # instance rejects the path form.
+  TF_API: https://{{ git_host }}/api/v4
+  TF_STATE_PROJECT: {{ git_namespace | replace('/', '%2F') }}%2F{{ cluster_name }}
+{% raw %}
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  # === Library checkout =================================================
+  lib:sync:
+    desc: "Clone/refresh .weisssrv-lib at LIB_REF — the source for the vendored scripts/ copies"
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -d "{{.LIB_DIR}}/.git" ]; then
+          git -C "{{.LIB_DIR}}" fetch --tags --force origin
+          git -C "{{.LIB_DIR}}" checkout --detach "{{.LIB_REF}}" 2>/dev/null \
+            || git -C "{{.LIB_DIR}}" checkout --detach "origin/{{.LIB_REF}}"
+        else
+          git clone --no-checkout "{{.LIB_URL}}" "{{.LIB_DIR}}"
+          git -C "{{.LIB_DIR}}" checkout --detach "{{.LIB_REF}}" 2>/dev/null \
+            || git -C "{{.LIB_DIR}}" checkout --detach "origin/{{.LIB_REF}}"
+        fi
+        git -C "{{.LIB_DIR}}" --no-pager log -1 --oneline
+
+  # === Ansible ==========================================================
+  ansible:install-collections:
+    desc: Install the weisssrv.infra collection (and its dependencies) at the pinned ref
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible-galaxy collection install -r requirements.yml {{.CLI_ARGS}}
+
+  ansible:ping:
+    desc: Ping every managed host
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible -i {{.INVENTORY}} all -m ping -e "ansible_become=false"
+
+  ansible:lint:
+    desc: Lint the playbooks (roles come from the collection and are linted upstream)
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - |
+        # Resolve ansible-lint through the shared helper (PATH, then a validated
+        # pyenv glob; no `python3 -m` step — its module is `ansiblelint`).
+        LINT=$({{.ROOT_DIR}}/scripts/resolve-tool.sh ansible-lint) \
+          || { echo "ERROR: ansible-lint not found (pip install ansible-lint)"; exit 1; }
+        # Unquoted: $LINT may be a bare command or a pyenv path.
+        $LINT playbooks/
+
+  # === Base infrastructure ==============================================
+  infra:deploy:
+    desc: Deploy the full host stack (Proxmox, DNS, storage, mail — excludes k3s)
+    dir: "{{.ANSIBLE_DIR}}"
+    # Anchor shared with infra:check so dry-run and deploy can never disagree
+    # about which secrets are injected.
+    env: &infra_env
+      ROOT_EMAIL_ALIAS: op://{{.OP_VAULT}}/Email Config/root_alias
+      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
+      SMTP_RELAY_USER: op://{{.OP_VAULT}}/SMTP Relay Auth/username
+      SMTP_RELAY_PASSWORD: op://{{.OP_VAULT}}/SMTP Relay Auth/password
+      SMTP_UPSTREAM_USER: op://{{.OP_VAULT}}/SMTP Smarthost/username
+      SMTP_UPSTREAM_PASSWORD: op://{{.OP_VAULT}}/SMTP Smarthost/password
+      ADGUARD_ADMIN_PASSWORD: op://{{.OP_VAULT}}/AdGuard Home/password
+      SAMBA_NAS_PASSWORD: op://{{.OP_VAULT}}/Samba NAS User/password
+      ACME_SSH_PRIVATE_KEY: op://{{.OP_VAULT}}/Cert Distribution Key/private key
+      ACME_SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/Cert Distribution Key/public key
+      LOKI_PUSH_USER: op://{{.OP_VAULT}}/Loki Push Auth/username
+      LOKI_PUSH_PASSWORD: op://{{.OP_VAULT}}/Loki Push Auth/password
+{% endraw %}{% if vpn_tailscale %}      TAILSCALE_AUTH_KEY: op://{{ onepassword_vault }}/Tailscale Auth Key/credential
+{% endif %}{% raw %}    preconditions: &op_preconditions
+      - sh: command -v ansible-playbook
+        msg: "ansible-playbook not installed. pip install ansible, then: task ansible:install-collections"
+      - sh: command -v op
+        msg: "1Password CLI not installed: https://developer.1password.com/docs/cli/get-started/"
+      - sh: op whoami 2>/dev/null
+        msg: "1Password CLI not authenticated. Run: eval $(op signin)"
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/site.yml {{.CLI_ARGS}}
+
+  infra:check:
+    desc: Check mode — show what infra:deploy would change
+    dir: "{{.ANSIBLE_DIR}}"
+    env: *infra_env
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/site.yml --check --diff {{.CLI_ARGS}}
+
+  infra:base:
+    desc: Deploy base host configuration only
+    dir: "{{.ANSIBLE_DIR}}"
+    env: &base_env
+      ROOT_EMAIL_ALIAS: op://{{.OP_VAULT}}/Email Config/root_alias
+      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/base.yml {{.CLI_ARGS}}
+
+  infra:base-first-run:
+    desc: First base run on a host whose sudo still prompts (-K)
+    dir: "{{.ANSIBLE_DIR}}"
+    env: *base_env
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/base.yml -K {{.CLI_ARGS}}
+
+  infra:verify:
+    desc: Run the post-deployment verification play
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible-playbook -i {{.INVENTORY}} playbooks/postflight.yml {{.CLI_ARGS}}
+
+  dns:deploy:
+    desc: Deploy the DNS stack (recursive resolver + filtering frontends)
+    dir: "{{.ANSIBLE_DIR}}"
+    env:
+      ROOT_EMAIL_ALIAS: op://{{.OP_VAULT}}/Email Config/root_alias
+      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
+      SMTP_RELAY_USER: op://{{.OP_VAULT}}/SMTP Relay Auth/username
+      SMTP_RELAY_PASSWORD: op://{{.OP_VAULT}}/SMTP Relay Auth/password
+      ADGUARD_ADMIN_PASSWORD: op://{{.OP_VAULT}}/AdGuard Home/password
+      ACME_SSH_PRIVATE_KEY: op://{{.OP_VAULT}}/Cert Distribution Key/private key
+      ACME_SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/Cert Distribution Key/public key
+      LOKI_PUSH_USER: op://{{.OP_VAULT}}/Loki Push Auth/username
+      LOKI_PUSH_PASSWORD: op://{{.OP_VAULT}}/Loki Push Auth/password
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/dns.yml {{.CLI_ARGS}}
+
+  storage:deploy:
+    desc: Deploy the NAS storage configuration (ZFS properties, NFS, SMB)
+    dir: "{{.ANSIBLE_DIR}}"
+    # Offsite backup (restic) is opt-in: enable it in the inventory and add
+    # B2_KEY_ID / B2_APPLICATION_KEY / RESTIC_REPO_PASSWORD references here.
+    env:
+      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
+      SAMBA_NAS_PASSWORD: op://{{.OP_VAULT}}/Samba NAS User/password
+      LOKI_PUSH_USER: op://{{.OP_VAULT}}/Loki Push Auth/username
+      LOKI_PUSH_PASSWORD: op://{{.OP_VAULT}}/Loki Push Auth/password
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/storage.yml {{.CLI_ARGS}}
+
+  certs:show-host-keys:
+    desc: Print SSH host keys for the cert distribution targets (paste into host_vars)
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible-playbook -i {{.INVENTORY}} playbooks/show-cert-host-keys.yml {{.CLI_ARGS}}
+
+  zfs:encrypt:
+    desc: Deploy the ZFS-encryption mechanism and boot units on hosts with encrypted pools
+    dir: "{{.ANSIBLE_DIR}}"
+    env:
+      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
+      ZFS_ENCRYPTION_CONNECT_TOKEN: op://{{.OP_VAULT}}/1Password Connect/token
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/zfs-encryption.yml {{.CLI_ARGS}}
+
+  disaster-recovery:storage-bootstrap:
+    desc: "INTERACTIVE: bootstrap storage from scratch (disaster recovery only)"
+    dir: "{{.ANSIBLE_DIR}}"
+    env:
+      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
+      SAMBA_NAS_PASSWORD: op://{{.OP_VAULT}}/Samba NAS User/password
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/bootstrap/storage-bootstrap.yml {{.CLI_ARGS}}
+
+  # === Proxmox ==========================================================
+  proxmox:configure-autostart:
+    desc: Apply autostart and boot order to existing guests (one-time)
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible-playbook -i {{.INVENTORY}} playbooks/proxmox-enable-autostart.yml {{.CLI_ARGS}}
+
+  proxmox:ha:
+    desc: Configure Proxmox HA rules, resources and storage replication
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible-playbook -i {{.INVENTORY}} playbooks/proxmox-ha.yml {{.CLI_ARGS}}
+
+  proxmox:ha-check:
+    desc: Check mode — show what proxmox:ha would change
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible-playbook -i {{.INVENTORY}} playbooks/proxmox-ha.yml --check --diff {{.CLI_ARGS}}
+
+  proxmox:ha-status:
+    desc: Show HA manager state, resources and replication across the cluster
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -z "$PVE_HOSTS" ]; then
+          echo "ERROR: PVE_HOSTS is empty — fill in the inventory and run: task hosts:sync"
+          exit 1
+        fi
+        # Bare hostnames (no user@) so ssh-config resolves the login user.
+        # shellcheck disable=SC2086
+        HOST=$(scripts/find-reachable-host.sh $PVE_HOSTS) || {
+          echo "ERROR: cannot reach any Proxmox host"
+          exit 1
+        }
+        echo "Connected via $HOST"
+        echo "=== HA manager status ==="
+        ssh -o BatchMode=yes "$HOST" "sudo ha-manager status" 2>/dev/null || echo "(no HA manager status)"
+        echo "=== HA resources ==="
+        ssh -o BatchMode=yes "$HOST" "sudo ha-manager config" 2>/dev/null | grep -E '^(ct|vm):' || echo "(none configured)"
+        echo "=== HA rules ==="
+        ssh -o BatchMode=yes "$HOST" "sudo ha-manager rules list" 2>/dev/null || echo "(none, or Proxmox < 9)"
+        echo "=== Replication jobs ==="
+        ssh -o BatchMode=yes "$HOST" "sudo pvesr list" 2>/dev/null || echo "(none configured)"
+      - |
+        # Replication STATUS only exists on the source nodes, so ask each host.
+        for host in $PVE_HOSTS; do
+          echo "--- $host ---"
+          if ssh -o ConnectTimeout=2 -o BatchMode=yes "$host" "true" 2>/dev/null; then
+            ssh -o BatchMode=yes "$host" "sudo pvesr status" 2>/dev/null || echo "(no replication status)"
+          else
+            echo "(unreachable)"
+          fi
+        done
+
+  # === k3s ==============================================================
+  k3s:provision-vms:
+    desc: Provision the k3s VMs on Proxmox (creates guests only)
+    dir: "{{.ANSIBLE_DIR}}"
+    env:
+      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/k3s-provision-vms.yml {{.CLI_ARGS}}
+
+  k3s:deploy:
+    desc: Deploy/refresh the k3s cluster (servers, agents, kube-vip)
+    dir: "{{.ANSIBLE_DIR}}"
+    env:
+      ROOT_EMAIL_ALIAS: op://{{.OP_VAULT}}/Email Config/root_alias
+      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
+      SMTP_RELAY_USER: op://{{.OP_VAULT}}/SMTP Relay Auth/username
+      SMTP_RELAY_PASSWORD: op://{{.OP_VAULT}}/SMTP Relay Auth/password
+      K3S_TOKEN: op://{{.OP_VAULT}}/K3s Cluster Token/credential
+      # Agents join with the lower-privilege worker token, which the servers
+      # advertise as agent-token.
+      K3S_AGENT_TOKEN: op://{{.OP_VAULT}}/K3s Agent Token/credential
+      LOKI_PUSH_USER: op://{{.OP_VAULT}}/Loki Push Auth/username
+      LOKI_PUSH_PASSWORD: op://{{.OP_VAULT}}/Loki Push Auth/password
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/k3s.yml {{.CLI_ARGS}}
+
+  k3s:kubeconfig:
+    desc: Fetch the cluster kubeconfig into ~/.kube/config-k3s (rewritten to the API VIP)
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -z "$K3S_SERVERS" ]; then
+          echo "ERROR: K3S_SERVERS is empty — fill in the inventory and run: task hosts:sync"
+          exit 1
+        fi
+        TARGETS=""
+        for ip in $K3S_SERVERS; do TARGETS="$TARGETS {{.ADMIN_USER}}@$ip"; done
+        # shellcheck disable=SC2086
+        SERVER=$(scripts/find-reachable-host.sh $TARGETS) || {
+          echo "ERROR: cannot reach any k3s server ($K3S_SERVERS)"
+          exit 1
+        }
+        DATA=$(ssh "$SERVER" "sudo cat /etc/rancher/k3s/k3s.yaml")
+        [ -n "$DATA" ] || { echo "ERROR: kubeconfig came back empty"; exit 1; }
+        mkdir -p ~/.kube
+        # The server writes 127.0.0.1; every client must go through the VIP so a
+        # server failover does not invalidate the file.
+        echo "$DATA" | sed 's/127.0.0.1/{{.API_VIP}}/g; s/0.0.0.0/{{.API_VIP}}/g' > ~/.kube/config-k3s
+        chmod 600 ~/.kube/config-k3s
+        echo "Wrote ~/.kube/config-k3s — export KUBECONFIG=~/.kube/config-k3s"
+
+  k3s:status:
+    desc: Show cluster nodes and platform service health
+    preconditions: &kubectl_preconditions
+      - sh: command -v kubectl
+        msg: "kubectl not installed: https://kubernetes.io/docs/tasks/tools/"
+      - sh: kubectl cluster-info 2>/dev/null
+        msg: "Cannot reach the cluster. Run: export KUBECONFIG=~/.kube/config-k3s"
+    cmds:
+      - kubectl get nodes -o wide
+      - kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded
+      - kubectl get svc -A --field-selector spec.type=LoadBalancer
+      - kubectl get ingressroute -A 2>/dev/null || true
+
+  k3s:backup:
+    desc: Take an on-demand etcd snapshot on a reachable server
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -z "$K3S_SERVERS" ]; then
+          echo "ERROR: K3S_SERVERS is empty — run: task hosts:sync"
+          exit 1
+        fi
+        SNAPSHOT="manual-$(date +%Y%m%d-%H%M%S)"
+        TARGETS=""
+        for ip in $K3S_SERVERS; do TARGETS="$TARGETS {{.ADMIN_USER}}@$ip"; done
+        # shellcheck disable=SC2086
+        SERVER=$(scripts/find-reachable-host.sh $TARGETS) || {
+          echo "ERROR: cannot reach any k3s server"
+          exit 1
+        }
+        ssh "$SERVER" "sudo k3s etcd-snapshot save --name $SNAPSHOT"
+        echo "Snapshot $SNAPSHOT created; list with: ssh $SERVER 'sudo k3s etcd-snapshot ls'"
+
+  # === Flux =============================================================
+  flux:install-cli:
+    desc: Install the flux CLI (Homebrew)
+    cmds:
+      - |
+        if ! command -v flux >/dev/null 2>&1; then
+          brew install fluxcd/tap/flux
+        fi
+        flux --version
+
+  flux:bootstrap-secrets:
+    desc: Create the two bootstrap Secrets External Secrets needs (one-time, needs ./1password-credentials.json)
+    preconditions:
+      - sh: command -v op
+        msg: "1Password CLI not installed"
+      - sh: op whoami 2>/dev/null
+        msg: "1Password CLI not authenticated. Run: eval $(op signin)"
+      - sh: kubectl cluster-info 2>/dev/null
+        msg: "Cannot reach the cluster. Point KUBECONFIG at it first"
+      - sh: test -f ./1password-credentials.json
+        msg: "./1password-credentials.json missing. Run: op connect server create {{.CLUSTER_NAME}}-connect --vaults {{.OP_VAULT}}"
+    cmds:
+      - |
+        set -eo pipefail
+        # These two Secrets are the ONLY hand-created ones in the cluster;
+        # every other Secret is produced by External Secrets from this token.
+        # The Connect token is minted here rather than read from the vault —
+        # it is deliberately not stored as an item.
+        TOKEN="$(op connect token create {{.CLUSTER_NAME}}-eso --server {{.CLUSTER_NAME}}-connect --vaults {{.OP_VAULT}})"
+        [ -n "$TOKEN" ] || { echo "ERROR: op connect token create returned nothing"; exit 1; }
+        TOKEN_FILE=$(mktemp)
+        trap 'rm -f "$TOKEN_FILE"' EXIT
+        printf '%s' "$TOKEN" > "$TOKEN_FILE"
+        kubectl create namespace external-secrets --dry-run=client -o yaml | kubectl apply -f -
+        kubectl -n external-secrets create secret generic op-credentials \
+          --from-file=1password-credentials.json=./1password-credentials.json \
+          --dry-run=client -o yaml | kubectl apply -f -
+        kubectl -n external-secrets create secret generic onepassword-connect-token \
+          --from-file=token="$TOKEN_FILE" \
+          --dry-run=client -o yaml | kubectl apply -f -
+        echo "Bootstrap Secrets created. Next: task flux:bootstrap"
+
+  flux:bootstrap:
+    desc: "One-time Flux bootstrap into this repository (BRANCH=main)"
+    vars:
+      BRANCH: '{{.BRANCH | default "main"}}'
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not installed. Run: task flux:install-cli"
+      - sh: kubectl cluster-info 2>/dev/null
+        msg: "Cannot reach the cluster. Point KUBECONFIG at it first"
+      - sh: op whoami 2>/dev/null
+        msg: "1Password CLI not authenticated. Run: eval $(op signin)"
+      - sh: kubectl -n external-secrets get secret op-credentials 2>/dev/null
+        msg: "Bootstrap Secret op-credentials missing. Run: task flux:bootstrap-secrets"
+      - sh: kubectl -n external-secrets get secret onepassword-connect-token 2>/dev/null
+        msg: "Bootstrap Secret onepassword-connect-token missing. Run: task flux:bootstrap-secrets"
+    cmds:
+      - |
+        set -eo pipefail
+        if [ ! -t 0 ]; then
+          echo "ERROR: flux:bootstrap needs an interactive TTY (it confirms before pushing)."
+          exit 1
+        fi
+        echo "Bootstrapping Flux into {{.GIT_HOST}}/{{.GIT_NAMESPACE}}/{{.CLUSTER_NAME}} (branch {{.BRANCH}})."
+        echo "This commits to the branch and pushes it."
+        read -r -p "Continue? [y/N] " confirm
+        [ "$confirm" = "y" ] || { echo "Aborted"; exit 1; }
+      - |
+        set -eo pipefail
+        # Explicit read + emptiness check: a silent op failure would otherwise
+        # run bootstrap with an empty token and fail with an opaque auth error.
+        GITLAB_TOKEN="$(op read 'op://{{.OP_VAULT}}/Git Access Token/credential')"
+        [ -n "$GITLAB_TOKEN" ] || { echo "ERROR: empty token from 'Git Access Token'"; exit 1; }
+        export GITLAB_TOKEN
+        flux bootstrap gitlab \
+          --hostname={{.GIT_HOST}} \
+          --owner={{.GIT_NAMESPACE}} \
+          --repository={{.CLUSTER_NAME}} \
+          --branch={{.BRANCH}} \
+          --path={{.CLUSTER_DIR}} \
+          --deploy-token-auth \
+          --interval=1m
+
+  flux:reconcile:
+    desc: Force a full reconcile (source → the infrastructure chain → apps)
+    preconditions: &flux_preconditions
+      - sh: command -v flux
+        msg: "flux CLI not installed. Run: task flux:install-cli"
+      - sh: command -v kubectl
+        msg: "kubectl not found"
+    cmds:
+      - flux reconcile source git flux-system
+      # Root first: it applies the child Kustomization CRs themselves, so edits
+      # under the cluster dir take effect without waiting for its own interval.
+      - flux reconcile kustomization flux-system
+      - flux reconcile kustomization infrastructure-sources
+      - flux reconcile kustomization infrastructure-crds
+      - flux reconcile kustomization infrastructure-controllers
+      - flux reconcile kustomization infrastructure-configs
+      - flux reconcile kustomization infrastructure-observability
+      - flux reconcile kustomization apps
+
+  flux:status:
+    desc: Concise health summary (kustomizations, releases, secrets)
+    preconditions: *flux_preconditions
+    cmds:
+      - flux get kustomizations -A
+      - flux get helmreleases -A
+      - kubectl get externalsecrets -A
+
+  flux:verify:
+    desc: flux check plus every managed resource
+    preconditions: *flux_preconditions
+    cmds:
+      - flux check
+      - flux get all -A
+
+  flux:suspend:
+    desc: "Suspend a Flux resource (task flux:suspend -- <ns>/<kind>/<name>)"
+    preconditions: *flux_preconditions
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Usage: task flux:suspend -- <ns>/<kind>/<name>"
+          exit 1
+        fi
+        IFS='/' read -r NS KIND NAME <<< "{{.CLI_ARGS}}"
+        flux suspend "$KIND" "$NAME" -n "$NS"
+
+  flux:resume:
+    desc: "Resume a suspended Flux resource (task flux:resume -- <ns>/<kind>/<name>)"
+    preconditions: *flux_preconditions
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Usage: task flux:resume -- <ns>/<kind>/<name>"
+          exit 1
+        fi
+        IFS='/' read -r NS KIND NAME <<< "{{.CLI_ARGS}}"
+        flux resume "$KIND" "$NAME" -n "$NS"
+
+  flux:refresh-secret:
+    desc: "Force an ExternalSecret to re-fetch (task flux:refresh-secret -- <ns>/<name>)"
+    cmds:
+      - |
+        set -eo pipefail
+        if ! [[ "{{.CLI_ARGS}}" =~ ^[a-z0-9-]+/[a-z0-9-]+$ ]]; then
+          echo "Usage: task flux:refresh-secret -- <namespace>/<name>"
+          exit 1
+        fi
+        IFS='/' read -r NS NAME <<< "{{.CLI_ARGS}}"
+        kubectl annotate --overwrite -n "$NS" externalsecret "$NAME" force-sync="$(date +%s)"
+        kubectl wait -n "$NS" externalsecret "$NAME" --for=condition=Ready --timeout=60s
+
+  flux:rotate-secret:
+    desc: "Re-fetch an ExternalSecret and restart its consumers (task flux:rotate-secret -- <ns>/<name>)"
+    cmds:
+      - |
+        # `set -e` matters: without it a failed refresh would still restart the
+        # pods, which come back with the OLD value and look like a success.
+        set -eo pipefail
+        if ! [[ "{{.CLI_ARGS}}" =~ ^[a-z0-9-]+/[a-z0-9-]+$ ]]; then
+          echo "Usage: task flux:rotate-secret -- <namespace>/<name>"
+          exit 1
+        fi
+        IFS='/' read -r NS NAME <<< "{{.CLI_ARGS}}"
+        task flux:refresh-secret -- "$NS/$NAME"
+        # Reloader watches ConfigMaps only (ignoreSecrets), so a Secret rotation
+        # is always a manual restart.
+        kubectl rollout restart deployment,statefulset,daemonset -n "$NS"
+
+  flux:sync-versions:
+    desc: Regenerate the cluster-versions ConfigMap from the Ansible vars file
+    preconditions: &pyyaml_precondition
+      - sh: python3 -c "import yaml" 2>/dev/null
+        msg: "PyYAML not installed (pip install pyyaml)"
+    cmds:
+      - >-
+        python3 scripts/generate-versions-configmap.py
+        --vars-file ansible/inventories/prod/group_vars/all.yml
+        --output {{.VERSIONS_CM}}
+        --nested-key helm_chart_versions
+        --regen-command "task flux:sync-versions"
+
+  hosts:sync:
+    desc: Regenerate scripts/hosts.env from the Ansible inventory
+    preconditions: *pyyaml_precondition
+    cmds:
+      - >-
+        python3 scripts/generate-hosts-env.py
+        --inventory ansible/inventories/prod/hosts.yml
+        --map scripts/hosts-env-map.yml
+        --regen-command "task hosts:sync"
+
+  flux:dev-apply:
+    desc: "Dev helper: render one path and apply it (Flux reverts it on the next reconcile)"
+    preconditions:
+      - sh: command -v kustomize
+        msg: "kustomize not installed"
+      - sh: command -v envsubst
+        msg: "envsubst not installed (brew install gettext)"
+      - sh: python3 -c "import yaml" 2>/dev/null
+        msg: "PyYAML not installed (pip install pyyaml)"
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Usage: task flux:dev-apply -- <path-to-kustomization-dir>"
+          exit 1
+        fi
+        # Substitute exactly what Flux substitutes at reconcile time, or the
+        # applied manifests carry literal ${...} placeholders.
+        VARS=$(scripts/flux-env.sh export-versions "{{.VERSIONS_CM}}") || exit 1
+        eval "$VARS"
+        echo "WARNING: Flux reverts this unless the change is committed."
+        kustomize build "{{.CLI_ARGS}}" | envsubst "$FLUX_ENVSUBST_VARS" | kubectl apply -f -
+
+  flux:lint:
+    desc: Build every Flux Kustomization, substitute, and schema-validate the result
+    preconditions:
+      - sh: command -v kustomize
+        msg: "kustomize not installed"
+      - sh: command -v kubeconform
+        msg: "kubeconform not installed (brew install kubeconform)"
+      - sh: command -v envsubst
+        msg: "envsubst not installed (brew install gettext)"
+      - sh: python3 -c "import yaml" 2>/dev/null
+        msg: "PyYAML not installed (pip install pyyaml)"
+    cmds:
+      - |
+        set -eo pipefail
+        FAILED=0
+        # Mirror the reconcile-time postBuild substitution: both ConfigMaps
+        # (versions + cluster config) are exported, so a placeholder typo is
+        # caught here instead of rendering as an empty string in-cluster.
+        VARS=$(scripts/flux-env.sh export-versions "{{.VERSIONS_CM}}") || exit 1
+        eval "$VARS"
+        K8S_VER=$(scripts/flux-env.sh k8s-version "{{.VERSIONS_CM}}")
+        echo "kubeconform target: $K8S_VER"
+
+        for ks in {{.CLUSTER_DIR}}/*.yaml; do
+          [ -f "$ks" ] || continue
+          NAME=$(basename "$ks" .yaml)
+          [ "$NAME" = "kustomization" ] && continue
+          SRCPATH=$(python3 -c "
+        import sys, yaml
+        with open(sys.argv[1]) as f:
+            doc = yaml.safe_load(f)
+        print((doc or {}).get('spec', {}).get('path', '') or '')
+        " "$ks") || { echo "ERROR: cannot parse $ks"; FAILED=1; continue; }
+          [ -n "$SRCPATH" ] || continue
+          SRCPATH="${SRCPATH#./}"
+          echo "=== $ks (path $SRCPATH) ==="
+          if ! RAW=$(kustomize build "$SRCPATH" 2>&1); then
+            echo "ERROR: kustomize build failed for $SRCPATH:"
+            echo "$RAW"
+            FAILED=1
+            continue
+          fi
+          # Check placeholders against the PRE-substitution output: envsubst
+          # renders an unknown var as an empty string, so only the raw text can
+          # reveal a typo.
+          MISSING=""
+          for ref in $(echo "$RAW" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' | sort -u); do
+            varname=${ref#\$\{}
+            varname=${varname%\}}
+            if [ -z "${!varname+x}" ]; then
+              MISSING="$MISSING $varname"
+            fi
+          done
+          MISSING=$(echo "$MISSING" | tr ' ' '\n' | grep -v '^$' | sort -u || true)
+          if [ -n "$MISSING" ]; then
+            echo "ERROR: $SRCPATH references keys absent from both ConfigMaps:"
+            echo "$MISSING" | sed 's/^/  - /'
+            FAILED=1
+            continue
+          fi
+          # printf, never echo: rendered dashboards carry literal \n inside
+          # block scalars that echo would expand and corrupt.
+          if ! printf '%s\n' "$RAW" | envsubst "$FLUX_ENVSUBST_VARS" | kubeconform \
+              -strict -ignore-missing-schemas \
+              -kubernetes-version "$K8S_VER" \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{`{{.Group}}`}}/{{`{{.ResourceKind}}`}}_{{`{{.ResourceAPIVersion}}`}}.json' \
+              -summary; then
+            FAILED=1
+          fi
+        done
+
+        # The root also pulls in flux-system/, whose gotk-components.yaml is
+        # written by `flux bootstrap` — before that it does not exist, so a
+        # pre-bootstrap repository would fail here for the wrong reason.
+        if [ -f "{{.CLUSTER_DIR}}/flux-system/gotk-components.yaml" ]; then
+          echo "=== cluster root {{.CLUSTER_DIR}} ==="
+          kustomize build {{.CLUSTER_DIR}} >/dev/null || FAILED=1
+        else
+          echo "=== cluster root skipped: flux-system/ is written by flux bootstrap ==="
+        fi
+        exit $FAILED
+
+  # === Observability ====================================================
+  observability:status:
+    desc: Show the observability namespace's workloads and scrape config
+    preconditions: *kubectl_preconditions
+    cmds:
+      - kubectl get pods -n observability -o wide
+      - kubectl get pvc -n observability
+      - kubectl get helmreleases -n observability
+      - kubectl get servicemonitors -n observability
+
+  observability:logs:
+    desc: "Tail an observability component (COMPONENT=prometheus)"
+    vars:
+      COMPONENT: '{{.COMPONENT | default "prometheus"}}'
+    cmds:
+      - kubectl logs -n observability -l app.kubernetes.io/name={{.COMPONENT}} --tail=100 -f {{.CLI_ARGS}}
+
+  observability:restart:
+    desc: Restart every observability workload
+    cmds:
+      - kubectl rollout restart deployment,statefulset,daemonset -n observability
+
+  # === Maintenance ======================================================
+  maintenance:update-packages:
+    desc: Rolling OS package updates across all hosts (interactive)
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-packages.yml {{.CLI_ARGS}}
+
+  maintenance:update-applications:
+    desc: Update the host-level applications to their pinned versions
+    dir: "{{.ANSIBLE_DIR}}"
+    # Anchor shared by the update-full variants so they cannot drift on secrets.
+    env: &maintenance_env
+      ROOT_EMAIL_ALIAS: op://{{.OP_VAULT}}/Email Config/root_alias
+      SMTP_RELAY_USER: op://{{.OP_VAULT}}/SMTP Relay Auth/username
+      SMTP_RELAY_PASSWORD: op://{{.OP_VAULT}}/SMTP Relay Auth/password
+      ADGUARD_ADMIN_PASSWORD: op://{{.OP_VAULT}}/AdGuard Home/password
+      ACME_SSH_PRIVATE_KEY: op://{{.OP_VAULT}}/Cert Distribution Key/private key
+      ACME_SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/Cert Distribution Key/public key
+{% endraw %}{% if vpn_tailscale %}      TAILSCALE_AUTH_KEY: op://{{ onepassword_vault }}/Tailscale Auth Key/credential
+{% endif %}{% raw %}    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-applications.yml {{.CLI_ARGS}}
+
+  maintenance:update-full:
+    desc: OS packages plus applications, rolling and interactive
+    dir: "{{.ANSIBLE_DIR}}"
+    env: *maintenance_env
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-full.yml {{.CLI_ARGS}}
+
+  maintenance:update-full-auto:
+    desc: OS packages plus applications, rolling with automatic reboots
+    dir: "{{.ANSIBLE_DIR}}"
+    env: *maintenance_env
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-full.yml -e auto_reboot=true {{.CLI_ARGS}}
+
+  maintenance:update-k3s-nodes:
+    desc: Rolling k3s binary upgrade (cordon, upgrade, restart, uncordon)
+    dir: "{{.ANSIBLE_DIR}}"
+    env:
+      K3S_TOKEN: op://{{.OP_VAULT}}/K3s Cluster Token/credential
+      K3S_AGENT_TOKEN: op://{{.OP_VAULT}}/K3s Agent Token/credential
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-k3s-nodes.yml {{.CLI_ARGS}}
+
+  maintenance:check-versions:
+    desc: Report available updates for every tracked pin (scripts/version-registry.py)
+    env: &version_env
+      GITHUB_TOKEN: op://{{.OP_VAULT}}/GitHub Token/credential
+    cmds:
+      # Exit 1 means "updates available", which is information, not failure.
+      - op run -- python3 scripts/check-versions.py {{.CLI_ARGS}}; RC=$?; [ $RC -le 1 ] || exit $RC
+
+  maintenance:check-versions-json:
+    desc: The same report as JSON
+    env: *version_env
+    cmds:
+      - op run -- python3 scripts/check-versions.py --json {{.CLI_ARGS}}; RC=$?; [ $RC -le 1 ] || exit $RC
+
+  maintenance:update-version:
+    desc: "Bump one tracked pin and regenerate the ConfigMap (SERVICE=<name>)"
+    vars:
+      SERVICE: '{{.SERVICE | default ""}}'
+    env: *version_env
+    cmds:
+      - |
+        if [ -z "{{.SERVICE}}" ]; then
+          echo "Usage: task maintenance:update-version SERVICE=<name>"
+          op run -- python3 scripts/check-versions.py --list
+          exit 1
+        fi
+        op run -- python3 scripts/check-versions.py --update "{{.SERVICE}}"
+      - task: flux:sync-versions
+      - echo "Pins updated. Commit all.yml + the versions ConfigMap and raise an MR."
+
+  maintenance:update-all-versions:
+    desc: Bump every outdated tracked pin and regenerate the ConfigMap
+    env: *version_env
+    cmds:
+      - op run -- python3 scripts/check-versions.py --update-all
+      - task: flux:sync-versions
+      - echo "Pins updated. Commit all.yml + the versions ConfigMap and raise an MR."
+
+  maintenance:update-cluster:
+    desc: Full cluster update pass — k3s nodes, then version pins
+    cmds:
+      - task: maintenance:update-k3s-nodes
+      - task: maintenance:check-versions
+      - task: maintenance:update-all-versions
+      - 'echo "Commit and push so Flux reconciles the new versions, then run task flux:status"'
+
+  # === Terraform ========================================================
+  # Each root module keeps its own state name under the project's
+  # GitLab-managed Terraform state. CI authenticates with CI_JOB_TOKEN; local
+  # runs use the project access token in the vault.
+  terraform:init:
+    desc: Initialize the DNS zone module
+    dir: "{{.TERRAFORM_DIR}}/cloudflare"
+    env: &tf_dns_env
+      TF_VAR_cloudflare_api_token: op://{{.OP_VAULT}}/Cloudflare Terraform Token/credential
+      TF_VAR_cloudflare_account_id: op://{{.OP_VAULT}}/Cloudflare Terraform Token/username
+      TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/cloudflare"
+      TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/cloudflare/lock"
+      TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/cloudflare/lock"
+      TF_HTTP_USERNAME: "terraform"
+      TF_HTTP_PASSWORD: op://{{.OP_VAULT}}/Git Terraform State Token/credential
+      TF_HTTP_LOCK_METHOD: "POST"
+      TF_HTTP_UNLOCK_METHOD: "DELETE"
+    preconditions: &tf_preconditions
+      - sh: command -v terraform
+        msg: "terraform not installed: https://developer.hashicorp.com/terraform/downloads"
+      - sh: command -v op
+        msg: "1Password CLI not installed"
+      - sh: op whoami 2>/dev/null
+        msg: "1Password CLI not authenticated. Run: eval $(op signin)"
+    cmds:
+      - op run -- terraform init {{.CLI_ARGS}}
+
+  terraform:plan:
+    desc: Plan DNS zone changes
+    dir: "{{.TERRAFORM_DIR}}/cloudflare"
+    env: *tf_dns_env
+    preconditions: *tf_preconditions
+    cmds:
+      - op run -- terraform plan {{.CLI_ARGS}}
+
+  terraform:apply:
+    desc: Apply DNS zone changes
+    dir: "{{.TERRAFORM_DIR}}/cloudflare"
+    env: *tf_dns_env
+    preconditions: *tf_preconditions
+    cmds:
+      - op run -- terraform apply {{.CLI_ARGS}}
+{% endraw %}{% if vpn_tailscale %}{% raw %}
+  # --- Tailnet ACL (own state name; SUPERVISED apply) ---
+  terraform:tailscale-init:
+    desc: Initialize the tailnet ACL module
+    dir: "{{.TERRAFORM_DIR}}/tailscale"
+    env: &tf_tailscale_env
+      TF_VAR_tailscale_oauth_client_id: op://{{.OP_VAULT}}/Tailscale OAuth/client id
+      TF_VAR_tailscale_oauth_client_secret: op://{{.OP_VAULT}}/Tailscale OAuth/credential
+      TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/tailscale"
+      TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/tailscale/lock"
+      TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/tailscale/lock"
+      TF_HTTP_USERNAME: "terraform"
+      TF_HTTP_PASSWORD: op://{{.OP_VAULT}}/Git Terraform State Token/credential
+      TF_HTTP_LOCK_METHOD: "POST"
+      TF_HTTP_UNLOCK_METHOD: "DELETE"
+    preconditions: *tf_preconditions
+    cmds:
+      - op run -- terraform init {{.CLI_ARGS}}
+
+  terraform:tailscale-plan:
+    desc: Plan tailnet ACL changes (diff against the live policy)
+    dir: "{{.TERRAFORM_DIR}}/tailscale"
+    env: *tf_tailscale_env
+    preconditions: *tf_preconditions
+    cmds:
+      - op run -- terraform plan {{.CLI_ARGS}}
+
+  terraform:tailscale-apply:
+    desc: "SUPERVISED: apply the tailnet ACL — it overwrites the live policy; read terraform/tailscale/README.md first"
+    dir: "{{.TERRAFORM_DIR}}/tailscale"
+    env: *tf_tailscale_env
+    preconditions: *tf_preconditions
+    cmds:
+      # A bad ACL can sever tailnet and SSH access to every node, so the plan
+      # review cannot be skipped by a stray flag.
+      - |
+        case " {{.CLI_ARGS}} " in
+          *-auto-approve*)
+            echo "Refusing -auto-approve: this apply is supervised. Review the plan and type 'yes'." >&2
+            exit 1
+            ;;
+        esac
+        op run -- terraform apply {{.CLI_ARGS}}
+{% endraw %}{% endif %}{% raw %}
+  # --- SSO objects (own state name; SUPERVISED apply) ---
+  terraform:authentik-init:
+    desc: Initialize the SSO module
+    dir: "{{.TERRAFORM_DIR}}/authentik"
+    env: &tf_authentik_env
+      TF_VAR_authentik_token: op://{{.OP_VAULT}}/Authentik Terraform Token/credential
+      TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/authentik"
+      TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/authentik/lock"
+      TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/authentik/lock"
+      TF_HTTP_USERNAME: "terraform"
+      TF_HTTP_PASSWORD: op://{{.OP_VAULT}}/Git Terraform State Token/credential
+      TF_HTTP_LOCK_METHOD: "POST"
+      TF_HTTP_UNLOCK_METHOD: "DELETE"
+    preconditions: *tf_preconditions
+    cmds:
+      - op run -- terraform init {{.CLI_ARGS}}
+
+  terraform:authentik-plan:
+    desc: Plan SSO changes (read-only diff against the live objects)
+    dir: "{{.TERRAFORM_DIR}}/authentik"
+    env: *tf_authentik_env
+    preconditions: *tf_preconditions
+    cmds:
+      - op run -- terraform plan {{.CLI_ARGS}}
+
+  terraform:authentik-apply:
+    desc: "SUPERVISED: apply SSO changes — a misconfiguration locks every user out of every app"
+    dir: "{{.TERRAFORM_DIR}}/authentik"
+    env: *tf_authentik_env
+    preconditions: *tf_preconditions
+    cmds:
+      - |
+        case " {{.CLI_ARGS}} " in
+          *-auto-approve*)
+            echo "Refusing -auto-approve: this apply is supervised. Review the plan and type 'yes'." >&2
+            exit 1
+            ;;
+        esac
+        op run -- terraform apply {{.CLI_ARGS}}
+
+  terraform:fmt:
+    desc: Format every Terraform module
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - terraform fmt -recursive
+
+  terraform:fmt-check:
+    desc: Check Terraform formatting (mirrors CI)
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - terraform fmt -check -recursive
+
+  terraform:validate:
+    desc: Validate every Terraform module (no backend credentials needed)
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - |
+        set -euo pipefail
+        # Separate data dir per module so a backend-free init cannot disturb the
+        # real state, kept under the module's gitignored .terraform/ so the
+        # library modules are fetched once rather than on every lint run.
+        for mod in */; do
+          [ -f "${mod}versions.tf" ] || continue
+          echo "=== terraform validate ${mod} ==="
+          ( cd "$mod" \
+            && export TF_DATA_DIR=".terraform/validate" \
+            && terraform init -backend=false -input=false >/dev/null \
+            && terraform validate )
+        done
+
+  # === Lint =============================================================
+  lint:
+    desc: Run every local gate (no credentials required) — mirrors the CI lint stage
+    cmds:
+      - task: lint:yamllint
+      - task: lint:shellcheck
+      - task: lint:doc-links
+      - task: lint:taskfile-smoke
+      - task: ansible:lint
+      - task: terraform:fmt-check
+      - task: terraform:validate
+      - task: flux:lint
+
+  lint:yamllint:
+    desc: Baseline YAML syntax check (mirrors the CI yaml-lint job)
+    preconditions:
+      - sh: command -v yamllint
+        msg: "yamllint not installed (pip install yamllint)"
+    cmds:
+      # -c .yamllint, not -d relaxed: the repo's config is what pre-commit and
+      # the CI yaml-lint job use, and a different config reports different findings.
+      - yamllint -c .yamllint ansible/ kubernetes/ terraform/ scripts/ .gitlab-ci.yml Taskfile.yml
+
+  lint:shellcheck:
+    desc: ShellCheck the repository's shell scripts
+    preconditions:
+      - sh: command -v shellcheck
+        msg: "shellcheck not installed (brew install shellcheck)"
+    cmds:
+      - shellcheck --severity=warning --exclude=SC1091,SC2034 scripts/*.sh
+
+  lint:doc-links:
+    desc: Resolve relative Markdown cross-links offline
+    cmds:
+      - python3 scripts/check-doc-links.py
+
+  lint:taskfile-smoke:
+    desc: Assert every script this Taskfile references (and the dotenv target) exists
+    cmds:
+      - task --list >/dev/null
+      - bash scripts/check-taskfile.sh
+
+  lint:prometheus-config:
+    desc: Lint the alert rules and Alertmanager config with promtool/amtool
+    preconditions:
+      - sh: command -v promtool
+        msg: "promtool not installed (ships in the Prometheus release tarball)"
+      - sh: command -v amtool
+        msg: "amtool not installed (ships in the Alertmanager release tarball)"
+      - sh: python3 -c "import yaml" 2>/dev/null
+        msg: "PyYAML not installed (pip install pyyaml)"
+    # The extractor's default paths already match this tree's observability
+    # layout; the unit-test step is skipped while the tests dir holds no
+    # *.test.yaml.
+    env:
+      RULE_TESTS_DIR: tests/prometheus-rules
+    cmds:
+      - bash scripts/lint-prometheus-config.sh
+
+  # === Secrets ==========================================================
+  op:check:
+    desc: Verify the 1Password CLI is authenticated
+    cmds:
+      - op account get
+
+  secrets:show:
+    desc: List the secret REFERENCES this repo uses (never the values)
+    cmds:
+      - |
+        echo "op:// references in Taskfile.yml:"
+        grep -oE "op://{{.OP_VAULT}}/[^\"'\`)(]+" Taskfile.yml \
+          | sed 's/[[:space:]]*$//' \
+          | grep -E "^op://{{.OP_VAULT}}/[^/]+/[^/]+$" | sort -u | sed 's/^/  - /'
+        echo ""
+        echo "op:// references in the inventory (the canonical home):"
+        find ansible/inventories -name '*.yml' -type f -exec grep -hoE "op://{{.OP_VAULT}}/[^\"'\`)(]+" {} \; 2>/dev/null \
+          | sed 's/[[:space:]]*$//' \
+          | grep -E "^op://{{.OP_VAULT}}/[^/]+/[^/]+$" | sort -u | sed 's/^/  - /' || echo "  (none)"
+        echo ""
+        echo "Verify they exist:  op item list --vault {{.OP_VAULT}}"
+{%- endraw %}

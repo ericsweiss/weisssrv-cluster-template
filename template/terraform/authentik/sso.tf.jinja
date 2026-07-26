@@ -1,0 +1,80 @@
+# Site data: which applications exist, who may reach them, and how each one
+# authenticates. Every map key is a STATE ADDRESS — renaming one destroys and
+# recreates the object.
+#
+# Users are never managed here. Only group membership is, so every username in
+# `groups[*].users` must already exist in authentik.
+locals {
+  # OIDC applications. The key is the provider's default client_id, so the app's
+  # own configuration must use the same string.
+  oauth2_providers = {
+    grafana = {
+      name = "Grafana"
+      redirect_uris = [
+        { url = "https://grafana.{{ internal_domain }}/login/generic_oauth" },
+      ]
+    }
+  }
+
+  # Client secrets come in as variables (injected from the secret store by the
+  # terraform:authentik-* tasks) so this file stays non-sensitive. A provider
+  # with no entry gets a server-generated secret that exists only in state,
+  # which the application itself then cannot know — pass one for every app that
+  # keeps its own copy of the secret.
+  oauth2_client_secrets = {
+    for key, secret in {
+      grafana = var.oauth2_client_secret_grafana
+    } : key => secret if secret != null
+  }
+
+  # Forward-auth for applications with no OIDC support. The outpost gates the
+  # request and can inject a basic-auth pair from the user's attributes.
+  proxy_providers = {}
+  # proxy_providers = {
+  #   adguard = {
+  #     name                          = "AdGuard Home"
+  #     external_host                 = "https://dns.{{ internal_domain }}"
+  #     basic_auth_enabled            = true
+  #     basic_auth_username_attribute = "adguard_user"
+  #     basic_auth_password_attribute = "adguard_password"
+  #   }
+  # }
+
+  saml_providers = {}
+
+  groups = {
+    "grafana-users" = { users = [] }
+  }
+
+  # Credentials a proxy provider injects upstream live as group attributes, so
+  # they merge into each member's user attributes. Source them from the same
+  # secret-store item the application uses, never as literals.
+  group_secret_attributes = {}
+
+  applications = {
+    grafana = {
+      name          = "Grafana"
+      group         = "Infrastructure"
+      provider_type = "oauth2"
+      provider_key  = "grafana"
+      launch_url    = "https://grafana.{{ internal_domain }}"
+    }
+  }
+
+  # An application with NO binding is open to every authenticated user. Give
+  # each one at least one binding.
+  policy_bindings = {
+    grafana = { application = "grafana", group = "grafana-users" }
+  }
+
+  # The embedded outpost serves the proxy providers. null leaves it alone —
+  # managing it means importing the object authentik created itself, and going
+  # back to null later DESTROYS it (detach with `terraform state rm` instead).
+  #
+  # The list is ORDERED: the API preserves insertion order, so reordering it is
+  # a permanent diff.
+  embedded_outpost = null
+  # embedded_outpost = {
+  #   proxy_provider_keys = ["adguard"]
+  # }
+}

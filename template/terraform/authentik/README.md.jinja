@@ -1,0 +1,66 @@
+# terraform/authentik
+
+Single sign-on objects as code: OIDC/proxy/SAML providers, applications, groups,
+and the policy bindings that gate them. The shape and its security defaults come
+from `weisssrv-lib//terraform/modules/authentik-sso` at the ref pinned in
+`main.tf`; the inventory is `sso.tf`.
+
+The authentik *deployment* is Flux's (`kubernetes/apps/authentik`). This module
+only configures the objects inside it, so the server must be up and reachable at
+`https://auth.{{ internal_domain }}` before the first plan.
+
+## Running it
+
+```bash
+task terraform:authentik-init
+task terraform:authentik-plan     # review object by object
+task terraform:authentik-apply    # refuses -auto-approve on purpose
+```
+
+An SSO misconfiguration locks every user out of every application at once. Keep
+a break-glass path available — a local admin account, or one route that bypasses
+SSO — until the post-apply login checks pass, and log in to at least one
+application before you walk away.
+
+## Adding an application
+
+1. Add the provider to the right map in `sso.tf` (`oauth2_providers` for OIDC,
+   `proxy_providers` for forward-auth, `saml_providers` for SAML).
+2. If the application keeps its own copy of the client secret, add a variable
+   for it in `variables.tf`, add the entry to `oauth2_client_secrets`, and add
+   the matching `TF_VAR_…` line to the `terraform:authentik-*` tasks pointing at
+   the SAME secret-store item the application reads. Without an entry, authentik
+   generates a secret that only exists in Terraform state and the app can never
+   learn it.
+3. Add the `applications` entry, a group, and a `policy_bindings` entry. **An
+   application with no binding is open to every authenticated user.**
+
+## Security defaults worth knowing
+
+- **Grant types** default to `authorization_code` + `refresh_token`. `password`
+  (ROPC) bypasses the authentication flow's stages *including MFA*, and
+  `implicit`/`hybrid` return tokens in the URL fragment. Importing an existing
+  deployment usually pulls in all seven, because that is what the admin UI
+  creates — tighten them in a supervised apply with a login test per app.
+- **Redirect URIs** default to `strict` matching. authentik evaluates `regex`
+  mode with `re.fullmatch`, where `.` matches any character, so the module
+  rejects a regex URI with an unescaped dot: `https://app\.example\.com/cb`.
+- **Consent**: the default authorization flow never prompts a signed-in user.
+  Set `authorization_flow_slug` to the explicit-consent flow if you want a
+  first-use prompt per application.
+
+## Credentials
+
+| Item | Field | Used for |
+|---|---|---|
+| `Authentik Terraform Token` | `credential` | The authentik API |
+| `<App> SSO` | client secret field | One per OIDC application |
+| `Git Terraform State Token` | `credential` | The GitLab state backend |
+
+## Changing SSO provider
+
+`kubernetes/apps/authentik` plus this module is the whole SSO backend. A
+replacement has to provide: an OIDC issuer the apps can point at, a forward-auth
+middleware Traefik can call for apps without OIDC, and a group model the
+bindings can express. The template's [ARCHITECTURE.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/ARCHITECTURE.md)
+records the seam.

@@ -1,0 +1,46 @@
+variable "cloudflare_api_token" {
+  # Dedicated Terraform token: Zone:Read + DNS:Edit + Zone Settings:Edit. Keep
+  # it separate from the DNS-only token handed to cert-manager/external-dns, so
+  # a compromised workload cannot downgrade zone-wide TLS posture.
+  description = "Cloudflare API token (1Password item 'Cloudflare Terraform Token', field 'credential')"
+  type        = string
+  sensitive   = true
+}
+
+variable "cloudflare_account_id" {
+  # Stored in the same item's `username` field, which is non-obvious enough that
+  # a wrong value would otherwise surface as a confusing zone-not-found error.
+  description = "Cloudflare account ID (1Password item 'Cloudflare Terraform Token', field 'username')"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{32}$", var.cloudflare_account_id))
+    error_message = "cloudflare_account_id must be a 32-character hex string."
+  }
+}
+
+variable "external_domain" {
+  description = "External zone managed here"
+  type        = string
+  default     = "{{ external_domain }}"
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]+(\\.[a-z0-9-]+)*\\.[a-z]{2,}$", var.external_domain))
+    error_message = "external_domain must be a bare FQDN with no scheme, trailing dot, or slash."
+  }
+}
+
+variable "contact_email" {
+  description = "Address published in the CAA iodef record for issuance-policy violation reports"
+  type        = string
+  default     = "{{ admin_email }}"
+}
+
+variable "apex_seed_ip" {
+  # Seeds the apex A record at creation only. The DDNS job owns the live value
+  # from then on (the record carries content_managed_externally = true), so this
+  # is documentation, not configuration.
+  description = "Placeholder public IP written when the apex record is first created"
+  type        = string
+  default     = "192.0.2.1"
+}

@@ -1,0 +1,50 @@
+// Tailnet policy for the {{ cluster_name }} cluster (HuJSON: comments and
+// trailing commas are allowed; it is not plain JSON).
+//
+// THIS IS A STARTING POINT, NOT A HARDENED POLICY. Before the first apply,
+// diff it against the live policy in the admin console — applying replaces the
+// live document wholesale, and a mistake here can sever tailnet and SSH access
+// to every node at once.
+{
+  // Tags let a device authenticate as a role instead of as a person, so an
+  // expiring user account cannot take nodes off the tailnet. Advertise them
+  // with `tailscale up --advertise-tags=tag:pve` on the hosts.
+  "tagOwners": {
+    "tag:pve":    ["autogroup:admin"],
+    "tag:k8s":    ["autogroup:admin"],
+    "tag:server": ["autogroup:admin"],
+  },
+
+  // Allow-all between members is the default a fresh tailnet starts with. It is
+  // kept here so the first apply is a no-op change in behaviour; tighten it to
+  // per-tag rules once the device inventory is stable.
+  "acls": [
+    {
+      "action": "accept",
+      "src":    ["autogroup:member"],
+      "dst":    ["*:*"],
+    },
+  ],
+
+  // Tailscale SSH. "check" re-authenticates the user in the browser on a
+  // periodic basis; "accept" would not. autogroup:nonroot excludes root
+  // sessions, which is why {{ admin_user }} is named explicitly.
+  "ssh": [
+    {
+      "action": "check",
+      "src":    ["autogroup:member"],
+      "dst":    ["autogroup:self", "tag:pve", "tag:server"],
+      "users":  ["autogroup:nonroot", "{{ admin_user }}"],
+    },
+  ],
+
+  // Subnet-route HA: any admin-owned node advertising the LAN gets approved
+  // automatically, so failing over the router role between hosts needs no
+  // console click. Without this, a route stays inactive until approved by hand.
+  "autoApprovers": {
+    "routes": {
+      "{{ lan_cidr }}": ["autogroup:admin"],
+    },
+    "exitNode": ["autogroup:admin"],
+  },
+}
