@@ -1,0 +1,34 @@
+# EditorConfig — https://editorconfig.org
+# Applies to this template's own sources and, because the rules are matched by
+# extension, to the .jinja files under template/ as well.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{yml,yaml,yml.jinja,yaml.jinja}]
+indent_style = space
+indent_size = 2
+
+[*.{py,py.jinja}]
+indent_style = space
+indent_size = 4
+
+[*.{sh,sh.j2,sh.jinja}]
+indent_style = space
+indent_size = 4
+
+[*.{tf,tfvars,tf.jinja}]
+indent_style = space
+indent_size = 2
+
+[Dockerfile*]
+indent_style = space
+indent_size = 4
+
+[*.{md,md.jinja}]
+# Trailing double-space is a Markdown hard line break.
+trim_trailing_whitespace = false

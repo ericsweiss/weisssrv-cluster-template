@@ -1,0 +1,39 @@
+# Secrets / local env — never commit these. NOT `*.env`: the template ships
+# scripts/hosts.env, a generated-but-committed file, and a broad glob would
+# silently drop it from every commit.
+.env
+.env.*
+.tmp/
+
+# Rendered template instances (the render-smoke gate and local `copier copy`
+# runs). Anchored so nothing under template/ can match by accident.
+/.render/
+/render/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+/build/
+/dist/
+
+# Terraform — init/state artifacts from rendering and validating an instance
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# ansible caches from linting a rendered instance
+.ansible/
+.ansible-home/
