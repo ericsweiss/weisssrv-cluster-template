@@ -1,0 +1,261 @@
+---
+# Rolling k3s binary upgrade to the pinned k3s_version: servers first (one etcd
+# member at a time), then agents.
+
+- name: Pre-flight checks
+  hosts: k3s
+  gather_facts: true
+  tasks:
+    - name: Check the k3s service state
+      ansible.builtin.systemd:
+        name: "{{ 'k3s' if k3s_role == 'server' else 'k3s-agent' }}"
+      check_mode: true
+
+    - name: Display the current cluster state
+      ansible.builtin.command: k3s kubectl get nodes -o wide
+      changed_when: false
+      delegate_to: "{{ groups['k3s_servers'][0] }}"
+      run_once: true
+      register: node_status
+
+    - name: Show the current cluster state
+      ansible.builtin.debug:
+        msg: "{{ node_status.stdout_lines }}"
+      run_once: true
+
+- name: Update k3s server nodes
+  hosts: k3s_servers
+  become: true
+  serial: 1
+  vars:
+    # A server OTHER than the one being upgraded; falls back to the first when
+    # it is the only one. Templated lazily, so it tracks each host.
+    k3s_delegate_server: "{{ (groups['k3s_servers'] | difference([inventory_hostname]) | first) | default(groups['k3s_servers'][0]) }}"
+  tasks:
+    - name: Display the node being updated
+      ansible.builtin.debug:
+        msg: "=== Updating k3s server {{ inventory_hostname }} ==="
+
+    # Shares the role's staged-installer path: the tag-pinned install.sh is
+    # downloaded to /root and checksum-verified before it runs as root — no
+    # `curl | sh`.
+    - name: Detect the k3s version and stage the install script
+      ansible.builtin.include_role:
+        name: weisssrv.infra.k3s
+        tasks_from: install-script.yml
+
+    - name: Skip if the version already matches
+      ansible.builtin.meta: end_host
+      when: k3s_installed_version is defined and k3s_installed_version == k3s_version
+
+    - name: Upgrade k3s server with a guaranteed uncordon
+      block:
+        # Restarting this server briefly drops its etcd member; doing that while
+        # kured reboots ANOTHER server loses quorum. Checked before the upgrade
+        # and again immediately before the restart to shrink the window.
+        - name: Serialize against kured before cordoning
+          ansible.builtin.include_tasks: _wait-no-kured-server-reboot.yml
+          vars:
+            kured_clear_reason: "before upgrading {{ inventory_hostname }}"
+            kured_clear_delegate: "{{ k3s_delegate_server }}"
+
+        # Cordon, never drain: containerd keeps running pods alive across a
+        # kubelet restart, and draining the node running this job's own executor
+        # pod would deadlock the run.
+        - name: Cordon the node
+          ansible.builtin.command: k3s kubectl cordon {{ inventory_hostname }}
+          changed_when: true
+          delegate_to: "{{ k3s_delegate_server }}"
+
+        - name: Upgrade the k3s server binary
+          ansible.builtin.command: /root/k3s-install.sh server
+          environment:
+            INSTALL_K3S_VERSION: "{{ k3s_version }}"
+            INSTALL_K3S_SKIP_START: "true"
+          changed_when: true
+
+        - name: Re-assert kured is idle right before the restart
+          ansible.builtin.include_tasks: _wait-no-kured-server-reboot.yml
+          vars:
+            kured_clear_reason: "before restarting k3s on {{ inventory_hostname }}"
+            kured_clear_delegate: "{{ k3s_delegate_server }}"
+
+        - name: Restart k3s
+          ansible.builtin.systemd:
+            name: k3s
+            state: restarted
+            daemon_reload: true
+
+        # /readyz, not `get nodes`: the latter can pass while etcd is still
+        # rejoining, letting serial:1 advance to the next server too early.
+        - name: Wait for the API to be ready
+          ansible.builtin.command: k3s kubectl --request-timeout=5s get --raw=/readyz
+          register: k3s_ready
+          retries: 30
+          delay: 10
+          until: k3s_ready.rc == 0
+          changed_when: false
+
+        - name: Verify the new version
+          ansible.builtin.command: k3s --version
+          register: k3s_new_version
+          changed_when: false
+
+        - name: Display the upgrade result
+          ansible.builtin.debug:
+            msg: "Server {{ inventory_hostname }} upgraded to: {{ k3s_new_version.stdout }}"
+
+      always:
+        - name: Uncordon and wait for Ready
+          ansible.builtin.include_tasks: _uncordon-and-wait-ready.yml
+
+- name: Update k3s agent nodes
+  hosts: k3s_agents
+  become: true
+  serial: 1
+  vars:
+    k3s_delegate_server: "{{ (groups['k3s_servers'] | difference([inventory_hostname]) | first) | default(groups['k3s_servers'][0]) }}"
+  tasks:
+    - name: Display the node being updated
+      ansible.builtin.debug:
+        msg: "=== Updating k3s agent {{ inventory_hostname }} ==="
+
+    - name: Detect the k3s version and stage the install script
+      ansible.builtin.include_role:
+        name: weisssrv.infra.k3s
+        tasks_from: install-script.yml
+
+    - name: Skip if the version already matches
+      ansible.builtin.meta: end_host
+      when: k3s_installed_version is defined and k3s_installed_version == k3s_version
+
+    - name: Upgrade k3s agent with a guaranteed uncordon
+      block:
+        - name: Cordon the node
+          ansible.builtin.command: k3s kubectl cordon {{ inventory_hostname }}
+          changed_when: true
+          delegate_to: "{{ k3s_delegate_server }}"
+
+        # The "agent" argument is required: without it the installer sets up
+        # server mode and creates k3s.service instead of k3s-agent.service.
+        - name: Upgrade the k3s agent binary
+          ansible.builtin.command: /root/k3s-install.sh agent
+          environment:
+            INSTALL_K3S_VERSION: "{{ k3s_version }}"
+            INSTALL_K3S_SKIP_START: "true"
+            K3S_URL: "https://{{ k3s_api_vip }}:{{ k3s_api_port | default(6443) }}"
+            # The worker-only token, so an upgrade rewrites the agent env file
+            # with it rather than the cluster token.
+            K3S_TOKEN: "{{ k3s_agent_token }}"
+          changed_when: true
+          no_log: true
+
+        # Guards against an earlier bad upgrade (or a future bug) having
+        # installed server mode here.
+        - name: Check whether the server unit exists on this agent
+          ansible.builtin.stat:
+            path: /etc/systemd/system/k3s.service
+          register: k3s_server_service
+
+        - name: Stop and disable the server unit if present
+          ansible.builtin.systemd:
+            name: k3s
+            state: stopped
+            enabled: false
+            daemon_reload: true
+          when: k3s_server_service.stat.exists
+          failed_when: false
+
+        - name: Restart the k3s agent
+          ansible.builtin.systemd:
+            name: k3s-agent
+            state: restarted
+            daemon_reload: true
+
+        - name: Wait for the agent to register
+          ansible.builtin.command: k3s kubectl get node {{ inventory_hostname }}
+          register: k3s_agent_ready
+          retries: 30
+          delay: 10
+          until: k3s_agent_ready.rc == 0
+          changed_when: false
+          delegate_to: "{{ k3s_delegate_server }}"
+
+        - name: Wait for pods on the node to stabilize
+          # Skip terminal batch pods (never-GC'd Job/CI pods) but still count
+          # Pending/CrashLoop/Evicted and Running-but-not-ready. A phase-only
+          # field selector would do the opposite on both counts.
+          ansible.builtin.shell: |
+            set -o pipefail
+            k3s kubectl get pods --all-namespaces \
+              --field-selector spec.nodeName={{ inventory_hostname }} \
+              --no-headers 2>/dev/null \
+            | awk '
+                $4 == "Completed" || $4 == "Succeeded" || $4 == "Error" || $4 == "Failed" { next }
+                { split($3, a, "/"); if ($4 != "Running" || a[1] != a[2]) print }' \
+            | wc -l
+          args:
+            executable: /bin/bash
+          register: unhealthy_on_node
+          retries: 30
+          delay: 10
+          until: unhealthy_on_node.stdout | int == 0
+          changed_when: false
+          delegate_to: "{{ k3s_delegate_server }}"
+
+        - name: Verify the new version
+          ansible.builtin.command: k3s --version
+          register: k3s_new_version
+          changed_when: false
+
+        - name: Display the upgrade result
+          ansible.builtin.debug:
+            msg: "Agent {{ inventory_hostname }} upgraded to: {{ k3s_new_version.stdout }}"
+
+      always:
+        - name: Uncordon and wait for Ready
+          ansible.builtin.include_tasks: _uncordon-and-wait-ready.yml
+
+- name: Post-upgrade verification
+  hosts: k3s_servers
+  run_once: true
+  tasks:
+    - name: Display the final cluster state
+      ansible.builtin.command: k3s kubectl get nodes -o wide
+      changed_when: false
+      register: final_nodes
+
+    - name: Show the final node status
+      ansible.builtin.debug:
+        msg: "{{ final_nodes.stdout_lines }}"
+
+    - name: Check for NotReady nodes
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl get nodes --no-headers | grep -v " Ready" | awk '{print $1}' || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: not_ready_nodes
+
+    - name: Warn about NotReady nodes
+      ansible.builtin.debug:
+        msg: "WARNING: nodes not ready: {{ not_ready_nodes.stdout }}"
+      when: not_ready_nodes.stdout != ""
+
+    - name: Check for unhealthy pods
+      ansible.builtin.shell: |
+        set -o pipefail
+        k3s kubectl get pods --all-namespaces --no-headers 2>/dev/null \
+        | awk '
+            $4 == "Completed" || $4 == "Succeeded" || $4 == "Error" || $4 == "Failed" { next }
+            { split($3, a, "/"); if ($4 != "Running" || a[1] != a[2]) print $1" "$2 }'
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: unhealthy_pods
+
+    - name: Warn about unhealthy pods
+      ansible.builtin.debug:
+        msg: "WARNING: unhealthy pods: {{ unhealthy_pods.stdout_lines }}"
+      when: unhealthy_pods.stdout != ""

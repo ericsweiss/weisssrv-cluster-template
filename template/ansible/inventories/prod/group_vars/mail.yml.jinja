@@ -1,0 +1,64 @@
+---
+# The SMTP relay: one authenticated smarthost for everything in the cluster that
+# sends mail (cron, fail2ban, SMART, Alertmanager, apps).
+
+proxmox_lxc_nesting: true
+
+# REQUIRED: the smarthost this relay forwards to, as Postfix `[host]:port`.
+# Brackets suppress the MX lookup. Provider-specific — a mail provider's
+# submission endpoint, e.g. "[smtp.example-provider.com]:587".
+smtp_relay_upstream: ""
+
+# Credentials for the smarthost (upstream_*) and for in-cluster senders
+# authenticating to THIS relay (sasl_*). All four are asserted.
+smtp_relay_upstream_user: "{% raw %}{{ lookup('ansible.builtin.env', 'SMTP_UPSTREAM_USER') }}{% endraw %}"
+smtp_relay_upstream_password: "{% raw %}{{ lookup('ansible.builtin.env', 'SMTP_UPSTREAM_PASSWORD') }}{% endraw %}"
+smtp_relay_sasl_user: "{% raw %}{{ lookup('ansible.builtin.env', 'SMTP_RELAY_USER') }}{% endraw %}"
+smtp_relay_sasl_password: "{% raw %}{{ lookup('ansible.builtin.env', 'SMTP_RELAY_PASSWORD') }}{% endraw %}"
+
+smtp_relay_config:
+  myhostname: "smtp-relay.{% raw %}{{ internal_domain }}{% endraw %}"
+  myorigin: "/etc/mailname"
+  mydestination: "$myhostname, localhost.$mydomain, localhost"
+  relayhost: "{% raw %}{{ smtp_relay_upstream }}{% endraw %}"
+  # Loopback + LAN. Pod CIDRs do not belong here: pods reaching this LXC are
+  # SNAT'd to their node's LAN address, and in-cluster senders authenticate with
+  # SASL on 587 rather than relying on mynetworks.
+  mynetworks: "127.0.0.0/8,{{ lan_cidr }}"
+  inet_interfaces: "all"
+  inet_protocols: "ipv4"
+  # "secure" = encrypt AND verify the smarthost's certificate.
+  smtp_tls_security_level: "secure"
+  smtp_tls_CAfile: "/etc/ssl/certs/ca-certificates.crt"
+  smtp_sasl_auth_enable: "yes"
+  smtp_sasl_security_options: "noanonymous"
+  smtp_sasl_tls_security_options: "noanonymous"
+  smtp_sasl_password_maps: "hash:/etc/postfix/sasl_passwd"
+  # permit_sasl_authenticated is what actually grants relay to an authenticated
+  # sender outside mynetworks; without it SASL is decorative.
+  smtpd_relay_restrictions: "permit_mynetworks,permit_sasl_authenticated,reject_unauth_destination"
+  smtpd_tls_cert_file: "/etc/postfix/tls/fullchain.pem"
+  smtpd_tls_key_file: "/etc/postfix/tls/privkey.pem"
+  smtpd_tls_security_level: "may"
+  smtpd_tls_loglevel: "1"
+  smtpd_tls_received_header: "yes"
+  smtpd_tls_protocols: "!SSLv2,!SSLv3,!TLSv1,!TLSv1.1"
+  smtp_tls_protocols: "!SSLv2,!SSLv3,!TLSv1,!TLSv1.1"
+  smtpd_tls_mandatory_protocols: "!SSLv2,!SSLv3,!TLSv1,!TLSv1.1"
+  smtpd_sasl_type: "cyrus"
+  smtpd_sasl_path: "smtpd"
+  smtpd_sasl_security_options: "noanonymous"
+  broken_sasl_auth_clients: "yes"
+  # AUTH off on :25 (cleartext-permitted and broken under chroot); submission
+  # re-enables it behind mandatory TLS below.
+  smtpd_sasl_auth_enable: "no"
+  smtpd_tls_auth_only: "yes"
+  smtpd_sasl_local_domain: "$myhostname"
+
+smtp_relay_submission_enabled: true
+smtp_relay_submission_config:
+  syslog_name: "postfix/submission"
+  smtpd_tls_security_level: "encrypt"
+  smtpd_sasl_auth_enable: "yes"
+  smtpd_recipient_restrictions: "permit_sasl_authenticated,reject"
+  milter_macro_daemon_name: "ORIGINATING"

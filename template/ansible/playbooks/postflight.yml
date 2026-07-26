@@ -1,0 +1,337 @@
+---
+# Post-deployment verification. Read-only: every check either passes or fails
+# the play, nothing is changed. Plays are skipped cleanly under --limit/--tags.
+
+- name: Verify SSH access to all managed hosts
+  hosts: base_managed
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Verify SSH connectivity
+      ansible.builtin.ping:
+
+- name: Verify base system health
+  hosts: base_managed
+  become: true
+  tasks:
+    - name: Check root filesystem has at least 10% free
+      ansible.builtin.assert:
+        that:
+          - item.size_available > (item.size_total * 0.10)
+        fail_msg: "{{ item.mount }} has less than 10% free space"
+      loop: "{{ ansible_facts['mounts'] | selectattr('mount', 'equalto', '/') }}"
+      loop_control:
+        label: "{{ item.mount }}"
+
+    - name: Verify SSH service is running
+      ansible.builtin.service:
+        name: ssh
+        state: started
+      check_mode: true
+      register: postflight_service_check
+      failed_when: postflight_service_check is changed
+
+    - name: Verify the admin user can sudo
+      ansible.builtin.command: sudo -n true
+      become: false
+      changed_when: false
+      when: admin_user != 'root'
+
+- name: Verify Proxmox host services
+  hosts: proxmox
+  become: true
+  tasks:
+    - name: Verify Tailscale is running
+      ansible.builtin.command: tailscale status
+      changed_when: false
+      register: tailscale_status
+      failed_when: tailscale_status.rc != 0
+      when: tailscale_enabled | default(false) | bool
+
+    - name: Verify Postfix is running
+      ansible.builtin.service:
+        name: postfix
+        state: started
+      check_mode: true
+      register: postflight_service_check
+      failed_when: postflight_service_check is changed
+
+- name: Verify DNS services
+  hosts: dns
+  become: true
+  tasks:
+    - name: Verify unbound is running
+      ansible.builtin.service:
+        name: unbound
+        state: started
+      check_mode: true
+      register: postflight_service_check
+      failed_when: postflight_service_check is changed
+
+    - name: Test recursion through unbound
+      ansible.builtin.command: dig @127.0.0.1 -p {{ unbound_port }} example.com +short
+      changed_when: false
+      register: dns_test
+      failed_when: dns_test.rc != 0 or dns_test.stdout == ""
+
+    - name: Verify AdGuard Home is running
+      ansible.builtin.service:
+        name: AdGuardHome
+        state: started
+      check_mode: true
+      register: postflight_service_check
+      failed_when: postflight_service_check is changed
+
+    - name: Test the AdGuard Home API (401 still proves it is serving)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ adguard_home_http_port }}/control/status"
+        method: GET
+        status_code: [200, 401]
+        validate_certs: false
+
+    - name: Verify AdGuard Home answers on :53
+      ansible.builtin.command: dig @127.0.0.1 -p 53 example.com +short
+      changed_when: false
+      register: adguard_dns_test
+      failed_when: adguard_dns_test.rc != 0 or adguard_dns_test.stdout == ""
+
+- name: Verify certificate distribution
+  hosts: dns_primary
+  become: true
+  tasks:
+    # Exercise the same pinned-key path the cert-reload script uses
+    # (StrictHostKeyChecking=yes against root's known_hosts), so a changed or
+    # unknown host key fails here exactly as the real push would.
+    - name: Test SSH to each certificate distribution target
+      ansible.builtin.command: >-
+        ssh -i {{ acme_certs_ssh_key_path | default('/home/' ~ admin_user ~ '/.ssh/id_ed25519_certs') }}
+        -o BatchMode=yes
+        -o StrictHostKeyChecking=yes
+        -o UserKnownHostsFile=/root/.ssh/known_hosts
+        -o ConnectTimeout=5
+        -p {{ item.ssh_port | default(22) }}
+        {{ item.ssh_user | default(admin_user) }}@{{ item.ip }} 'echo success'
+      changed_when: false
+      register: cert_target_ssh
+      failed_when: "'success' not in cert_target_ssh.stdout"
+      loop: "{{ acme_certs_distribution_targets | default([]) }}"
+      loop_control:
+        label: "{{ item.host }} ({{ item.ip }})"
+
+    - name: Verify the AdGuard sync timer is enabled
+      ansible.builtin.systemd:
+        name: adguardhome-sync.timer
+        enabled: true
+      check_mode: true
+      register: postflight_service_check
+      failed_when: postflight_service_check is changed
+      when: adguard_sync_enabled | default(false) | bool
+
+    # An enabled timer says nothing about whether the DynamicUser +
+    # LoadCredential + StateDirectory sandbox can actually start in an
+    # unprivileged container. Trigger one run and check it did not die at the
+    # exec stage: an app-level failure is fine, a systemd exec status is not.
+    - name: Trigger one sync run to exercise the sandbox  # noqa: command-instead-of-module
+      ansible.builtin.command: systemctl start adguardhome-sync.service
+      changed_when: false
+      failed_when: false
+      when: adguard_sync_enabled | default(false) | bool
+
+    - name: Read the sync service exec status  # noqa: command-instead-of-module
+      ansible.builtin.command: >-
+        systemctl show adguardhome-sync.service --property=ExecMainStatus --value
+      register: adguardhome_sync_status
+      changed_when: false
+      when: adguard_sync_enabled | default(false) | bool
+
+    - name: Assert the sync service started under its sandbox
+      ansible.builtin.assert:
+        that:
+          # 217 USER, 226 NAMESPACE, 238 STATE_DIRECTORY, 243 CREDENTIALS
+          - adguardhome_sync_status.stdout | trim not in ['217', '226', '238', '243']
+        fail_msg: >-
+          adguardhome-sync.service failed at the exec/sandbox stage
+          (ExecMainStatus={{ adguardhome_sync_status.stdout | trim }}).
+      when: adguard_sync_enabled | default(false) | bool
+
+- name: Verify SMTP relay
+  hosts: mail
+  become: true
+  tasks:
+    - name: Verify Postfix is running
+      ansible.builtin.service:
+        name: postfix
+        state: started
+      check_mode: true
+      register: postflight_service_check
+      failed_when: postflight_service_check is changed
+
+    - name: Test the submission port is accepting connections
+      ansible.builtin.wait_for:
+        port: 587
+        host: 127.0.0.1
+        timeout: 5
+
+    - name: Test SASL authentication is configured
+      ansible.builtin.command: postconf -h smtp_sasl_auth_enable
+      changed_when: false
+      register: sasl_config
+      failed_when: "'yes' not in sasl_config.stdout"
+
+- name: Verify NAS storage
+  hosts: nas
+  become: true
+  tasks:
+    - name: Check ZFS pool health
+      ansible.builtin.command: "zpool status {{ item }}"
+      changed_when: false
+      register: zpool_health
+      failed_when: >
+        zpool_health.rc != 0 or
+        'DEGRADED' in zpool_health.stdout or
+        'FAULTED' in zpool_health.stdout or
+        'UNAVAIL' in zpool_health.stdout
+      loop: "{{ nas_storage_zfs_pools | default([]) | map(attribute='name') | list }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Verify declared datasets are mounted
+      ansible.builtin.command: "zfs get -H -o value mounted {{ item.name }}"
+      changed_when: false
+      register: dataset_mounted
+      failed_when: dataset_mounted.stdout | trim not in ['yes', '-']
+      loop: >-
+        {{ nas_storage_zfs_pools | default([]) | map(attribute='datasets', default=[])
+           | flatten }}
+      loop_control:
+        label: "{{ item.name }}"
+      # canmount=off datasets and zvols report '-', which the failed_when allows.
+
+    - name: Verify mergerfs mounts
+      ansible.builtin.command: findmnt -t fuse.mergerfs -o TARGET,SOURCE
+      changed_when: false
+      register: mergerfs_mounts_check
+      failed_when: mergerfs_mounts_check.rc != 0
+      when: nas_storage_mergerfs_mounts | default([]) | length > 0
+
+    - name: Check SMART health
+      ansible.builtin.command: "smartctl -H {{ item }}"
+      changed_when: false
+      register: smart_health
+      failed_when: "'PASSED' not in smart_health.stdout"
+      loop: >-
+        {{ (nas_storage_smartd_tank_disks | default([]))
+           + (nas_storage_smartd_ssd_disks | default([]))
+           + (nas_storage_smartd_nvme_disks | default([]))
+           + (nas_storage_smartd_archive_disks | default([])) }}
+      loop_control:
+        label: "{{ item | basename }}"
+      when: nas_storage_smartd_enabled | default(true)
+
+    - name: Verify smartd is running
+      ansible.builtin.service:
+        name: smartd
+        state: started
+      check_mode: true
+      register: postflight_service_check
+      failed_when: postflight_service_check is changed
+      when: nas_storage_smartd_enabled | default(true)
+
+    - name: Verify the NFS server is running
+      ansible.builtin.service:
+        name: nfs-kernel-server
+        state: started
+      check_mode: true
+      register: postflight_service_check
+      failed_when: postflight_service_check is changed
+
+    # Every TLS PV mount depends on the handshake daemon: nfsd can be up while
+    # new TLS mounts fail cluster-wide.
+    - name: Verify tlshd is running
+      ansible.builtin.service:
+        name: tlshd
+        state: started
+      check_mode: true
+      register: postflight_service_check
+      failed_when: postflight_service_check is changed
+      when: nfs_tls_enabled | default(false)
+
+    - name: Check NFS exports are active
+      ansible.builtin.command: showmount -e localhost
+      changed_when: false
+      register: nfs_exports
+      failed_when: "'/export' not in nfs_exports.stdout"
+
+    - name: Verify Samba is running
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+      check_mode: true
+      register: postflight_service_check
+      failed_when: postflight_service_check is changed
+      loop:
+        - smbd
+        - nmbd
+      when: nas_storage_samba_shares | default([]) | length > 0
+
+- name: Verify persistent storage mounts
+  hosts: k3s:app_servers
+  become: true
+  tasks:
+    - name: Verify each additional disk is mounted
+      ansible.builtin.command: "findmnt {{ item.mount_point }}"
+      loop: "{{ vm_additional_disks | default([]) }}"
+      loop_control:
+        label: "{{ item.name }} -> {{ item.mount_point }}"
+      changed_when: false
+      register: mount_check
+      failed_when: mount_check.rc != 0
+
+# Client side of the NFS-over-TLS contract: every node that could mount an
+# export runs the handshake daemon, and any live mount from the NAS is actually
+# TLS (a plaintext one means a client slipped past a require-TLS export line).
+- name: Verify NFS-over-TLS on k3s nodes
+  hosts: k3s
+  become: true
+  vars:
+    nas_fqdn: "{{ (groups['nas'] | first) ~ '.' ~ internal_domain }}"
+  tasks:
+    - name: Verify the tlshd handshake daemon is running
+      ansible.builtin.service:
+        name: tlshd
+        state: started
+      check_mode: true
+      register: postflight_service_check
+      failed_when: postflight_service_check is changed
+      when: nfs_tls_enabled | default(false)
+
+    # Pods and their PVs float, so a node may legitimately carry zero NAS
+    # mounts; a no-match grep leaves the assert loop empty.
+    - name: Gather live NFS mounts from the NAS
+      ansible.builtin.command:
+        cmd: "grep {{ nas_fqdn }}: /proc/mounts"
+      changed_when: false
+      failed_when: false
+      register: nas_nfs_mounts
+      when: nfs_tls_enabled | default(false)
+
+    - name: Assert every NAS mount carries xprtsec=tls
+      ansible.builtin.assert:
+        that:
+          - "'xprtsec=tls' in item"
+        fail_msg: "NFS mount without xprtsec=tls: {{ item }}"
+      loop: "{{ nas_nfs_mounts.stdout_lines | default([]) }}"
+      loop_control:
+        label: "{{ item.split()[0] }}"
+      when: nfs_tls_enabled | default(false)
+
+- name: Display verification summary
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          Post-deployment verification finished — review the output above for
+          failures or skipped plays.

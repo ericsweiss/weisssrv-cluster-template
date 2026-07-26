@@ -1,0 +1,72 @@
+---
+# Bare-metal hypervisors (the `nas` + `compute` groups).
+
+# Proxmox migration and storage replication run as root over SSH between nodes,
+# so root key auth must stay on here — this overrides the "no" in all.yml.
+ssh_permit_root_login: "prohibit-password"
+
+# Protect the web UI (:8006) from credential stuffing.
+base_fail2ban_pveproxy_enabled: true
+
+# Proxmox-only textfile collectors (cluster/quorum, guest state).
+node_exporter_host_proxmox: true
+
+# tlshd on every host: the cluster's NFS storage target mounts with
+# xprtsec=tls, and storage.cfg is cluster-wide, so every node needs the
+# handshake daemon. Client mode only — the NAS overrides nfs_tls_is_server.
+nfs_tls_enabled: true
+
+# ZFS ARC ceiling in bytes, applied by zfs_arc_cap on the compute hosts (the NAS
+# sets its own through nas_storage). Empty leaves ARC at the ZFS default (~half
+# of RAM), which collides with pinned guest RAM on a passthrough host and with
+# guest memory generally on a small host. Set a byte count once you know the
+# host's memory budget, e.g. 8589934592 (8 GiB).
+zfs_arc_cap_max_bytes: ""
+
+# Host-originated egress filtering: default-deny OUT on the node itself plus the
+# sg-host-egress allowlist. Off here so a first deploy cannot lock a host out of
+# apt or the cluster; turn it on per the firewall docs once you have confirmed
+# corosync, backups and any VPN still egress. Guest egress is unaffected.
+proxmox_firewall_egress_filtering: false
+{%- if vpn_tailscale %}
+
+# Subnet routers: advertise the LAN into the tailnet, never accept routes back
+# (a router that accepts its own advertised route loops its LAN traffic).
+# Advertising only makes a route usable once it is APPROVED in the tailnet —
+# apply the ACL (terraform/tailscale) BEFORE this role runs, so tagOwners and
+# the route auto-approver exist when the hosts adopt the tag.
+tailscale_advertise_routes:
+  - "{{ lan_cidr }}"
+tailscale_advertise_tags:
+  - "tag:subnet-router"
+tailscale_additional_flags:
+  - "--operator={{ admin_user }}"
+  - "--ssh"
+
+# Required for subnet routing; pve-firewall resets it, so nic_tuning persists it
+# as a sysctl.d drop-in.
+nic_tuning_ip_forward: true
+{%- endif %}
+
+# Proxmox HA (playbooks/proxmox-ha.yml). Opt-in and empty by default: HA moves
+# guests between nodes on failure, which is only safe once the guest's storage
+# is replicated to (or shared with) every node its rules allow. Shape:
+#
+#   proxmox_ha_resources:
+#     - id: ct:121              # vm:<id> or ct:<id>
+#       state: started
+#       max_restart: 2
+#       max_relocate: 2
+#   proxmox_ha_rules:
+#     - id: affinity-dns-01
+#       type: node-affinity
+#       resources: ct:121
+#       nodes: "pve-node-01:2,pve-node-02:1"   # <node>:<priority>
+#       strict: false
+#   proxmox_ha_replication_jobs:
+#     - id: "121-0"
+#       target: pve-node-02
+#       schedule: "*/15"
+proxmox_ha_resources: []
+proxmox_ha_rules: []
+proxmox_ha_replication_jobs: []

@@ -1,0 +1,61 @@
+---
+# k3s nodes (servers + agents). The API VIP lives in all.yml — the firewall and
+# DNS layers reference it too.
+
+# Server token: grants the right to join as a SERVER and pull cluster CA
+# material. The agent token is worker-only, so a compromised agent cannot
+# register a control-plane node; it falls back to the server token when unset.
+k3s_token: >-
+  {% raw %}{{ lookup('ansible.builtin.env', 'K3S_TOKEN')
+     or undef(hint='K3S_TOKEN must be set (run via the task wrapper / op run)') }}{% endraw %}
+k3s_agent_token: "{% raw %}{{ lookup('ansible.builtin.env', 'K3S_AGENT_TOKEN') or k3s_token }}{% endraw %}"
+
+# k3s derives the cluster DNS ClusterIP (.10) from the service CIDR, so there is
+# no separate cluster-dns setting. These must not overlap {{ lan_cidr }}.
+k3s_cluster_cidr: "10.42.0.0/16"
+k3s_service_cidr: "10.43.0.0/16"
+
+# Empty on purpose: kubelet copies the host's search domains into every pod, and
+# ndots:5 plus a search suffix makes every in-cluster lookup
+# (svc.namespace.svc.cluster.local) get suffixed and probed externally first.
+# Pods still get cluster.local from kubelet's --cluster-domain.
+resolv_conf_search_domains: []
+
+# Replaced by MetalLB and our own Traefik release.
+k3s_disable:
+  - servicelb
+  - traefik
+
+# WireGuard-encrypted pod-to-pod traffic between nodes (UDP/51820) instead of
+# plaintext VXLAN, at roughly 5% throughput. Changing this on a running cluster
+# requires a server-by-server restart — see the k3s docs before touching it.
+k3s_flannel_backend: "wireguard-native"
+
+# Reclaim unused images earlier than the 85/80 default: on a 64G root disk the
+# containerd image store otherwise grows to tens of gigabytes before kubelet
+# starts pruning.
+k3s_kubelet_args:
+  - "image-gc-high-threshold=70"
+  - "image-gc-low-threshold=50"
+
+# The interface kube-vip advertises the API VIP on. Check it matches the guest's
+# NIC name; a cloud-image guest that renames its NIC breaks VIP failover.
+k3s_kube_vip_interface: "eth0"
+
+# NFS-over-TLS on every node: agents mount the NAS-backed PVs, servers mount the
+# off-node etcd snapshot export. Both are pure TLS clients (system CA truststore
+# only, no cert of their own).
+nfs_tls_enabled: true
+
+# Each server copies its newest etcd snapshot to the NAS and emits a freshness
+# metric, so a lost control-plane node is recoverable from another host.
+k3s_etcd_snapshot_offnode_enabled: true
+k3s_etcd_snapshot_nfs_server: "pve-nas-01.{% raw %}{{ internal_domain }}{% endraw %}"
+
+# /etc/hosts pins so image pulls and PV mounts survive a cluster-DNS outage
+# (CoreDNS itself needs the registry to start). The NFS mount MUST be by
+# hostname for the TLS handshake to verify. Rename these with the roster.
+k3s_storage_host_pins:
+  - name: "pve-nas-01.{% raw %}{{ internal_domain }}{% endraw %}"
+    ip: {{ lan_prefix }}.11
+k3s_registry_host_pins: []

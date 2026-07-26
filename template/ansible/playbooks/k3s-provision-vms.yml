@@ -1,0 +1,16 @@
+---
+# Create the k3s VMs (and their zvols) on the Proxmox hosts. Nothing is
+# installed inside them here — run k3s.yml next.
+
+- name: Provision k3s VM infrastructure
+  hosts: k3s
+  gather_facts: false
+  become: false
+  roles:
+    - weisssrv.infra.proxmox_vm
+
+  post_tasks:
+    - name: Display next step
+      ansible.builtin.debug:
+        msg: "VMs provisioned. Verify SSH reachability, then deploy k3s."
+      run_once: true

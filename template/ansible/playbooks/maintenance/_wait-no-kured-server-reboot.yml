@@ -1,0 +1,38 @@
+---
+# etcd-quorum guard. Block until no k3s SERVER node is mid-kured-reboot, so an
+# operation that briefly drops THIS server's etcd member never coincides with
+# kured rebooting another one.
+#
+# Caller MUST set kured_clear_delegate (a server that stays reachable throughout
+# the operation — never the one going down). kured_clear_reason is a label.
+
+- name: "Wait for kured to not be rebooting any k3s server ({{ kured_clear_reason | default('etcd quorum') }})"
+  ansible.builtin.shell: |
+    set -o pipefail
+    for n in {{ groups['k3s_servers'] | join(' ') }}; do
+      # A server is ACTIVELY rebooting only if it is BOTH annotated AND cordoned:
+      # kured writes the annotation before it checks its reboot blockers and does
+      # not clear it when blocked, so annotated-but-schedulable means blocked or
+      # stale, not mid-reboot. Waiting on that would hang forever.
+      # Fail CLOSED on a kubectl error: an unreadable node cannot prove the
+      # cluster is safe.
+      st=$(k3s kubectl get node "$n" \
+        -o jsonpath='{.metadata.annotations.weave\.works/kured-reboot-in-progress}{" "}{.spec.unschedulable}' \
+        2>/dev/null) || st=KUBECTL_ERR
+      case "$st" in
+        KUBECTL_ERR) echo "kubectl get node $n failed - cannot confirm kured state"; exit 1 ;;
+        ?*" true") echo "kured rebooting server $n"; exit 1 ;;
+      esac
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  register: kured_server_clear
+  changed_when: false
+  # 8 minutes, comfortably past kured's drain timeout so a normal reboot does not
+  # trip this. Exhaustion FAILS the play — aborting is safer than risking a
+  # second etcd member.
+  retries: 48
+  delay: 10
+  until: kured_server_clear.rc == 0
+  delegate_to: "{{ kured_clear_delegate }}"

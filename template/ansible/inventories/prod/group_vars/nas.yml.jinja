@@ -1,0 +1,112 @@
+---
+# The storage host: ZFS properties, NFS exports, Samba, backups.
+#
+# ZFS POOLS AND DATASETS ARE NEVER CREATED BY ANSIBLE — too destructive to
+# automate. Build them by hand once (docs/), then declare them here: the role
+# only enforces properties, and a declared dataset that does not exist fails the
+# deploy loudly rather than silently skipping it.
+
+# REQUIRED: your pool and dataset layout. Two pools is the shape the rest of this
+# template assumes — a bulk pool for media/backups and a fast pool for app data.
+nas_storage_zfs_pools:
+  - name: tank
+    datasets:
+      - name: tank/media
+        properties:
+          mountpoint: /mnt/tank/media
+          atime: "off"
+          compression: zstd
+          recordsize: 1M       # large sequential reads
+      - name: tank/share
+        properties:
+          mountpoint: /mnt/tank/share
+          atime: "off"
+          compression: zstd
+      - name: tank/backups
+        properties:
+          mountpoint: /mnt/tank/backups
+          atime: "off"
+          compression: zstd
+  - name: ssd
+    datasets:
+      - name: ssd/appdata
+        properties:
+          mountpoint: /mnt/ssd/appdata
+          atime: "off"
+          compression: lz4     # latency over ratio for live app data
+
+# Unified media directory across tiers. Leave as an empty list if you have one
+# media pool. inodecalc/noforget are not optional when the branch is re-exported
+# over NFS: without them clients hit ESTALE.
+nas_storage_mergerfs_mounts: []
+
+# NFS exports. /export is an NFSv4 pseudo-root (fsid=0, traversal only); every
+# real export is a bind of a dataset under it. `xprtsec: tls` REQUIRES kernel
+# TLS and rejects plaintext mounts — set per export or per client. Clients mount
+# by HOSTNAME (the wildcard cert has no IP SAN, so an IP mount fails the
+# handshake). crossmnt is deliberately absent: it would implicitly export every
+# child filesystem with this line's options, bypassing the per-child client lists.
+nas_storage_exports:
+  - path: /export
+    clients:
+      - spec: "{{ lan_cidr }}"
+        options: "ro,sync,hide,no_subtree_check,fsid=0,sec=sys,root_squash"
+
+  - path: /export/appdata
+    bind_source: /mnt/ssd/appdata
+    owner: 1000
+    group: 2000
+    mode: "02775"
+    xprtsec: "tls"
+    clients:
+      - spec: "{{ lan_cidr }}"
+        options: "rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=2000,fsid=11"
+
+  - path: /export/share
+    bind_source: /mnt/tank/share
+    owner: 1000
+    group: 2000
+    mode: "02775"
+    xprtsec: "tls"
+    clients:
+      - spec: "{{ lan_cidr }}"
+        options: "rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=2000,fsid=12"
+
+# Per-app directories created under the appdata bind source, owned to match the
+# export's anonuid/anongid squash.
+nas_storage_appdata_dirs: []
+
+# Samba shares (SMB clients only — the cluster uses NFS). The share password
+# comes from the SAMBA_NAS_PASSWORD environment variable.
+nas_storage_samba_shares: []
+
+# SMART monitoring: list the device paths of each pool's members (use stable
+# /dev/disk/by-id/ paths). Empty lists disable the checks for that class.
+nas_storage_smartd_enabled: true
+nas_storage_smartd_tank_disks: []
+nas_storage_smartd_ssd_disks: []
+nas_storage_smartd_nvme_disks: []
+
+nas_storage_zfs_scrub_enabled: true
+nas_storage_zfs_scrub_schedule: "Sun *-*-1..7 04:00:00"   # first Sunday, monthly
+
+# ARC ceiling in bytes on the NAS specifically (nas_storage owns it here, not
+# zfs_arc_cap). Empty leaves the ZFS default of roughly half of RAM, which
+# competes with the guests this host runs. Example: 4294967296 (4 GiB).
+nas_storage_zfs_arc_max_bytes: ""
+
+# Datasets on encrypted pools whose bind mounts must wait for the key load. The
+# NFS export of an unlocked-later dataset would otherwise publish an empty
+# directory at boot.
+nas_storage_encrypted_bind_sources: []
+
+# Cluster-wide vzdump target and jobs (storage.cfg is clustered, so this runs
+# from the NAS only). Empty = unmanaged.
+proxmox_backup_storage: []
+proxmox_backup_vzdump_jobs: []
+
+# Offsite backup (restic over rclone). Off until you have a remote and have
+# tested a RESTORE, not just a backup. Enabling requires restic_offsite_repo,
+# restic_offsite_cache_dir, restic_offsite_repo_password and the rclone remote
+# credentials; the role asserts all of them.
+restic_offsite_enabled: false

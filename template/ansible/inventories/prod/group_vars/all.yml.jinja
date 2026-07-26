@@ -1,0 +1,245 @@
+---
+# Platform-wide inputs for every weisssrv.infra role. Role variables carry their
+# role's prefix; the names below without one are the conventional inventory-wide
+# values the roles alias (see the collection README "Use" table) — set them here
+# once and every consuming role picks them up.
+
+# --- Identity ---------------------------------------------------------------
+internal_domain: {{ internal_domain }}
+external_domain: {{ external_domain }}
+
+admin_user: {{ admin_user }}
+# Injected at runtime rather than committed: it is the destination for cron,
+# fail2ban and SMART mail. `undef(hint=...)` fails loudly instead of silently
+# mailing root@localhost.
+admin_email: >-
+  {% raw %}{{ lookup('ansible.builtin.env', 'ROOT_EMAIL_ALIAS')
+     or undef(hint='ROOT_EMAIL_ALIAS must be set (run via the task wrapper / op run)') }}{% endraw %}
+
+timezone: {{ timezone }}
+
+# --- Network ----------------------------------------------------------------
+# Both resolvers, in preference order. base and resolv_conf point every host here.
+dns_servers:
+  - {{ lan_prefix }}.21
+  - {{ lan_prefix }}.22
+
+# k3s control-plane VIP (kube-vip) and the two MetalLB VIPs. Declared here
+# because the firewall IPSets, the DNS rewrites and the k3s role all reference
+# them; the Kubernetes side gets the same values from the cluster-config ConfigMap.
+k3s_api_vip: {{ k3s_api_vip }}
+metallb_public_vip: {{ metallb_public_vip }}
+metallb_internal_vip: {{ metallb_internal_vip }}
+
+# --- SSH --------------------------------------------------------------------
+ssh_port: 22
+ssh_permit_root_login: "no"
+ssh_password_authentication: false
+ssh_pubkey_authentication: true
+
+# from= pins the key to the sources that may use it. The pod CIDR is required
+# when CI deploy jobs run as pods in this cluster: a pod SSHing to its OWN node
+# hairpins without SNAT and arrives with its pod IP, which sshd would otherwise
+# refuse ("Refused by key options"). Cross-host pod traffic is already
+# masqueraded to a LAN address, so this adds no exposure beyond that path.
+ssh_authorized_keys:
+  - >-
+    from="{{ lan_cidr }},100.64.0.0/10,10.42.0.0/16"
+    {% raw %}{{ lookup('ansible.builtin.env', 'SSH_PUBLIC_KEY') or undef(hint='SSH_PUBLIC_KEY must be set') }}{% endraw %}
+
+# --- Secrets ----------------------------------------------------------------
+# The canonical map of every credential this repo consumes, as 1Password
+# references. Nothing here is read by Ansible directly: the Taskfile's `op run`
+# env blocks mirror these paths and export each key AS ITS UPPERCASED NAME,
+# which is the environment variable the consuming role looks up — so a secret
+# never lands in a fact or in argv.
+#
+# Swapping secret backends means replacing the reference syntax here AND the
+# matching env blocks in the Taskfile; the roles themselves only ever read
+# environment variables, so they need no change.
+#
+# Item titles are placeholders — create them in the "{{ onepassword_vault }}"
+# vault and rename here to match; the template's PRE-SETUP.md lists them:
+# https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/PRE-SETUP.md
+secrets:
+  # Host access + guest provisioning
+  ssh_public_key: "op://{{ onepassword_vault }}/SSH Key/public key"
+  root_email_alias: "op://{{ onepassword_vault }}/Email Config/root_alias"
+  # DNS stack
+  adguard_admin_password: "op://{{ onepassword_vault }}/AdGuard Home/password"
+  acme_ssh_private_key: "op://{{ onepassword_vault }}/Cert Distribution Key/private key"
+  acme_ssh_public_key: "op://{{ onepassword_vault }}/Cert Distribution Key/public key"
+{%- if dns_backend == 'cloudflare' %}
+  cloudflare_api_token: "op://{{ onepassword_vault }}/Cloudflare DNS Token/credential"
+  cloudflare_account_id: "op://{{ onepassword_vault }}/Cloudflare DNS Token/username"
+{%- endif %}
+  # Mail
+  smtp_upstream_user: "op://{{ onepassword_vault }}/SMTP Smarthost/username"
+  smtp_upstream_password: "op://{{ onepassword_vault }}/SMTP Smarthost/password"
+  smtp_relay_user: "op://{{ onepassword_vault }}/SMTP Relay Auth/username"
+  smtp_relay_password: "op://{{ onepassword_vault }}/SMTP Relay Auth/password"
+  # Storage
+  samba_nas_password: "op://{{ onepassword_vault }}/Samba NAS User/password"
+  # k3s. The agent token is worker-only, so a compromised agent cannot register
+  # a control-plane node or pull the cluster CA.
+  k3s_token: "op://{{ onepassword_vault }}/K3s Cluster Token/credential"
+  k3s_agent_token: "op://{{ onepassword_vault }}/K3s Agent Token/credential"
+  # Host-side log shipping (Alloy -> Loki through the internal ingress)
+  loki_push_user: "op://{{ onepassword_vault }}/Loki Push Auth/username"
+  loki_push_password: "op://{{ onepassword_vault }}/Loki Push Auth/password"
+{%- if vpn_tailscale %}
+  # Overlay VPN
+  tailscale_auth_key: "op://{{ onepassword_vault }}/Tailscale Auth Key/credential"
+{%- endif %}
+  # ZFS encryption: the boot-time key fetch reads this token to reach the
+  # in-cluster 1Password Connect API.
+  zfs_encryption_connect_token: "op://{{ onepassword_vault }}/1Password Connect/token"
+
+# --- Proxmox guest defaults -------------------------------------------------
+# Storage each guest lands on, chosen from its host's proxmox_role. Override per
+# guest with proxmox_storage / proxmox_lxc_storage. These are Proxmox storage
+# IDs — they must already exist on the hosts.
+proxmox_storage_defaults:
+  nas: ssd
+  compute: local-ssd
+  general: local-ssd
+
+# Pools a guest may be placed in (proxmox_resource_pool); the roles reject an
+# unlisted pool rather than creating one by accident.
+proxmox_resource_pools:
+  - infra-core      # DNS, SMTP relay
+  - platform        # k3s nodes
+  - apps-private    # internal applications
+  - apps-public     # internet-facing applications
+
+proxmox_autostart_enabled: true
+proxmox_startup_order: 100
+proxmox_startup_delay: 0
+
+# --- Firewall ---------------------------------------------------------------
+# REQUIRED and asserted by proxmox_firewall on every host and guest it touches:
+# an empty admin_lan locks :22 and :8006 out cluster-wide. Add your VPN or
+# jump-host ranges here too.
+proxmox_firewall_admin_lan_cidrs:
+  - {{ lan_cidr }}
+
+# Addresses that belong to an IPSet but are not inventory hosts.
+firewall_ipset_special_entries:
+  k3s_nodes:
+    - ip: "{% raw %}{{ k3s_api_vip }}{% endraw %}"
+      comment: k3s API VIP
+
+# --- Mail -------------------------------------------------------------------
+# Every host runs a null client that forwards local mail (cron, fail2ban, SMART)
+# to the relay over SASL+TLS. All four values are asserted by the role.
+postfix_null_client_mail_domain: {{ internal_domain }}
+postfix_null_client_relay_host: "smtp-relay.{% raw %}{{ internal_domain }}{% endraw %}"
+postfix_null_client_sasl_user: "{% raw %}{{ lookup('ansible.builtin.env', 'SMTP_RELAY_USER') }}{% endraw %}"
+postfix_null_client_sasl_password: "{% raw %}{{ lookup('ansible.builtin.env', 'SMTP_RELAY_PASSWORD') }}{% endraw %}"
+
+# --- Host log shipping ------------------------------------------------------
+# journald -> Loki through the internal ingress (the in-cluster DaemonSet covers
+# container logs only, so without this the hosts and non-k8s guests are dark).
+# Credentials are asserted for an https:// endpoint.
+alloy_host_loki_url: "https://loki.{% raw %}{{ internal_domain }}{% endraw %}/loki/api/v1/push"
+alloy_host_loki_user: "{% raw %}{{ lookup('ansible.builtin.env', 'LOKI_PUSH_USER') | default('', true) }}{% endraw %}"
+alloy_host_loki_password: "{% raw %}{{ lookup('ansible.builtin.env', 'LOKI_PUSH_PASSWORD') | default('', true) }}{% endraw %}"
+
+# --- Overlay VPN ------------------------------------------------------------
+tailscale_enabled: {{ 'true' if vpn_tailscale else 'false' }}
+{%- if vpn_tailscale %}
+# Hosts must not accept routes from other peers: a subnet router that accepts
+# its own advertised route loops its LAN traffic through the tailnet.
+tailscale_accept_routes: false
+tailscale_accept_dns: false      # this cluster runs its own resolvers
+tailscale_advertise_routes: []   # set on the subnet routers only (group_vars/proxmox.yml)
+{%- endif %}
+
+# --- Maintenance ------------------------------------------------------------
+{%- if git_backend == 'gitlab_selfhosted' %}
+# When a maintenance play runs from CI, the reboot logic has to recognise the
+# executor pod running it — rebooting its own host mid-job would kill the run.
+# These must match the namespace those jobs actually execute in; a mismatch is
+# safe (the play defers the reboot to an operator) but noisy.
+maintenance_ci_runner_namespace: gitlab-runner
+maintenance_ci_executor_pod_prefix: "runner-"
+{%- endif %}
+
+# --- Version pins -----------------------------------------------------------
+# Single source of truth for every pinned version, host-side and in-cluster.
+# After editing anything below, run `task flux:sync-versions` and commit the
+# regenerated ConfigMap: Flux substitutes these into the manifests at reconcile
+# time (every top-level *_version key plus each helm_chart_versions entry).
+
+# Host-side pins consumed by weisssrv.infra roles (no role default — required).
+adguard_home_version: "0.107.78"
+adguard_sync_version: "0.9.2"
+alloy_host_version: "1.18.0-1"    # apt package version, not the chart version
+
+k3s_version: "v1.36.2+k3s1"
+# sha256 of install.sh at that tag, verified before the root-run installer
+# executes (install.sh checks the k3s binary, not itself). Recompute on every
+# k3s_version bump:
+#   curl -sfL https://raw.githubusercontent.com/k3s-io/k3s/<k3s_version>/install.sh | sha256sum
+k3s_install_script_checksum: "sha256:46177d4c99440b4c0311b67233823a8e8a2fc09693f6c89af1a7161e152fbfad"
+{%- if gpu == 'nvidia' %}
+
+# GPU node pins (k3s role tasks/gpu.yml). The driver must be new enough for the
+# CUDA build your workloads ship; gpu.yml holds the packages after install so a
+# routine apt upgrade cannot move them off the pin.
+# https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/
+nvidia_driver_version: "610.43.02-1"
+nvidia_container_toolkit_version: "1.19.1-1"
+nvidia_cuda_keyring_version: "1.1-1"
+# Verified before the keyring .deb runs its maintainer scripts as root.
+nvidia_cuda_keyring_sha256: "d0d4ef986a44400f9db33c600ef33a985175e7cc63d805a10e1839c7a1e78f5f"
+{%- endif %}
+
+# Platform Helm charts reconciled by Flux (kubernetes/infrastructure/).
+helm_chart_versions:
+  cert_manager: "v1.21.0"
+  external_dns: "1.21.1"
+  external_secrets: "2.8.0"
+  metallb: "0.15.3"
+  traefik: "41.0.2"
+  # Owns the monitoring.coreos.com CRDs in the dedicated crds stage; bump in
+  # lockstep with kube_prometheus_stack so the CRDs match the operator.
+  prometheus_operator_crds: "30.0.1"
+  kube_prometheus_stack: "87.19.1"
+  loki: "18.5.4"
+  alloy: "1.11.0"
+  prometheus_blackbox_exporter: "11.15.1"
+  onepassword_connect: "2.4.1"
+  vpa: "4.12.3"
+  kured: "6.1.0"
+  reloader: "2.2.14"
+{%- if vpn_tailscale %}
+  tailscale_operator: "1.98.9"
+{%- endif %}
+{%- if gpu == 'nvidia' %}
+  nvidia_device_plugin: "0.19.3"
+{%- endif %}
+
+# App-module pins (kubernetes/apps/). Same mechanism, separate block: these move
+# on their own upstream cadence, independently of the platform charts above.
+
+# SSO identity provider + its bundled database. postgresql_version is also what
+# the pg_dump CronJob runs, so the client major matches the server.
+authentik_version: "2026.5.6"
+postgresql_version: "18.4-trixie"
+
+# Pull-through registry cache — the CNCF distribution `registry` image, bare
+# X.Y.Z tag. https://hub.docker.com/_/registry/tags
+registry_cache_version: "3.1.1"
+{%- if vpn_tailscale %}
+
+# CoreDNS image for the tailnet split-horizon resolver. Pinned to the rancher
+# mirror k3s already caches on every node, so it needs no new pull.
+coredns_tailnet_version: "1.14.6"
+{%- endif %}
+{%- if git_backend == 'gitlab_selfhosted' %}
+
+# GitLab Runner chart, shared by both runner tiers.
+# https://gitlab.com/gitlab-org/charts/gitlab-runner/tags
+gitlab_runner_helm_version: "0.91.0"
+{%- endif %}

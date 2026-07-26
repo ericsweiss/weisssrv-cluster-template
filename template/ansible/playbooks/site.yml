@@ -1,0 +1,159 @@
+---
+# Base infrastructure: Proxmox hosts, DNS, mail, NAS storage, firewall and
+# host-level observability. k3s has its own lifecycle (k3s.yml), as does every
+# application you add.
+
+# FIRST, and purely delegated: the relay container may not exist yet (or may
+# have been lost), and the base_managed play below connects to it directly —
+# which would mark it UNREACHABLE and exclude it from every later play.
+- name: Provision SMTP relay container
+  hosts: mail
+  gather_facts: false
+  roles:
+    - role: weisssrv.infra.proxmox_lxc
+      tags: [proxmox_lxc]
+
+- name: Deploy base configuration to all managed hosts
+  hosts: base_managed
+  become: true
+  roles:
+    - role: weisssrv.infra.base
+      tags: [base]
+    - role: weisssrv.infra.nic_tuning
+      tags: [nic_tuning, network]
+
+- name: Deploy Proxmox host configuration
+  hosts: proxmox
+  become: true
+  roles:
+    - role: weisssrv.infra.qol
+      tags: [qol]
+    - role: weisssrv.infra.postfix_null_client
+      tags: [postfix_null_client]
+    # Config only — activation waits for the host's next reboot.
+    - role: weisssrv.infra.encrypted_swap
+      tags: [encrypted_swap]
+    # The NAS owns its own ARC cap through nas_storage; capping it twice would
+    # let the two sources drift.
+    - role: weisssrv.infra.zfs_arc_cap
+      tags: [zfs_arc_cap]
+      when: proxmox_role != 'nas'
+    # Stages the IOMMU cmdline + vfio-pci bind and reports reboot-required; it
+    # never reboots. Apply in a maintenance window.
+    - role: weisssrv.infra.vfio_passthrough
+      tags: [vfio_passthrough]
+      when: vfio_passthrough_enabled | default(false)
+    - role: weisssrv.infra.tailscale
+      tags: [tailscale]
+      when: tailscale_enabled | default(false) | bool
+    # Client mode only. The server (the NAS) is excluded here because its setup
+    # needs the wildcard cert, which the acme_certs play below distributes —
+    # that ordering is what makes a fresh bootstrap work.
+    - role: weisssrv.infra.nfs_tls
+      tags: [nfs_tls]
+      when: not (nfs_tls_is_server | default(false))
+    - role: weisssrv.infra.proxmox_firewall
+      tags: [proxmox_firewall]
+
+- name: Deploy DNS server configuration
+  hosts: dns
+  become: true
+  serial: 1  # never restart unbound/AdGuard on both resolvers at once
+  roles:
+    - role: weisssrv.infra.postfix_null_client
+      tags: [postfix_null_client]
+    - role: weisssrv.infra.unbound
+      tags: [unbound]
+    - role: weisssrv.infra.unbound_exporter
+      tags: [unbound_exporter]
+    - role: weisssrv.infra.adguard_home
+      tags: [adguard_home]
+
+- name: Deploy certificate management and config replication
+  hosts: dns
+  become: true
+  serial: 1  # a cert reload restarts AdGuard — keep the other resolver up
+  roles:
+    - role: weisssrv.infra.acme_certs
+      tags: [acme_certs]
+    - role: weisssrv.infra.adguard_sync
+      tags: [adguard_sync]
+
+# After the cert plays: nfs_tls fails loud if the wildcard cert/key are not on
+# the server yet, so an earlier position would break a fresh bootstrap.
+- name: Deploy NAS storage configuration
+  hosts: nas
+  become: true
+  roles:
+    # Before nas_storage, so the handshake daemon is verified before any
+    # require-TLS export is (re)published.
+    - role: weisssrv.infra.nfs_tls
+      tags: [nfs_tls]
+    - role: weisssrv.infra.nas_storage
+      tags: [nas_storage]
+    - role: weisssrv.infra.restic_offsite
+      tags: [restic_offsite]
+    # storage.cfg and vzdump jobs are cluster-wide, so they are written from
+    # this one node.
+    - role: weisssrv.infra.proxmox_backup
+      tags: [proxmox_backup]
+    - role: weisssrv.infra.zfs_exporter
+      tags: [zfs_exporter]
+
+- name: Deploy DNS guest firewall rules
+  hosts: dns
+  roles:
+    - role: weisssrv.infra.proxmox_firewall
+      tags: [proxmox_firewall]
+
+- name: Deploy SMTP relay configuration
+  hosts: mail
+  become: true
+  roles:
+    - role: weisssrv.infra.smtp_relay
+      tags: [smtp_relay]
+
+- name: Deploy SMTP guest firewall rules
+  hosts: mail
+  roles:
+    - role: weisssrv.infra.proxmox_firewall
+      tags: [proxmox_firewall]
+
+- name: Deploy host-level metrics
+  hosts: proxmox:dns:mail:app_servers:k3s_servers
+  become: true
+  # An application VM provisioned by its own playbook does not exist on a first
+  # run; skipping it here keeps that from failing the whole base deploy. A
+  # genuinely down host surfaces through alerting, not through this play.
+  ignore_unreachable: true
+  roles:
+    - role: weisssrv.infra.node_exporter_host
+      tags: [node_exporter_host]
+
+- name: Deploy host-side log collection (Alloy -> Loki)
+  hosts: base_managed:app_servers:k3s
+  become: true
+  ignore_unreachable: true
+  roles:
+    - role: weisssrv.infra.alloy_host
+      tags: [alloy_host]
+
+# Guests that cannot run Ansible: the .fw write is delegated to their Proxmox
+# host, so an inventory-only security-group change still deploys.
+- name: Deploy guest firewall rules for delegation-only guests
+  hosts: services
+  gather_facts: false
+  roles:
+    - role: weisssrv.infra.proxmox_firewall
+      tags: [proxmox_firewall]
+
+# k3s guest .fw files are otherwise written only by k3s.yml, which runs on its
+# own lifecycle; including them here means an inventory-only security-group edit
+# ships with a base deploy. The role self-gates on vmid + guest_security_groups,
+# and cluster.fw is run_once-guarded, so this writes guest files only.
+- name: Deploy k3s guest firewall rules
+  hosts: k3s
+  gather_facts: false
+  roles:
+    - role: weisssrv.infra.proxmox_firewall
+      tags: [proxmox_firewall]

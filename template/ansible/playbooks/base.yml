@@ -1,0 +1,12 @@
+---
+# Base configuration only (SSH hardening, packages, timezone, fail2ban, NIC
+# tuning). Use it for a first contact with a new host; site.yml supersedes it.
+
+- name: Deploy base configuration
+  hosts: base_managed
+  become: true
+  roles:
+    - role: weisssrv.infra.base
+      tags: [base]
+    - role: weisssrv.infra.nic_tuning
+      tags: [nic_tuning, network]

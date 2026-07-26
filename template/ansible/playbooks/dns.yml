@@ -1,0 +1,38 @@
+---
+# The DNS stack on its own, one resolver at a time.
+
+- name: Provision DNS containers
+  hosts: dns
+  gather_facts: false
+  serial: 1
+  roles:
+    - weisssrv.infra.proxmox_lxc
+
+- name: Deploy DNS server configuration
+  hosts: dns
+  become: true
+  serial: 1
+  roles:
+    - weisssrv.infra.base
+    - weisssrv.infra.postfix_null_client
+    - weisssrv.infra.unbound
+    - weisssrv.infra.unbound_exporter
+    - weisssrv.infra.adguard_home
+    # site.yml deploys these to the dns group in its own plays; repeating them
+    # here keeps a standalone DNS deploy from leaving the resolvers without
+    # host metrics or log shipping.
+    - weisssrv.infra.node_exporter_host
+    - weisssrv.infra.alloy_host
+
+- name: Deploy certificate management and config replication
+  hosts: dns
+  become: true
+  serial: 1
+  roles:
+    - weisssrv.infra.acme_certs
+    - weisssrv.infra.adguard_sync
+
+- name: Deploy guest firewall rules
+  hosts: dns
+  roles:
+    - weisssrv.infra.proxmox_firewall
