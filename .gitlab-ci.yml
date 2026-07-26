@@ -1,0 +1,172 @@
+---
+# CI for the template itself. The generic jobs come from the shared library, so
+# the template is linted by the same tooling it hands to a generated cluster.
+#
+# The gate that matters is `render-validate`: it renders this template with
+# tests/answers-weisssrv-shaped.yml and runs the REAL toolchain over the output
+# — yamllint, kustomize + kubeconform through the Flux substitution loop, and
+# `ansible-playbook --syntax-check` against the weisssrv.infra collection. A
+# template change that produces an invalid cluster fails here rather than in
+# someone's homelab.
+#
+# Every job is TAG-LESS and non-root safe (pip --user, workspace-local tool
+# downloads), so they land on the shared runner.
+#
+# TODO: pin every `ref:` to v0.2.0 once weisssrv-lib cuts the tag.
+stages:
+  - lint
+  - test
+  - security
+  - ai-review
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+variables:
+  LIB_PROJECT: "eric/weisssrv-lib"
+  COPIER_VERSION: "9.17.0"
+  PYYAML_VERSION: "6.0.2"
+  YAMLLINT_VERSION: "1.38.0"
+  ANSIBLE_CORE_VERSION: "2.18.18"
+  KUBECONFORM_VERSION: "0.6.7"
+  KUBECONFORM_SHA256: "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73"
+  KUSTOMIZE_VERSION: "5.4.3"
+  KUSTOMIZE_SHA256: "3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7"
+
+include:
+  # Only genuine YAML: files under template/ that carry the .jinja suffix are
+  # Jinja sources, not documents. The render-validate job below yamllints the
+  # rendered tree, which is where template/ actually gets covered.
+  - project: eric/weisssrv-lib
+    ref: feat/v0.2.0-building-blocks
+    file: /ci/lint/yaml-lint.yml
+    inputs:
+      tags: []
+      image: python:3.13-slim
+      config: "-c .yamllint"
+      targets: "copier.yml tests/ .gitlab-ci.yml"
+      changes:
+        - "copier.yml"
+        - "tests/**/*"
+        - ".yamllint"
+        - ".gitlab-ci.yml"
+
+  - project: eric/weisssrv-lib
+    ref: feat/v0.2.0-building-blocks
+    file: /ci/lint/python-lint.yml
+    inputs:
+      tags: []
+      image: python:3.13-slim
+      # The Python under template/ is static (no .jinja suffix), so it is linted
+      # here as well as in every repository it ships to.
+      targets: "tests template/tests template/scripts"
+      changes:
+        - "tests/**/*.py"
+        - "template/**/*.py"
+        - "ruff.toml"
+        - ".gitlab-ci.yml"
+
+  # The shell the template ships is static (no .jinja suffix), so it can be
+  # checked in place rather than only after a render.
+  - project: eric/weisssrv-lib
+    ref: feat/v0.2.0-building-blocks
+    file: /ci/lint/shellcheck.yml
+    inputs:
+      tags: []
+      direct_globs: "template/scripts/*.sh"
+      find_dir: ""
+      changes:
+        - "template/scripts/**/*.sh"
+        - ".gitlab-ci.yml"
+
+  # copier.yml schema checks + the full render invariants. Everything in the
+  # repository feeds the render, hence the catch-all `changes`.
+  - project: eric/weisssrv-lib
+    ref: feat/v0.2.0-building-blocks
+    file: /ci/test/python-tests.yml
+    inputs:
+      tags: []
+      image: python:3.13
+      apt_packages: ""
+      test_dir: "tests"
+      pip_packages: "copier==9.17.0"
+      changes:
+        - "**/*"
+
+  - project: eric/weisssrv-lib
+    ref: feat/v0.2.0-building-blocks
+    file: /ci/security/secret-detection.yml
+    inputs:
+      tags: []
+
+  - project: eric/weisssrv-lib
+    ref: feat/v0.2.0-building-blocks
+    file: /ci/review/pr-agent.yml
+    inputs:
+      tags: []
+      needs:
+        - job: yaml-lint
+          optional: true
+        - job: python-tests
+          optional: true
+        - job: render-validate
+          optional: true
+
+render-validate:
+  stage: test
+  image: python:3.13
+  tags: []
+  needs: []
+  variables:
+    # The collection is cloned rather than installed from the pinned ref, so the
+    # gate does not depend on anonymous access to the library project.
+    LIB_CHECKOUT: "$CI_PROJECT_DIR/.tmp/lib"
+  before_script:
+    - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
+    - mkdir -p "$CI_PROJECT_DIR/.bin"
+    - |
+      pip install --user --quiet \
+        "copier==${COPIER_VERSION}" \
+        "pyyaml==${PYYAML_VERSION}" \
+        "yamllint==${YAMLLINT_VERSION}" \
+        "ansible-core==${ANSIBLE_CORE_VERSION}"
+    - |
+      set -eo pipefail
+      # Non-root tool install: stdlib download, sha256 verify, extract into a
+      # workspace bin that before_script already put on PATH.
+      fetch_verified() {  # <file> <url> <sha256>
+        python -c "import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" "$2" "/tmp/$1"
+        echo "$3  /tmp/$1" | sha256sum -c -
+      }
+      fetch_verified kubeconform.tar.gz \
+        "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+        "$KUBECONFORM_SHA256"
+      tar xzf /tmp/kubeconform.tar.gz -C "$CI_PROJECT_DIR/.bin" kubeconform
+      fetch_verified kustomize.tar.gz \
+        "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+        "$KUSTOMIZE_SHA256"
+      tar xzf /tmp/kustomize.tar.gz -C "$CI_PROJECT_DIR/.bin" kustomize
+      kubeconform -v && kustomize version
+    - |
+      set -eo pipefail
+      # The ref under test is the fixture's, so the gate and the generated
+      # requirements.yml can never disagree about which library is exercised.
+      LIB_REF=$(python -c "import yaml; print(yaml.safe_load(open('tests/answers-weisssrv-shaped.yml'))['lib_ref'])")
+      git clone --depth 1 --branch "$LIB_REF" \
+        "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" \
+        "$LIB_CHECKOUT"
+  script:
+    - python3 tests/validate_render.py --lib-path "$LIB_CHECKOUT"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - "**/*"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - "**/*"
+    - if: '$CI_PIPELINE_SOURCE == "web"'

@@ -1,0 +1,63 @@
+---
+# Answer fixture for the render tests: the same SHAPE as the reference cluster
+# (flat /24 LAN, split-horizon domains, three VIPs, both optional modules on)
+# with placeholder identity. No real host, domain or credential appears here —
+# the render tests assert that none of the reference cluster's values survive
+# into a generated repository.
+#
+# Every question in copier.yml must have an entry: `copier copy --defaults`
+# would otherwise fall back to a default, and a question that gains one later
+# would silently stop being exercised.
+cluster_name: homelab
+internal_domain: lan.example.com
+external_domain: example.com
+
+lan_cidr: 192.168.0.0/24
+lan_prefix: 192.168.0
+k3s_api_vip: 192.168.0.161
+metallb_public_vip: 192.168.0.100
+metallb_internal_vip: 192.168.0.101
+k3s_pod_cidr: 10.42.0.0/16
+k3s_service_cidr: 10.43.0.0/16
+upstream_dns_servers: 192.168.0.21 192.168.0.22
+
+admin_user: ops
+admin_email: ops@example.com
+alert_email: ops@example.com
+timezone: America/Los_Angeles
+
+git_backend: gitlab_selfhosted
+git_host: git.example.com
+git_namespace: homelab
+git_repo: homelab
+
+secrets_backend: onepassword
+onepassword_vault: Homelab
+
+dns_backend: cloudflare
+
+# Starter roster: 2 compute + the NAS node = 3 hosts, the smallest shape that
+# carries a 3-node etcd quorum.
+compute_node_count: 2
+nas_host: pve-nas-01.lan.example.com
+smtp_host: smtp-relay.lan.example.com
+node_exporter_job_regex: node-exporter
+
+# Both optional modules ON: their conditional branches are the ones a
+# defaults-only render would never reach.
+vpn_tailscale: true
+# Left at the sentinel on purpose: a generated cluster ships an unusable
+# tailnet resolver until the operator supplies the real MagicDNS suffix, and
+# the render must keep showing that.
+tailnet_dns_suffix: CHANGEME.ts.net
+gpu: nvidia
+
+# The library is the one upstream this fixture legitimately names.
+lib_url: https://git.ericsweiss.com/eric/weisssrv-lib.git
+# TODO: pin to v0.2.0 once weisssrv-lib cuts the tag.
+lib_ref: feat/v0.2.0-building-blocks
+lib_project: eric/weisssrv-lib
+
+ci_runner_tag: infrastructure
+ci_cpu_selector: lan.example.com/cpu=modern
+enable_semantic_release: false
