@@ -1,0 +1,27 @@
+---
+# The SMTP relay on its own. site.yml deploys the same roles as part of a full
+# base run; this exists so a mail-only change (an upstream smarthost, a SASL
+# credential, a Postfix parameter) can be deployed — by hand or by its own CI
+# job — without re-running every other host's base configuration.
+
+- name: Provision SMTP relay container
+  hosts: mail
+  gather_facts: false
+  roles:
+    - weisssrv.infra.proxmox_lxc
+
+- name: Deploy SMTP relay configuration
+  hosts: mail
+  become: true
+  roles:
+    - weisssrv.infra.base
+    - weisssrv.infra.smtp_relay
+    # Also deployed by site.yml; repeated so a standalone mail deploy keeps the
+    # relay's host metrics and log shipping in sync.
+    - weisssrv.infra.node_exporter_host
+    - weisssrv.infra.alloy_host
+
+- name: Deploy guest firewall rules
+  hosts: mail
+  roles:
+    - weisssrv.infra.proxmox_firewall

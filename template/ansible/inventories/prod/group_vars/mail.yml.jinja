@@ -17,7 +17,9 @@ smtp_relay_sasl_user: "{% raw %}{{ lookup('ansible.builtin.env', 'SMTP_RELAY_USE
 smtp_relay_sasl_password: "{% raw %}{{ lookup('ansible.builtin.env', 'SMTP_RELAY_PASSWORD') }}{% endraw %}"
 
 smtp_relay_config:
-  myhostname: "smtp-relay.{% raw %}{{ internal_domain }}{% endraw %}"
+  # The smtp_host answer: what Alertmanager and every null client submit to, so
+  # the relay must greet under exactly that name.
+  myhostname: "{{ smtp_host }}"
   myorigin: "/etc/mailname"
   mydestination: "$myhostname, localhost.$mydomain, localhost"
   relayhost: "{% raw %}{{ smtp_relay_upstream }}{% endraw %}"

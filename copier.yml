@@ -202,9 +202,12 @@ k3s_service_cidr:
 upstream_dns_servers:
   type: str
   help: >-
-    LAN resolvers the in-cluster forwarders send non-cluster names to,
-    space-separated. Defaults to the two DNS containers in the starter
-    inventory.
+    Addresses of this cluster's resolvers, space-separated, in preference
+    order. The starter inventory builds one AdGuard+unbound container at each
+    address, points every host's resolv.conf at the list, and forwards
+    non-cluster names from in-cluster DNS to it — so these are the addresses
+    the containers are CREATED at, not pre-existing servers to forward to.
+    Two (one per host) is the smallest resilient answer.
   default: "{{ lan_prefix }}.21 {{ lan_prefix }}.22"
   validator: >-
     {% if not (upstream_dns_servers | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])( ((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))*$')) %}
@@ -382,7 +385,9 @@ nas_host:
   type: str
   help: >-
     FQDN of the NAS / NFS server. NFS PVs mount it BY NAME (the wildcard
-    certificate has no IP SAN, so an IP mount fails the TLS handshake).
+    certificate has no IP SAN, so an IP mount fails the TLS handshake). Its
+    short name is also the storage host's name in the Ansible inventory, so
+    this answer renames the host on both sides at once.
   default: "pve-nas-01.{{ internal_domain }}"
   validator: >-
     {% if not (nas_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
@@ -394,6 +399,8 @@ smtp_host:
   type: str
   help: >-
     FQDN of the SMTP relay Alertmanager and the hosts' null-client submit to.
+    Its short name is also the relay container's name in the Ansible
+    inventory, so this answer renames the host on both sides at once.
   default: "smtp-relay.{{ internal_domain }}"
   validator: >-
     {% if not (smtp_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
@@ -404,10 +411,13 @@ smtp_host:
 node_exporter_job_regex:
   type: str
   help: >-
-    Prometheus job name the HOST node-exporters register under; the node and
-    storage alert rules scope themselves to it. Change it only if you scrape
-    the hosts under a different job label.
-  default: "node-exporter"
+    Prometheus job label(s) the HOST node-exporters register under, as a regex
+    alternation — the node and storage alert rules scope themselves to it. The
+    default covers both shipped sources: the in-cluster DaemonSet
+    (`node-exporter`) and the static scrape of the Proxmox hosts and VMs
+    (`node-exporter-host`, from the observability exporters). Change it only if
+    you scrape the hosts under a different job label.
+  default: "node-exporter|node-exporter-host"
   validator: >-
     {% if not node_exporter_job_regex.strip() %}
     node_exporter_job_regex is required — an empty value silently widens every
@@ -445,8 +455,10 @@ gpu:
   type: str
   help: >-
     GPU passthrough for one compute node. 'nvidia' adds VFIO host prep, the
-    driver and container toolkit on the GPU agent, and the device plugin plus
-    DCGM telemetry in-cluster.
+    driver and container toolkit on the GPU agent, and the in-cluster device
+    plugin (time-sliced). GPU TELEMETRY IS NOT SHIPPED — DCGM needs a chart
+    pin in your own version file; the four-step recipe is in
+    kubernetes/infrastructure/observability/README.md (GPU telemetry).
   default: none
   choices:
     No GPU: none
@@ -474,11 +486,13 @@ lib_ref:
   help: >-
     weisssrv-lib ref the generated repo pins: the Ansible collection in
     requirements.yml, the CI template includes and the Terraform module
-    sources. A release tag normally; a branch name for local iteration.
+    sources. Use a RELEASE TAG (vX.Y.Z) — the library's include contract is
+    explicit that a branch is never a valid pin, and a branch deleted after
+    merge takes every include, module source and collection install with it.
   default: "v0.2.0"
   validator: >-
     {% if not (lib_ref | regex_search('^[A-Za-z0-9][A-Za-z0-9._/-]*$')) %}
-    lib_ref must be a git tag or branch name.
+    lib_ref must be a git ref — normally a release tag such as v0.2.0.
     {% endif %}
 
 lib_project:
@@ -516,7 +530,11 @@ ci_cpu_selector:
   help: >-
     Node selector (label=value) pinning the secret-detection job to a modern
     CPU — gitleaks SIGILLs on hosts without SSE4.2. Must satisfy the runner's
-    node_selector_overwrite_allowed regex.
+    node_selector_overwrite_allowed regex (`^[a-z0-9.-]+/cpu=(modern|legacy)$`),
+    AND the label must actually be applied to at least one k3s node — a
+    selector no node carries leaves the job Pending forever. Add it to the
+    agents' `k3s_labels` in ansible/inventories/prod/hosts.yml before the first
+    pipeline; see kubernetes/README.md's node-label contract.
   default: "{{ internal_domain }}/cpu=modern"
   validator: >-
     {% if not (ci_cpu_selector | regex_search('^[^\s=]+=[^\s=]+$')) %}

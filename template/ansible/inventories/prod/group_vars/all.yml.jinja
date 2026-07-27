@@ -19,10 +19,14 @@ admin_email: >-
 timezone: {{ timezone }}
 
 # --- Network ----------------------------------------------------------------
-# Both resolvers, in preference order. base and resolv_conf point every host here.
+# The resolvers, in preference order. base and resolv_conf point every host here,
+# the dns group builds a container at each address, and the in-cluster forwarders
+# get the same list through the cluster-config ConfigMap — one answer
+# (upstream_dns_servers), three consumers.
 dns_servers:
-  - {{ lan_prefix }}.21
-  - {{ lan_prefix }}.22
+{%- for addr in upstream_dns_servers.split() %}
+  - {{ addr }}
+{%- endfor %}
 
 # k3s control-plane VIP (kube-vip) and the two MetalLB VIPs. Declared here
 # because the firewall IPSets, the DNS rewrites and the k3s role all reference
@@ -44,7 +48,7 @@ ssh_pubkey_authentication: true
 # masqueraded to a LAN address, so this adds no exposure beyond that path.
 ssh_authorized_keys:
   - >-
-    from="{{ lan_cidr }},100.64.0.0/10,10.42.0.0/16"
+    from="{{ lan_cidr }},100.64.0.0/10,{{ k3s_pod_cidr }}"
     {% raw %}{{ lookup('ansible.builtin.env', 'SSH_PUBLIC_KEY') or undef(hint='SSH_PUBLIC_KEY must be set') }}{% endraw %}
 
 # --- Secrets ----------------------------------------------------------------
@@ -133,7 +137,7 @@ firewall_ipset_special_entries:
 # Every host runs a null client that forwards local mail (cron, fail2ban, SMART)
 # to the relay over SASL+TLS. All four values are asserted by the role.
 postfix_null_client_mail_domain: {{ internal_domain }}
-postfix_null_client_relay_host: "smtp-relay.{% raw %}{{ internal_domain }}{% endraw %}"
+postfix_null_client_relay_host: "{{ smtp_host }}"
 postfix_null_client_sasl_user: "{% raw %}{{ lookup('ansible.builtin.env', 'SMTP_RELAY_USER') }}{% endraw %}"
 postfix_null_client_sasl_password: "{% raw %}{{ lookup('ansible.builtin.env', 'SMTP_RELAY_PASSWORD') }}{% endraw %}"
 

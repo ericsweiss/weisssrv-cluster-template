@@ -1,6 +1,10 @@
 ---
-# The two resolvers: unbound (recursive, DoT upstream) behind AdGuard Home
-# (filtering, rewrites, the LAN-facing :53).
+{%- set nas_name = nas_host.split('.')[0] %}
+{%- set smtp_name = smtp_host.split('.')[0] %}
+{%- set resolvers = upstream_dns_servers.split() %}
+# The resolvers: unbound (recursive, DoT upstream) behind AdGuard Home
+# (filtering, rewrites, the LAN-facing :53). Their addresses come from the
+# upstream_dns_servers answer, so this file and hosts.yml cannot drift apart.
 
 # systemd 257+ needs nesting inside an unprivileged container.
 proxmox_lxc_nesting: true
@@ -41,11 +45,11 @@ _dns_addressed_hosts: >-
   {% raw %}{{ groups['all'] | map('extract', hostvars)
      | selectattr('ansible_host', 'defined') | list }}{% endraw %}
 _dns_service_rewrites:
-  # DoT/DoQ endpoint: both resolvers answer for the same name.
+  # DoT/DoQ endpoint: every resolver answers for the same name.
+{%- for addr in resolvers %}
   - domain: "dns.{% raw %}{{ internal_domain }}{% endraw %}"
-    answer: "{{ lan_prefix }}.21"
-  - domain: "dns.{% raw %}{{ internal_domain }}{% endraw %}"
-    answer: "{{ lan_prefix }}.22"
+    answer: "{{ addr }}"
+{%- endfor %}
   - domain: "k3s.{% raw %}{{ internal_domain }}{% endraw %}"
     answer: "{% raw %}{{ k3s_api_vip }}{% endraw %}"
   - domain: "vip-internal.{% raw %}{{ internal_domain }}{% endraw %}"
@@ -72,7 +76,7 @@ adguard_home_rewrites: >-
 
 # Filtering allowlist entries and PTR records, e.g.
 #   - '@@||example.com^'
-#   - '||<host-ip-in-reverse-octet-order>.in-addr.arpa^$dnsrewrite=NOERROR;PTR;pve-nas-01.{{ internal_domain }}.'
+#   - '||<host-ip-in-reverse-octet-order>.in-addr.arpa^$dnsrewrite=NOERROR;PTR;{{ nas_host }}.'
 adguard_home_user_rules: []
 
 # --- Certificates -----------------------------------------------------------
@@ -87,32 +91,41 @@ acme_certs_ssh_public_key: >-
   {% raw %}{{ lookup('ansible.builtin.env', 'ACME_SSH_PUBLIC_KEY')
      or undef(hint='ACME_SSH_PUBLIC_KEY must be set (run via the task wrapper / op run)') }}{% endraw %}
 # Without this the distribution key is usable from any source address.
-acme_certs_key_from: {{ lan_prefix }}.21
+acme_certs_key_from: {{ resolvers[0] }}
 
 # Hosts that receive the wildcard cert. host_key pins the target's SSH host key
 # (strict checking — a rebuilt host fails the push loudly until you re-capture
 # it with playbooks/show-cert-host-keys.yml). The NAS needs it for NFS-over-TLS;
-# the relay for SMTP submission.
+# the relay for SMTP submission; every replica resolver for DoT.
 acme_certs_distribution_targets:
-  - host: dns-02
-    ip: {{ lan_prefix }}.22
+{%- for addr in resolvers[1:] %}
+  - host: dns-{{ '%02d' | format(loop.index + 1) }}
+    ip: {{ addr }}
     ssh_user: {{ admin_user }}
     host_key: ""
-  - host: smtp-relay
+{%- endfor %}
+  - host: {{ smtp_name }}
     ip: {{ lan_prefix }}.23
     ssh_user: {{ admin_user }}
     host_key: ""
-  - host: pve-nas-01
+  - host: {{ nas_name }}
     ip: {{ lan_prefix }}.11
     ssh_user: {{ admin_user }}
     host_key: ""
 
 # --- Config replication -----------------------------------------------------
+{%- if resolvers | length > 1 %}
 # dns-01 -> dns-02, over the ingress so the hop is TLS. Enabled on the primary
-# only (adguard_sync_enabled in hosts.yml). TLS config is deliberately NOT
+# only (adguard_sync_enabled in hosts.yml), and the role takes ONE replica — a
+# third resolver needs its own sync instance. TLS config is deliberately NOT
 # synced: certs are host-local and reconciled per host by adguard_home.
+{%- else %}
+# Inert with a single resolver: nothing sets adguard_sync_enabled, so the role
+# never runs. These values are kept self-consistent so that adding a second
+# resolver (a second upstream_dns_servers address) is the only change needed.
+{%- endif %}
 adguard_sync_origin: "https://dns-01.{% raw %}{{ internal_domain }}{% endraw %}"
-adguard_sync_replica: "https://dns-02.{% raw %}{{ internal_domain }}{% endraw %}"
+adguard_sync_replica: "https://dns-{{ '%02d' | format(2 if resolvers | length > 1 else 1) }}.{% raw %}{{ internal_domain }}{% endraw %}"
 adguard_sync_admin_user: "{% raw %}{{ adguard_home_admin_user }}{% endraw %}"
 adguard_sync_admin_password: "{% raw %}{{ adguard_home_admin_password }}{% endraw %}"
 adguard_sync_features:

@@ -26,6 +26,13 @@
   serial: 1  # one etcd member at a time
   roles:
     - weisssrv.infra.k3s
+    # The servers' off-node etcd snapshot copy writes its freshness metric to
+    # the node_exporter textfile directory, and nothing else on a server exposes
+    # :9101. site.yml also deploys this role, but it skips the servers on a
+    # first run (the VMs do not exist yet), so without it here the metric behind
+    # EtcdSnapshotStale would never be scrapable. Agents are covered by the
+    # in-cluster DaemonSet on :9100 instead.
+    - weisssrv.infra.node_exporter_host
 
 - name: Deploy k3s agents
   hosts: k3s_agents

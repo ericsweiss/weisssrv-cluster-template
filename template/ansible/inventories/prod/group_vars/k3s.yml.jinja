@@ -12,8 +12,12 @@ k3s_agent_token: "{% raw %}{{ lookup('ansible.builtin.env', 'K3S_AGENT_TOKEN') o
 
 # k3s derives the cluster DNS ClusterIP (.10) from the service CIDR, so there is
 # no separate cluster-dns setting. These must not overlap {{ lan_cidr }}.
-k3s_cluster_cidr: "10.42.0.0/16"
-k3s_service_cidr: "10.43.0.0/16"
+#
+# The SAME two answers reach the Kubernetes side through the cluster-config
+# ConfigMap (NetworkPolicy egress, Traefik ipAllowList) and the SSH from= pin in
+# group_vars/all.yml — change them by re-answering, never by editing one layer.
+k3s_cluster_cidr: "{{ k3s_pod_cidr }}"
+k3s_service_cidr: "{{ k3s_service_cidr }}"
 
 # Empty on purpose: kubelet copies the host's search domains into every pod, and
 # ndots:5 plus a search suffix makes every in-cluster lookup
@@ -48,14 +52,19 @@ k3s_kube_vip_interface: "eth0"
 nfs_tls_enabled: true
 
 # Each server copies its newest etcd snapshot to the NAS and emits a freshness
-# metric, so a lost control-plane node is recoverable from another host.
+# metric, so a lost control-plane node is recoverable from another host. The
+# export named here is provisioned by group_vars/nas.yml (/export/k3s-etcd,
+# server-only client list, xprtsec=tls) — the two must move together, and the
+# EtcdSnapshotStale alert fires if the mount or the copy ever stops working.
 k3s_etcd_snapshot_offnode_enabled: true
-k3s_etcd_snapshot_nfs_server: "pve-nas-01.{% raw %}{{ internal_domain }}{% endraw %}"
+k3s_etcd_snapshot_nfs_server: "{{ nas_host }}"
+k3s_etcd_snapshot_nfs_export: /k3s-etcd
 
 # /etc/hosts pins so image pulls and PV mounts survive a cluster-DNS outage
 # (CoreDNS itself needs the registry to start). The NFS mount MUST be by
-# hostname for the TLS handshake to verify. Rename these with the roster.
+# hostname for the TLS handshake to verify — the wildcard certificate has no IP
+# SAN. The name comes from the nas_host answer; the address follows the roster.
 k3s_storage_host_pins:
-  - name: "pve-nas-01.{% raw %}{{ internal_domain }}{% endraw %}"
+  - name: "{{ nas_host }}"
     ip: {{ lan_prefix }}.11
 k3s_registry_host_pins: []
