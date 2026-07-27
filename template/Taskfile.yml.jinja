@@ -957,6 +957,7 @@ tasks:
       - task: lint:doc-links
       - task: lint:taskfile-smoke
       - task: lint:version-coverage
+      - task: lint:repo-sync
       - task: ansible:lint
       - task: terraform:fmt-check
       - task: terraform:validate
@@ -1002,6 +1003,51 @@ tasks:
     # where staleness is a security problem.
     cmds:
       - python3 scripts/check-versions.py --check-coverage
+
+  lint:repo-sync:
+    desc: Assert every generated file still matches the source it is generated from
+    # Two files in this repository are OUTPUTS: scripts/hosts.env (from the
+    # inventory) and the cluster-versions ConfigMap (from group_vars/all.yml).
+    # Nothing else ever compares them again — flux-lint substitutes FROM the
+    # ConfigMap, so it passes on a stale value, and maintenance:check-versions
+    # reads all.yml, so it reports the pin as current. A hand-edit or a forgotten
+    # `task flux:sync-versions` is therefore invisible everywhere except here.
+    #
+    # Regenerates into a temp file and diffs, so the workspace is never touched.
+    preconditions: *pyyaml_precondition
+    cmds:
+      - |
+        set -uo pipefail
+        FAILED=0
+        TMPDIR_SYNC=$(mktemp -d)
+        trap 'rm -rf "$TMPDIR_SYNC"' EXIT
+
+        python3 scripts/generate-hosts-env.py \
+          --inventory ansible/inventories/prod/hosts.yml \
+          --map scripts/hosts-env-map.yml \
+          --output "$TMPDIR_SYNC/hosts.env" \
+          --regen-command "task hosts:sync" >/dev/null
+        if ! diff -u scripts/hosts.env "$TMPDIR_SYNC/hosts.env"; then
+          echo "ERROR: scripts/hosts.env is out of sync with ansible/inventories/prod/hosts.yml"
+          echo "Run: task hosts:sync and commit the result."
+          FAILED=1
+        else
+          echo "scripts/hosts.env is in sync with hosts.yml"
+        fi
+
+        python3 scripts/generate-versions-configmap.py \
+          --vars-file ansible/inventories/prod/group_vars/all.yml \
+          --output "$TMPDIR_SYNC/versions-configmap.yaml" \
+          --nested-key helm_chart_versions \
+          --regen-command "task flux:sync-versions" >/dev/null
+        if ! diff -u {{.VERSIONS_CM}} "$TMPDIR_SYNC/versions-configmap.yaml"; then
+          echo "ERROR: {{.VERSIONS_CM}} is out of sync with group_vars/all.yml"
+          echo "Run: task flux:sync-versions and commit the result."
+          FAILED=1
+        else
+          echo "{{.VERSIONS_CM}} is in sync with all.yml"
+        fi
+        exit $FAILED
 
   lint:prometheus-config:
     desc: Lint the alert rules and Alertmanager config with promtool/amtool

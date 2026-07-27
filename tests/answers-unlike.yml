@@ -19,6 +19,7 @@ external_domain: brinemoor.test
 
 lan_cidr: 10.77.4.0/24
 lan_prefix: 10.77.4
+lan_gateway: 10.77.4.1
 k3s_api_vip: 10.77.4.9
 metallb_public_vip: 10.77.4.7
 metallb_internal_vip: 10.77.4.8

@@ -296,6 +296,66 @@ version-coverage:
         - ".gitlab-ci.yml"
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
+# Two files in this repository are OUTPUTS, not sources: scripts/hosts.env is
+# generated from the inventory and {{ versions_cm }} from
+# group_vars/all.yml. Nothing else ever compares them against their source
+# again — flux-lint substitutes FROM the ConfigMap, so it renders and passes on
+# a stale pin, and the version-bump bot reads all.yml, so it reports that pin as
+# current. The MR diff then shows only all.yml and the cluster keeps running the
+# old version. This is the job that closes that: regenerate each file into a
+# temp dir and diff. `task lint:repo-sync` is the identical local gate.
+repo-sync:
+  stage: lint
+  image: python:3.13-slim
+  tags: ["{{ runner_tag }}"]
+  needs: []
+  before_script:
+    - pip install --quiet "pyyaml==$PYYAML_VERSION"
+  script:
+    - |
+      set -uo pipefail
+      FAILED=0
+      OUT=$(mktemp -d)
+
+      python3 scripts/generate-hosts-env.py \
+        --inventory ansible/inventories/prod/hosts.yml \
+        --map scripts/hosts-env-map.yml \
+        --output "$OUT/hosts.env" \
+        --regen-command "task hosts:sync" >/dev/null
+      if ! diff -u scripts/hosts.env "$OUT/hosts.env"; then
+        echo "ERROR: scripts/hosts.env is out of sync with ansible/inventories/prod/hosts.yml"
+        echo "Run: task hosts:sync and commit the result."
+        FAILED=1
+      fi
+
+      python3 scripts/generate-versions-configmap.py \
+        --vars-file ansible/inventories/prod/group_vars/all.yml \
+        --output "$OUT/versions-configmap.yaml" \
+        --nested-key helm_chart_versions \
+        --regen-command "task flux:sync-versions" >/dev/null
+      if ! diff -u {{ versions_cm }} "$OUT/versions-configmap.yaml"; then
+        echo "ERROR: {{ versions_cm }} is out of sync with group_vars/all.yml"
+        echo "Run: task flux:sync-versions and commit the result."
+        FAILED=1
+      fi
+      exit $FAILED
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &repo_sync_paths
+        - "ansible/inventories/prod/hosts.yml"
+        - "ansible/inventories/prod/group_vars/all.yml"
+        - "scripts/hosts.env"
+        - "scripts/hosts-env-map.yml"
+        - "scripts/generate-hosts-env.py"
+        - "scripts/generate-versions-configmap.py"
+        - "{{ versions_cm }}"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *repo_sync_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
 # The `changes:` list on a deploy job is a contract, and nothing else enforces
 # it: a playbook or inventory path that no deploy job lists goes green on every
 # MR while never actually deploying. This fails the MR that introduces the gap,

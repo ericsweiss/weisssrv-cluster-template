@@ -14,6 +14,7 @@ external_domain: example.com
 
 lan_cidr: 192.168.0.0/24
 lan_prefix: 192.168.0
+lan_gateway: 192.168.0.1
 k3s_api_vip: 192.168.0.161
 metallb_public_vip: 192.168.0.100
 metallb_internal_vip: 192.168.0.101

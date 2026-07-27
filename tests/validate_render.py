@@ -334,6 +334,187 @@ def check_role_opt_ins(render: Path, lib_path: Path | None) -> None:
     print(f"  role opt-ins ok ({checked} invocations of {len(opt_in)} opt-in roles)")
 
 
+# `<var> | default('') | length > 0` / `<var> | default([]) | length > 0` — the
+# shape every weisssrv.infra role uses to say "this input is required".
+_ASSERTED_NONEMPTY = re.compile(
+    r"\b([a-z_][a-z0-9_]*)\s*\|\s*default\(\s*(?:''|\"\"|\[\]|\{\})\s*\)\s*\|\s*length\s*>\s*0"
+)
+_FALSEY_STRINGS = {"", "false", "no", "off", "0", "none"}
+
+
+def _ansible_bool(value) -> bool:
+    """Ansible's `| bool`, which plain Jinja does not have. Feature flags in the
+    collection are written `<flag> | bool`, so the gate below cannot read a
+    role's own gating without it."""
+    if isinstance(value, str):
+        return value.strip().lower() not in _FALSEY_STRINGS
+    return bool(value)
+
+
+def _walk_tasks(tasks, inherited: tuple[str, ...] = ()):
+    """(task, accumulated when-conditions) for every task, descending into
+    block/rescue/always so a `when:` on the enclosing block is not lost — which
+    is where every optional feature in this collection is actually gated."""
+    for task in tasks if isinstance(tasks, list) else []:
+        if not isinstance(task, dict):
+            continue
+        clause = task.get("when")
+        conditions = inherited + tuple(
+            str(c) for c in (clause if isinstance(clause, list) else [clause] if clause else [])
+        )
+        nested = False
+        for key in ("block", "rescue", "always"):
+            if key in task:
+                nested = True
+                yield from _walk_tasks(task[key], conditions)
+        if not nested:
+            yield task, conditions
+
+
+def _reachable_by_default(conditions: tuple[str, ...], defaults: dict) -> bool | None:
+    """Would this task run on a host that sets none of the role's own inputs?
+
+    Returns None when the expression uses something this evaluator does not
+    model, in which case the caller treats the input as NOT required — a missed
+    input is a gap, a false positive is a broken build for every operator.
+    """
+    import jinja2
+
+    env = jinja2.Environment(undefined=jinja2.ChainableUndefined)  # noqa: S701
+    env.filters["bool"] = _ansible_bool
+    for condition in conditions:
+        try:
+            verdict = env.from_string(
+                "{% if " + condition + " %}yes{% else %}no{% endif %}"
+            ).render(**defaults)
+        except Exception:  # noqa: BLE001 - an unmodelled expression, not a failure
+            return None
+        if verdict != "yes":
+            return False
+    return True
+
+
+def _asserted_inputs(role: Path, defaults: dict) -> set[str]:
+    """Role-prefixed variables the role asserts non-empty on its DEFAULT path.
+
+    Restricted to `<role_name>_*` because that is the collection's naming
+    convention for a role's own inputs; the inventory-wide aliases a role also
+    reads are set once in group_vars/all.yml and are covered by their own
+    prefixed names. Restricted to `assert` tasks (not `when:`/`loop:` uses of
+    the same expression), and to asserts whose accumulated `when:` is true with
+    nothing set — an opt-in feature's assert is a contract, not a requirement.
+    """
+    found: set[str] = set()
+    tasks_dir = role / "tasks"
+    for path in sorted(tasks_dir.rglob("*.yml")) if tasks_dir.is_dir() else []:
+        try:
+            doc = yaml.safe_load(path.read_text())
+        except yaml.YAMLError:
+            continue
+        for task, conditions in _walk_tasks(doc):
+            spec = task.get("ansible.builtin.assert") or task.get("assert")
+            if not isinstance(spec, dict):
+                continue
+            if _reachable_by_default(conditions, defaults) is not True:
+                continue
+            that = spec.get("that")
+            for clause in that if isinstance(that, list) else [that] if that else []:
+                for name in _ASSERTED_NONEMPTY.findall(str(clause)):
+                    if name.startswith(role.name + "_"):
+                        found.add(name)
+    return found
+
+
+def _role_defaults(role: Path) -> dict:
+    defaults = role / "defaults" / "main.yml"
+    doc = yaml.safe_load(defaults.read_text()) if defaults.is_file() else {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _has_usable_default(defaults: dict, var: str) -> bool:
+    """False when defaults/main.yml either omits the key or gives it a value
+    that is itself empty — both mean the operator must supply it."""
+    if var not in defaults:
+        return False
+    return defaults[var] not in (None, "", [], {})
+
+
+def check_required_role_inputs(render: Path, lib_path: Path | None) -> None:
+    """A role input the role ASSERTS and gives no default must be set in the
+    inventory.
+
+    The sibling opt-in check reads `<role>_enabled: false` defaults, so it sees
+    only inputs that HAVE a default. The other half of the same class is an
+    input with none: the role asserts it up front, the assert is the first task
+    of the first play, and nothing in the template supplies it. That shipped —
+    `proxmox_lxc_gateway` / `proxmox_vm_cloudinit_gateway` were asserted by both
+    guest-provisioning roles, answered by no copier question and set in no
+    group_var, so `task infra:deploy` (SETUP's stated entry point) stopped on
+    its very first task in every generated cluster while 74 tests, both renders
+    and `task lint` stayed green.
+
+    Static on purpose: it reads the library's own `defaults/main.yml` and
+    `assert` tasks rather than replaying a play, so it needs no hosts and costs
+    nothing.
+    """
+    if not lib_path:
+        raise Failure("--lib-path is required to read the roles' required inputs")
+    roles_dir = lib_path / "ansible_collections" / "weisssrv" / "infra" / "roles"
+    if not roles_dir.is_dir():
+        raise Failure(f"{roles_dir} does not exist (is --lib-path a weisssrv-lib checkout?)")
+
+    inventory = render / "ansible" / "inventories" / "prod"
+    assigned: set[str] = set()
+    for path in sorted(inventory.rglob("*.yml")) + sorted(inventory.rglob("*.yaml")):
+        for line in path.read_text().splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            assigned.update(_ASSIGNMENT.findall(line))
+
+    # Group vars as VALUES, not just names: a role's feature flag defaults to
+    # true in the library and false in this template (restic_offsite is the
+    # live example), so an assert's `when:` can only be judged with the
+    # inventory's answer in hand.
+    group_values: dict = {}
+    for path in sorted((inventory / "group_vars").glob("*.yml")):
+        doc = yaml.safe_load(path.read_text())
+        if isinstance(doc, dict):
+            group_values.update(doc)
+
+    invoked = {
+        role.rsplit(".", 1)[-1]: path
+        for path, role, _when in _role_invocations(render / "ansible" / "playbooks")
+        if role
+    }
+    required, problems = 0, []
+    for name, playbook in sorted(invoked.items()):
+        role = roles_dir / name
+        if not role.is_dir():
+            continue
+        defaults = _role_defaults(role)
+        for var in sorted(_asserted_inputs(role, {**defaults, **group_values})):
+            if _has_usable_default(defaults, var):
+                continue
+            required += 1
+            if var in assigned:
+                continue
+            problems.append(
+                f"{playbook.relative_to(render)} invokes weisssrv.infra.{name}, which "
+                f"asserts {var} and gives it no default in defaults/main.yml — it is "
+                "set nowhere in inventories/prod, so the role's opening assert fails "
+                "on every host it touches"
+            )
+    if not required:
+        raise Failure(
+            "no invoked role declares an assert-without-default input — either the "
+            "collection dropped the convention or the assert scan is stale; this "
+            "check is now examining nothing"
+        )
+    if problems:
+        raise Failure("\n".join(sorted(set(problems))))
+    print(f"  required role inputs ok ({required} asserted-without-default inputs assigned)")
+
+
 def check_ansible(render: Path, lib_path: Path | None, workdir: Path) -> None:
     _need("ansible-playbook")
     ansible_dir = render / "ansible"
@@ -408,7 +589,7 @@ def main() -> int:
     parser.add_argument(
         "--skip",
         default="",
-        help="Comma-separated: yamllint,flux,vendored,role-opt-ins,ansible",
+        help="Comma-separated: yamllint,flux,vendored,role-opt-ins,role-inputs,ansible",
     )
     args = parser.parse_args()
 
@@ -427,7 +608,11 @@ def main() -> int:
                 fn(render)
             except Failure as exc:
                 failed.append(f"[{name}] {exc}")
-        for name, fn in (("vendored", check_vendored), ("role-opt-ins", check_role_opt_ins)):
+        for name, fn in (
+            ("vendored", check_vendored),
+            ("role-opt-ins", check_role_opt_ins),
+            ("role-inputs", check_required_role_inputs),
+        ):
             if name in skip:
                 print(f"  {name} skipped")
             elif not args.lib_path:

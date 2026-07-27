@@ -26,6 +26,7 @@ REQUIRED_QUESTIONS = {
     "external_domain",
     "lan_cidr",
     "lan_prefix",
+    "lan_gateway",
     "k3s_api_vip",
     "metallb_public_vip",
     "metallb_internal_vip",

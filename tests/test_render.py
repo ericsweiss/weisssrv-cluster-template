@@ -526,6 +526,238 @@ def test_documented_tasks_exist(cluster, rendered, rendered_b):
     )
 
 
+def _section(text: str, heading: str) -> str:
+    """The body of one `## <heading>` section, up to the next heading of the
+    same level."""
+    out, inside = [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if inside:
+                break
+            inside = line[3:].strip().lower() == heading.lower()
+            continue
+        if inside:
+            out.append(line)
+    return "\n".join(out)
+
+
+# Steps that exist in SETUP.md only because round 2 put them there, and whose
+# absence from the generated README is the exact defect this gate was written
+# for: a one-pass deploy that dies on the storage host, a `terraform plan` with
+# no initialized backend, and a converged cluster nobody can sign in to.
+BRINGUP_MUST_NAME = ("certs:show-host-keys", "terraform:init", "terraform:authentik-apply")
+
+
+def test_generated_readme_bringup_matches_setup(cluster):
+    """The generated repo's own numbered bring-up list is the doc a stranger
+    reads first — it sits at the root of the tree copier just handed them and
+    calls itself complete. SETUP.md is the long form of the SAME sequence, so
+    the two must not describe different orders.
+
+    Two directions, both real. Every task the README's bring-up names must be
+    named by SETUP too (a task SETUP dropped or renamed cannot survive here),
+    and the three steps SETUP gained in round 2 must appear in the README (which
+    is what it was missing: it promised a single-pass `infra:deploy`, a
+    `terraform:apply` with no init, and no SSO step at all).
+    """
+    readme = cluster.path / "README.md"
+    if not readme.is_file():
+        pytest.skip("the render ships no README.md")
+    bringup = _section(readme.read_text(encoding="utf-8"), "Bring-up")
+    assert bringup.strip(), "the generated README has no '## Bring-up' section to check"
+
+    setup = (_TEMPLATE_ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+    setup_tasks = set(_TASK_REF.findall(setup))
+    assert setup_tasks, "no `task <name>` found in docs/SETUP.md — this gate examined nothing"
+
+    readme_tasks = set(_TASK_REF.findall(bringup))
+    assert readme_tasks, "the README's bring-up names no task — the pattern is stale"
+
+    orphaned = sorted(readme_tasks - setup_tasks)
+    assert not orphaned, (
+        "the generated README's bring-up names tasks docs/SETUP.md does not — the "
+        "two descriptions of the same sequence have drifted:\n  " + "\n  ".join(orphaned)
+    )
+    missing = sorted(name for name in BRINGUP_MUST_NAME if name not in readme_tasks)
+    assert not missing, (
+        "the generated README's bring-up omits steps SETUP.md documents as "
+        "required on a fresh cluster:\n  " + "\n  ".join(missing)
+    )
+    # Keep the required list honest: each entry must still be a SETUP step.
+    absent_from_setup = sorted(name for name in BRINGUP_MUST_NAME if name not in setup_tasks)
+    assert not absent_from_setup, (
+        "BRINGUP_MUST_NAME lists tasks docs/SETUP.md no longer names, so this gate "
+        "is enforcing a sequence the long form abandoned: " + ", ".join(absent_from_setup)
+    )
+
+
+_TF_VAR = re.compile(r"\bTF_VAR_[A-Za-z0-9_]+")
+
+
+def test_docs_never_tell_the_operator_to_add_a_tf_var_that_ships(rendered, rendered_b):
+    """A doc that says "add `TF_VAR_x` to the env: block" must be describing a
+    variable the generated Taskfile does NOT already set.
+
+    It said exactly that about `TF_VAR_oauth2_client_secret_grafana` while its
+    sibling commit was adding that line to the shared `terraform:authentik-*`
+    env anchor. Following the instruction literally produces a duplicate key in
+    one YAML mapping: go-task tolerates it (last wins) so nothing looks wrong,
+    while yamllint with the repo's own config fails — `task lint` and the CI
+    lint stage both go red for a reader who did what the step said.
+    """
+    shipped = set()
+    for root in (rendered, rendered_b):
+        shipped |= set(_TF_VAR.findall((root / "Taskfile.yml").read_text(encoding="utf-8")))
+    assert shipped, "no TF_VAR_* found in either rendered Taskfile — this gate is stale"
+
+    offenders = []
+    for path, text in _template_docs():
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if not re.search(r"\badd(?:ing|s)?\b", line, re.IGNORECASE):
+                continue
+            for name in _TF_VAR.findall(line):
+                if name in shipped:
+                    offenders.append(f"{path}:{lineno} {name}")
+    assert not offenders, (
+        "operator docs instruct adding a TF_VAR the generated Taskfile already "
+        "sets — following them duplicates a YAML key and fails lint:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+# Generated file -> the script that generates it. Both are OUTPUTS committed
+# next to their source, and nothing else in the repository ever compares the two
+# again: flux-lint substitutes FROM the ConfigMap so it passes on a stale pin,
+# and the version bot reads all.yml so it reports that pin as current.
+GENERATED_FILES = {
+    "scripts/hosts.env": "generate-hosts-env.py",
+    "kubernetes/infrastructure/sources/versions-configmap.yaml": "generate-versions-configmap.py",
+}
+
+
+def test_generated_files_are_drift_gated(cluster):
+    """SETUP.md and ARCHITECTURE.md both promise that the two generated files
+    are drift-gated. This is the assertion that the promise is backed by a job
+    and a task, in the render, rather than by prose.
+
+    A claimed gate is worse than an absent one: it is the reason nobody
+    re-checks by hand.
+    """
+    root = cluster.path
+    ci_text = (root / ".gitlab-ci.yml").read_text(encoding="utf-8")
+    ci = _load_ci(root / ".gitlab-ci.yml")
+    taskfile = yaml.safe_load((root / "Taskfile.yml").read_text()) or {}
+    tasks = taskfile.get("tasks") or {}
+
+    def script_text(job: dict) -> str:
+        parts = []
+        for key in ("before_script", "script", "after_script", "cmds"):
+            value = job.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, list):
+                parts.extend(str(v) for v in value)
+        return "\n".join(parts)
+
+    for target, generator in GENERATED_FILES.items():
+        assert (root / target).is_file(), f"{target} is not in the render"
+        assert (root / "scripts" / generator).is_file(), f"scripts/{generator} is not in the render"
+
+        gating_jobs = [
+            name
+            for name, job in ci.items()
+            if isinstance(job, dict)
+            and generator in script_text(job)
+            and "diff" in script_text(job)
+            # the version-bump bot REGENERATES as part of its own MR; that is
+            # the opposite of comparing, and is what used to be mistaken for
+            # this gate.
+            and target in script_text(job)
+        ]
+        assert gating_jobs, (
+            f"no job in the generated pipeline regenerates {target} with "
+            f"scripts/{generator} and diffs the result — the drift gate "
+            "docs/SETUP.md and docs/ARCHITECTURE.md promise does not exist. "
+            f"(jobs naming the generator at all: "
+            f"{[n for n, j in ci.items() if isinstance(j, dict) and generator in script_text(j)]})"
+        )
+        assert generator in ci_text and target in ci_text  # cheap belt-and-braces
+
+    # And the same gate locally, wired into `task lint` — otherwise the first
+    # time anyone learns about the drift is in CI.
+    assert "lint:repo-sync" in tasks, "the generated Taskfile defines no lint:repo-sync"
+    repo_sync = script_text(tasks["lint:repo-sync"])
+    for target, generator in GENERATED_FILES.items():
+        assert generator in repo_sync and "diff" in repo_sync, (
+            f"lint:repo-sync does not regenerate-and-diff {target}"
+        )
+    lint_deps = [
+        str(step.get("task") if isinstance(step, dict) else step)
+        for step in (tasks.get("lint") or {}).get("cmds") or []
+    ]
+    assert "lint:repo-sync" in lint_deps, (
+        "lint:repo-sync exists but `task lint` does not run it, so the local half "
+        f"of the gate is opt-in: {lint_deps}"
+    )
+
+
+# Components the README's answer table names, and the evidence a render must
+# carry for the claim to be true. The table is a contract an operator picks
+# answers from: `gpu: nvidia` was advertised as adding DCGM telemetry that
+# copier.yml states in capitals is NOT shipped, so the answer bought a GPU node
+# with no GPU metrics and no way to know until you went looking for a dashboard.
+README_TABLE_CLAIMS = {
+    "DCGM": "dcgm",
+}
+
+
+def test_readme_answer_table_only_claims_what_ships(rendered, rendered_b):
+    readme = (_TEMPLATE_ROOT / "README.md").read_text(encoding="utf-8")
+    table = [line for line in readme.splitlines() if line.startswith("| `")]
+    assert table, "no answer table found in README.md — this gate examined nothing"
+
+    def ships(needle: str) -> bool:
+        for root in (rendered, rendered_b):
+            for path, text in _k8s_files(root):
+                if path.name.endswith(".md"):
+                    continue
+                for line in text.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("#"):
+                        continue  # prose in a comment is not a shipped component
+                    if needle in stripped.lower():
+                        return True
+        return False
+
+    offenders = [
+        f"{claim}: named in the README answer table, absent from both renders"
+        for claim, needle in README_TABLE_CLAIMS.items()
+        if any(claim in line for line in table) and not ships(needle)
+    ]
+    assert not offenders, (
+        "the README's answer table advertises components no render contains:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_runnable_quickstarts_pin_no_template_tag():
+    """This repository has no tags. A quickstart block that passes a literal
+    `--vcs-ref vX.Y.Z` therefore fails at clone time, before the first question
+    — and the two blocks in README.md are presented as runnable, which is the
+    whole point of a quickstart. docs/SETUP.md already says so; the README kept
+    its copies.
+    """
+    for path, text in _template_docs():
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for m in re.finditer(r"--vcs-ref\s+(\S+)", line):
+                ref = m.group(1)
+                assert not re.fullmatch(r"v\d+\.\d+\.\d+", ref), (
+                    f"{path}:{lineno} pins --vcs-ref {ref}, a literal template "
+                    "release. This repository cuts no tags yet, so the block "
+                    "fails at clone time; use a `<template-tag>` placeholder."
+                )
+
+
 def test_relative_markdown_links_resolve(cluster):
     """Every relative `](path)` in the generated tree must resolve. The repo's
     own `task lint:doc-links` only scans docs/ and the top-level README, so the
