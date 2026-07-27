@@ -21,6 +21,8 @@ requirements.yml, which needs network access to the git host.
 from __future__ import annotations
 
 import argparse
+import ast
+import ipaddress
 import os
 import re
 import shlex
@@ -509,17 +511,95 @@ def _role_defaults(role: Path) -> dict:
     return doc if isinstance(doc, dict) else {}
 
 
-def _has_usable_default(defaults: dict, var: str) -> bool:
-    """False when defaults/main.yml either omits the key or gives it a value
-    that is itself empty — both mean the operator must supply it."""
+_UNMODELLED = object()
+
+
+def _render_default(value, context: dict):
+    """The value a role's default actually takes on an inventory holding
+    `context`.
+
+    A default is routinely an EXPRESSION over the inventory rather than a
+    literal, and Ansible converts a whole-template result back to a native type
+    — `proxmox_vm_cloudinit_dns: "{{ dns_servers | default([]) }}"` is an empty
+    LIST on an inventory that sets no `dns_servers`, not the two-character
+    string `"[]"` a plain Jinja render returns. Testing the raw string instead
+    reads every such default as "supplied".
+
+    Returns `_UNMODELLED` when the expression uses something this evaluator does
+    not model, which the caller reads as "assume it has a default": a missed
+    input is a gap, a false positive is a broken build for every operator.
+    """
+    if not isinstance(value, str) or "{{" not in value:
+        return value
+    import jinja2
+
+    env = jinja2.Environment(undefined=jinja2.ChainableUndefined)  # noqa: S701
+    env.filters["bool"] = _ansible_bool
+    try:
+        rendered = env.from_string(value).render(**context)
+    except Exception:  # noqa: BLE001 - an unmodelled expression, not a failure
+        return _UNMODELLED
+    try:
+        return ast.literal_eval(rendered)
+    except (ValueError, SyntaxError):
+        return rendered
+
+
+def _referenced_names(value) -> set[str]:
+    """Inventory variables a default's expression reads."""
+    if not isinstance(value, str) or "{{" not in value:
+        return set()
+    import jinja2
+    from jinja2 import meta
+
+    env = jinja2.Environment(undefined=jinja2.ChainableUndefined)  # noqa: S701
+    try:
+        return meta.find_undeclared_variables(env.parse(value))
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _is_empty(value) -> bool:
+    if isinstance(value, str):
+        return not value.strip()
+    return value in (None, [], {}, ())
+
+
+def _default_gap(defaults: dict, var: str, context: dict, assigned: set[str]) -> str | None:
+    """None when defaults/main.yml gives `var` a value that is non-empty ONCE
+    RENDERED against this inventory; otherwise the reason it does not.
+
+    Two gaps, and the second is the one a raw-string test cannot see:
+
+    * the key is absent — the operator must supply it (`proxmox_lxc_gateway`);
+    * the key is present and its value renders EMPTY. `proxmox_lxc_nameserver`
+      defaults to `{{ dns_servers | default([]) | join(' ') }}`: non-empty as
+      TEXT, empty as a VALUE on any inventory that does not set `dns_servers`,
+      so the role's own `proxmox_lxc_nameserver | default('') | length > 0`
+      fails on the first task of the first play — the same failure this gate
+      exists to catch, one variable over.
+
+    An empty render whose expression reads a name that IS set somewhere in the
+    inventory (in `hosts.yml`, say, which `context` does not model) is treated
+    as supplied, so the check cannot invent work for an operator whose value
+    simply lives where this evaluator does not look.
+    """
     if var not in defaults:
-        return False
-    return defaults[var] not in (None, "", [], {})
+        return "gives it no default in defaults/main.yml"
+    raw = defaults[var]
+    value = _render_default(raw, context)
+    if value is _UNMODELLED or not _is_empty(value):
+        return None
+    if (_referenced_names(raw) & assigned) - set(context):
+        return None
+    if isinstance(raw, str) and "{{" in raw:
+        return f"defaults it to {raw!r}, which renders EMPTY against this inventory"
+    return f"defaults it to {raw!r}, which is empty"
 
 
 def check_required_role_inputs(render: Path, lib_path: Path | None) -> None:
-    """A role input the role ASSERTS and gives no default must be set in the
-    inventory.
+    """A role input the role ASSERTS and has no usable default for must be set
+    in the inventory.
 
     The sibling opt-in check reads `<role>_enabled: false` defaults, so it sees
     only inputs that HAVE a default. The other half of the same class is an
@@ -531,9 +611,19 @@ def check_required_role_inputs(render: Path, lib_path: Path | None) -> None:
     its very first task in every generated cluster while 74 tests, both renders
     and `task lint` stayed green.
 
+    "Usable" is decided by RENDERING the default, not by looking at it: the
+    inputs sitting immediately next to those two — `proxmox_lxc_nameserver`,
+    `proxmox_vm_cloudinit_dns` — default to expressions over `dns_servers`,
+    which read as supplied and evaluate to nothing the moment the inventory
+    stops setting it. See `_default_gap`.
+
     Static on purpose: it reads the library's own `defaults/main.yml` and
     `assert` tasks rather than replaying a play, so it needs no hosts and costs
-    nothing.
+    nothing. The price of that is scope — `assigned` is every name assigned
+    anywhere under `inventories/prod`, not the subset a given group inherits, so
+    a var set only in `group_vars/dns.yml` counts for a role invoked on `mail`
+    too. No shipped playbook passes role-scoped `vars:`, so nothing exploits it
+    today; it is the direction that under-reports rather than over-reports.
     """
     if not lib_path:
         raise Failure("--lib-path is required to read the roles' required inputs")
@@ -570,27 +660,135 @@ def check_required_role_inputs(render: Path, lib_path: Path | None) -> None:
         if not role.is_dir():
             continue
         defaults = _role_defaults(role)
-        for var in sorted(_asserted_inputs(role, {**defaults, **group_values})):
-            if _has_usable_default(defaults, var):
+        context = {**defaults, **group_values}
+        for var in sorted(_asserted_inputs(role, context)):
+            gap = _default_gap(defaults, var, context, assigned)
+            if gap is None:
                 continue
             required += 1
             if var in assigned:
                 continue
             problems.append(
                 f"{playbook.relative_to(render)} invokes weisssrv.infra.{name}, which "
-                f"asserts {var} and gives it no default in defaults/main.yml — it is "
-                "set nowhere in inventories/prod, so the role's opening assert fails "
-                "on every host it touches"
+                f"asserts {var} and {gap} — and {var} is set nowhere in "
+                "inventories/prod, so the role's opening assert fails on every host "
+                "it touches"
             )
     if not required:
         raise Failure(
-            "no invoked role declares an assert-without-default input — either the "
-            "collection dropped the convention or the assert scan is stale; this "
-            "check is now examining nothing"
+            "no invoked role declares an asserted input without a usable default — "
+            "either the collection dropped the convention or the assert scan is "
+            "stale; this check is now examining nothing"
         )
     if problems:
         raise Failure("\n".join(sorted(set(problems))))
-    print(f"  required role inputs ok ({required} asserted-without-default inputs assigned)")
+    print(f"  required role inputs ok ({required} asserted inputs with no usable default assigned)")
+
+
+def _inventory_hosts(hosts_file: Path) -> dict[str, dict]:
+    """host name -> merged vars, for every host in an Ansible YAML inventory.
+
+    Merged rather than collected per group: a host listed in two groups
+    (`dns-01` is in both `dns` and `dns_primary`) is ONE machine, and comparing
+    its two entries against each other would report every such host as a
+    duplicate of itself.
+    """
+    hosts: dict[str, dict] = {}
+
+    def walk(node) -> None:
+        if not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            if key == "hosts" and isinstance(value, dict):
+                for name, host_vars in value.items():
+                    hosts.setdefault(name, {}).update(host_vars or {})
+            elif key != "vars":
+                walk(value)
+
+    walk(yaml.safe_load(hosts_file.read_text()) or {})
+    return hosts
+
+
+def check_inventory_addresses(render: Path) -> None:
+    """No two guests may share an address or a vmid, and every address must sit
+    inside the LAN.
+
+    The copier answers are validated one at a time, never against the plan they
+    compose into, and `hosts.yml` hardcodes every address and vmid except the
+    resolvers': the relay is `.23` / vmid 123, k3s servers `.31+` / 131+, agents
+    `.41+` / 141+, while a resolver's vmid is DERIVED from its answer
+    (`100 + last octet`). So `upstream_dns_servers: <prefix>.31 <prefix>.32` —
+    an ordinary answer for anyone whose `.21`/`.22` are already taken — puts
+    dns-01 and k3s-srv-01 on one address under one vmid, and every static gate
+    stays green. `pct` and `qm` share a single vmid namespace, so the collision
+    surfaces two phases later as a create against an id Proxmox already knows.
+
+    Deliberately a check on the RENDERED INVENTORY rather than on the answer:
+    `hosts.yml` is a skeleton the operator is told to re-address by hand, and a
+    hand edit reaches the same collision by a route no answer validator sees.
+    The generated repository carries the same assertions in its own
+    `tests/test_cluster_invariants.py`, which is what covers those edits after
+    generation; this is the copy that gates the template itself.
+    """
+    hosts_file = render / "ansible" / "inventories" / "prod" / "hosts.yml"
+    if not hosts_file.is_file():
+        raise Failure(f"{hosts_file} does not exist — the render has no Ansible inventory")
+    hosts = _inventory_hosts(hosts_file)
+    if not hosts:
+        raise Failure(f"{hosts_file} declares no hosts — this check is examining nothing")
+
+    problems: list[str] = []
+    for field in ("ansible_host", "vmid"):
+        owners: dict[str, list[str]] = {}
+        for name, host_vars in sorted(hosts.items()):
+            value = host_vars.get(field)
+            if value is not None:
+                owners.setdefault(str(value), []).append(name)
+        for value, names in sorted(owners.items()):
+            if len(names) > 1:
+                problems.append(f"{field} {value} is claimed by {', '.join(names)}")
+
+    cidr = _lan_cidr(render)
+    if cidr is None:
+        problems.append(
+            "no cluster_lan_cidr in kubernetes/infrastructure/sources/cluster-config.yaml — "
+            "the addresses below cannot be checked against the LAN"
+        )
+    else:
+        network = ipaddress.ip_network(cidr, strict=False)
+        for name, host_vars in sorted(hosts.items()):
+            addr = host_vars.get("ansible_host")
+            if addr is None:
+                continue
+            try:
+                inside = ipaddress.ip_address(str(addr)) in network
+            except ValueError:
+                continue  # a name rather than an address; DNS resolves it
+            if not inside:
+                problems.append(f"{name}'s ansible_host {addr} is outside lan_cidr {network}")
+
+    if problems:
+        raise Failure(
+            f"{hosts_file.relative_to(render)}:\n  "
+            + "\n  ".join(problems)
+            + "\n  (pct and qm share one vmid namespace, and two guests on one "
+            "address fail several phases after the answer that caused it)"
+        )
+    print(f"  inventory addresses ok ({len(hosts)} hosts, unique vmid + address, all inside {cidr})")
+
+
+def _lan_cidr(render: Path) -> str | None:
+    """The LAN, from the ConfigMap that is the cluster's declared single source
+    for it — not from the answers file, which a re-addressed inventory outgrows."""
+    config = render / "kubernetes" / "infrastructure" / "sources" / "cluster-config.yaml"
+    if not config.is_file():
+        return None
+    for doc in yaml.safe_load_all(config.read_text()):
+        if isinstance(doc, dict) and doc.get("kind") == "ConfigMap":
+            value = (doc.get("data") or {}).get("cluster_lan_cidr")
+            if value:
+                return str(value)
+    return None
 
 
 def check_ansible(render: Path, lib_path: Path | None, workdir: Path) -> None:
@@ -667,7 +865,10 @@ def main() -> int:
     parser.add_argument(
         "--skip",
         default="",
-        help="Comma-separated: yamllint,flux,vendored,role-opt-ins,role-inputs,ansible",
+        help=(
+            "Comma-separated: yamllint,flux,inventory-addresses,vendored,"
+            "role-opt-ins,role-inputs,ansible"
+        ),
     )
     args = parser.parse_args()
 
@@ -676,7 +877,11 @@ def main() -> int:
     try:
         render = args.render_dir or render_cluster.render(workdir, answers=args.answers)
         print(f"validating {render}")
-        checks = (("yamllint", check_yamllint), ("flux", check_flux))
+        checks = (
+            ("yamllint", check_yamllint),
+            ("flux", check_flux),
+            ("inventory-addresses", check_inventory_addresses),
+        )
         failed = []
         for name, fn in checks:
             if name in skip:

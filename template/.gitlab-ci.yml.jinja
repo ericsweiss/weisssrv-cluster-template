@@ -310,7 +310,10 @@ repo-sync:
   tags: ["{{ runner_tag }}"]
   needs: []
   before_script:
-    - pip install --quiet "pyyaml==$PYYAML_VERSION"
+    # --user, like every other unprivileged pip here: docs/ci-pipeline.md tells
+    # the operator only the three privileged jobs need a root-capable runner,
+    # and a bare `pip install` cannot write site-packages as non-root.
+    - pip install --user --quiet "pyyaml==$PYYAML_VERSION"
   script:
     - |
       set -uo pipefail

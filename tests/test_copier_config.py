@@ -271,3 +271,155 @@ def test_answer_fixture_covers_every_question():
         f"tests/answers-weisssrv-shaped.yml does not answer {sorted(missing)} — "
         "the render test would silently exercise the default instead"
     )
+
+
+# --------------------------------------------------------------------------
+# Answer ORDER — the property that decides whether a validator can ever fire
+# --------------------------------------------------------------------------
+
+# Every field copier renders in a question's own context. A name referenced here
+# resolves against AnswersMap.combined, whose `user` map fills in QUESTION ORDER,
+# so a reference to a question asked LATER is simply absent.
+RENDERED_FIELDS = ("validator", "default", "placeholder", "when", "help")
+
+QUESTION_ORDER = {name: i for i, name in enumerate(QUESTIONS)}
+
+
+def _referenced_questions(text: str) -> set[str]:
+    env = jinja2.Environment()  # noqa: S701 - parsing only, nothing is rendered
+    env.filters = _AnyFilter(env.filters)
+    env.tests = _AnyFilter(env.tests)
+    return {n for n in meta.find_undeclared_variables(env.parse(text)) if n in QUESTIONS}
+
+
+def test_no_question_references_an_answer_asked_later():
+    """A validator can only compare against answers already given.
+
+    `lan_gateway` carried `{% elif lan_gateway in [k3s_api_vip | default(''),
+    ...] %}` while all three VIPs are asked AFTER it. Interactively the names
+    were undefined, `| default('')` collapsed the test to `x in ['', '', '']`,
+    and the check passed everything — while the `--data-file` path used by these
+    very tests supplied all answers up front and made it fire. So the harness
+    exercised the arm in the one mode where it could work and the operator met it
+    in the mode where it could not.
+
+    This is the general form: a check that reads as enforcement and enforces
+    nothing on the documented path. Move the comparison DOWN to the later
+    question rather than reaching forward from the earlier one.
+    """
+    violations: list[str] = []
+    for name, question in QUESTIONS.items():
+        if not isinstance(question, dict):
+            continue
+        for field in RENDERED_FIELDS:
+            value = question.get(field)
+            if not isinstance(value, str):
+                continue
+            for referenced in sorted(_referenced_questions(value)):
+                if QUESTION_ORDER[referenced] > QUESTION_ORDER[name]:
+                    violations.append(
+                        f"{name}.{field} references {referenced}, which copier asks "
+                        f"{QUESTION_ORDER[referenced] - QUESTION_ORDER[name]} question(s) later"
+                    )
+    assert not violations, (
+        "answers referenced before they are asked — undefined interactively, "
+        "populated only in --data/update mode:\n  " + "\n  ".join(violations)
+    )
+
+
+# --------------------------------------------------------------------------
+# Address-plan collisions
+# --------------------------------------------------------------------------
+
+# The addresses hosts.yml composes for everything the operator does NOT choose.
+# Keep in step with template/ansible/inventories/prod/hosts.yml.jinja.
+COMPOSED_BANDS = {
+    "192.168.0.11": "Proxmox host band",
+    "192.168.0.19": "Proxmox host band, top",
+    "192.168.0.23": "SMTP relay",
+    "192.168.0.31": "k3s server band",
+    "192.168.0.41": "k3s agent band",
+}
+
+VIP_ANSWERS = {
+    "k3s_api_vip": "192.168.0.161",
+    "metallb_public_vip": "192.168.0.100",
+    "metallb_internal_vip": "192.168.0.101",
+    "lan_gateway": "192.168.0.1",
+}
+
+
+def _dns_message(answer: str) -> str:
+    return _validator_message(
+        "upstream_dns_servers",
+        upstream_dns_servers=answer,
+        lan_prefix="192.168.0",
+        **VIP_ANSWERS,
+    )
+
+
+@pytest.mark.parametrize("answer", sorted(COMPOSED_BANDS))
+def test_upstream_dns_servers_rejects_the_composed_address_bands(answer):
+    """A resolver's vmid is DERIVED from its address (100 + last octet), so an
+    answer inside a composed band duplicates the address AND the vmid — and pct
+    and qm share one vmid namespace. Both halves fail phases after the answer."""
+    assert _dns_message(answer), (
+        f"{answer} ({COMPOSED_BANDS[answer]}) was accepted; it collides with an "
+        "address hosts.yml composes"
+    )
+
+
+@pytest.mark.parametrize("name,address", sorted(VIP_ANSWERS.items()))
+def test_upstream_dns_servers_rejects_the_vips_and_the_gateway(name, address):
+    assert _dns_message(address), f"{address} was accepted, but it is {name}"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["192.168.0.21 192.168.0.22", "192.168.0.20", "192.168.0.30", "192.168.0.60 192.168.0.61"],
+)
+def test_upstream_dns_servers_accepts_free_addresses(answer):
+    """The bands must not swallow the whole LAN — a false rejection here is an
+    operator blocked at the prompt with nowhere to go."""
+    assert not _dns_message(answer), f"{answer} was rejected but collides with nothing"
+
+
+def test_upstream_dns_servers_rejects_a_repeated_address():
+    assert _dns_message("192.168.0.21 192.168.0.21"), "the same address twice was accepted"
+
+
+@pytest.mark.parametrize("name", ["nas_host", "smtp_host"])
+def test_service_fqdns_must_sit_under_the_internal_domain(name):
+    """The internal wildcard covers `*.<internal_domain>` and nothing else, and
+    the NFS PVs mount by name with `xprtsec=tls`, which verifies its SAN. A name
+    in another zone fails the handshake exactly as an IP mount does, and the
+    internal resolver does not answer for it either."""
+    inside = _validator_message(
+        name, **{name: "box.lan.example.com"}, internal_domain="lan.example.com"
+    )
+    outside = _validator_message(
+        name, **{name: "box.example.com"}, internal_domain="lan.example.com"
+    )
+    assert not inside, f"{name} rejected a name inside internal_domain"
+    assert outside, f"{name} accepted a name outside internal_domain"
+
+
+def test_tailnet_dns_suffix_rejects_its_own_placeholder():
+    """It is only asked once `vpn_tailscale` is true — the operator has already
+    said they have a tailnet, so they can name it. A sentinel that passes its own
+    validator ships a resolver CNAMEing into a domain that does not exist."""
+    assert _validator_message("tailnet_dns_suffix", tailnet_dns_suffix="CHANGEME.ts.net"), (
+        "the CHANGEME placeholder was accepted"
+    )
+    assert not _validator_message("tailnet_dns_suffix", tailnet_dns_suffix="tail1a2b3c.ts.net"), (
+        "a real MagicDNS suffix was rejected"
+    )
+
+
+def test_tailnet_dns_suffix_has_no_default():
+    """A `default:` here is answered by pressing enter; there is no value that is
+    right for two different tailnets."""
+    assert "default" not in QUESTIONS["tailnet_dns_suffix"], (
+        "tailnet_dns_suffix carries a default again — use `placeholder:`, which "
+        "copier shows as a hint and never accepts as an answer"
+    )

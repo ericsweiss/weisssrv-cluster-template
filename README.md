@@ -136,10 +136,10 @@ checks live there. Summary:
 | `secrets_backend` / `onepassword_vault` | `onepassword` | Credential source for hosts and cluster |
 | `dns_backend` | `cloudflare` | Zone module, external-dns, ACME DNS-01 |
 | `compute_node_count` | `2` | Compute hosts in the starter inventory (plus the NAS node) |
-| `nas_host` / `smtp_host` | derived from `internal_domain` | NFS server (mounted by name) and SMTP relay |
+| `nas_host` / `smtp_host` | derived from `internal_domain` | NFS server (mounted by name) and SMTP relay; both must stay under `internal_domain` — the wildcard certificate covers that zone only |
 | `node_exporter_job_regex` | `node-exporter\|node-exporter-host` | Prometheus jobs the host alert rules scope to; both shipped names are required |
 | `vpn_tailscale` | `false` | Overlay VPN: host role, operator, ACL module |
-| `tailnet_dns_suffix` | `CHANGEME.ts.net` | Asked only with `vpn_tailscale`; MagicDNS suffix — must be replaced |
+| `tailnet_dns_suffix` | *(none — asked)* | Asked only with `vpn_tailscale`; MagicDNS suffix, rejected if left at the `CHANGEME` placeholder |
 | `gpu` | `none` | `nvidia` adds VFIO prep, driver + container toolkit, device plugin; GPU telemetry is a documented add-on, **not shipped** (`kubernetes/infrastructure/observability/README.md`) |
 | `lib_url` / `lib_ref` | upstream URL / `v0.2.0` | weisssrv-lib source and pin for collection, CI includes, TF modules |
 | `lib_project` | path part of `lib_url` | GitLab project path for `include: project:` (instance-local) |

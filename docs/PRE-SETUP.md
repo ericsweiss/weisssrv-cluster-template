@@ -165,6 +165,14 @@ name nothing resolves (they mount **by name**, because the wildcard certificate
 has no IP SAN) and every host's mail null-client submits to a relay that is not
 there. Decide both names now and use them in both places.
 
+Both must sit **under `internal_domain`**, and copier rejects them if they do
+not. The internal wildcard covers `*.<internal_domain>` and nothing else, and
+the NFS PVs mount with `xprtsec=tls`, which verifies that certificate's SAN — so
+a storage box that already answers to a name in another zone fails the handshake
+exactly as an IP mount does, and the internal resolver does not answer for it
+either. Give it a second name in the internal zone rather than answering its
+existing one.
+
 ---
 
 ## 3. Domains and DNS
@@ -493,11 +501,12 @@ UI. It requires, before generation:
 
 - A Tailscale account and tailnet.
 - Your tailnet's **MagicDNS suffix** (`<tailnet>.ts.net`, on the admin console's
-  DNS page) → `tailnet_dns_suffix`. Fetch it *before* generating. Its default is
-  the literal sentinel `CHANGEME.ts.net`, which passes the answer's own
-  validator, so pressing enter at the prompt ships a cluster whose tailnet
-  resolver hands out CNAMEs into a domain that does not exist — remote access to
-  internal names is silently broken, with nothing failing to tell you.
+  DNS page) → `tailnet_dns_suffix`. Fetch it *before* generating: the question
+  has no default and rejects the `CHANGEME.ts.net` placeholder, because a
+  cluster generated with it has a tailnet resolver handing out CNAMEs into a
+  domain that does not exist — remote access to internal names silently broken,
+  with nothing failing to tell you. If you do not have the suffix to hand,
+  answer `vpn_tailscale` as false and re-run `copier update` later.
 - A reusable **auth key** for enrolling hosts.
 - An **OAuth client** with `acl` and `dns` write scope, if you want the tailnet
   policy and split-DNS managed as code by Terraform.

@@ -79,9 +79,10 @@ failing.
 | `cluster_node_exporter_job_regex` | Prometheus job name for host node-exporters |
 | `cluster_ddns_records` | Records the DDNS CronJob maintains |
 
-Values whose defaults are guesses — `cluster_tailnet_dns_suffix` above all, which
-renders as `CHANGEME.ts.net` until you set it — are the first thing to check if
-something resolves to the wrong place.
+Values whose defaults are guesses are the first thing to check if something
+resolves to the wrong place. Each of these is an answer, so correct it with
+`copier update` (or in the ConfigMap for a one-off) rather than in the manifests
+that substitute it.
 
 ## Shared components
 

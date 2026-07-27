@@ -56,7 +56,10 @@ node_exporter_job_regex: node-exporter|node-exporter-host|hostwatch
 
 # Both optional modules OFF — the branches the shaped fixture never renders.
 vpn_tailscale: false
-tailnet_dns_suffix: CHANGEME.ts.net
+# Never asked here (vpn_tailscale is false), but answered anyway so the fixture
+# covers the whole question set — and answered UNLIKE fixture A's, like every
+# other value in this file.
+tailnet_dns_suffix: tail9z8y7x.ts.net
 gpu: none
 
 lib_url: https://git.ericsweiss.com/eric/weisssrv-lib.git

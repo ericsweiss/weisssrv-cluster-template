@@ -181,7 +181,8 @@ Re-run it whenever `lib_ref` changes.
 
 ```bash
 task lint          # yamllint, shellcheck, doc-links, taskfile-smoke,
-                   # ansible-lint, terraform fmt-check + validate, flux:lint
+                   # version-coverage, repo-sync, ansible-lint,
+                   # terraform fmt-check + validate, flux:lint
 task ansible:ping  # every host in the inventory answers
 ```
 
@@ -189,6 +190,12 @@ task ansible:ping  # every host in the inventory answers
 tool-completeness check: each sub-task names the missing binary in its
 precondition message. Fix everything it reports before touching a host — most
 first-run failures are inventory typos it catches for free.
+
+One expected exception on a repository you have not yet run `task hosts:sync`
+against: **`lint:repo-sync` fails, and that is the design** — `scripts/hosts.env`
+ships as a placeholder, and a placeholder is by definition out of sync with the
+inventory you just filled in. It tells you so and names the fix (§ 2). Run
+`task hosts:sync`, commit the result, and re-run `task lint`.
 
 `task lint:prometheus-config` is **not** part of `task lint` (it needs
 `promtool` and `amtool`). Run it separately if you edit alert rules.
@@ -268,10 +275,10 @@ the same dependency:
 |---|---|---|
 | 1 | `task infra:base -- --limit proxmox` | users, SSH hardening, packages, timezone on the bare-metal hosts — limited to them because no container exists yet |
 | 2 | `task dns:deploy` | provisions the resolver containers, then the validating recursive resolver and the filtering frontend, then acme.sh + the renewal cron + the cert push channel, then the secondary sync |
-| 3 | `task infra:deploy -- --limit mail` | provisions the SMTP relay container and its base config. **Do not skip it or move it later:** it is a certificate distribution target, and step 4 can only pin the host key of a host that exists |
+| 3 | `task infra:deploy -- --limit mail` | provisions the SMTP relay container, its base config **and its Postfix config** — the last of which is written against a certificate that has not landed yet and is corrected by step 6. **Do not skip it or move it later:** it is a certificate distribution target, and step 4 can only pin the host key of a host that exists |
 | 4 | the certificate step above | pin the host keys, issue the wildcard once, re-run `task dns:deploy` to distribute it |
 | 5 | `task storage:deploy` | NFS-over-TLS, ZFS properties and datasets, exports, Samba, backups, exporters |
-| 6 | `task infra:deploy` | everything else site.yml carries: the relay's Postfix config, Proxmox host config, firewall, host metrics and log shipping |
+| 6 | `task infra:deploy` | everything else site.yml carries, plus the re-run that makes the relay's Postfix config work against the now-distributed certificate: Proxmox host config, firewall, host metrics and log shipping |
 | 7 | `task proxmox:ha` | HA rules, resource pools, replication jobs |
 | 8 | `task infra:verify` | post-deploy verification across all of the above |
 
@@ -291,13 +298,20 @@ Notes on that table, because each one has bitten someone:
   cron and distribution to non-cluster hosts all run inside `dns.yml` (and
   inside `site.yml`), on the DNS hosts. There is no `certs:deploy` — only
   `task certs:show-host-keys`, which captures the pins those pushes need.
-- **The relay is provisioned in step 3 and configured in step 6.** Both are
-  `site.yml`; step 3 is the same run limited to the `mail` group, which is
-  enough to give the container an address and an SSH host key. Its Postfix
-  configuration needs the wildcard certificate (`smtpd_tls_security_level:
-  encrypt` on submission), so it lands after the certificate step, not before.
-  `task mail:deploy` exists for redeploying the relay *alone* later (an upstream
-  smarthost, a SASL credential, a Postfix parameter).
+- **Step 3 configures the relay as well as creating it, and that is fine.**
+  Step 3 is `site.yml` limited to the `mail` group, and `--limit` selects hosts,
+  not plays — so the `Deploy SMTP relay configuration` play runs too, writing
+  `main.cf` with `smtpd_tls_cert_file` pointing into `/etc/postfix/tls/`, which
+  is still an empty directory. Nothing fails: the role creates that directory
+  and starts Postfix regardless. What you get from step 3 is a container with an
+  address and an SSH host key — which is all step 4 needs — plus a submission
+  service (587, `smtpd_tls_security_level: encrypt`) that cannot complete a TLS
+  handshake **until step 6 re-runs against the distributed certificate**. Local
+  mail queues rather than bouncing in the meantime, so nothing is lost. The
+  two-pass path at the top of this section behaves identically, which is why it
+  needs no equivalent caveat. `task mail:deploy` exists for redeploying the
+  relay *alone* later (an upstream smarthost, a SASL credential, a Postfix
+  parameter).
 - **Run these through `task`, not bare `ansible-playbook`.** The tasks wrap the
   playbook in `op run --`; the inventory deliberately fails with
   `undef(hint=...)` when the injected values are absent, so a bare invocation

@@ -35,15 +35,26 @@ conventions again.
 
 ### Tenant CI is the tenant's choice, and one option is none
 
-The app-template offers three CI shapes, and the cluster side is indifferent to
-which one a tenant picks — because in every one of them the deploy is this
-cluster pulling, never the tenant pushing:
+**The cluster side is indifferent to a tenant's CI, whatever it is** — the deploy
+is always this cluster pulling, never the tenant pushing. That is true today and
+is the part that matters here.
+
+The app-template is growing a *selector* for this, so a tenant can be generated
+with the shape it wants rather than editing the pipeline out afterwards:
 
 | Shape | What the tenant repo carries | What this cluster does |
 |---|---|---|
 | `gitlab` | a `.gitlab-ci.yml` that lints and kubeconforms `kubernetes/flux/` | pulls and reconciles |
 | `github` | the same gates as GitHub Actions workflows | pulls and reconciles |
 | `none` | no pipeline at all | pulls and reconciles |
+
+**Availability.** The selector is not in the versions this cluster pins. It
+arrives with **weisssrv-lib 0.3.0** (`weisssrv-lib prune ci:<shape>`) and the
+matching **weisssrv-app-template** release that wraps it in
+`scripts/select-ci.sh`; this repository answers `lib_ref: {{ lib_ref }}`. Until
+you move to those, the app-template generates the `gitlab` shape and the other
+two are reached by deleting the pipeline by hand — which the cluster accepts,
+because it never reads it.
 
 Shape `none` is a real option, not a degraded one: the `Kustomization` below is
 the only thing that applies anything, so a tenant with no CI is deployed exactly

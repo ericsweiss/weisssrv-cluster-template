@@ -48,10 +48,11 @@ node_exporter_job_regex: node-exporter|node-exporter-host
 # Both optional modules ON: their conditional branches are the ones a
 # defaults-only render would never reach.
 vpn_tailscale: true
-# Left at the sentinel on purpose: a generated cluster ships an unusable
-# tailnet resolver until the operator supplies the real MagicDNS suffix, and
-# the render must keep showing that.
-tailnet_dns_suffix: CHANGEME.ts.net
+# A real-SHAPED suffix, not the CHANGEME sentinel: the question's validator
+# rejects the placeholder, because a cluster generated with it ships a tailnet
+# resolver CNAMEing internal names into a domain that does not exist — broken
+# remote access with nothing failing to say so.
+tailnet_dns_suffix: tail1a2b3c.ts.net
 gpu: nvidia
 
 # The library is the one upstream this fixture legitimately names. The ref is a

@@ -200,7 +200,7 @@ def test_the_two_fixtures_answer_differently(answers, answers_b):
     shared = {k for k, v in answers.items() if answers_b[k] == v}
     # The library pin and its URL/project path are the same upstream on purpose.
     assert shared <= {"lib_url", "lib_ref", "lib_project", "git_backend", "secrets_backend",
-                      "dns_backend", "tailnet_dns_suffix", "k3s_pod_cidr", "k3s_service_cidr"}, (
+                      "dns_backend", "k3s_pod_cidr", "k3s_service_cidr"}, (
         "answers that must differ between the fixtures now coincide: "
         + ", ".join(sorted(shared))
     )

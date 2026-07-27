@@ -130,6 +130,14 @@ lan_prefix:
     lan_prefix must be three octets with no trailing dot, e.g. 192.168.0
     {% endif %}
 
+# The gateway-vs-VIP collision is tested on the THREE VIP QUESTIONS BELOW, not
+# here. A validator sees only the answers given so far (copier renders it against
+# AnswersMap.combined, whose `user` map fills in question order), and all three
+# VIPs are asked after this one — so a test here would compare against three
+# undefined names, pass everything interactively, and fire only in
+# `--data`/update mode where every answer is present up front. That is a check
+# that reads as enforcement and enforces nothing on the path the docs document.
+# Rule: only compare an answer against answers declared ABOVE it.
 lan_gateway:
   type: str
   help: >-
@@ -144,9 +152,6 @@ lan_gateway:
     {% elif not lan_gateway.startswith(lan_prefix + '.') %}
     lan_gateway must sit inside lan_prefix ({{ lan_prefix }}.x) — every guest is
     created on the flat LAN and routes through it directly.
-    {% elif lan_gateway in [k3s_api_vip | default(''), metallb_public_vip | default(''),
-                           metallb_internal_vip | default('')] %}
-    lan_gateway must differ from the three VIPs.
     {% endif %}
 
 k3s_api_vip:
@@ -161,6 +166,9 @@ k3s_api_vip:
     {% elif not k3s_api_vip.startswith(lan_prefix + '.') %}
     k3s_api_vip must sit inside lan_prefix ({{ lan_prefix }}.x) — kube-vip
     advertises it with ARP on the LAN segment.
+    {% elif k3s_api_vip == lan_gateway %}
+    k3s_api_vip must differ from lan_gateway ({{ lan_gateway }}) — kube-vip
+    would ARP-advertise your router's address and fight it for the LAN.
     {% endif %}
 
 metallb_public_vip:
@@ -174,8 +182,10 @@ metallb_public_vip:
     metallb_public_vip must be an IPv4 address, e.g. {{ lan_prefix }}.100
     {% elif not metallb_public_vip.startswith(lan_prefix + '.') %}
     metallb_public_vip must sit inside lan_prefix ({{ lan_prefix }}.x).
-    {% elif metallb_public_vip == k3s_api_vip %}
-    metallb_public_vip must differ from k3s_api_vip.
+    {% elif metallb_public_vip in [k3s_api_vip, lan_gateway] %}
+    metallb_public_vip must differ from k3s_api_vip ({{ k3s_api_vip }}) and from
+    lan_gateway ({{ lan_gateway }}) — MetalLB answers ARP for it, so sharing
+    either address takes the API or the router off the LAN.
     {% endif %}
 
 metallb_internal_vip:
@@ -189,8 +199,10 @@ metallb_internal_vip:
     metallb_internal_vip must be an IPv4 address, e.g. {{ lan_prefix }}.101
     {% elif not metallb_internal_vip.startswith(lan_prefix + '.') %}
     metallb_internal_vip must sit inside lan_prefix ({{ lan_prefix }}.x).
-    {% elif metallb_internal_vip in [k3s_api_vip, metallb_public_vip] %}
-    metallb_internal_vip must differ from k3s_api_vip and metallb_public_vip.
+    {% elif metallb_internal_vip in [k3s_api_vip, metallb_public_vip, lan_gateway] %}
+    metallb_internal_vip must differ from k3s_api_vip ({{ k3s_api_vip }}),
+    metallb_public_vip ({{ metallb_public_vip }}) and lan_gateway
+    ({{ lan_gateway }}) — MetalLB answers ARP for it.
     {% endif %}
 
 k3s_pod_cidr:
@@ -227,11 +239,50 @@ upstream_dns_servers:
     non-cluster names from in-cluster DNS to it — so these are the addresses
     the containers are CREATED at, not pre-existing servers to forward to.
     Two (one per host) is the smallest resilient answer.
+
+    These are the ONLY guest addresses you choose here. Every other one in the
+    starter inventory is composed from a fixed scheme (.11+ hosts, .23 relay,
+    .31+ k3s servers, .41+ agents), and a resolver's Proxmox vmid is DERIVED
+    from its address (100 + last octet) — so an answer landing in one of those
+    bands produces two guests on one address under one vmid. The validator
+    below rejects exactly that; hosts.yml's header lists the whole scheme.
   default: "{{ lan_prefix }}.21 {{ lan_prefix }}.22"
   validator: >-
+    {% set _addrs = upstream_dns_servers.split() %}
+    {% set _vips = {k3s_api_vip: 'the k3s API VIP',
+                    metallb_public_vip: 'the public MetalLB VIP',
+                    metallb_internal_vip: 'the internal MetalLB VIP',
+                    lan_gateway: 'the LAN gateway'} %}
+    {% set ns = namespace(taken=[]) %}
+    {% for a in _addrs %}
+    {% set _o = a.split('.')[-1] | int %}
+    {% if a in _vips %}
+    {% set ns.taken = ns.taken + [a ~ ' is ' ~ _vips[a]] %}
+    {% elif a.startswith(lan_prefix ~ '.') and 11 <= _o <= 19 %}
+    {% set ns.taken = ns.taken + [a ~ ' is in the .11-.19 Proxmox host band'] %}
+    {% elif a.startswith(lan_prefix ~ '.') and _o == 23 %}
+    {% set ns.taken = ns.taken + [a ~ ' is the SMTP relay (.23, vmid 123)'] %}
+    {% elif a.startswith(lan_prefix ~ '.') and 31 <= _o <= 39 %}
+    {% set ns.taken = ns.taken + [a ~ ' is in the .31-.39 k3s server band (vmids 131+)'] %}
+    {% elif a.startswith(lan_prefix ~ '.') and 41 <= _o <= 49 %}
+    {% set ns.taken = ns.taken + [a ~ ' is in the .41-.49 k3s agent band (vmids 141+)'] %}
+    {% endif %}
+    {% endfor %}
     {% if not (upstream_dns_servers | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])( ((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))*$')) %}
     upstream_dns_servers must be one or more IPv4 addresses separated by single
     spaces, e.g. "{{ lan_prefix }}.21 {{ lan_prefix }}.22"
+    {% elif _addrs | unique | list | length != _addrs | length %}
+    upstream_dns_servers lists the same address twice — one container is built
+    per address, so a repeat is one resolver, not two.
+    {% elif ns.taken %}
+    upstream_dns_servers collides with the addresses the starter inventory
+    composes: {{ ns.taken | join('; ') }}. These are the only resolver addresses
+    you pick, but they are NOT the only ones generated — hosts.yml lays out
+    .11+ (Proxmox hosts), .23 (SMTP relay), .31+ (k3s servers) and .41+ (k3s
+    agents), and a resolver's vmid is 100 + its last octet, so a collision here
+    duplicates BOTH the address and the vmid (pct and qm share one namespace).
+    Pick addresses outside those bands — .21/.22 if they are free, otherwise
+    anything in .20-.22, .24-.30 or .50+.
     {% endif %}
 
 # --------------------------------------------------------------------------
@@ -404,28 +455,49 @@ compute_node_count:
 nas_host:
   type: str
   help: >-
-    FQDN of the NAS / NFS server. NFS PVs mount it BY NAME (the wildcard
-    certificate has no IP SAN, so an IP mount fails the TLS handshake). Its
-    short name is also the storage host's name in the Ansible inventory, so
+    FQDN of the NAS / NFS server, UNDER internal_domain. NFS PVs mount it BY
+    NAME (the wildcard certificate has no IP SAN, so an IP mount fails the TLS
+    handshake) — and the wildcard covers *.{{ internal_domain }} only, so a
+    name outside that zone fails the handshake for the same reason an IP does.
+    Its short name is also the storage host's name in the Ansible inventory, so
     this answer renames the host on both sides at once.
   default: "pve-nas-01.{{ internal_domain }}"
   validator: >-
     {% if not (nas_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
     nas_host must be a fully-qualified lowercase hostname, e.g.
     pve-nas-01.{{ internal_domain }}
+    {% elif not nas_host.endswith('.' ~ internal_domain) %}
+    nas_host must sit under internal_domain ({{ internal_domain }}) — e.g.
+    {{ nas_host.split('.')[0] }}.{{ internal_domain }}. The internal wildcard
+    certificate covers *.{{ internal_domain }} and nothing else, and the NFS PVs
+    mount this name with `xprtsec=tls`, which verifies the server certificate's
+    SAN; the internal resolver answers for that zone only, so a name outside it
+    does not resolve on the LAN either. The symptom is Grafana, Loki and the
+    authentik backup PV stuck unbound on a tlshd handshake error, several phases
+    after this answer.
     {% endif %}
 
 smtp_host:
   type: str
   help: >-
-    FQDN of the SMTP relay Alertmanager and the hosts' null-client submit to.
-    Its short name is also the relay container's name in the Ansible
-    inventory, so this answer renames the host on both sides at once.
+    FQDN of the SMTP relay Alertmanager and the hosts' null-client submit to,
+    UNDER internal_domain. Submission is `smtpd_tls_security_level: encrypt`
+    against the same internal wildcard certificate, and the internal resolver
+    answers for that zone only. Its short name is also the relay container's
+    name in the Ansible inventory, so this answer renames the host on both
+    sides at once.
   default: "smtp-relay.{{ internal_domain }}"
   validator: >-
     {% if not (smtp_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
     smtp_host must be a fully-qualified lowercase hostname, e.g.
     smtp-relay.{{ internal_domain }}
+    {% elif not smtp_host.endswith('.' ~ internal_domain) %}
+    smtp_host must sit under internal_domain ({{ internal_domain }}) — e.g.
+    {{ smtp_host.split('.')[0] }}.{{ internal_domain }}. The wildcard
+    certificate covers *.{{ internal_domain }} only and the internal resolver
+    answers for that zone only, so a name outside it neither resolves on the LAN
+    nor presents a certificate the null clients will submit to. This one fails
+    quietly: mail queues instead of erroring.
     {% endif %}
 
 node_exporter_job_regex:
@@ -474,13 +546,20 @@ tailnet_dns_suffix:
   help: >-
     MagicDNS suffix of your tailnet ("<tailnet>.ts.net", from the Tailscale
     admin console DNS page). The in-cluster tailnet resolver hands out CNAMEs
-    into it, so the placeholder below leaves remote access to internal names
-    broken until you replace it.
-  default: "CHANGEME.ts.net"
+    into it, so there is no usable default: a placeholder here leaves remote
+    access to internal names broken with nothing failing to say so. You have
+    already answered that you have a tailnet, so you can name it.
+  placeholder: "tail1a2b3c.ts.net"
   validator: >-
     {% if not (tailnet_dns_suffix | regex_search('^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+ts\.net$')) %}
     tailnet_dns_suffix must be a MagicDNS name ending in .ts.net, e.g.
     tail1a2b3c.ts.net
+    {% elif tailnet_dns_suffix.startswith('CHANGEME') %}
+    tailnet_dns_suffix is still the CHANGEME placeholder. Read the real suffix
+    off the Tailscale admin console's DNS page ("Tailnet name") — the in-cluster
+    tailnet resolver CNAMEs internal names into this domain, so a placeholder
+    ships remote access broken and silent. Answer vpn_tailscale as false if you
+    do not have a tailnet yet.
     {% endif %}
 
 gpu:

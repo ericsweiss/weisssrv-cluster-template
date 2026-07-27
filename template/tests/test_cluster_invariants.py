@@ -1,16 +1,22 @@
-"""Invariants that keep site values out of the Kubernetes manifests.
+"""Invariants this cluster's own layout has to keep.
 
-Every domain, VIP and CIDR this cluster uses lives in ONE place — the
-cluster-config ConfigMap — and reaches the manifests through Flux postBuild
-substitution. These tests fail the moment a manifest hard-codes one of those
-values instead, or references a placeholder no ConfigMap defines.
+Two families, both PyYAML-only so they run in the `python-tests` CI job without
+kustomize or Ansible:
 
-They need only PyYAML, so they run in the `python-tests` CI job without
-kustomize; `flux-lint` covers the same ground on the POST-kustomize output.
+* **Site values stay out of the Kubernetes manifests.** Every domain, VIP and
+  CIDR lives in ONE place — the cluster-config ConfigMap — and reaches the
+  manifests through Flux postBuild substitution. These fail the moment a
+  manifest hard-codes one of those values, or references a placeholder no
+  ConfigMap defines. `flux-lint` covers the same ground POST-kustomize.
+* **The Ansible inventory's addresses are internally consistent.** `hosts.yml`
+  ships as a skeleton you are told to re-address, and two guests on one address
+  — or one vmid, which `pct` and `qm` share a namespace for — fails phases later
+  than the edit that caused it, naming neither.
 """
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from pathlib import Path
 
@@ -22,6 +28,7 @@ K8S_ROOT = REPO_ROOT / "kubernetes"
 SOURCES_DIR = K8S_ROOT / "infrastructure" / "sources"
 CLUSTERS_DIR = K8S_ROOT / "clusters"
 ANSWERS_FILE = REPO_ROOT / ".copier-answers.yml"
+INVENTORY_HOSTS = REPO_ROOT / "ansible" / "inventories" / "prod" / "hosts.yml"
 
 # The postBuild sources every stage after `sources` substitutes from.
 SUBSTITUTE_SOURCES = ("cluster-versions", "cluster-config")
@@ -32,8 +39,11 @@ PLACEHOLDER_RE = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?$")
 DOMAIN_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$")
 
-pytestmark = pytest.mark.skipif(
+needs_k8s = pytest.mark.skipif(
     not K8S_ROOT.is_dir(), reason="no kubernetes/ tree in this repository"
+)
+needs_inventory = pytest.mark.skipif(
+    not INVENTORY_HOSTS.is_file(), reason="no ansible/inventories/prod/hosts.yml"
 )
 
 
@@ -73,6 +83,7 @@ CONFIGMAPS = _load_configmaps()
 SUBSTITUTION_KEYS = {k for _, data in CONFIGMAPS.values() for k in data}
 
 
+@needs_k8s
 def test_cluster_config_configmap_exists():
     assert "cluster-config" in CONFIGMAPS, (
         "kubernetes/infrastructure/sources/ must define a `cluster-config` ConfigMap — "
@@ -80,6 +91,7 @@ def test_cluster_config_configmap_exists():
     )
 
 
+@needs_k8s
 def test_cluster_config_carries_the_expected_keys():
     _, data = CONFIGMAPS["cluster-config"]
     required = {
@@ -94,6 +106,7 @@ def test_cluster_config_carries_the_expected_keys():
     assert required <= set(data), f"cluster-config is missing keys: {sorted(required - set(data))}"
 
 
+@needs_k8s
 def test_substitution_keys_are_unique_across_configmaps():
     """Flux merges substituteFrom sources in list order — a duplicate resolves
     to whichever source is listed last, which is invisible in review."""
@@ -107,6 +120,7 @@ def test_substitution_keys_are_unique_across_configmaps():
     assert not clashes, "duplicate substitution keys: " + "; ".join(clashes)
 
 
+@needs_k8s
 def test_every_placeholder_resolves():
     unresolved: list[str] = []
     for path in _yaml_files(K8S_ROOT):
@@ -121,6 +135,7 @@ def test_every_placeholder_resolves():
     )
 
 
+@needs_k8s
 def test_flux_kustomizations_carry_both_substitute_sources():
     if not CLUSTERS_DIR.is_dir():
         pytest.skip("no kubernetes/clusters/ tree")
@@ -148,6 +163,7 @@ def test_flux_kustomizations_carry_both_substitute_sources():
     )
 
 
+@needs_k8s
 def test_no_site_addresses_are_hard_coded_in_manifests():
     """Domains, IPs and CIDRs belong in cluster-config, referenced as ${...}.
 
@@ -181,3 +197,101 @@ def test_no_site_addresses_are_hard_coded_in_manifests():
                     rel = path.relative_to(REPO_ROOT)
                     offenders.append(f"{rel}:{lineno} {value!r} — use ${{{key}}}")
     assert not offenders, "site values hard-coded in manifests:\n  " + "\n  ".join(offenders)
+
+
+# --------------------------------------------------------------------------
+# Ansible inventory
+# --------------------------------------------------------------------------
+
+
+def _inventory_hosts() -> dict[str, dict]:
+    """host name -> merged vars, for every host in the YAML inventory.
+
+    Merged rather than collected per group: a host listed in two groups
+    (`dns-01` is in both `dns` and `dns_primary`) is ONE machine, and comparing
+    its two entries against each other would report every such host as a
+    duplicate of itself.
+    """
+    hosts: dict[str, dict] = {}
+
+    def walk(node) -> None:
+        if not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            if key == "hosts" and isinstance(value, dict):
+                for name, host_vars in value.items():
+                    hosts.setdefault(name, {}).update(host_vars or {})
+            elif key != "vars":
+                walk(value)
+
+    walk(yaml.safe_load(INVENTORY_HOSTS.read_text()) or {})
+    return hosts
+
+
+def _duplicates(field: str) -> list[str]:
+    owners: dict[str, list[str]] = {}
+    for name, host_vars in sorted(_inventory_hosts().items()):
+        value = host_vars.get(field)
+        if value is not None:
+            owners.setdefault(str(value), []).append(name)
+    return [
+        f"{field} {value} is claimed by {', '.join(names)}"
+        for value, names in sorted(owners.items())
+        if len(names) > 1
+    ]
+
+
+@needs_inventory
+def test_inventory_declares_hosts():
+    """The three tests below are vacuously true on an empty inventory."""
+    assert _inventory_hosts(), f"{INVENTORY_HOSTS} declares no hosts"
+
+
+@needs_inventory
+def test_every_vmid_is_unique():
+    """`pct` and `qm` share ONE vmid namespace.
+
+    Most vmids here are composed from a fixed scheme, but a resolver's is
+    derived from its address (`100 + last octet`), so re-addressing one moves
+    it — into the k3s server band, if the new address is in the .31+ range.
+    The second `create` then fails against an id Proxmox already knows, or the
+    reconcile path adopts the wrong guest, several phases after the edit.
+    """
+    clashes = _duplicates("vmid")
+    assert not clashes, "duplicate vmids in the inventory:\n  " + "\n  ".join(clashes)
+
+
+@needs_inventory
+def test_every_ansible_host_is_unique():
+    clashes = _duplicates("ansible_host")
+    assert not clashes, (
+        "two hosts configured on one address:\n  "
+        + "\n  ".join(clashes)
+        + "\nWhichever is provisioned second takes the address."
+    )
+
+
+@needs_inventory
+def test_every_ansible_host_is_inside_the_lan():
+    """Guests are created on the flat LAN and route through its gateway; an
+    address outside it is unreachable from everything that manages it."""
+    if "cluster-config" not in CONFIGMAPS:
+        pytest.skip("no cluster-config ConfigMap to read cluster_lan_cidr from")
+    cidr = CONFIGMAPS["cluster-config"][1].get("cluster_lan_cidr")
+    if not cidr:
+        pytest.skip("cluster-config declares no cluster_lan_cidr")
+    network = ipaddress.ip_network(cidr, strict=False)
+    outside: list[str] = []
+    for name, host_vars in sorted(_inventory_hosts().items()):
+        addr = host_vars.get("ansible_host")
+        if addr is None:
+            continue
+        try:
+            address = ipaddress.ip_address(str(addr))
+        except ValueError:
+            continue  # a name rather than an address; DNS resolves it
+        if address not in network:
+            outside.append(f"{name}: {addr}")
+    assert not outside, (
+        f"hosts addressed outside cluster_lan_cidr ({network}):\n  " + "\n  ".join(outside)
+    )

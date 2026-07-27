@@ -19,15 +19,16 @@ Structural tests can only prove that files exist and match each other. The
 hard-coded from the reference cluster renders byte-identically to a correct
 substitution in the shaped fixture and is only visible in a second, unlike one.
 
-`tests/validate_render.py` runs six checks over a render:
+`tests/validate_render.py` runs seven checks over a render:
 
 | Check | What it proves | Needs |
 |---|---|---|
 | `yamllint` | the tree passes the generated repo's own `.yamllint` | `yamllint` |
 | `flux` | for every Kustomization under `kubernetes/clusters/<name>/`: `kustomize build` the target path, assert every `${placeholder}` is a key of one of the two postBuild ConfigMaps, substitute, `kubeconform`. Mirrors `ci/validate/flux-lint.yml`, through the generated repo's own `scripts/flux-env.sh` | `kustomize`, `kubeconform` |
+| `inventory-addresses` | no two hosts in `inventories/prod/hosts.yml` share an `ansible_host` or a `vmid`, and every address sits inside `cluster_lan_cidr`. Copier answers are validated one at a time, never against the address plan `hosts.yml` composes them into — and a resolver's vmid is derived from its answer (`100 + last octet`), so `upstream_dns_servers` landing in the `.31+` server band duplicates both. Reads the rendered inventory rather than the answer, so a hand re-address reaches the same gate | — |
 | `vendored` | every script in the render's `scripts/` **and** in this repository's own `scripts/` is byte-identical to the library's copy. The second half is what holds `scripts/semantic-release.py` — the file that cuts the tag a generated cluster's `copier update` resolves to — to the library at the ref the includes pin, and it refuses to compare at all if those includes and the fixture's `lib_ref` disagree | `--lib-path` |
 | `role-opt-ins` | no playbook invokes a `<role>_enabled: false` role without the inventory setting the flag — a role that runs and does nothing, successfully | `--lib-path` |
-| `role-inputs` | every input an invoked role *asserts* and gives no default is assigned in `inventories/prod` — the shape that took out `proxmox_lxc_gateway` | `--lib-path` |
+| `role-inputs` | every input an invoked role *asserts* and has no **usable** default for is assigned in `inventories/prod` — the shape that took out `proxmox_lxc_gateway`. "Usable" is decided by rendering the default against the inventory, not by reading it: `proxmox_lxc_nameserver` defaults to `{{ dns_servers \| default([]) \| join(' ') }}`, which is non-empty as text and empty as a value the moment `dns_servers` is unset | `--lib-path` |
 | `ansible` | `ansible-playbook --syntax-check` on every rendered playbook, with `weisssrv.infra` resolved from the library | `ansible-playbook` |
 
 **`vendored`, `role-opt-ins` and `role-inputs` are silently skipped without
@@ -42,7 +43,7 @@ instead of in someone's homelab.
 
 ```bash
 python3 -m pytest tests -q                      # structure + copier schema
-python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib          # all six checks
+python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib          # all seven checks
 python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
   --answers tests/answers-unlike.yml            # the contrast fixture
 python3 tests/render_cluster.py --out /tmp/x    # just render, and keep it
@@ -57,11 +58,11 @@ review.
 Requirements: `copier>=9`, `pytest`, `pyyaml` for the pytest suite; plus
 `yamllint`, `kustomize`, `kubeconform` and `ansible-playbook` for the
 validator. Any missing tool is reported by name. `--skip` takes any of
-`yamllint,flux,vendored,role-opt-ins,role-inputs,ansible`.
+`yamllint,flux,inventory-addresses,vendored,role-opt-ins,role-inputs,ansible`.
 
 `--lib-path` points at a weisssrv-lib checkout — the directory that *contains*
 `ansible_collections/`. Use it to exercise an unmerged library change, to avoid
-the network, and — as the table above says — to run three of the six checks at
+the network, and — as the table above says — to run three of the seven checks at
 all. Without it the collection is installed from the git ref in the render's
 `requirements.yml`. The library's galaxy dependencies (`ansible.posix`,
 `community.general`) are installed either way, with the operator's own
