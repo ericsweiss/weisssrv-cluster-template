@@ -173,30 +173,24 @@ def check_flux(render: Path) -> None:
     print(f"  flux ok ({built} Kustomizations, k8s {k8s_version}, {len(values)} substitutions)")
 
 
-def check_vendored(render: Path, lib_path: Path | None) -> None:
-    """Every vendored script must be byte-identical to the library's copy.
+_SITE_DATA_SUFFIXES = {".yml", ".yaml", ".env", ".conf", ".toml"}
 
-    The template ships copies of weisssrv-lib's generic tooling so a generated
-    cluster's CI never has to clone another repository. Nothing else notices
-    when a copy drifts: the fix the library shipped is simply absent, and the
-    next `task lib:sync` refresh silently reverts whatever was edited here.
-    `flux-env.sh` is the one script written locally and has no library twin, so
-    it is not compared — it must not be a fork of a vendored file either, which
-    is why `flux-render.sh` is compared like the rest.
+
+def _compare_vendored(
+    scripts: Path, lib_scripts: Path, local: set[str], site_data: set[str]
+) -> tuple[list[str], list[str]]:
+    """(vendored, problems) for one scripts/ directory against the library's.
+
+    `local` names files written here that have no library twin; `site_data`
+    names files that are configuration for a vendored tool rather than a tool.
+    Anything else with no upstream is reported — a copy the library stopped
+    shipping is exactly as invisible as one that drifted.
     """
-    if not lib_path:
-        raise Failure("--lib-path is required to check the vendored copies")
-    lib_scripts = lib_path / "scripts"
-    if not lib_scripts.is_dir():
-        raise Failure(f"{lib_scripts} does not exist (is --lib-path a weisssrv-lib checkout?)")
-
-    local = {"flux-env.sh"}
-    site_data = {".yml", ".yaml", ".env", ".conf", ".toml"}
     vendored, drifted, orphaned = [], [], []
-    for path in sorted((render / "scripts").iterdir()):
+    for path in sorted(scripts.iterdir()):
         if not path.is_file() or path.name in local or path.name == "README.md":
             continue
-        if path.suffix in site_data or path.name == "version-registry.py":
+        if path.suffix in _SITE_DATA_SUFFIXES or path.name in site_data:
             continue  # site data, not a vendored tool
         upstream = lib_scripts / path.name
         if not upstream.is_file():
@@ -209,17 +203,101 @@ def check_vendored(render: Path, lib_path: Path | None) -> None:
     problems = []
     if drifted:
         problems.append(
-            "vendored scripts differ from the library at the pinned ref "
-            "(re-copy them and review the diff): " + ", ".join(drifted)
+            f"{scripts}: vendored scripts differ from the library at the pinned "
+            "ref (re-copy them and review the diff): " + ", ".join(drifted)
         )
     if orphaned:
         problems.append(
-            "scripts/ holds files the library does not ship, and they are not "
+            f"{scripts}: holds files the library does not ship, and they are not "
             "declared local: " + ", ".join(orphaned)
         )
+    return vendored, problems
+
+
+def check_vendored(render: Path, lib_path: Path | None) -> None:
+    """Every vendored script must be byte-identical to the library's copy.
+
+    TWO trees are checked against the one library checkout:
+
+    * the RENDER's `scripts/` — the template ships copies of weisssrv-lib's
+      generic tooling so a generated cluster's CI never has to clone another
+      repository. Nothing else notices when a copy drifts: the fix the library
+      shipped is simply absent, and the next `task lib:sync` refresh silently
+      reverts whatever was edited here. `flux-env.sh` is the one script written
+      locally and has no library twin, so it is not compared — it must not be a
+      fork of a vendored file either, which is why `flux-render.sh` is compared
+      like the rest.
+    * this REPOSITORY's own `scripts/` — the template's pipeline vendors the
+      release script the same way, and it is the one file here whose drift would
+      mis-cut the tag every generated cluster's `copier update` resolves to.
+
+    Both comparisons use the checkout `--lib-path` points at, which CI clones at
+    the fixture's `lib_ref`. `_assert_one_lib_ref` below reports — instead of
+    comparing — when the template's own pipeline pins something else, so the
+    repository's copies are never silently gated against a ref they were not
+    taken from.
+    """
+    if not lib_path:
+        raise Failure("--lib-path is required to check the vendored copies")
+    lib_scripts = lib_path / "scripts"
+    if not lib_scripts.is_dir():
+        raise Failure(f"{lib_scripts} does not exist (is --lib-path a weisssrv-lib checkout?)")
+
+    vendored, problems = _compare_vendored(
+        render / "scripts",
+        lib_scripts,
+        local={"flux-env.sh"},
+        site_data={"version-registry.py"},
+    )
+    own_scripts = render_cluster.REPO_ROOT / "scripts"
+    own: list[str] = []
+    if own_scripts.is_dir():
+        # A ref mismatch makes the comparison meaningless, so it REPLACES it —
+        # reporting drift against a ref the copies never came from would send
+        # whoever reads this to re-copy the wrong file.
+        mismatch = _assert_one_lib_ref()
+        if mismatch:
+            problems += mismatch
+        else:
+            own, own_problems = _compare_vendored(
+                own_scripts, lib_scripts, local=set(), site_data=set()
+            )
+            problems += own_problems
     if problems:
         raise Failure("\n".join(problems))
-    print(f"  vendored ok ({len(vendored)} scripts byte-identical to the library)")
+    print(
+        f"  vendored ok ({len(vendored)} render + {len(own)} template-repo scripts "
+        "byte-identical to the library)"
+    )
+
+
+def _assert_one_lib_ref() -> list[str]:
+    """The template's own pipeline must pin the ref the fixtures do.
+
+    The render-validate job clones ONE library, at the `lib_ref` in
+    answers-weisssrv-shaped.yml, and gates both trees with it. If this
+    repository's own includes moved to a different tag, the byte-comparison
+    above would still pass or fail — against the wrong ref — so the mismatch is
+    reported rather than assumed away.
+    """
+    root = render_cluster.REPO_ROOT
+    fixture = yaml.safe_load((root / "tests" / "answers-weisssrv-shaped.yml").read_text())
+    expected = fixture["lib_ref"]
+    ci = render_cluster.load_ci(root / ".gitlab-ci.yml")
+    refs = {
+        inc["ref"]
+        for inc in ci.get("include", [])
+        if isinstance(inc, dict) and "ref" in inc
+    }
+    if refs - {expected}:
+        return [
+            "this template's own .gitlab-ci.yml pins library ref(s) "
+            f"{sorted(refs)} but tests/answers-weisssrv-shaped.yml answers "
+            f"lib_ref: {expected} — render-validate clones only the latter, so "
+            "the vendored-script comparison below would run against a ref the "
+            "repository's own copies were never taken from"
+        ]
+    return []
 
 
 _ASSIGNMENT = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*:", re.MULTILINE)

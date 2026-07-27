@@ -58,3 +58,6 @@ and are held to the same list.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — why the shapes are what they are
 - [SETUP.md](SETUP.md) — first bring-up, which the runbooks pick up from
 - [CI.md](CI.md) — what runs in the pipeline
+- [VERSIONING.md](VERSIONING.md) — what a template release may change, and what
+  `copier update` does with it (the § *Updating the template* runbook is the
+  procedure; this is the contract behind it)

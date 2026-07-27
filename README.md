@@ -199,6 +199,7 @@ provide.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Understanding the shape: Flux stages, substitution, storage, DNS, backups |
 | [docs/CI.md](docs/CI.md) | What the generated pipeline runs, and what it needs from your instance |
 | [docs/RUNBOOKS.md](docs/RUNBOOKS.md) | Day two — reconcile, upgrade, add a node, rotate a secret. The runbooks are *shipped into* the generated cluster (that is what every alert's `runbook_url` points at); this page is the index and the source link |
+| [docs/VERSIONING.md](docs/VERSIONING.md) | What this template's MAJOR/MINOR/PATCH mean, how a cluster pins a template release, and what `copier update` does across versions |
 
 ## Updating a generated cluster
 
@@ -216,7 +217,9 @@ weisssrv-lib's own version and is answered separately. List what exists with
 touches files you rewrote beyond recognition without telling you. Bumping
 `lib_ref` in the same pass upgrades the Ansible collection, CI templates and
 Terraform modules together. See
-[docs/RUNBOOKS.md](docs/RUNBOOKS.md) § Updating the template.
+[docs/RUNBOOKS.md](docs/RUNBOOKS.md) § Updating the template for the procedure,
+and [docs/VERSIONING.md](docs/VERSIONING.md) for what a given bump is allowed to
+change — read the target release's notes before updating across a MAJOR.
 
 ## Developing this template
 

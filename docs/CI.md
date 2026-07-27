@@ -4,7 +4,7 @@ Two pipelines are involved and they are easy to confuse:
 
 | Pipeline | File | Runs on | Gates |
 |---|---|---|---|
-| **This template's** | `.gitlab-ci.yml` | changes to the template | lint, the copier schema, and a full render that is then validated with the real toolchain |
+| **This template's** | `.gitlab-ci.yml` | changes to the template | lint, the copier schema, a full render that is then validated with the real toolchain, and — on `main` only — the release tag |
 | **A generated cluster's** | `template/.gitlab-ci.yml.jinja` | the repository copier produces | lint, flux-lint, secret detection, AI review, version bumps, deploys |
 
 The generated pipeline is documented from the operator's side in the rendered
@@ -25,7 +25,7 @@ substitution in the shaped fixture and is only visible in a second, unlike one.
 |---|---|---|
 | `yamllint` | the tree passes the generated repo's own `.yamllint` | `yamllint` |
 | `flux` | for every Kustomization under `kubernetes/clusters/<name>/`: `kustomize build` the target path, assert every `${placeholder}` is a key of one of the two postBuild ConfigMaps, substitute, `kubeconform`. Mirrors `ci/validate/flux-lint.yml`, through the generated repo's own `scripts/flux-env.sh` | `kustomize`, `kubeconform` |
-| `vendored` | every script in the render's `scripts/` is byte-identical to the library's copy | `--lib-path` |
+| `vendored` | every script in the render's `scripts/` **and** in this repository's own `scripts/` is byte-identical to the library's copy. The second half is what holds `scripts/semantic-release.py` — the file that cuts the tag a generated cluster's `copier update` resolves to — to the library at the ref the includes pin, and it refuses to compare at all if those includes and the fixture's `lib_ref` disagree | `--lib-path` |
 | `role-opt-ins` | no playbook invokes a `<role>_enabled: false` role without the inventory setting the flag — a role that runs and does nothing, successfully | `--lib-path` |
 | `role-inputs` | every input an invoked role *asserts* and gives no default is assigned in `inventories/prod` — the shape that took out `proxmox_lxc_gateway` | `--lib-path` |
 | `ansible` | `ansible-playbook --syntax-check` on every rendered playbook, with `weisssrv.infra` resolved from the library | `ansible-playbook` |
@@ -110,3 +110,27 @@ built against was deleted when it merged.
 `render-validate` clones the library with `CI_JOB_TOKEN`, so the job does not
 depend on anonymous access — the library project must list this project on its
 CI/CD job-token allowlist if it is not public.
+
+## The release stage
+
+`release` is the LAST stage of this repository's own pipeline, and the
+`semantic-release` job sets no `needs:` — stage ordering is what gates a tag on
+every job above it, `render-validate` included. Merging to `main` reads the
+conventional commits since the last tag, cuts `vMAJOR.MINOR.PATCH`, and creates
+the GitLab Release with generated notes in one Releases-API call; nothing
+releasable means no tag and a green pipeline.
+
+That tag is not decoration: `copier update` resolves to the **latest tag** of
+the template and falls back to the branch tip only when there is none. What a
+given bump is allowed to change — and what `copier update` does across one — is
+[VERSIONING.md](VERSIONING.md).
+
+The job runs `scripts/semantic-release.py`, vendored from the library and held
+byte-identical by the `vendored` check above. It needs no credential beyond
+`CI_JOB_TOKEN`; if protected tags restrict who may create `v*`, pass a PAT
+reference through the template's `release_token` / `token_header` inputs.
+
+The generated cluster's pipeline gets the same stage only when the operator
+answers `enable_semantic_release: true` — off by default, because a cluster
+repository is normally released by hand. `answers-unlike.yml` turns it on, so
+the rendered wiring is exercised on every run.

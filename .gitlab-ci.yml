@@ -13,11 +13,18 @@
 #
 # Every job is TAG-LESS and non-root safe (pip --user, workspace-local tool
 # downloads), so they land on the shared runner.
+#
+# `release` is LAST on purpose: the semantic-release job sets no `needs:`, so
+# stage ordering is what gates a tag on every gate above it having passed —
+# including `render-validate`. A template tag is what a generated cluster's
+# `copier update` resolves to, so it must never be cut from a tree that does not
+# render. See docs/VERSIONING.md.
 stages:
   - lint
   - test
   - security
   - ai-review
+  - release
 
 workflow:
   rules:
@@ -61,9 +68,11 @@ include:
       tags: []
       image: python:3.13-slim
       # The Python under template/ is static (no .jinja suffix), so it is linted
-      # here as well as in every repository it ships to.
-      targets: "tests template/tests template/scripts"
+      # here as well as in every repository it ships to. `scripts` is this
+      # repository's OWN tooling (the vendored release script), not payload.
+      targets: "scripts tests template/tests template/scripts"
       changes:
+        - "scripts/**/*.py"
         - "tests/**/*.py"
         - "template/**/*.py"
         - "ruff.toml"
@@ -114,6 +123,26 @@ include:
           optional: true
         - job: render-validate
           optional: true
+
+  # Cuts THIS template's tag from the conventional commits merged to main — the
+  # tag a generated cluster's `copier update` resolves to and records as
+  # `_commit` in .copier-answers.yml. Untagged, copier falls back to the
+  # template's HEAD, so every update pulls unreleased work; see
+  # docs/VERSIONING.md.
+  #
+  # Everything else is the template's default: the job sets no `needs:` and
+  # `release` is declared LAST above, so stage ordering gates it on every job
+  # here passing; its rules are already main-only with schedules excluded, and
+  # `resource_group` serializes rapid merges. `script_path` defaults to the
+  # vendored scripts/semantic-release.py, which tests/validate_render.py holds
+  # byte-identical to the library at this ref. major_on_zero stays false: while
+  # the tag is 0.x a `feat!:` bumps MINOR, and calling a template 1.0.0 is a
+  # deliberate act (flip the input for that release).
+  - project: eric/weisssrv-lib
+    ref: v0.2.0
+    file: /ci/release/semantic-release.yml
+    inputs:
+      tags: []
 
 render-validate:
   stage: test
