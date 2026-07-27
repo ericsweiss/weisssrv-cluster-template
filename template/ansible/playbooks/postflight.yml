@@ -99,6 +99,23 @@
   hosts: dns_primary
   become: true
   tasks:
+    # An unpinned target is filtered out of acme_certs_distribution_targets, so
+    # the certificate play skips it instead of failing. That is deliberate — a
+    # first deploy has to run before the guests whose keys these are exist — but
+    # it must not stay unnoticed: this is where a forgotten paste surfaces.
+    - name: Assert every certificate distribution target has a pinned host key
+      ansible.builtin.assert:
+        that: item.host_key | default('') | length > 0
+        fail_msg: >-
+          {{ item.host }} ({{ item.ip }}) has no host_key, so it is NOT
+          receiving the wildcard certificate. Run `task certs:show-host-keys`,
+          paste the value into the matching _acme_certs_targets entry in
+          group_vars/dns.yml, and re-run `task dns:deploy`.
+        quiet: true
+      loop: "{{ _acme_certs_targets | default([]) }}"
+      loop_control:
+        label: "{{ item.host }}"
+
     # Exercise the same pinned-key path the cert-reload script uses
     # (StrictHostKeyChecking=yes against root's known_hosts), so a changed or
     # unknown host key fails here exactly as the real push would.

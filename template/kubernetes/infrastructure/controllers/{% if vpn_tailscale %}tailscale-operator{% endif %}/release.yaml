@@ -21,6 +21,12 @@ spec:
         namespace: flux-system
       interval: 12h
   install:
+    # The operator-oauth Secret is created by the configs stage (the
+    # ClusterSecretStore this namespace's ExternalSecret targets lives there),
+    # which depends on this one. Without disableWait, Helm --wait blocks on pod
+    # readiness -> pods block on the Secret -> bootstrap deadlock. Upgrades run
+    # in steady state where the Secret already exists.
+    disableWait: true
     remediation:
       retries: 3
   upgrade:

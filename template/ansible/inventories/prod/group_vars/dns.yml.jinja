@@ -66,6 +66,11 @@ _dns_service_rewrites:
     answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
   - domain: "connect.{% raw %}{{ internal_domain }}{% endraw %}"
     answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
+  # The identity provider. Every SSO-gated UI redirects here, and Grafana's
+  # OIDC endpoints are this name — without the rewrite the login loop dead-ends
+  # on NXDOMAIN and nobody can sign in to anything.
+  - domain: "auth.{% raw %}{{ internal_domain }}{% endraw %}"
+    answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
 
 adguard_home_rewrites: >-
   {% raw %}{{ dict(_dns_addressed_hosts | map(attribute='inventory_hostname')
@@ -82,6 +87,15 @@ adguard_home_user_rules: []
 # --- Certificates -----------------------------------------------------------
 # acme.sh with a DNS-01 challenge issues the wildcard on the primary resolver
 # and pushes it to each target over SSH with a dedicated, from=-pinned key.
+#
+# `acme_certs_enabled` is set PER HOST (on dns-01 in hosts.yml), not here: the
+# role is the certificate authority, so a second resolver running it would issue
+# its own wildcard against the same rate limit and push it to everyone else.
+#
+# The role installs acme.sh, the renewal cron and the distribution channel — it
+# never runs `--issue`. The FIRST wildcard is one manual command on the primary
+# resolver, which the role prints when no certificate exists yet; SETUP.md § 4
+# walks it. Renewals from then on are automatic.
 acme_certs_domain: {{ internal_domain }}
 acme_certs_email: "{% raw %}{{ admin_email }}{% endraw %}"
 acme_certs_ssh_private_key: >-
@@ -93,11 +107,25 @@ acme_certs_ssh_public_key: >-
 # Without this the distribution key is usable from any source address.
 acme_certs_key_from: {{ resolvers[0] }}
 
-# Hosts that receive the wildcard cert. host_key pins the target's SSH host key
-# (strict checking — a rebuilt host fails the push loudly until you re-capture
-# it with playbooks/show-cert-host-keys.yml). The NAS needs it for NFS-over-TLS;
-# the relay for SMTP submission; every replica resolver for DoT.
-acme_certs_distribution_targets:
+# Hosts that receive the wildcard cert. host_key pins the target's SSH host key:
+# the push carries private-key material, so the channel runs with
+# StrictHostKeyChecking=yes and never accept-new. The NAS needs the cert for
+# NFS-over-TLS; the relay for SMTP submission; every replica resolver for DoT.
+#
+# The pins ship EMPTY on purpose. Every target except the NAS is a container
+# Ansible has not created yet, so its host key does not exist when this file is
+# first rendered. An unpinned entry is filtered out of
+# acme_certs_distribution_targets below rather than aborting the certificate
+# play — so a first deploy runs to completion and simply distributes to nobody.
+# Once the guests are up:
+#
+#     task certs:show-host-keys     # prints a paste-ready host_key per target
+#
+# paste each value in here and re-run `task dns:deploy`. `task infra:verify`
+# fails while any target is still unpinned, so a forgotten paste is reported
+# rather than silently skipped. Same workflow after a target is rebuilt — its
+# old pin stops matching and the push fails loudly until you re-capture it.
+_acme_certs_targets:
 {%- for addr in resolvers[1:] %}
   - host: dns-{{ '%02d' | format(loop.index + 1) }}
     ip: {{ addr }}
@@ -112,6 +140,10 @@ acme_certs_distribution_targets:
     ip: {{ lan_prefix }}.11
     ssh_user: {{ admin_user }}
     host_key: ""
+acme_certs_distribution_targets: >-
+  {% raw %}{{ _acme_certs_targets
+     | selectattr('host_key', 'defined')
+     | rejectattr('host_key', 'equalto', '') | list }}{% endraw %}
 
 # --- Config replication -----------------------------------------------------
 {%- if resolvers | length > 1 %}

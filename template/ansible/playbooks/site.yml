@@ -3,9 +3,18 @@
 # host-level observability. k3s has its own lifecycle (k3s.yml), as does every
 # application you add.
 
-# FIRST, and purely delegated: the relay container may not exist yet (or may
-# have been lost), and the base_managed play below connects to it directly —
-# which would mark it UNREACHABLE and exclude it from every later play.
+# FIRST, and purely delegated: these containers may not exist yet (or may have
+# been lost), and the base_managed play below connects to them directly — which
+# would mark them UNREACHABLE and exclude them from every later play. On a fresh
+# cluster that would silently skip the whole DNS stack, and with it the
+# certificate the NAS play needs.
+- name: Provision DNS containers
+  hosts: dns
+  gather_facts: false
+  roles:
+    - role: weisssrv.infra.proxmox_lxc
+      tags: [proxmox_lxc]
+
 - name: Provision SMTP relay container
   hosts: mail
   gather_facts: false

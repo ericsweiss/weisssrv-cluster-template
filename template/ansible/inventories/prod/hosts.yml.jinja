@@ -106,10 +106,21 @@ all:
 {%- if loop.first %}
           dns_role: primary
           adguard_home_is_primary: true
+          # Certificate authority: acme.sh, the renewal cron and the push
+          # channel run HERE and nowhere else. A second resolver with this flag
+          # would issue its own wildcard against the same rate limit and push it
+          # over the first one. The cert settings live in group_vars/dns.yml.
+          acme_certs_enabled: true
 {%- if resolvers | length > 1 %}
-          # Pushes this resolver's config to every replica. Only meaningful with
-          # a second resolver, so it is set only when one exists.
+          # Pushes this resolver's config to every replica.
           adguard_sync_enabled: true
+{%- else %}
+          # Only meaningful with a second resolver, and this roster has one —
+          # written out as an explicit false rather than left absent so the
+          # decision is on the page: site.yml invokes the role either way, and
+          # an unset opt-in flag is indistinguishable from an oversight.
+          # Add a second address to upstream_dns_servers and flip this to true.
+          adguard_sync_enabled: false
 {%- endif %}
 {%- else %}
           dns_role: replica

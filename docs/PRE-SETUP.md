@@ -80,6 +80,7 @@ before you start; the answers marked → become copier answers.
 | Router / gateway address | — | usually `.1` |
 | DHCP pool range | — | must **not** overlap anything below |
 | Proxmox host addresses | — | one per node, static, contiguous block |
+| Resolver addresses | `upstream_dns_servers` | space-separated, preference order; the DNS containers are **created** at these, not forwarded to |
 | Infrastructure guest addresses | — | DNS, mail relay, application VMs |
 | k3s server VM addresses | — | three, contiguous |
 | k3s agent VM addresses | — | one per compute node, contiguous |
@@ -124,9 +125,21 @@ Also decide and note:
 - Two of the VIPs answer ARP from whichever node currently holds them. If your
   switch does port security or your network does IP-MAC binding, allow that.
 
-The Kubernetes pod and service networks default to k3s' own `10.42.0.0/16` and
-`10.43.0.0/16`. Change them only if they collide with your LAN, and if you do,
-change them before the first `k3s` deploy — they are not re-negotiable later.
+The Kubernetes pod and service networks (`k3s_pod_cidr`, `k3s_service_cidr`)
+default to k3s' own `10.42.0.0/16` and `10.43.0.0/16`. Change them only if they
+collide with your LAN, and if you do, change them before the first `k3s`
+deploy — they are not re-negotiable later.
+
+### Two names that must move together
+
+`nas_host` and `smtp_host` are FQDNs, but they are also **inventory hostnames**:
+their short names are what the storage host and the relay container are called
+in `ansible/inventories/prod/hosts.yml`. SETUP § 2 has you rename the placeholder
+roster hosts to your own; if you rename either of those two there without having
+answered the matching FQDN here, the two halves stop agreeing — NFS PVs mount a
+name nothing resolves (they mount **by name**, because the wildcard certificate
+has no IP SAN) and every host's mail null-client submits to a relay that is not
+there. Decide both names now and use them in both places.
 
 ---
 
@@ -145,7 +158,13 @@ If you only own one domain, use a subdomain for the internal zone
 identical values because the per-zone certificate and ingress pairs would
 collide.
 
-### Cloudflare (the implemented DNS backend)
+Two addresses also belong here rather than to any zone: `admin_email` is where
+system mail (cron, SMART, ZFS events) lands and the account address ACME
+registers with, and `alert_email` is where critical Alertmanager notifications
+go. They default to the same inbox; separate them if pages should not land in
+the same place as nightly SMART reports.
+
+### Cloudflare (`dns_backend: cloudflare`, the implemented DNS backend)
 
 1. Add `external_domain` to a Cloudflare account and move its nameservers.
    Adding `internal_domain` too is optional — it is only needed if you want
@@ -282,7 +301,7 @@ These never appear in an `op://` reference; they are `remoteRef.key` /
 | `Loki Push Auth` | `htpasswd` | the Loki ingress basic-auth middleware — an **htpasswd line**, not the plain password |
 | `Alertmanager Webhook` | `url` | the chat receiver |
 | `Healthchecks Watchdog` | `ping url` | the dead-man's-switch heartbeat (note the **space** in the field name) |
-| `Grafana SSO` | `oidc-client-id`, `oidc-client-secret` | Grafana's OIDC login |
+| `Grafana SSO` | `oidc-client-id`, `oidc-client-secret`, `admin-password` | Grafana's OIDC login, plus the break-glass built-in admin (login form and basic auth are both off, so it authenticates nothing until you turn one back on) |
 | `Authentik Secrets` | `secret-key`, `postgresql-password`, `postgresql-admin-password` | the identity provider and its database |
 | `GitLab Runner` | `runner-token` | the shared in-cluster runner |
 | `GitLab Runner Privileged` | `runner-token` | the privileged runner (image builds) |
@@ -335,7 +354,18 @@ You need, before generating:
   pipeline expects at least one runner that can reach the cluster. The template
   ships in-cluster runner manifests, which means the first pipeline runs cannot
   happen until the cluster exists — expect to bring the platform up manually
-  first and let CI take over afterwards.
+  first and let CI take over afterwards. Two answers come out of that plan:
+  - `ci_runner_tag` — the tag **every** generated job carries. It must match a
+    tag on a runner registered to the project, or the pipeline queues forever
+    rather than failing.
+  - `ci_cpu_selector` — a `label=value` node selector pinning the secret-detection
+    job to a modern CPU (gitleaks SIGILLs without SSE4.2). It has to satisfy the
+    runner's `node_selector_overwrite_allowed` regex **and** name a label that
+    is actually on a node; a selector nothing carries leaves the job Pending
+    forever. You apply it via the agents' `k3s_labels` in `hosts.yml`.
+  - `enable_semantic_release` — off by default; turn it on only if you want the
+    generated pipeline to carry a release stage. A cluster repo is normally
+    released by hand.
 
 ---
 
@@ -417,6 +447,12 @@ Enable it if you want remote administration without exposing SSH or the Proxmox
 UI. It requires, before generation:
 
 - A Tailscale account and tailnet.
+- Your tailnet's **MagicDNS suffix** (`<tailnet>.ts.net`, on the admin console's
+  DNS page) → `tailnet_dns_suffix`. Fetch it *before* generating. Its default is
+  the literal sentinel `CHANGEME.ts.net`, which passes the answer's own
+  validator, so pressing enter at the prompt ships a cluster whose tailnet
+  resolver hands out CNAMEs into a domain that does not exist — remote access to
+  internal names is silently broken, with nothing failing to tell you.
 - A reusable **auth key** for enrolling hosts.
 - An **OAuth client** with `acl` and `dns` write scope, if you want the tailnet
   policy and split-DNS managed as code by Terraform.
@@ -439,6 +475,23 @@ Requires:
 - IOMMU enabled in firmware, and the host **not** using the card for display.
 - Awareness that the first apply is disruptive: the host binds the card to VFIO
   and reboots.
+
+---
+
+## 8a. Answers to accept as they come
+
+Not everything copier asks is a decision. `node_exporter_job_regex` looks like
+free text, but its two members name things the template *ships*: `node-exporter`
+is the kube-prometheus chart's own DaemonSet job and `node-exporter-host` is the
+static scrape of the Proxmox hosts and VMs. The node and storage alert rules
+scope themselves to that alternation, so dropping either name leaves those rules
+matching zero series — and a rule that matches nothing never fires, so nothing
+ever tells you the alerts went quiet. Copier now rejects an answer that omits
+either; press enter unless you have added a third exporter source of your own,
+in which case append `|your-job` rather than replacing what is there.
+
+The same goes for `k3s_pod_cidr` and `k3s_service_cidr` (§ 2): the k3s defaults
+are right unless they collide with your LAN.
 
 ---
 
@@ -513,8 +566,12 @@ Names and accounts
 - [ ] Connect server created as `<cluster_name>-connect`;
       `1password-credentials.json` saved somewhere safe (no token minted by hand)
 - [ ] CI service account token created
-- [ ] Git project created empty; Flux token created
-- [ ] Optional: tailnet auth key and OAuth clients
+- [ ] Git project created empty, named exactly `cluster_name`, in `git_namespace`;
+      Flux token created
+- [ ] `ci_runner_tag` matches a tag on a runner registered to that project
+- [ ] Optional: tailnet auth key and OAuth clients, **and the MagicDNS suffix
+      noted for `tailnet_dns_suffix`** (its default is a sentinel that renders a
+      broken resolver)
 - [ ] Every host-side item from § 4 present in the vault
 - [ ] Every in-cluster item from § 4 present, including `Healthchecks Watchdog`
       and `Grafana SSO` (placeholders are fine)

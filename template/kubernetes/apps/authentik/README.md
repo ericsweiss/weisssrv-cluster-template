@@ -47,10 +47,23 @@ aligned with local overnight maintenance windows.
 
 ## Before first login
 
-Create the `grafana-users` / `grafana-admins` groups (and whatever groups your
-other apps gate on) in authentik, and bootstrap the initial admin via the
-chart's `/if/flow/initial-setup/` flow. The Terraform module then imports and
-owns the object inventory from there.
+Nothing can sign in to anything until this is done, and Grafana ships SSO-only,
+so do it as soon as the ingress answers:
+
+1. **Bootstrap the built-in admin** at
+   `https://auth.<internal>/if/flow/initial-setup/`. That flow is available
+   only while no admin exists.
+2. **Mint an API token** for `akadmin` (Directory > Tokens) and store it as the
+   `Authentik Terraform Token` vault item.
+3. **Apply the objects from code.** `terraform/authentik/sso.tf` ships the
+   Grafana provider, application, `grafana-users` group and its policy binding;
+   `task terraform:authentik-init` / `-plan` / `-apply` creates them. Groups the
+   shipped inventory does *not* include — `grafana-admins`, and whatever your
+   other apps gate on — belong in `sso.tf` too, not in the UI.
+
+Steps 1 and 2 are UI-only because the module authenticates with a token that
+cannot exist before an admin does. Everything after them is code. The bring-up
+guide walks the whole sequence, including the Grafana client-id/secret pairing.
 
 ## Upgrades
 
@@ -62,9 +75,11 @@ Flux's 5m default would trigger remediation mid-migration.
 
 Remove `- authentik` from `kubernetes/apps/kustomization.yaml`. Then also:
 
-1. drop the `GF_AUTH_GENERIC_OAUTH_*` env and `disable_login_form` from
+1. drop the `GF_AUTH_GENERIC_OAUTH_*` env, `auth.disable_login_form` and
+   `auth.basic.enabled` from
    `infrastructure/observability/kube-prometheus-stack/release.yaml`, or Grafana
-   becomes unreachable;
+   becomes unreachable. Its built-in `admin` account stays — its password is the
+   `Grafana SSO` item's `admin-password` field — so that is the way back in;
 2. remove `authentik-auth` from every IngressRoute middleware chain that lists
    it, or those routes 500 on every request.
 

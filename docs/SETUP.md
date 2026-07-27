@@ -28,7 +28,7 @@ Useful flags:
 
 | Flag | Why |
 |---|---|
-| `--vcs-ref v0.1.0` | pin a template release instead of `main` |
+| `--vcs-ref <template-tag>` | pin a template release instead of `main`; `git ls-remote --tags <template-url>` lists what exists |
 | `--data cluster_name=homelab` | answer one question from the command line |
 | `--data-file answers.yml --defaults` | fully non-interactive; copy `tests/answers-weisssrv-shaped.yml` for the shape |
 | `--pretend` | show what would be written, write nothing |
@@ -43,9 +43,13 @@ source and the destination:
 ```bash
 pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@v0.2.0#subdirectory=cli'
 weisssrv-new-project new-cluster \
-  https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster \
-  --vcs-ref v0.1.0
+  https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
 ```
+
+Both blocks above are runnable as written, which is why neither passes
+`--vcs-ref`: they take the template's default branch. Add the flag from the
+table only with a tag that exists — a ref the template has not cut yet fails at
+clone time, before a single question is asked.
 
 The library marks `new-cluster` **EXPERIMENTAL** and reserves the right to
 change its flags. Plain `copier copy` is the stable path; use the wrapper only
@@ -195,35 +199,83 @@ task infra:verify                     # post-deploy verification
 
 **On a fresh cluster, `task infra:deploy` is the correct entry point.** It runs
 `playbooks/site.yml`, and site.yml is the only thing that gets the ordering
-right: it places the certificate plays *before* the NAS plays, because `nfs_tls`
-fails loudly if the wildcard certificate and key are not on the storage server
-yet. Running the storage playbook on its own first is the one sequence that
-reliably breaks a first run.
+right: it provisions the DNS and relay containers before anything connects to
+them, and it places the certificate plays *before* the NAS plays, because
+`nfs_tls` fails loudly if the wildcard certificate and key are not on the
+storage server yet. Running the storage playbook on its own first is the one
+sequence that reliably breaks a first run.
+
+It still takes **two passes** the first time, for the one thing Ansible cannot
+do for you — read the next section before running anything.
+
+### The one-time certificate step
+
+Everything TLS in this cluster — NFS-over-TLS, DNS-over-TLS, SMTP submission —
+hangs off a single wildcard certificate issued on the primary resolver and
+pushed to the other hosts over SSH. Ansible installs and *renews* it, but the
+**first issuance is one manual command**, and the push targets cannot be pinned
+until the containers they name exist. So a fresh cluster takes two passes:
+
+```bash
+# 1. First pass. Hold back the storage server: its NFS-over-TLS server config
+#    is the one thing that hard-fails without the wildcard cert.
+task infra:deploy -- --limit '!<nas-host>'
+
+# 2. Pin each distribution target's SSH host key — the containers exist now.
+task certs:show-host-keys
+#    Paste each printed host_key into the matching _acme_certs_targets entry in
+#    ansible/inventories/prod/group_vars/dns.yml. Entries left empty are skipped,
+#    not fatal: that host simply never receives the certificate.
+
+# 3. Issue the wildcard, once, on the primary resolver. acme.sh never issues by
+#    itself; the certificate play prints this command when no cert exists yet.
+#    Read the DNS token on your workstation first — the resolver has no `op`:
+op read "op://<vault>/Cloudflare DNS Token/credential"    # -> CF_Token
+op read "op://<vault>/Cloudflare DNS Token/username"      # -> CF_Account_ID
+
+ssh <admin_user>@dns-01
+sudo -i
+export CF_Token='<credential>' CF_Account_ID='<account id>'
+/root/.acme.sh/acme.sh --issue --dns dns_cf --server letsencrypt \
+  --keylength ec-256 -d '<internal_domain>' -d '*.<internal_domain>'
+
+# 4. Second pass. Installs the cert locally, distributes it to every pinned
+#    target, and lands the storage server.
+task infra:deploy
+```
+
+acme.sh saves those two variables into its own account config, so renewals need
+them only this once. `--server letsencrypt` is passed explicitly so the command
+also works against an acme.sh install this role did not pin; acme.sh 3.x
+otherwise defaults to ZeroSSL, which a Let's-Encrypt-only CAA record refuses.
+
+From then on the acme.sh cron renews and re-pushes on its own, and `task
+infra:deploy` is a single idempotent pass.
 
 If you would rather watch it land in stages the first time, this order respects
 the same dependency:
 
 | Order | Command | What lands |
 |---|---|---|
-| 1 | `task infra:base` | users, SSH hardening, packages, timezone, resolver config |
-| 2 | `task dns:deploy` | filtering resolver + validating recursive resolver, **then ACME issuance and cert distribution**, then the secondary sync |
-| 3 | `task storage:deploy` | NFS-over-TLS, ZFS properties and datasets, exports, Samba, backups, exporters |
-| 4 | `task infra:deploy` | everything else site.yml carries: the SMTP relay, Proxmox host config, firewall, host metrics and log shipping |
-| 5 | `task proxmox:ha` | HA rules, resource pools, replication jobs |
-| 6 | `task infra:verify` | post-deploy verification across all of the above |
+| 1 | `task infra:base -- --limit proxmox` | users, SSH hardening, packages, timezone on the bare-metal hosts — limited to them because no container exists yet |
+| 2 | `task dns:deploy` | provisions the resolver containers, then the validating recursive resolver and the filtering frontend, then acme.sh + the renewal cron + the cert push channel, then the secondary sync |
+| 3 | the certificate step above | pin the host keys, issue the wildcard once, re-run `task dns:deploy` to distribute it |
+| 4 | `task storage:deploy` | NFS-over-TLS, ZFS properties and datasets, exports, Samba, backups, exporters |
+| 5 | `task infra:deploy` | everything else site.yml carries: the SMTP relay, Proxmox host config, firewall, host metrics and log shipping |
+| 6 | `task proxmox:ha` | HA rules, resource pools, replication jobs |
+| 7 | `task infra:verify` | post-deploy verification across all of the above |
 
 Notes on that table, because each one has bitten someone:
 
-- **Certificates are not a separate phase.** The ACME account, DNS-01 issuance
-  and distribution to non-cluster hosts run inside `dns.yml` (and inside
-  `site.yml`), on the DNS hosts. There is no `certs:deploy`.
-- **The SMTP relay lands in step 4, not in a step of its own.** It is
-  provisioned and configured by `site.yml`, which is why step 4 is not optional.
-  `playbooks/mail.yml` exists for redeploying the relay *alone* later (an
-  upstream smarthost, a SASL credential); run it the same way the tasks do —
-  `cd ansible && op run -- ansible-playbook -i inventories/prod/hosts.yml
-  playbooks/mail.yml`. Check `task --list` first in case a wrapper task has been
-  added since.
+- **Certificates are not a separate phase.** The acme.sh install, the renewal
+  cron and distribution to non-cluster hosts all run inside `dns.yml` (and
+  inside `site.yml`), on the DNS hosts. There is no `certs:deploy` — only
+  `task certs:show-host-keys`, which captures the pins those pushes need.
+- **The SMTP relay lands in step 5, not in a step of its own.** It is
+  provisioned and configured by `site.yml`, which is why that step is not
+  optional.
+  `task mail:deploy` exists for redeploying the relay *alone* later (an upstream
+  smarthost, a SASL credential, a Postfix parameter).
 - **Run these through `task`, not bare `ansible-playbook`.** The tasks wrap the
   playbook in `op run --`; the inventory deliberately fails with
   `undef(hint=...)` when the injected values are absent, so a bare invocation
@@ -357,14 +409,97 @@ a zone.
 
 Once the platform is Ready:
 
-1. **Terraform** — apply the external state that could not exist before now:
+1. **Terraform (public DNS)** — apply the external state that could not exist
+   before now. Every module keeps its state in the GitLab HTTP backend, so each
+   one needs `init` before its first plan — `task lint`'s `terraform:validate`
+   inits with `-backend=false` and will not do it for you:
    ```bash
+   task terraform:init     # once per module, per checkout
    task terraform:plan     # review
    task terraform:apply
    ```
-   This creates the public DNS records, and the tailnet policy if you enabled it.
-2. **Router** — forward `443/tcp` to `metallb_public_vip`.
-3. **CI** — register runners, add the CI service-account token as a masked
+   These three tasks are the **zone module only** (`terraform/cloudflare`): the
+   public DNS records.
+2. **Terraform (tailnet)** — only with `vpn_tailscale`. The ACL policy is its
+   own module with its own state, and its apply is supervised — it overwrites
+   the live policy in one shot and a bad one severs tailnet and SSH access to
+   every node. Read `terraform/tailscale/README.md`, then:
+   ```bash
+   task terraform:tailscale-init
+   task terraform:tailscale-plan
+   task terraform:tailscale-apply   # refuses -auto-approve on purpose
+   ```
+   The SSO module (`terraform/authentik`) is the third one; it comes after the
+   identity provider exists, in step 4.
+3. **Router** — forward `443/tcp` to `metallb_public_vip`.
+4. **Single sign-on** — the platform is green but nobody can sign in to
+   anything yet. Grafana ships SSO-only (no login form, no basic auth) and its
+   OIDC endpoints point at `auth.<internal_domain>` — this cluster's own
+   Authentik, which Flux has just deployed with no objects in it. Bring it up
+   before you hand the cluster to anyone.
+
+   **In the Authentik UI** (this part cannot be code: the Terraform module
+   authenticates with a token that only exists once an admin does):
+
+   ```
+   https://auth.<internal_domain>/if/flow/initial-setup/
+   ```
+
+   That flow sets the password for the built-in `akadmin` user and is available
+   **only until an admin exists** — run it the moment the ingress answers, not
+   next week. Then, still in the UI: Directory > Tokens > Create, for `akadmin`,
+   and store the value in the vault as `Authentik Terraform Token` →
+   `credential`.
+
+   **In code**, everything else. `terraform/authentik/sso.tf` already ships the
+   Grafana provider, application, `grafana-users` group and the policy binding
+   that gates it, so the object inventory is one supervised apply:
+
+   ```bash
+   task terraform:authentik-init
+   task terraform:authentik-plan     # review object by object
+   task terraform:authentik-apply    # refuses -auto-approve on purpose
+   ```
+
+   Three things that apply does **not** decide for you:
+
+   - **Admin access.** Grafana maps `grafana-admins` to Admin and
+     `grafana-users` to Viewer, with `ROLE_ATTRIBUTE_STRICT` on: an account in
+     neither group is refused, not defaulted. Add a `"grafana-admins"` entry to
+     the `groups` map in `sso.tf`, put your account in **both** groups (the
+     application's policy binding gates on `grafana-users`), and re-apply. The
+     module manages membership, never users, so the username has to exist in
+     Authentik already — on a fresh install that is `akadmin` and nobody else.
+   - **The client id** is the map key — the literal string `grafana`. The vault
+     item `Grafana SSO` → `oidc-client-id` must be exactly that.
+   - **The client secret** has to match on both sides. Either read it out of
+     Authentik after the apply (Applications > Providers > Grafana) and store it
+     in `Grafana SSO` → `oidc-client-secret`, or keep Terraform authoritative by
+     adding `TF_VAR_oauth2_client_secret_grafana: op://<vault>/Grafana SSO/oidc-client-secret`
+     to the `env:` block of the three `terraform:authentik-*` tasks *before* the
+     apply. `terraform/authentik/README.md` § Adding an application is the
+     pattern to repeat for every app you add.
+
+   Then push the real values into the cluster and sign in:
+
+   ```bash
+   task flux:refresh-secret -- observability/observability-secrets
+   kubectl -n observability rollout restart deploy/kube-prometheus-stack-grafana
+   open https://grafana.<internal_domain>
+   ```
+
+   (Reloader is configured with `ignoreSecrets: true`, so a credential Secret
+   changing is deliberately a manual restart.)
+
+   If the identity provider is ever down, or a group mapping locks everyone out,
+   Grafana's break-glass is a two-line change: set `auth.disable_login_form:
+   false` and `auth.basic.enabled: true` in
+   `kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml`,
+   reconcile, and sign in as `admin` with `Grafana SSO` → `admin-password`.
+   Revert both when the IdP is back —
+   `kubernetes/infrastructure/observability/README.md` explains why the account
+   exists at all.
+5. **CI** — register runners, add the CI service-account token as a masked
    variable, and push a branch to watch the pipeline run. From here changes ship
    as merge requests, not as local `task` invocations. `docs/ci-pipeline.md` in
    the generated repository is the operator-side reference: it covers which jobs
@@ -385,9 +520,9 @@ Once the platform is Ready:
    > ```
    The runners themselves are in-cluster workloads, so this step necessarily
    comes after the platform is up.
-4. **Encryption** — if your pools are encrypted, `task zfs:encrypt` now that
+6. **Encryption** — if your pools are encrypted, `task zfs:encrypt` now that
    1Password Connect answers inside the cluster.
-5. **Backups** — offsite backup ships **disabled**
+7. **Backups** — offsite backup ships **disabled**
    (`restic_offsite_enabled: false`). Turning it on means filling in the repo,
    cache dir and rclone remote in `group_vars/nas.yml`, adding the credentials
    to the vault and the matching `op://` references to the `storage:deploy`
@@ -413,6 +548,8 @@ it.
 | Internal name | `dig +short <anything>.<internal_domain>` | the internal ingress VIP |
 | External name | `dig +short <anything>.<external_domain> @1.1.1.1` | your public address |
 | Ingress serving | `curl -I https://<host>.<internal_domain>` | 200/302 with a valid certificate |
+| SSO answering | `curl -I https://auth.<internal_domain>/if/flow/default-authentication-flow/` | 200 — the identity provider is reachable by name |
+| Signed in | browse `https://grafana.<internal_domain>` | redirected to Authentik, back to Grafana, and your account has the role its group grants |
 
 ---
 
@@ -429,6 +566,9 @@ it.
 | `LoadBalancer` stuck `<pending>` | the MetalLB pool does not contain the VIP, or the pool is not reconciled yet |
 | `ExternalSecret` `SecretSyncError` | the item or field name in the vault does not match the manifest |
 | `Certificate` stuck | DNS-01 propagation, or a token scoped to the wrong zone |
+| Cert push fails with a host-key error | the target was rebuilt, or its pin is still empty — `task certs:show-host-keys`, paste into `_acme_certs_targets`, re-run `task dns:deploy` |
+| `nfs_tls` on the NAS: cert/key missing | the wildcard has not been issued or has not reached that host — § 4's certificate step |
+| Grafana redirects to a login you cannot pass | the OIDC objects, the groups or the client secret — § 7 step 4; the break-glass admin is in the same step |
 | Literal `${cluster_...}` in a live object | the ConfigMap is missing a key, or the Kustomization does not substitute from it |
 
 Day-two operations, upgrades and incident procedures continue in

@@ -115,45 +115,54 @@ spec:
       ingress:
         enabled: false
 
+      # The built-in admin account EXISTS but authenticates nothing while the
+      # two switches below are set — see the break-glass note there. Its
+      # password is an ESO-managed random value, never the chart default
+      # (`prom-operator`, which is public knowledge).
+      admin:
+        existingSecret: observability-secrets
+        userKey: grafana-admin-user
+        passwordKey: grafana-admin-password
+
       grafana.ini:
         server:
           root_url: https://grafana.${cluster_internal_domain}
 
-        # SSO-ONLY, AND THAT MEANS ALL THREE OF THE SETTINGS BELOW. The chart
-        # ships a built-in `admin` account whose password is a WELL-KNOWN
-        # CHART DEFAULT (`prom-operator`), and that account is a Grafana Admin:
-        # it can read every datasource, run arbitrary queries against Prometheus
-        # and Loki, edit dashboards and mint API tokens.
+        # SSO-ONLY, AND THAT MEANS BOTH OF THE SETTINGS BELOW. The chart's
+        # built-in `admin` account is a Grafana Admin: it can read every
+        # datasource, run arbitrary queries against Prometheus and Loki, edit
+        # dashboards and mint API tokens.
         #
         #   disable_login_form            removes the browser login form, but
         #                                 ONLY the browser form — it does not
         #                                 close the HTTP path.
         #   auth.basic.enabled=false      closes that path. Without it, anyone
         #                                 who can reach the ingress can still
-        #                                 `curl -u admin:prom-operator .../api/...`
-        #                                 and get full Admin.
-        #   disable_initial_admin_creation removes the account itself, so the
-        #                                 chart's password authenticates nothing
-        #                                 even if basic auth is re-enabled later.
+        #                                 `curl -u admin:<password> .../api/...`.
         #
         # Authorization then comes entirely from the OIDC role mapping below:
         # the first member of the admin group to sign in becomes a Grafana
-        # Admin. Running WITHOUT an identity provider means deleting all three
-        # of these AND the OIDC block, and setting a real admin password
-        # (`grafana.admin.existingSecret` pointed at an ESO-managed Secret) —
-        # never leaving the chart default in place.
+        # Admin. Running WITHOUT an identity provider means deleting both of
+        # these AND the OIDC block, which leaves the admin account above as the
+        # only way in — it is already password-protected from the vault.
         #
-        # BREAK-GLASS (identity provider down, nobody can sign in): temporarily
-        # set disable_login_form: false, auth.basic.enabled: true and
-        # disable_initial_admin_creation: false, wire
-        # `grafana.admin.existingSecret` to a Secret you control, reconcile, fix
-        # the IdP, then revert. Do not leave that state committed.
+        # security.disable_initial_admin_creation is deliberately NOT set.
+        # Grafana only ever creates the built-in admin when the user table is
+        # EMPTY, so suppressing it means the account can never be created again:
+        # after the first OIDC login the table is non-empty, and flipping the
+        # setting back re-opens the login form against a database with no admin
+        # in it (`grafana cli admin reset-admin-password` then fails with
+        # "Could not find user named admin"). The only way back in would be
+        # hand-editing grafana.db on the PV.
+        #
+        # BREAK-GLASS (identity provider down, nobody can sign in): set
+        # disable_login_form: false and auth.basic.enabled: true, reconcile, and
+        # sign in as `admin` with the vault's grafana-admin-password. Fix the
+        # IdP, then revert both. Do not leave that state committed.
         auth:
           disable_login_form: true
         auth.basic:
           enabled: false
-        security:
-          disable_initial_admin_creation: true
 
         analytics:
           check_for_updates: false

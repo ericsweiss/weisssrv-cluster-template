@@ -1,6 +1,10 @@
 ---
 # Capture the SSH host key of every certificate-distribution target and print it
-# in a paste-ready form for acme_certs_distribution_targets.
+# in a paste-ready form for _acme_certs_targets (group_vars/dns.yml).
+#
+# It scans _acme_certs_targets — the FULL list — not the filtered
+# acme_certs_distribution_targets the role consumes: an unpinned target is
+# exactly the one whose key you are here to capture.
 #
 # The cert push uses StrictHostKeyChecking=yes against a pinned key, so a
 # rebuilt target fails the push loudly until you re-capture it here.
@@ -13,7 +17,7 @@
     - name: Capture each target's ed25519 host key
       ansible.builtin.command:
         cmd: "ssh-keyscan -t ed25519 -T 5 -p {{ item.ssh_port | default(22) }} {{ item.ip }}"
-      loop: "{{ acme_certs_distribution_targets }}"
+      loop: "{{ _acme_certs_targets }}"
       loop_control:
         label: "{{ item.host }} ({{ item.ip }}:{{ item.ssh_port | default(22) }})"
       register: ssh_keyscans
@@ -25,8 +29,10 @@
     - name: Render paste-ready host_key values
       ansible.builtin.debug:
         msg: |
-          Paste each host_key into the matching acme_certs_distribution_targets
-          entry in group_vars/dns.yml, replacing the empty placeholder.
+          Paste each host_key into the matching _acme_certs_targets entry in
+          group_vars/dns.yml, replacing the empty placeholder, then re-run
+          `task dns:deploy`. NOT_AVAILABLE means the target did not answer —
+          usually because it has not been provisioned yet.
 
           {% for r in ssh_keyscans.results %}
           {% set key_line = (r.stdout_lines | default([])) | reject('match', '^#') | first | default('') %}

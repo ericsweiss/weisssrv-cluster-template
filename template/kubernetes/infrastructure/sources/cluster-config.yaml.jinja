@@ -126,8 +126,11 @@ data:
 {%- endif %}
 
   cluster_git_host: "{{ git_host }}"
-  # Prefix every alert's runbook_url gets.
-  cluster_runbook_base_url: "https://{{ git_host }}/{{ git_namespace }}/{{ git_repo | default(cluster_name) }}/-/blob/main/docs"
+  # Prefix every alert's runbook_url gets. The repository is named cluster_name
+  # (see copier.yml's git_namespace help) — the same composition the Taskfile's
+  # flux bootstrap target and Terraform state project use, so a 3am alert link
+  # and the repo Flux actually reconciles from can never drift apart.
+  cluster_runbook_base_url: "https://{{ git_host }}/{{ git_namespace }}/{{ cluster_name }}/-/blob/main/docs"
 
   # Host-side services the platform talks to. These three come from the copier
   # ANSWERS (nas_host, smtp_host, upstream_dns_servers), and the Ansible

@@ -303,8 +303,10 @@ broken.
 
 Renewed host-side certificates are distributed over SSH with a pinned host key;
 a distribution failure after a rebuild usually means the pinned key is stale —
-`task certs:show-host-keys` prints the current ones to paste back into the
-inventory.
+`task certs:show-host-keys` prints the current ones to paste back into
+`_acme_certs_targets` in `group_vars/dns.yml`. A target whose pin is **empty**
+is filtered out of the push entirely rather than failing it, so it silently
+holds an old certificate until you notice; `task infra:verify` is what names it.
 
 The NAS depends on this: `nfs_tls` refuses to publish a require-TLS export
 without the wildcard certificate and key in place, so a certificate failure
@@ -325,6 +327,14 @@ helm history <release> -n <ns>                 # while suspended, if you must
 Suspend from leaf to root so no stage reconciles into a half-suspended state.
 Anything you do by hand while suspended is undone by the resume unless you have
 also changed git — which is the point.
+
+**Locked out of Grafana** (the identity provider is down, or a group mapping in
+it went wrong). Grafana keeps a built-in `admin` whose password is the vault's
+`Grafana SSO` → `admin-password`, but both doors to it are closed. Open one:
+set `auth.disable_login_form: false` and `auth.basic.enabled: true` in
+`kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml`,
+reconcile, sign in, fix the provider, then revert both. Do not leave that state
+committed.
 
 ---
 

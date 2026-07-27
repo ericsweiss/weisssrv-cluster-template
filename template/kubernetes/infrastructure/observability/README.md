@@ -34,7 +34,7 @@ here is a regression — put it in `cluster-config` instead.
 | `cluster_node_exporter_host_addresses` | `'[{"ip": "10.0.0.11"}, …]'` | `exporters/node-exporter-host.yaml` `Endpoints` roster — also a flow sequence |
 | `cluster_offsite_backup_probe_metric` | `up` | gates `OffsiteBackupStale`'s `absent()` arm — see `platform.backups` |
 | `cluster_runbook_base_url` | `https://git.example.com/ops/cluster/-/blob/main/docs` | every alert's `runbook_url` (see below) |
-| `cluster_node_exporter_job_regex` | `node-exporter` | node/storage alert job scoping — see below |
+| `cluster_node_exporter_job_regex` | `node-exporter\|node-exporter-host` | node/storage alert job scoping — see below |
 
 ### `cluster-versions` keys this directory consumes
 
@@ -133,26 +133,41 @@ Admin — it can query every datasource, edit dashboards and mint API tokens.
 Disabling the login form alone does not close it: the form is a browser affordance,
 while HTTP basic auth against `/api/...` is a separate path that keeps working.
 
-The release values therefore set all three of:
+The release values therefore set both of:
 
 | Setting | Closes |
 |---|---|
 | `auth.disable_login_form: true` | the browser login form |
-| `auth.basic.enabled: false` | `curl -u admin:prom-operator .../api/...` |
-| `security.disable_initial_admin_creation: true` | the account itself, so the default password authenticates nothing |
+| `auth.basic.enabled: false` | `curl -u admin:<password> .../api/...` |
+
+and replace the chart's well-known default password
+(`prom-operator`) with an ESO-managed one:
+`grafana.admin.existingSecret: observability-secrets`, reading
+`grafana-admin-user` / `grafana-admin-password`. The account therefore *exists*
+but authenticates through no open path.
+
+`security.disable_initial_admin_creation` is deliberately **not** set, even
+though it looks like the strictest option. Grafana creates the built-in admin
+only while the user table is empty, so suppressing it means the account can
+never be created at all: after the first OIDC login the table is non-empty, and
+flipping the setting back later re-opens the login form against a database that
+contains no admin. `grafana cli admin reset-admin-password` fails the same way
+("Could not find user named admin"), leaving hand-editing `grafana.db` on the PV
+as the only way back in. A password-protected account behind two closed doors is
+the safer trade.
 
 Authorization then comes entirely from the OIDC role mapping
 (`GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH`): the first member of the admin
 group to sign in becomes a Grafana Admin. Two consequences:
 
-- **Running without an identity provider** means deleting all three settings
-  *and* the OIDC block — and then setting a real admin password through
-  `grafana.admin.existingSecret` pointed at an ESO-managed Secret. Leaving the
-  chart default in place is the failure this section exists to prevent.
-- **Break-glass** (the IdP is down and nobody can sign in): temporarily flip the
-  three settings back, wire `grafana.admin.existingSecret` to a Secret you
-  control, reconcile, fix the IdP, then revert. Do not leave that state
-  committed.
+- **Running without an identity provider** means deleting both settings *and*
+  the OIDC block. The vault-backed admin account is then the only way in, which
+  is why it is wired up from the start.
+- **Break-glass** (the IdP is down, or a group-mapping mistake in the IdP locks
+  everyone out): set `auth.disable_login_form: false` and
+  `auth.basic.enabled: true`, reconcile, and sign in as `admin` with the vault's
+  `Grafana SSO` → `admin-password`. Fix the IdP, then revert both. Do not leave
+  that state committed.
 
 Closing the basic-auth path is also why both Grafana sidecars run with
 `skipReload: true` — their default behaviour is to POST Grafana's
