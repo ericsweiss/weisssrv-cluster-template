@@ -168,6 +168,22 @@ tasks:
     cmds:
       - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/dns.yml {{.CLI_ARGS}}
 
+  mail:deploy:
+    desc: Deploy the SMTP relay
+    dir: "{{.ANSIBLE_DIR}}"
+    env:
+      ROOT_EMAIL_ALIAS: op://{{.OP_VAULT}}/Email Config/root_alias
+      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
+      SMTP_RELAY_USER: op://{{.OP_VAULT}}/SMTP Relay Auth/username
+      SMTP_RELAY_PASSWORD: op://{{.OP_VAULT}}/SMTP Relay Auth/password
+      SMTP_UPSTREAM_USER: op://{{.OP_VAULT}}/SMTP Smarthost/username
+      SMTP_UPSTREAM_PASSWORD: op://{{.OP_VAULT}}/SMTP Smarthost/password
+      LOKI_PUSH_USER: op://{{.OP_VAULT}}/Loki Push Auth/username
+      LOKI_PUSH_PASSWORD: op://{{.OP_VAULT}}/Loki Push Auth/password
+    preconditions: *op_preconditions
+    cmds:
+      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/mail.yml {{.CLI_ARGS}}
+
   storage:deploy:
     desc: Deploy the NAS storage configuration (ZFS properties, NFS, SMB)
     dir: "{{.ANSIBLE_DIR}}"

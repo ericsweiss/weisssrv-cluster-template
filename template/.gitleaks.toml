@@ -1,0 +1,57 @@
+# gitleaks allowlist shared across weisssrv-family repos.
+#
+# Consumed by GitLab's secret_detection job (which uses gitleaks under the hood)
+# via the passthrough in secret-detection-ruleset.toml. Copy BOTH files into a
+# consumer repo (gitleaks.toml at the repo root, the ruleset at
+# .gitlab/secret-detection-ruleset.toml) — GitLab loads the ruleset from that
+# fixed path and the passthrough points it at .gitleaks.toml.
+#
+# Scope of exclusions:
+#   - docs are scanned normally — the `regexes` content allowlist below covers
+#     the placeholder shapes docs use (1Password op:// refs, `[your-...]`
+#     placeholders), so a real secret committed under docs/ is still caught.
+#
+# `useDefault = true` is REQUIRED — without it gitleaks loads only the rules
+# defined in this file (which has none), disabling all detection.
+
+title = "weisssrv-family allowlist"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "weisssrv-family false positives"
+regexes = [
+  # 1Password reference URIs — not secrets, just pointers to vault items.
+  '''op://[A-Za-z0-9_ /-]+''',
+  # Documentation placeholders like [your-cloudflare-api-token].
+  '''\[your-[a-z0-9-]+\]''',
+  # Test/fixture tokens — anchored at start of token so a real secret prefixed
+  # with "prodtestkey_…" or similar can't be silenced.
+  '''^(test|fake|dummy|example)[-_]?(password|token|key|secret)[A-Za-z0-9_-]*''',
+  # Published supply-chain pins the CI templates verify downloaded key material
+  # against (1Password's apt GPG fingerprint and its apk public key's sha256).
+  # Both are public by construction but trip gitleaks' generic-api-key entropy
+  # rule. Listed as exact values, so rotating a pinned key forces this allowlist
+  # to be reviewed alongside it rather than silently covering the new material.
+  '''^3FEF9748469ADBE15DA7CA80AC2D62742012EA22$''',
+  '''^0e88171d9f8b7630763f70cbf69f2a01b4ba8ea1d8e79487f59c162db255eb84$''',
+  # Molecule fixture key material, synthetic by construction. Matched by CONTENT
+  # (anchored on each fixture's own distinctive body), not by path: the two files
+  # stay in scope, so a real secret added to either is still caught. The
+  # acme_certs scenario's throwaway OpenSSH key — gitleaks reports it twice, raw
+  # and with its base64 partially decoded, hence the loose middle.
+  '''(?s)^-----BEGIN OPENSSH PRIVATE KEY-----\s+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\s.*bmx5LWRvbnQtdXNlAAAAC3Rlc3RAbW9sZWN1bGUBAgMEBQ==\s+-----END OPENSSH PRIVATE KEY-----$''',
+  # The nfs_tls prepare stub, which says what it is in its own PEM body.
+  '''(?s)^-----BEGIN PRIVATE KEY-----\s+synthetic-test-fixture-not-a-real-key\s+-----END PRIVATE KEY-----$''',
+]
+
+paths = [
+  # Generated cluster snapshots (gitignored, but never trip on a stray copy).
+  '''CLUSTER_STATUS\.txt''',
+  '''cluster-state-.*\.txt''',
+  # Vendored galaxy dependency collections (gitignored; installed into the
+  # tree by the ansible-lint flow) — third-party test fixtures are full of
+  # dummy keys and are not ours to scan.
+  '''\.ansible-home/''',
+]

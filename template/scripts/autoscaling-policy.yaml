@@ -1,0 +1,22 @@
+---
+# Policy data for scripts/check-hpa-vpa-invariant.py (--policy-config) and, for
+# the shared CPU-limit allowlist, scripts/validate-helm-values.py. Both run in
+# the CI flux-lint job's extra_validation and in `task lint:autoscaling`.
+#
+# chart_native_hpa_targets: workloads whose HPA lives INSIDE a HelmRelease and
+# is therefore absent from the kustomize corpus the invariant check reads. Each
+# one must have a mutating (Auto/Initial) VPA that excludes cpu, which
+# --require-chart-native-vpas asserts. Keep this list in step with the
+# HelmReleases that enable chart autoscaling: enabling `autoscaling` on a chart
+# without adding its entry here means the pairing is never checked.
+chart_native_hpa_targets:
+  - namespace: traefik
+    kind: Deployment
+    name: traefik
+    source: traefik chart autoscaling.enabled
+
+# cpu_limit_allowlist: "namespace/Kind/name" workloads intentionally permitted a
+# CPU limit. CPU is compressible, so a limit only buys CFS throttling — it hurts
+# latency and inflates the CPU% a CPU-based HPA reads. Empty by design; add an
+# entry only with an inline rationale.
+cpu_limit_allowlist: []

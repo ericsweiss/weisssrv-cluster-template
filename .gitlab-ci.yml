@@ -11,8 +11,6 @@
 #
 # Every job is TAG-LESS and non-root safe (pip --user, workspace-local tool
 # downloads), so they land on the shared runner.
-#
-# TODO: pin every `ref:` to v0.2.0 once weisssrv-lib cuts the tag.
 stages:
   - lint
   - test
@@ -41,7 +39,7 @@ include:
   # Jinja sources, not documents. The render-validate job below yamllints the
   # rendered tree, which is where template/ actually gets covered.
   - project: eric/weisssrv-lib
-    ref: feat/v0.2.0-building-blocks
+    ref: v0.2.0
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: []
@@ -55,7 +53,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: feat/v0.2.0-building-blocks
+    ref: v0.2.0
     file: /ci/lint/python-lint.yml
     inputs:
       tags: []
@@ -72,7 +70,7 @@ include:
   # The shell the template ships is static (no .jinja suffix), so it can be
   # checked in place rather than only after a render.
   - project: eric/weisssrv-lib
-    ref: feat/v0.2.0-building-blocks
+    ref: v0.2.0
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: []
@@ -85,7 +83,7 @@ include:
   # copier.yml schema checks + the full render invariants. Everything in the
   # repository feeds the render, hence the catch-all `changes`.
   - project: eric/weisssrv-lib
-    ref: feat/v0.2.0-building-blocks
+    ref: v0.2.0
     file: /ci/test/python-tests.yml
     inputs:
       tags: []
@@ -97,13 +95,13 @@ include:
         - "**/*"
 
   - project: eric/weisssrv-lib
-    ref: feat/v0.2.0-building-blocks
+    ref: v0.2.0
     file: /ci/security/secret-detection.yml
     inputs:
       tags: []
 
   - project: eric/weisssrv-lib
-    ref: feat/v0.2.0-building-blocks
+    ref: v0.2.0
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []

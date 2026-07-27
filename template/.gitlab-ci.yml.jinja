@@ -4,7 +4,6 @@
 {%- set cpu_selector = ci_cpu_selector | default(internal_domain ~ '/cpu=modern') -%}
 {%- set cluster_dir = 'kubernetes/clusters/' ~ cluster_name -%}
 {%- set versions_cm = 'kubernetes/infrastructure/sources/versions-configmap.yaml' -%}
-{%- set config_cm = 'kubernetes/infrastructure/sources/cluster-config.yaml' -%}
 ---
 # CI for the {{ cluster_name }} cluster. Generic lint / validate / security /
 # review jobs are pulled from {{ lib_project }} at a pinned ref; only the deploy
@@ -128,9 +127,19 @@ include:
         - ".gitlab-ci.yml"
 
   # Substitute mode mirrors what kustomize-controller does at reconcile time:
-  # both postBuild ConfigMaps are exported, every ${placeholder} in a rendered
-  # Kustomization must resolve to one of their keys, and the result is
-  # kubeconform'd. versions_configmap takes BOTH files (see scripts/flux-render.sh).
+  # every ${placeholder} in a rendered Kustomization must resolve to a postBuild
+  # ConfigMap key, and the result is kubeconform'd.
+  #
+  # flux_render_script is scripts/flux-env.sh, NOT the vendored flux-render.sh:
+  # this cluster substitutes from TWO ConfigMaps (cluster-versions for pins,
+  # cluster-config for domains/VIPs/CIDRs) while the library helper takes one
+  # file per call, and flux-env.sh is the wrapper that adds the second. Passing
+  # the vendored copy directly would forfeit every cluster_* key — and `task
+  # flux:lint` calls flux-env.sh too, so both see identical variables.
+  #
+  # extra_validation is the parity the library documents: the kustomize corpus
+  # never renders a chart, so `.spec.values` is otherwise unvalidated, and an
+  # HPA/VPA pair fighting over the same workload has no other gate.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/validate/flux-lint.yml
@@ -138,14 +147,35 @@ include:
       tags: ["{{ runner_tag }}"]
       substitute: true
       cluster_dir: "{{ cluster_dir }}"
-      versions_configmap: "{{ versions_cm }} {{ config_cm }}"
-      flux_render_script: "scripts/flux-render.sh"
+      versions_configmap: "{{ versions_cm }}"
+      flux_render_script: "scripts/flux-env.sh"
       skipped_script: "scripts/kubeconform-skipped.py"
+      extra_validation: 'echo "=== Checking HPA/VPA invariant ==="; python3 scripts/check-hpa-vpa-invariant.py --require-chart-native-vpas --policy-config scripts/autoscaling-policy.yaml < "$RENDER_ALL" || FAILED=1; echo "=== Schema-validating HelmRelease values blocks (helm template) ==="; MERGED_CM=$(mktemp /tmp/merged-cm-XXXXXX.yaml); scripts/flux-env.sh merged-configmap "{{ versions_cm }}" > "$MERGED_CM" && python3 scripts/validate-helm-values.py --kubeconform --releases scripts/helm-values-releases.yaml --versions-configmap "$MERGED_CM" --policy-config scripts/autoscaling-policy.yaml || FAILED=1; rm -f "$MERGED_CM"'
       changes:
         - "kubernetes/**/*"
         - "ansible/inventories/prod/group_vars/all.yml"
         - ".gitlab-ci.yml"
 
+  # Doc-link rot: the checker is vendored (scripts/check-doc-links.py) and
+  # `task lint:doc-links` runs it locally; this is the gate that makes it
+  # mandatory rather than a habit.
+  - project: {{ lib_project }}
+    ref: {{ lib_ref }}
+    file: /ci/lint/docs-link-check.yml
+    inputs:
+      tags: ["{{ runner_tag }}"]
+      changes:
+        - "docs/**/*"
+        - "README.md"
+        - "**/README.md"
+        - "scripts/check-doc-links.py"
+        - ".gitlab-ci.yml"
+
+  # Findings BLOCK (the library's v0.2.0 default). The paired allowlists ship
+  # with the repo — .gitleaks.toml and .gitlab/secret-detection-ruleset.toml —
+  # so the `op://` references and the published supply-chain sha256 pins this
+  # tree is full of do not fail the job. Amend .gitleaks.toml (with a rationale)
+  # rather than disabling the gate.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/security/secret-detection.yml
@@ -177,27 +207,32 @@ include:
   # and needs $VERSION_BUMP_BOT_TOKEN — see docs/ci-pipeline.md for both.
   #
   # check_command is the non-interactive twin of `task maintenance:update-all-versions`
-  # (check-versions is not vendored; it is run from the pinned library checkout,
-  # exactly as the Taskfile does). Keep the two in step — including
-  # --nested-key, without which every helm_chart_versions_* key vanishes from
-  # the regenerated ConfigMap. check-versions exits 1 when updates exist, which
-  # would kill the job before the bot ever runs.
+  # and runs the VENDORED scripts/check-versions.py, exactly as the Taskfile
+  # does: the checker resolves its registry relative to its own parent's parent,
+  # so a copy run out of a library checkout looks for the registry inside that
+  # checkout and finds nothing. Keep the two in step — including --nested-key,
+  # without which every helm_chart_versions_* key vanishes from the regenerated
+  # ConfigMap.
+  #
+  # Exit-code handling mirrors the Taskfile rather than `|| true`: rc 1 is
+  # "updates available" (information, and the whole point of the run) while rc 2
+  # is a real failure that must turn the job red — a blanket `|| true` would
+  # keep the weekly job green while it checked nothing.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/maintenance/version-bump-bot.yml
     inputs:
       tags: ["{{ runner_tag }}"]
-      setup_command: >-
-        pip install --user --quiet pyyaml==$PYYAML_VERSION &&
-        git clone --depth 1 --branch {{ lib_ref }} {{ lib_url_ }} .weisssrv-lib
+      setup_command: "pip install --user --quiet pyyaml==$PYYAML_VERSION"
       check_command: >-
-        python3 .weisssrv-lib/scripts/check-versions.py --json > version-report.json || true;
-        python3 .weisssrv-lib/scripts/check-versions.py --update-all || true;
+        python3 scripts/check-versions.py --json > version-report.json ||
+        { RC=$?; [ "$RC" -le 1 ] || exit "$RC"; };
+        python3 scripts/check-versions.py --update-all || exit $?;
         python3 scripts/generate-versions-configmap.py
         --vars-file ansible/inventories/prod/group_vars/all.yml
         --output {{ versions_cm }}
         --nested-key helm_chart_versions
-        --regen-command "task flux:sync-versions"
+        --regen-command "task flux:sync-versions" || exit $?
       paths: "ansible/inventories/prod/group_vars/all.yml kubernetes/"
       report_path: "version-report.json"
       title: "chore(deps): {{ cluster_name }} version bumps"
@@ -228,12 +263,49 @@ include:
       state_name: "{{ dns_backend }}"
 
 # ==============================================================================
+# Local jobs
+# ==============================================================================
+
+# The `changes:` list on a deploy job is a contract, and nothing else enforces
+# it: a playbook or inventory path that no deploy job lists goes green on every
+# MR while never actually deploying. This fails the MR that introduces the gap,
+# and takes `scripts/deploy-coverage.conf` as the acknowledged-manual list
+# (every entry there needs an inline rationale).
+deploy-coverage:
+  stage: lint
+  # The FULL python image: the checker shells out to git, which python:*-slim
+  # does not ship.
+  image: python:3.13
+  tags: ["{{ runner_tag }}"]
+  needs: []
+  variables:
+    # The MR base commit must be in the local history for the diff to resolve.
+    GIT_DEPTH: "0"
+  script:
+    - pip install --user --quiet "pyyaml==$PYYAML_VERSION"
+    - bash scripts/check-deploy-coverage.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - "ansible/**/*"
+        - "scripts/deploy-coverage.conf"
+        - ".gitlab-ci.yml"
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# ==============================================================================
 # Deploy — starter set. One job per playbook, gated to main + a changes list, so
 # a merge deploys exactly what it touched. Adding a playbook means adding a job:
 # the pattern is documented in docs/ci-pipeline.md.
 # ==============================================================================
 .deploy-base:
   extends: [.install-1password, .dep-cache]
+  # The SAME tag every included job carries. An untagged job goes to whichever
+  # runner accepts untagged work — the shared, non-root, LAN-blocked one — where
+  # .install-1password's apt-get and the SSH reach to the hosts both fail. A
+  # deploy needs the privileged runner registered with this tag.
+  tags: ["{{ runner_tag }}"]
   # Deploys touch live infrastructure: never cancel one because a new pipeline
   # started. Runner-pod casualties are environmental and the playbooks are
   # idempotent, so retry those rather than failing the chain.
@@ -268,6 +340,12 @@ include:
 # run` resolves EVERY op:// reference in the environment, so a job must declare
 # what its playbook needs and nothing more (an item the vault lacks is a hard
 # failure, not an unused variable).
+# Runs site.yml, the full host stack — the CI twin of `task infra:deploy`. It
+# has to: its trigger list includes the whole inventory and the roles site.yml
+# adds on top of base.yml (Proxmox host config, certs, firewall, host metrics
+# and log shipping), and a job that ran only base.yml would report a green
+# deploy for changes it never applied. The three group jobs below are the fast
+# path for a change scoped to one group.
 deploy-ansible-base:
   stage: deploy
   extends: .deploy-base
@@ -275,9 +353,22 @@ deploy-ansible-base:
   variables:
     ROOT_EMAIL_ALIAS: "op://{{ onepassword_vault }}/Email Config/root_alias"
     SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
+    SMTP_RELAY_USER: "op://{{ onepassword_vault }}/SMTP Relay Auth/username"
+    SMTP_RELAY_PASSWORD: "op://{{ onepassword_vault }}/SMTP Relay Auth/password"
+    SMTP_UPSTREAM_USER: "op://{{ onepassword_vault }}/SMTP Smarthost/username"
+    SMTP_UPSTREAM_PASSWORD: "op://{{ onepassword_vault }}/SMTP Smarthost/password"
+    ADGUARD_ADMIN_PASSWORD: "op://{{ onepassword_vault }}/AdGuard Home/password"
+    SAMBA_NAS_PASSWORD: "op://{{ onepassword_vault }}/Samba NAS User/password"
+    ACME_SSH_PRIVATE_KEY: "op://{{ onepassword_vault }}/Cert Distribution Key/private key"
+    ACME_SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/Cert Distribution Key/public key"
+    LOKI_PUSH_USER: "op://{{ onepassword_vault }}/Loki Push Auth/username"
+    LOKI_PUSH_PASSWORD: "op://{{ onepassword_vault }}/Loki Push Auth/password"
+{%- if vpn_tailscale %}
+    TAILSCALE_AUTH_KEY: "op://{{ onepassword_vault }}/Tailscale Auth Key/credential"
+{%- endif %}
   script:
     - cd ansible
-    - op run -- ansible-playbook -i inventories/prod playbooks/base.yml
+    - op run -- ansible-playbook -i inventories/prod playbooks/site.yml
   environment:
     name: production/ansible-base
   rules:
@@ -285,10 +376,105 @@ deploy-ansible-base:
       when: never
     - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
       changes:
-        - "ansible/inventories/**/*"
+        # Cluster-wide inventory. The per-group group_vars files belong to the
+        # group jobs below, so a DNS-only edit does not re-run every host.
+        - "ansible/inventories/prod/hosts.yml"
+        - "ansible/inventories/prod/group_vars/all.yml"
+        - "ansible/inventories/prod/group_vars/proxmox.yml"
+        - "ansible/inventories/prod/host_vars/**/*"
         - "ansible/playbooks/base.yml"
         - "ansible/playbooks/site.yml"
         - "ansible/requirements.yml"
+
+# The DNS stack alone — the CI twin of `task dns:deploy`. dns.yml runs one
+# resolver at a time, so a bad change never takes both down at once.
+deploy-ansible-dns:
+  stage: deploy
+  extends: .deploy-base
+  resource_group: deploy-ansible-dns
+  needs:
+    - job: deploy-ansible-base
+      optional: true
+  variables:
+    ROOT_EMAIL_ALIAS: "op://{{ onepassword_vault }}/Email Config/root_alias"
+    SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
+    SMTP_RELAY_USER: "op://{{ onepassword_vault }}/SMTP Relay Auth/username"
+    SMTP_RELAY_PASSWORD: "op://{{ onepassword_vault }}/SMTP Relay Auth/password"
+    ADGUARD_ADMIN_PASSWORD: "op://{{ onepassword_vault }}/AdGuard Home/password"
+    ACME_SSH_PRIVATE_KEY: "op://{{ onepassword_vault }}/Cert Distribution Key/private key"
+    ACME_SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/Cert Distribution Key/public key"
+    LOKI_PUSH_USER: "op://{{ onepassword_vault }}/Loki Push Auth/username"
+    LOKI_PUSH_PASSWORD: "op://{{ onepassword_vault }}/Loki Push Auth/password"
+  script:
+    - cd ansible
+    - op run -- ansible-playbook -i inventories/prod playbooks/dns.yml
+  environment:
+    name: production/ansible-dns
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+      changes:
+        - "ansible/inventories/prod/group_vars/dns.yml"
+        - "ansible/playbooks/dns.yml"
+
+# The NAS alone — the CI twin of `task storage:deploy`. Add the restic
+# references here too when you enable the offsite backup role.
+deploy-ansible-storage:
+  stage: deploy
+  extends: .deploy-base
+  resource_group: deploy-ansible-storage
+  needs:
+    - job: deploy-ansible-base
+      optional: true
+  variables:
+    SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
+    SAMBA_NAS_PASSWORD: "op://{{ onepassword_vault }}/Samba NAS User/password"
+    LOKI_PUSH_USER: "op://{{ onepassword_vault }}/Loki Push Auth/username"
+    LOKI_PUSH_PASSWORD: "op://{{ onepassword_vault }}/Loki Push Auth/password"
+  script:
+    - cd ansible
+    - op run -- ansible-playbook -i inventories/prod playbooks/storage.yml
+  environment:
+    name: production/ansible-storage
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+      changes:
+        - "ansible/inventories/prod/group_vars/nas.yml"
+        - "ansible/playbooks/storage.yml"
+
+# The SMTP relay alone. Every host's null client submits through it, so a relay
+# change is worth deploying without re-running the whole stack.
+deploy-ansible-mail:
+  stage: deploy
+  extends: .deploy-base
+  resource_group: deploy-ansible-mail
+  needs:
+    - job: deploy-ansible-base
+      optional: true
+  variables:
+    ROOT_EMAIL_ALIAS: "op://{{ onepassword_vault }}/Email Config/root_alias"
+    SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
+    SMTP_RELAY_USER: "op://{{ onepassword_vault }}/SMTP Relay Auth/username"
+    SMTP_RELAY_PASSWORD: "op://{{ onepassword_vault }}/SMTP Relay Auth/password"
+    SMTP_UPSTREAM_USER: "op://{{ onepassword_vault }}/SMTP Smarthost/username"
+    SMTP_UPSTREAM_PASSWORD: "op://{{ onepassword_vault }}/SMTP Smarthost/password"
+    LOKI_PUSH_USER: "op://{{ onepassword_vault }}/Loki Push Auth/username"
+    LOKI_PUSH_PASSWORD: "op://{{ onepassword_vault }}/Loki Push Auth/password"
+  script:
+    - cd ansible
+    - op run -- ansible-playbook -i inventories/prod playbooks/mail.yml
+  environment:
+    name: production/ansible-mail
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+      changes:
+        - "ansible/inventories/prod/group_vars/mail.yml"
+        - "ansible/playbooks/mail.yml"
 
 # Manual: a k3s change can restart the control plane, so an operator triggers it
 # after reading the diff.
@@ -316,7 +502,9 @@ deploy-ansible-k3s:
       when: never
     - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
       changes:
-        - "ansible/inventories/**/*"
+        - "ansible/inventories/prod/hosts.yml"
+        - "ansible/inventories/prod/group_vars/all.yml"
+        - "ansible/inventories/prod/group_vars/k3s.yml"
         - "ansible/playbooks/k3s.yml"
         - "ansible/playbooks/k3s-provision-vms.yml"
       when: manual
@@ -325,6 +513,9 @@ deploy-ansible-k3s:
 deploy-terraform:
   stage: deploy
   extends: .terraform-http-backend
+  # Same reasoning as .deploy-base: .install-1password-alpine installs a package
+  # and this job holds a live API token, so it belongs on the privileged runner.
+  tags: ["{{ runner_tag }}"]
   interruptible: false
   image:
     name: hashicorp/terraform:1.15

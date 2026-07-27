@@ -63,13 +63,55 @@ cmd_k8s_version() {
     "$RENDER" k8s-version "$1"
 }
 
+# Print ONE ConfigMap whose .data is the union of every input file's, for the
+# tools that accept a single --versions-configmap (validate-helm-values.py).
+# Same file list and precedence as export-versions, so the merged document and
+# the exported environment can never disagree.
+cmd_merged_configmap() {
+    [ -n "${1:-}" ] || die "usage: $0 merged-configmap <configmap> [configmap ...]"
+
+    local files="" seen=" "
+    # shellcheck disable=SC2048,SC2086  # both lists are deliberately word-split
+    for cm in $* $FLUX_EXTRA_CONFIGMAPS; do
+        case "$seen" in *" $cm "*) continue ;; esac
+        seen="$seen$cm "
+        [ -f "$cm" ] || die "ConfigMap not found: $cm"
+        files="$files $cm"
+    done
+    # shellcheck disable=SC2086  # the accumulated list is deliberately word-split
+    python3 - $files <<'PY'
+import sys
+import yaml
+
+data = {}
+for path in sys.argv[1:]:
+    with open(path) as fh:
+        doc = yaml.safe_load(fh) or {}
+    entries = doc.get("data") or {}
+    if not entries:
+        sys.exit(f"flux-env: ERROR: no substitution keys found in {path}")
+    data.update({k: str(v) for k, v in entries.items()})
+yaml.safe_dump(
+    {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "merged-substitutions"},
+        "data": data,
+    },
+    sys.stdout,
+    sort_keys=True,
+)
+PY
+}
+
 main() {
     local sub="${1:-}"
     shift || true
     case "$sub" in
         export-versions) cmd_export_versions "$@" ;;
         k8s-version) cmd_k8s_version "$@" ;;
-        *) die "unknown subcommand: ${sub:-<none>} (want: export-versions|k8s-version)" ;;
+        merged-configmap) cmd_merged_configmap "$@" ;;
+        *) die "unknown subcommand: ${sub:-<none>} (want: export-versions|k8s-version|merged-configmap)" ;;
     esac
 }
 

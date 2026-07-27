@@ -1,0 +1,38 @@
+---
+# Release list for scripts/validate-helm-values.py (passed as --releases from
+# the CI flux-lint job's extra_validation).
+#
+# `kustomize build | kubeconform` emits a HelmRelease verbatim and never renders
+# its chart, so every key under `.spec.values` is unvalidated — a typo silently
+# no-ops in-cluster. Each entry here is rendered with `helm template` at the
+# pinned chart version instead, which hard-fails on an unknown key for any chart
+# shipping a values.schema.json and on any values that will not render.
+#
+# Only value-heavy releases are worth listing: each entry is a network
+# round-trip to the chart repo. Add one when you give a release a substantial
+# `.spec.values` block; the chart version is read from the manifest, so there is
+# nothing to keep in sync here.
+releases:
+  - name: traefik
+    manifest: kubernetes/infrastructure/controllers/traefik/release.yaml
+    chart: traefik
+    repo_name: traefik
+    repo_url: https://traefik.github.io/charts
+  - name: kube-prometheus-stack
+    manifest: kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml
+    chart: kube-prometheus-stack
+    repo_name: prometheus-community
+    repo_url: https://prometheus-community.github.io/helm-charts
+  # The OSS Loki chart, from grafana-community — NOT grafana/loki, which became
+  # the GEL chart after the fork at 6.55.0. repo_name must match the manifest's
+  # sourceRef, or a version that only exists in one index will not resolve.
+  - name: loki
+    manifest: kubernetes/infrastructure/observability/loki/release.yaml
+    chart: loki
+    repo_name: grafana-community
+    repo_url: https://grafana-community.github.io/helm-charts
+  - name: alloy
+    manifest: kubernetes/infrastructure/observability/alloy/release.yaml
+    chart: alloy
+    repo_name: grafana
+    repo_url: https://grafana.github.io/helm-charts

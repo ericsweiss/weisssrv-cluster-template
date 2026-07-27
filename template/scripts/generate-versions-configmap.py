@@ -79,17 +79,15 @@ def _scalar_str(key: str, value: object) -> str:
 def flatten(data: dict, nested_keys: tuple[str, ...] = DEFAULT_NESTED_KEYS) -> dict[str, str]:
     out: dict[str, str] = {}
     for k, v in data.items():
-        if k.endswith(VERSION_SUFFIX) and not isinstance(v, bool):
+        if k.endswith(VERSION_SUFFIX):
             if not FLUX_VAR_RE.match(k):
                 raise ValueError(
                     f"top-level key {k!r} is not a valid Flux postBuild variable name"
                 )
-            if isinstance(v, (str, int, float)):
-                out[k] = _scalar_str(k, v)
-            else:
-                print(f"WARNING: {k!r} has non-scalar value (type {type(v).__name__}) — skipped", file=sys.stderr)
-        elif k.endswith(VERSION_SUFFIX) and isinstance(v, bool):
-            print(f"WARNING: {k!r} is bool ({v!r}) — probably an unquoted YAML value; skipped", file=sys.stderr)
+            # Fail closed, exactly like the nested branch: a dropped key is not
+            # a warning, it is an unresolved ${...} at reconcile time. The
+            # "every key dropped" guard below only catches the total case.
+            out[k] = _scalar_str(k, v)
         elif k in nested_keys and isinstance(v, dict):
             for sub_k, sub_v in v.items():
                 flat_key = f"{k}_{sub_k}"
