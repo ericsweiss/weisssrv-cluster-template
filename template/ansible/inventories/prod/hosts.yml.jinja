@@ -115,10 +115,10 @@ all:
           # Pushes this resolver's config to every replica.
           adguard_sync_enabled: true
 {%- else %}
-          # Only meaningful with a second resolver, and this roster has one —
-          # written out as an explicit false rather than left absent so the
-          # decision is on the page: site.yml invokes the role either way, and
-          # an unset opt-in flag is indistinguishable from an oversight.
+          # Only meaningful with a second resolver, and this roster has none to
+          # sync to — written out as an explicit false rather than left absent
+          # so the decision is on the page: site.yml invokes the role either
+          # way, and an unset opt-in flag is indistinguishable from an oversight.
           # Add a second address to upstream_dns_servers and flip this to true.
           adguard_sync_enabled: false
 {%- endif %}

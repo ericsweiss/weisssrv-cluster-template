@@ -33,6 +33,85 @@ Nothing about tenant onboarding requires the app-template — a hand-authored
 `kubernetes/flux/` works identically. It just means writing the pipeline and the
 conventions again.
 
+### Tenant CI is the tenant's choice, and one option is none
+
+The app-template offers three CI shapes, and the cluster side is indifferent to
+which one a tenant picks — because in every one of them the deploy is this
+cluster pulling, never the tenant pushing:
+
+| Shape | What the tenant repo carries | What this cluster does |
+|---|---|---|
+| `gitlab` | a `.gitlab-ci.yml` that lints and kubeconforms `kubernetes/flux/` | pulls and reconciles |
+| `github` | the same gates as GitHub Actions workflows | pulls and reconciles |
+| `none` | no pipeline at all | pulls and reconciles |
+
+Shape `none` is a real option, not a degraded one: the `Kustomization` below is
+the only thing that applies anything, so a tenant with no CI is deployed exactly
+like a tenant with CI — it just has no pre-merge gate of its own. It does put the
+whole burden on Flux being able to clone the repository, so read the private-repo
+section below before choosing it for a private tenant.
+
+### Tenant repositories are host-independent
+
+`{{ git_host }}` is where **this cluster's** repository lives. It has nothing to
+do with where a tenant's repository lives: Flux clones over plain HTTPS or SSH,
+so a tenant can sit on GitHub while this cluster sits on
+`{{ git_host }}`, or on a third host entirely. Copy the example's URL only if the
+tenant really is on the same host — otherwise write the tenant's own:
+
+```yaml
+# same host as this cluster
+url: https://{{ git_host }}/{{ git_namespace }}/example-app
+# a GitHub-hosted tenant, on the same cluster
+url: https://github.com/<owner>/example-app
+# either host, over SSH (required for a private repo authenticated by deploy key)
+url: ssh://git@github.com/<owner>/example-app.git
+```
+
+### Private tenant repositories
+
+Flux authenticates per `GitRepository`, through a Secret named by
+`spec.secretRef.name`. That Secret must live in the **same namespace as the
+GitRepository** (`flux-system` here — `secretRef` is namespace-local), and it is
+**bootstrap state, not Flux-managed**: it is what Flux needs in order to read
+git, so it cannot itself come from git.
+
+Deploy key (preferred — scoped to one repository, and revocable there):
+
+```bash
+flux create secret git example-app-git-auth \
+  --namespace=flux-system \
+  --url=ssh://git@github.com/<owner>/example-app \
+  --ssh-key-algorithm=ecdsa \
+  --ssh-ecdsa-curve=p521
+```
+
+That prints a public key. Add it to the tenant repository as a deploy key —
+**read-only**, no write access; Flux never pushes to a tenant repo — then point
+the source at it:
+
+```yaml
+spec:
+  url: ssh://git@github.com/<owner>/example-app.git   # ssh://, and the .git suffix
+  secretRef:
+    name: example-app-git-auth
+```
+
+Token instead of a key (GitHub PAT, GitLab deploy token or project access
+token), when the host makes tokens easier to scope than keys:
+
+```bash
+flux create secret git example-app-git-auth \
+  --namespace=flux-system \
+  --url=https://github.com/<owner>/example-app \
+  --username=git \
+  --password=<TOKEN>
+```
+
+The `url:` on the GitRepository then stays `https://…`, with the same
+`secretRef.name`. Either way, rotating the credential is re-running the command;
+nothing in git changes.
+
 ## Example
 
 ```yaml
@@ -89,11 +168,16 @@ metadata:
   namespace: flux-system
 spec:
   interval: 1m
+  # This host because the example tenant is co-located; a tenant on GitHub (or
+  # anywhere else Flux can clone from) writes its own URL here — see
+  # "Tenant repositories are host-independent" above.
   url: https://{{ git_host }}/{{ git_namespace }}/example-app
   ref:
     branch: main
-  # Private repo: create a deploy token, put its secret in flux-system, and
-  # reference it here with secretRef.name.
+  # Private repo: add `secretRef: {name: example-app-git-auth}` and create that
+  # Secret with `flux create secret git` — see "Private tenant repositories"
+  # above. It is bootstrap state and lives in flux-system, alongside this
+  # GitRepository, because secretRef is namespace-local.
 ---
 # Without serviceAccountName, kustomize-controller applies tenant manifests with
 # its own cluster-admin credentials. The SA must live in the Kustomization's OWN

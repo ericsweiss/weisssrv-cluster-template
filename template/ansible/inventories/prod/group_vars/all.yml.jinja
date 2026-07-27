@@ -35,6 +35,16 @@ k3s_api_vip: {{ k3s_api_vip }}
 metallb_public_vip: {{ metallb_public_vip }}
 metallb_internal_vip: {{ metallb_internal_vip }}
 
+# The LAN's default gateway. Both guest-provisioning roles ASSERT their own
+# prefixed name before `pct create` / `qm create` — neither has a generic
+# default, because guessing a router address wrong produces a guest that boots,
+# gets an address and reaches nothing. They are written out separately rather
+# than aliased so a guest class that routes elsewhere (a DMZ bridge, a second
+# uplink) is a one-line override on that role, not a fork of this value.
+lan_gateway: {{ lan_gateway }}
+proxmox_lxc_gateway: "{% raw %}{{ lan_gateway }}{% endraw %}"
+proxmox_vm_cloudinit_gateway: "{% raw %}{{ lan_gateway }}{% endraw %}"
+
 # --- SSH --------------------------------------------------------------------
 ssh_port: 22
 ssh_permit_root_login: "no"

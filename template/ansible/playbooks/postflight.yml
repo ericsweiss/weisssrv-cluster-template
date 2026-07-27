@@ -116,24 +116,78 @@
       loop_control:
         label: "{{ item.host }}"
 
-    # Exercise the same pinned-key path the cert-reload script uses
-    # (StrictHostKeyChecking=yes against root's known_hosts), so a changed or
-    # unknown host key fails here exactly as the real push would.
-    - name: Test SSH to each certificate distribution target
-      ansible.builtin.command: >-
-        ssh -i {{ acme_certs_ssh_key_path | default('/home/' ~ admin_user ~ '/.ssh/id_ed25519_certs') }}
-        -o BatchMode=yes
-        -o StrictHostKeyChecking=yes
-        -o UserKnownHostsFile=/root/.ssh/known_hosts
-        -o ConnectTimeout=5
-        -p {{ item.ssh_port | default(22) }}
-        {{ item.ssh_user | default(admin_user) }}@{{ item.ip }} 'echo success'
+    # Exercise the real push channel end to end, short of pushing a certificate.
+    #
+    # The distribution pubkey is pinned in each target's authorized_keys with
+    # `command="sudo /usr/local/sbin/cert-receive",restrict`, so OpenSSH ignores
+    # whatever the client asks for and runs the receiver — an `echo success`
+    # payload can never run, and a probe that looks for its output can never
+    # pass. What the receiver DOES do with an empty stdin (`-n` gives it
+    # /dev/null) is bail on its first check: `FAIL: empty bundle`, exit 3,
+    # nothing written and no service reloaded.
+    #
+    # That exit code is therefore the proof, and it is a strong one: reaching it
+    # means the target's host key matched the pin (StrictHostKeyChecking=yes
+    # against the root known_hosts the role seeds), the distribution key
+    # authenticated, the forced command fired, its sudoers drop-in allowed the
+    # escalation, and the receiver script is installed. Anything earlier fails
+    # differently — 255 for an SSH-level refusal, 1 for a missing receiver.
+    #
+    # `acme_certs_ssh_key_path` is deliberately used WITHOUT a default: it is set
+    # in group_vars/dns.yml next to the rest of the channel's inputs, and an
+    # undefined-variable error here is the correct outcome if that ever stops
+    # being true.
+    - name: Probe each certificate distribution target over the pinned-key channel
+      ansible.builtin.command:
+        argv:
+          - ssh
+          # /dev/null on stdin: the receiver must see an empty bundle and refuse
+          # it. Never give this task a real bundle — it would install a cert.
+          - "-n"
+          - "-i"
+          - "{{ acme_certs_ssh_key_path }}"
+          - "-o"
+          - BatchMode=yes
+          - "-o"
+          - StrictHostKeyChecking=yes
+          - "-o"
+          - UserKnownHostsFile=/root/.ssh/known_hosts
+          - "-o"
+          - ConnectTimeout=5
+          - "-p"
+          - "{{ item.ssh_port | default(22) }}"
+          - "{{ item.ssh_user | default(acme_certs_ssh_user) }}@{{ item.ip }}"
       changed_when: false
+      failed_when: false
+      # Read-only, so it runs under --check too — otherwise a check-mode
+      # `task infra:verify` would skip it and the assert below would blow up on
+      # a result that has no rc.
+      check_mode: false
       register: cert_target_ssh
-      failed_when: "'success' not in cert_target_ssh.stdout"
       loop: "{{ acme_certs_distribution_targets | default([]) }}"
       loop_control:
         label: "{{ item.host }} ({{ item.ip }})"
+
+    - name: Assert each target answered from the cert-receive forced command
+      ansible.builtin.assert:
+        that:
+          - item.rc == 3
+          - "'empty bundle' in (item.stderr | default(''))"
+        fail_msg: >-
+          {{ item.item.host }} ({{ item.item.ip }}) did not answer as a
+          certificate distribution target: expected rc 3 with
+          'FAIL: empty bundle' from {{ acme_certs_receiver_path | default('/usr/local/sbin/cert-receive') }},
+          got rc {{ item.rc }}.
+          255 = SSH refused it (host key changed, or the pinned key is not in
+          {{ item.item.ssh_user | default(acme_certs_ssh_user) }}'s authorized_keys) — re-run
+          `task certs:show-host-keys`, re-pin, and re-run `task dns:deploy`.
+          1 = the forced command could not run (receiver or sudoers drop-in
+          missing) — re-run `task dns:deploy`.
+          stderr: {{ item.stderr | default('') | trim }}
+        quiet: true
+      loop: "{{ cert_target_ssh.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.host }} ({{ item.item.ip }})"
 
     - name: Verify the AdGuard sync timer is enabled
       ansible.builtin.systemd:

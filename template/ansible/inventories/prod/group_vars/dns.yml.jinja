@@ -107,6 +107,17 @@ acme_certs_ssh_public_key: >-
 # Without this the distribution key is usable from any source address.
 acme_certs_key_from: {{ resolvers[0] }}
 
+# The AUTHORITY side of the push: the local user whose ~/.ssh holds the
+# distribution private key, and the path the renewal hook reads it from. Both
+# match the role's own defaults and are written out anyway, because
+# ansible/playbooks/postflight.yml probes this exact channel and a playbook sees
+# inventory, never a role's defaults/main.yml — a `| default(...)` there on a
+# value the play cannot know is what turned a broken check into a passing-looking
+# one. `ssh_user` on each target below is the login user ON THE TARGET and is a
+# different thing entirely.
+acme_certs_ssh_user: root
+acme_certs_ssh_key_path: /root/.ssh/id_ed25519_certs
+
 # Hosts that receive the wildcard cert. host_key pins the target's SSH host key:
 # the push carries private-key material, so the channel runs with
 # StrictHostKeyChecking=yes and never accept-new. The NAS needs the cert for
@@ -152,9 +163,10 @@ acme_certs_distribution_targets: >-
 # third resolver needs its own sync instance. TLS config is deliberately NOT
 # synced: certs are host-local and reconciled per host by adguard_home.
 {%- else %}
-# Inert with a single resolver: nothing sets adguard_sync_enabled, so the role
-# never runs. These values are kept self-consistent so that adding a second
-# resolver (a second upstream_dns_servers address) is the only change needed.
+# Inert with a single resolver: adguard_sync_enabled is set to false on the
+# primary in hosts.yml, so the role runs as a no-op. These values are kept
+# self-consistent so that adding a second resolver (a second
+# upstream_dns_servers address) is the only change needed.
 {%- endif %}
 adguard_sync_origin: "https://dns-01.{% raw %}{{ internal_domain }}{% endraw %}"
 adguard_sync_replica: "https://dns-{{ '%02d' | format(2 if resolvers | length > 1 else 1) }}.{% raw %}{{ internal_domain }}{% endraw %}"

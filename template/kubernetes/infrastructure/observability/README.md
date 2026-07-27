@@ -169,6 +169,35 @@ group to sign in becomes a Grafana Admin. Two consequences:
   `Grafana SSO` → `admin-password`. Fix the IdP, then revert both. Do not leave
   that state committed.
 
+### The admin password is applied once, at the first start
+
+The same mechanic that keeps the account creatable makes its password a
+one-shot. Grafana reads `GF_SECURITY_ADMIN_PASSWORD` only while it is creating
+the account — that is, only while the user table is empty. `persistence.enabled:
+true` against the NFS-backed `grafana-data` claim means the database outlives
+the pod, the HelmRelease and the node, so there is never a second first start.
+
+Consequences, in the order they bite:
+
+- The vault's `admin-password` must be its **final** value before this stage
+  first reconciles. A placeholder typed in phase 0 becomes the live break-glass
+  password, and the runbook that sends a locked-out operator to that field sends
+  them to a value that no longer matches.
+- Changing the vault field later, refreshing the ExternalSecret and restarting
+  the Deployment all do exactly nothing to the account: the restart re-reads the
+  Secret into an environment variable Grafana no longer consults.
+- Rotation is therefore two steps in one change — edit the vault field, then
+  make the database agree:
+
+  ```bash
+  task flux:refresh-secret -- observability/observability-secrets
+  kubectl -n observability exec deploy/kube-prometheus-stack-grafana -c grafana -- \
+    grafana cli --homepath /usr/share/grafana admin reset-admin-password '<new>'
+  ```
+
+  `--homepath` is not optional: without it the CLI cannot find its config
+  defaults and exits before touching the database.
+
 Closing the basic-auth path is also why both Grafana sidecars run with
 `skipReload: true` — their default behaviour is to POST Grafana's
 `/api/admin/provisioning/*/reload` endpoint using that same admin account, which
