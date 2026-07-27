@@ -1,4 +1,11 @@
 ---
+{%- set n_compute = compute_node_count | default(2) | int %}
+{%- set resolvers = upstream_dns_servers.split() %}
+{%- set pve_hosts = [nas_host.split('.')[0]] %}
+{%- for i in range(1, n_compute + 1) %}
+{%- set _ = pve_hosts.append('pve-node-%02d' | format(i)) %}
+{%- endfor %}
+{%- set n_srv = 3 if pve_hosts | length >= 3 else 1 %}
 # Cluster identity, addressing and backend names for Flux postBuild
 # substitution — the sibling of cluster-versions. Every stage after sources
 # substitutes from BOTH, which is why no manifest under kubernetes/ contains a
@@ -47,6 +54,64 @@ data:
   # the inventory.
   cluster_apiserver_egress_cidr: "{{ lan_cidr }}"
 
+  # etcd scrape targets for kube-prometheus-stack's kubeEtcd component (k3s
+  # serves etcd metrics on :2381 with `etcd-expose-metrics`, which the k3s role
+  # sets on every server). Enabling that component is also what enables the
+  # UPSTREAM etcd alert rules — quorum loss, leader flapping, DB growth, fsync
+  # latency — on the one component whose failure loses the cluster.
+  #
+  # A JSON FLOW SEQUENCE, not a plain string, and that is load-bearing: Helm
+  # needs a real YAML list, while Flux postBuild (and envsubst) substitute TEXT.
+  # Inlined as `endpoints: ${cluster_etcd_endpoints}` this parses as a list; a
+  # space-separated string would silently become a single bogus endpoint.
+  #
+  # Seeded from the k3s server addresses the starter inventory generates.
+  # RE-ADDRESS THE SERVERS AND CHANGE THIS TOO — stale entries surface as
+  # etcd targets that are permanently down, not as silence.
+  cluster_etcd_endpoints: '[{% for j in range(1, n_srv + 1) %}"{{ lan_prefix }}.{{ 30 + j }}"{{ ", " if not loop.last }}{% endfor %}]'
+
+  # Scrape targets for the HOST node-exporters (port 9101, the `node_exporter_host`
+  # role) — the machines the in-cluster DaemonSet cannot see. Consumed by
+  # observability/exporters/node-exporter-host.yaml as an `Endpoints` address
+  # list, so this is the same JSON FLOW SEQUENCE trick as cluster_etcd_endpoints:
+  # a real YAML list is required where Flux only substitutes text.
+  #
+  # Seeded from the starter inventory's roster, which is exactly the set the
+  # playbooks deploy the role onto:
+{%- for host in pve_hosts %}
+  #   {{ lan_prefix }}.{{ 11 + loop.index0 }}  {{ host }} (bare metal — hwmon, SMART, NIC, disk I/O)
+{%- endfor %}
+{%- for addr in resolvers %}
+  #   {{ addr }}  dns-{{ '%02d' | format(loop.index) }} (LXC — filesystem + textfile metrics)
+{%- endfor %}
+  #   {{ lan_prefix }}.23  {{ smtp_host.split('.')[0] }} (LXC — filesystem + textfile metrics)
+{%- for j in range(1, n_srv + 1) %}
+  #   {{ lan_prefix }}.{{ 30 + j }}  k3s-srv-{{ '%02d' | format(j) }} (server — off-node etcd snapshot textfile metric)
+{%- endfor %}
+  #
+  # The k3s AGENTS are deliberately absent: the in-cluster node-exporter
+  # DaemonSet already scrapes them on 9100, and listing them here would produce
+  # two series per agent under different jobs. Add an app VM to this list when it
+  # grows a textfile collector worth alerting on.
+  cluster_node_exporter_host_addresses: '[{% for host in pve_hosts %}{"ip": "{{ lan_prefix }}.{{ 11 + loop.index0 }}"}, {% endfor %}{% for addr in resolvers %}{"ip": "{{ addr }}"}, {% endfor %}{"ip": "{{ lan_prefix }}.23"}{% for j in range(1, n_srv + 1) %}, {"ip": "{{ lan_prefix }}.{{ 30 + j }}"}{% endfor %}]'
+
+  # Gate for OffsiteBackupStale's absent() arm. It holds a METRIC NAME rather
+  # than a boolean because Flux substitutes text: `${...}` is only valid PromQL
+  # inside a quoted string, and the rules are linted before substitution.
+  #
+  #   "up"  — the default, and the OFF position. `up` always has series, so
+  #           absent() is never true and the arm cannot fire. Correct while
+  #           `restic_offsite_enabled` is false in the Ansible inventory:
+  #           otherwise a cluster that never opted into offsite backups would
+  #           page about a backup it was never asked to take, forever.
+  #
+  #   "restic_offsite_last_success_timestamp_seconds" — the ON position. Set it
+  #           in the SAME change that flips `restic_offsite_enabled` to true.
+  #           The arm then means what it should: no offsite metric at all, i.e.
+  #           the unit was never installed, was removed, or the storage host is
+  #           unreachable — the failure mode a freshness alert cannot see.
+  cluster_offsite_backup_probe_metric: "up"
+
   cluster_metallb_public_vip: "{{ metallb_public_vip }}"
   cluster_metallb_internal_vip: "{{ metallb_internal_vip }}"
 
@@ -64,9 +129,16 @@ data:
   # Prefix every alert's runbook_url gets.
   cluster_runbook_base_url: "https://{{ git_host }}/{{ git_namespace }}/{{ git_repo | default(cluster_name) }}/-/blob/main/docs"
 
-  # Host-side services the platform talks to. Defaults follow the starter
-  # inventory's names — rename hosts there and these follow, but change them
-  # HERE, never in the manifests.
+  # Host-side services the platform talks to. These three come from the copier
+  # ANSWERS (nas_host, smtp_host, upstream_dns_servers), and the Ansible
+  # inventory derives its host names and addresses from those SAME answers — the
+  # dependency runs answers -> both layers, not inventory -> here.
+  #
+  # So: to move the NAS, the relay or a resolver, change the answer (or change
+  # both files together in one commit). Editing only hosts.yml leaves the
+  # manifests pointed at the old address; editing only this ConfigMap leaves
+  # Ansible building the old host. Either way the two layers split apart, and
+  # nothing fails until an NFS mount or an alert route quietly stops working.
   cluster_nas_host: "{{ nas_host | default('pve-nas-01.' ~ internal_domain) }}"
   cluster_smtp_host: "{{ smtp_host | default('smtp-relay.' ~ internal_domain) }}"
   cluster_alert_email: "{{ alert_email | default(admin_email) }}"

@@ -65,6 +65,9 @@ failing.
 | `cluster_tailnet_cidr` | Tailscale CGNAT range |
 | `cluster_k3s_api_vip` (alias `cluster_api_vip`) | kube-apiserver VIP |
 | `cluster_apiserver_egress_cidr` | What pod egress policies allow on 6443 |
+| `cluster_etcd_endpoints` | etcd scrape targets for `kubeEtcd` — a **JSON flow sequence**, because Helm needs a real list where Flux substitutes text |
+| `cluster_node_exporter_host_addresses` | `Endpoints` roster for the host node-exporters (`:9101`) — also a flow sequence |
+| `cluster_offsite_backup_probe_metric` | gates `OffsiteBackupStale`'s `absent()` arm; `up` until the offsite tier is enabled |
 | `cluster_metallb_public_vip` / `cluster_metallb_internal_vip` | Ingress VIPs |
 | `cluster_issuer` / `cluster_acme_email` | cert-manager ClusterIssuer name + ACME contact |
 | `cluster_secret_store` | ClusterSecretStore every ExternalSecret references |
@@ -112,15 +115,22 @@ The Ansible k3s layer labels and taints nodes with the
 | `<prefix>/nas: "true"` (+ matching `PreferNoSchedule` taint) | Storage-node affinity for the Prometheus/Loki/database volumes; also the DoesNotExist term that steers disposable workloads and CI job pods off it |
 | `<prefix>/ingress: "true"` | Traefik node affinity (**preferred**, so an unlabelled cluster still schedules) |
 | `<prefix>/gpu: nvidia` | NVIDIA device plugin node selector (**required** — that DaemonSet is for the GPU node only) |
-| `<prefix>/runner-class=infrastructure` | kured refuses to reboot a node running a CI job pod |
+| `<prefix>/runner-class` | A **pod** label on CI job pods, with two fixed values: `infrastructure` and `shared`. kured refuses to reboot a node running an `infrastructure` job pod, and each runner's egress NetworkPolicy selects on it. It is the runner TIER, deliberately **not** the `ci_runner_tag` answer |
 | `<prefix>/dns-api-token: "true"` | Namespace opt-in for the DNS-provider token fan-out |
+| `<prefix>/cluster-secrets: "true"` | Namespace opt-in for the platform `ClusterSecretStore` — **required** on any namespace with an ExternalSecret (see below) |
+
+Not every row is a node label: `runner-class` is set on CI job pods, and the
+last two are set on Namespaces. They live in this table because they share the
+prefix and the same opt-in-by-label mechanism — and because getting one of them
+wrong fails silently rather than loudly.
 
 ## Backend seams
 
 Only the backends the answers file offers are implemented; each is isolated so a
 replacement is a bounded change.
 
-- **Secrets** (`secrets_backend`): `configs/cluster-secret-store.yaml`,
+- **Secrets** (`secrets_backend`): `configs/cluster-secret-store.yaml` (which is
+  namespace-scoped — see below),
   `controllers/onepassword-connect/`, and the Connect egress patch in
   `controllers/external-secrets/kustomization.yaml`. Every ExternalSecret in the
   repo references `${cluster_secret_store}` and nothing else, so another
@@ -135,7 +145,54 @@ replacement is a bounded change.
 - **Overlay VPN** (`vpn_tailscale`) and **GPU** (`gpu`) are additive modules:
   when off, their directories are not generated at all.
 
-## Bootstrap and day-2
+## Secret access is namespace-scoped
+
+A `ClusterSecretStore` is cluster-scoped: without `spec.conditions`, **any**
+namespace can name it in an ExternalSecret and read **every** item in the vault.
+That is not theoretical here — a tenant namespace whose reconciliation
+ServiceAccount holds the `admin` ClusterRole can create ExternalSecrets, so an
+unconditioned store would hand every tenant the CI runner tokens, the identity
+provider's keys and the SMTP credentials. RBAC inside the tenant's namespace
+cannot re-impose the boundary; the store has to.
+
+`configs/cluster-secret-store.yaml` therefore admits only namespaces labelled
+`{{ internal_domain }}/cluster-secrets: "true"`. Namespace labels are set by
+manifests in this repository, and the built-in `admin` ClusterRole grants only
+`get`/`list`/`watch` on namespaces, so a tenant cannot label its way in.
+
+- **Adding a platform module that needs a secret**: add the label to its
+  `namespace.yaml`. Forgetting it is a loud failure — the ExternalSecret reports
+  `no matching conditions` and `ExternalSecretSyncFailure` fires.
+- **Onboarding a tenant**: do *not* add the label. Give the tenant its own
+  `ClusterSecretStore`, its own provider token, and ideally its own vault. The
+  pattern is in `clusters/{{ cluster_name }}/tenants/README.md`.
+
+{% if git_backend == 'gitlab_selfhosted' %}## Before you register the CI runners
+
+Read `apps/gitlab-runner-privileged/README.md` first, and take one rule from it
+into the bring-up itself:
+
+> **The privileged runner must be registered as a PROJECT runner locked to this
+> repository. Never an instance runner; never a group runner over a group that
+> contains untrusted projects.**
+
+Tags are cooperative routing, not access control — any project on the instance
+can write `tags: [{{ ci_runner_tag | default('infrastructure') }}]` in its own
+`.gitlab-ci.yml`. If this runner is registered instance-wide, that single line
+gets an arbitrary authenticated user root + Docker-in-Docker execution on your
+cluster, on a runner that also holds SSH reach to your hosts. In the system this
+template generalizes, the docs stated the project-runner rule while the live
+registration was `instance_type`, and another project's pipeline was observed
+executing on it — the gap survived because nothing checked it.
+
+Verify immediately after registering, and again after any re-registration:
+
+```bash
+# Expect "runner_type": "project_type"
+curl -sH "PRIVATE-TOKEN: $TOKEN" "https://{{ git_host }}/api/v4/runners/<id>" | jq .runner_type
+```
+
+{% endif %}## Bootstrap and day-2
 
 `flux bootstrap` is a one-time step and is documented in
 `clusters/{{ cluster_name }}/flux-system/README.md`; everything you must have in

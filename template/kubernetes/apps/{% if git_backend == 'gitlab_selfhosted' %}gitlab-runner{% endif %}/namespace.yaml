@@ -7,6 +7,9 @@ metadata:
     app.kubernetes.io/name: gitlab-runner
     app.kubernetes.io/part-of: gitlab
     app.kubernetes.io/managed-by: flux
+    # Opts this namespace into the platform ClusterSecretStore, whose
+    # spec.conditions admit only namespaces carrying this label.
+    ${cluster_node_label_domain}/cluster-secrets: "true"
     # enforce: baseline is the admission half of the trust boundary — it blocks
     # this untrusted runner's job pods from escalating to privileged/host*. The
     # privileged runner lives in its own namespace precisely so this can stay.

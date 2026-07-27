@@ -30,6 +30,9 @@ here is a regression — put it in `cluster-config` instead.
 | `cluster_smtp_host` | `smtp-relay.int.example.com` | Alertmanager `smtp_smarthost` |
 | `cluster_alert_email` | `ops@example.com` | Alertmanager critical receiver |
 | `cluster_api_vip` | `10.0.0.161` | blackbox API-VIP probe |
+| `cluster_etcd_endpoints` | `'["10.0.0.31", "10.0.0.32", "10.0.0.33"]'` | `kubeEtcd` scrape targets — a JSON flow sequence, see below |
+| `cluster_node_exporter_host_addresses` | `'[{"ip": "10.0.0.11"}, …]'` | `exporters/node-exporter-host.yaml` `Endpoints` roster — also a flow sequence |
+| `cluster_offsite_backup_probe_metric` | `up` | gates `OffsiteBackupStale`'s `absent()` arm — see `platform.backups` |
 | `cluster_runbook_base_url` | `https://git.example.com/ops/cluster/-/blob/main/docs` | every alert's `runbook_url` (see below) |
 | `cluster_node_exporter_job_regex` | `node-exporter` | node/storage alert job scoping — see below |
 
@@ -50,6 +53,14 @@ The custom rules live in `additionalPrometheusRulesMap` inside
 | `platform.gitops` | Flux reconcile errors, durable `Ready=False` on any Flux resource |
 | `platform.certificates` | cert-manager expiry (warning/critical), edge-cert expiry via blackbox |
 | `platform.backups` | etcd off-node snapshot freshness, offsite-repo freshness/verify |
+
+`platform.backups` reads textfile metrics that only exist because the host
+node-exporter job below is scraped. `OffsiteBackupStale`'s `absent()` arm is
+gated by `${cluster_offsite_backup_probe_metric}`, which ships as `up` (inert) —
+flip it to `restic_offsite_last_success_timestamp_seconds` in the same change
+that sets `restic_offsite_enabled: true`, or that arm stays switched off. The
+gate is a metric name rather than a boolean because `${...}` is only valid PromQL
+inside a quoted string, and these rules are linted before substitution.
 
 Plus `platform.probes` (blackbox endpoint down, prober down) and
 `platform.secrets` (ExternalSecret sync failures) in the same map.
@@ -79,16 +90,28 @@ coverage on those 15-odd targets: no filesystem, no NIC-error, no textfile-scrap
 alerts. That gap is a documented production finding, not a hypothetical.
 
 The rules in this repo therefore never hardcode the job. They select
-`job=~"${cluster_node_exporter_job_regex}"`, defaulting to `node-exporter` alone.
-When you add host-level scraping, widen the key to
-`node-exporter|node-exporter-host` and every storage/node rule covers both
-without editing a manifest.
+`job=~"${cluster_node_exporter_job_regex}"`.
 
-Adding the host job itself is site data (an IP roster), so this repo ships no
-`Endpoints` list. The shape is one selectorless headless `Service` + a manual
-`Endpoints` list + a `ServiceMonitor` with
-`jobLabel: app.kubernetes.io/name` — put it in a site overlay and set the
-`app.kubernetes.io/name` label to the job name you want.
+**This cluster ships that second job.** `exporters/node-exporter-host.yaml` is a
+selectorless headless `Service` + a hand-maintained `Endpoints` list +
+a `ServiceMonitor` with `jobLabel: app.kubernetes.io/name`, giving
+`job="node-exporter-host"` over the `:9101` exporters the `node_exporter_host`
+Ansible role installs on the Proxmox hosts, the resolver and relay LXCs, and the
+k3s servers. That layer carries the hardware metrics (hwmon, SMART, NIC, disk
+I/O) no VM can see, and the textfile metrics — off-node etcd snapshot freshness,
+offsite-backup timestamps — that `platform.backups` alerts on.
+
+> **Set `cluster_node_exporter_job_regex` to `node-exporter|node-exporter-host`.**
+> The address roster is shipped, but the *rules* only cover what the regex
+> matches. Left at `node-exporter` alone, the hosts are scraped and graphed while
+> none of the filesystem, inode or node-condition alerts apply to them — the
+> quietest possible failure.
+
+The address roster itself lives with `cluster_node_exporter_host_addresses` in
+`infrastructure/sources/cluster-config.yaml` (a JSON flow sequence, same reason
+as the etcd endpoints), annotated host by host. The k3s **agents** are
+deliberately excluded: the in-cluster DaemonSet already covers them on `:9100`,
+and listing them would double every agent's series under two jobs.
 
 ## Dashboards
 
@@ -101,6 +124,109 @@ loses track of it and orphans accumulate.
 Add an app dashboard by dropping the JSON next to the app's manifests with the
 `grafana_dashboard: "1"` label and a `grafana_folder` annotation; the sidecar
 searches all namespaces.
+
+## Grafana is SSO-only, and that is enforced in three places
+
+`kube-prometheus-stack` ships a built-in `admin` account whose password is a
+**well-known chart default** (`prom-operator`), and that account is a Grafana
+Admin — it can query every datasource, edit dashboards and mint API tokens.
+Disabling the login form alone does not close it: the form is a browser affordance,
+while HTTP basic auth against `/api/...` is a separate path that keeps working.
+
+The release values therefore set all three of:
+
+| Setting | Closes |
+|---|---|
+| `auth.disable_login_form: true` | the browser login form |
+| `auth.basic.enabled: false` | `curl -u admin:prom-operator .../api/...` |
+| `security.disable_initial_admin_creation: true` | the account itself, so the default password authenticates nothing |
+
+Authorization then comes entirely from the OIDC role mapping
+(`GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH`): the first member of the admin
+group to sign in becomes a Grafana Admin. Two consequences:
+
+- **Running without an identity provider** means deleting all three settings
+  *and* the OIDC block — and then setting a real admin password through
+  `grafana.admin.existingSecret` pointed at an ESO-managed Secret. Leaving the
+  chart default in place is the failure this section exists to prevent.
+- **Break-glass** (the IdP is down and nobody can sign in): temporarily flip the
+  three settings back, wire `grafana.admin.existingSecret` to a Secret you
+  control, reconcile, fix the IdP, then revert. Do not leave that state
+  committed.
+
+Closing the basic-auth path is also why both Grafana sidecars run with
+`skipReload: true` — their default behaviour is to POST Grafana's
+`/api/admin/provisioning/*/reload` endpoint using that same admin account, which
+would now only ever log a 401. Dashboards are unaffected (Grafana's file
+provisioner rescans on its own interval). **Datasources are not**: Grafana reads
+those files only at startup, and the Prometheus datasource itself arrives as a
+sidecar-discovered ConfigMap — so `sidecar.datasources.initDatasources: true`
+runs the sidecar as an init container as well, guaranteeing the files exist
+before Grafana boots. Keep `skipReload` and `initDatasources` together; the
+chart documents them as a pair.
+
+## etcd
+
+`kubeEtcd` is **enabled**. k3s serves etcd metrics on `:2381` over plain HTTP on
+every server node, and enabling this component is what turns on the upstream
+etcd rule group — quorum loss, leader flapping, DB-size growth, fsync latency —
+on the one component whose failure loses the cluster.
+
+Its `endpoints` list is the single site value here that cannot be an ordinary
+substitution, because Helm needs a real YAML list rather than a string. It comes
+from `${cluster_etcd_endpoints}` in `cluster-config`, stored as a **JSON flow
+sequence** (`'["10.0.0.31", "10.0.0.32", "10.0.0.33"]'`) so that it parses as a
+list once Flux substitutes it inline. Re-address the server nodes and update
+that key in the same change; a stale entry shows up as a permanently-down etcd
+target and an `etcdMembersDown` alert, never as silence.
+
+## GPU telemetry
+
+If this cluster was generated with `gpu: nvidia`, the device plugin in
+`infrastructure/controllers/nvidia-device-plugin/` advertises the card to the
+scheduler but **exports no metrics at all** — no utilisation, VRAM, temperature,
+power or per-pod attribution. That is the one gap in this stage's coverage, and
+it matters most under the time-slicing the plugin enables by default, where
+several pods share a single card's memory and the first symptom of exhaustion is
+a CUDA OOM with nothing on a dashboard to explain it.
+
+NVIDIA's DCGM exporter fills it. It is not shipped because it needs a version
+pin, and every pin in this repository is single-sourced from
+`ansible/inventories/prod/group_vars/all.yml`. Adding it is four steps:
+
+1. **Pin the chart** — add to `all.yml` under `helm_chart_versions:`:
+   ```yaml
+   dcgm_exporter: "4.6.1"     # check https://github.com/NVIDIA/dcgm-exporter/releases
+   ```
+   then `task flux:sync-versions` (this regenerates
+   `sources/versions-configmap.yaml`; CI fails if you skip it).
+2. **Add the chart repository** — `infrastructure/sources/nvidia-dcgm.yaml`:
+   ```yaml
+   ---
+   apiVersion: source.toolkit.fluxcd.io/v1
+   kind: HelmRepository
+   metadata:
+     name: nvidia-dcgm
+     namespace: flux-system
+   spec:
+     interval: 1h
+     url: https://nvidia.github.io/dcgm-exporter/helm-charts
+   ```
+   and list it in `sources/kustomization.yaml`.
+3. **Add the release** — a `dcgm-exporter/` directory in *this* stage with a
+   namespace (PSA `privileged`; the DaemonSet mounts the host GPU devices), the
+   `netpol-baseline` component, and a HelmRelease whose values carry the same
+   `nodeSelector`/`tolerations` as the device plugin
+   (`${cluster_node_label_domain}/gpu: nvidia`, tolerating `nvidia.com/gpu`),
+   `runtimeClassName: nvidia`, and `serviceMonitor.enabled: true`. Prometheus
+   discovers ServiceMonitors in every namespace, so nothing else needs editing.
+4. **Add a dashboard** — NVIDIA publishes one (`dashboards/` in the exporter
+   repo); drop the JSON into `dashboards/` with a `configMapGenerator` entry and
+   `disableNameSuffixHash: true`, like the others here.
+
+Useful first alerts once the metrics exist: `DCGM_FI_DEV_GPU_TEMP` above the
+card's slowdown threshold, and `DCGM_FI_DEV_FB_FREE` near zero for longer than a
+few minutes (the time-slicing VRAM ceiling).
 
 ## Loki ruler
 

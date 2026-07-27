@@ -4,16 +4,57 @@ The tailnet policy (`policy.hujson`) and Split-DNS (`split_dns.tf`) for the
 {{ cluster_name }} tailnet, applied through
 `weisssrv-lib//terraform/modules/tailscale-acl` at the ref pinned in `main.tf`.
 
+## What the shipped policy grants
+
+`policy.hujson` is a **least-privilege baseline, and the first apply is a real
+tightening** — a fresh tailnet starts allow-all between members.
+
+| Rule | Source | Destination |
+|---|---|---|
+| acls 1 | `group:admins` | `tag:subnet-router:22,80,443,8006` — the hosts' own tailnet IPs |
+| acls 2 | `group:admins` | `{{ lan_cidr }}:22,53,80,111,443,853,2049,3000,6443,8006` — the LAN over subnet routing |
+| acls 3 | `group:admins` | `autogroup:self:22` — SSH between your own untagged devices |
+| acls 4 | `group:admins` | `tag:k8s:53,443` — the operator-registered proxy devices |
+| ssh | `group:admins` | `autogroup:self`, `tag:subnet-router` as `autogroup:nonroot` (root refused) |
+
+Nothing sources from `autogroup:member`. A device that joins the tailnet without
+being owned by a member of `group:admins` — a shared node, a family member's
+phone, a device invited later — gets **no** reach into this cluster: not SSH, not
+the Proxmox UI, not the kube-API, not NFS. Widening that is a deliberate edit
+here, never a side effect of someone accepting an invite.
+
+Two consequences worth internalising before you extend it:
+
+- **Adding a service usually means adding a port to acls rule 2.** Anything
+  behind Traefik is already covered by 443. Anything that is not (SMB, RDP, a
+  direct-play media port, a git host's alternate SSH port) needs an explicit
+  port, and the rule's comments say so at the point of edit.
+- **`tag:subnet-router` is the tag the Ansible layer advertises**
+  (`tailscale_advertise_tags` in `group_vars/proxmox.yml`) and `tag:k8s` is what
+  the Kubernetes operator applies to its proxy devices. If you rename a tag,
+  rename it in all three places at once — an unowned tag makes
+  `tailscale up --advertise-tags` fail outright, and a tag no rule names simply
+  matches nothing.
+
 ## Apply is supervised
 
 A bad ACL can sever tailnet and SSH access to **every** node at once. Before the
 first apply:
 
-1. Open the tailnet policy in the admin console and diff it against
-   `policy.hujson`. Applying replaces the live document wholesale — Terraform
-   has no per-line merge.
-2. Keep a path that does not depend on the tailnet open (a LAN session, or
-   console access to one host) until the checks below pass.
+1. **Fix `group:admins`.** It is seeded from the `admin_email` answer, which is
+   the system-mail address — it is very often *not* the identity you signed into
+   Tailscale with. Copy the exact login from the admin console (Users), or from
+   `tailscale status --json`. Every rule in the policy sources from this group,
+   so a wrong entry grants nobody anything.
+2. **Prove nonroot SSH works on every host.** The `ssh` rule permits
+   `autogroup:nonroot` only. Log in as `{{ admin_user }}` on each host and run a
+   `sudo` command *before* applying, or you will lose Tailscale SSH to any host
+   where that account is broken.
+3. **Diff against the live policy.** Open the tailnet policy in the admin console
+   and compare it with `policy.hujson`. Applying replaces the live document
+   wholesale — Terraform has no per-line merge.
+4. **Keep a non-tailnet path open** (a LAN session, or console access to one
+   host) until the post-apply checks pass.
 
 ```bash
 task terraform:tailscale-init
@@ -24,6 +65,28 @@ task terraform:tailscale-apply    # refuses -auto-approve on purpose
 After applying: confirm `tailscale status` still lists the nodes, that SSH over
 the tailnet still works from a second device, and that the subnet route is still
 marked approved.
+
+**Break-glass.** A tailnet Admin can always edit Access controls in the admin
+console from a browser, without being on the tailnet — that is the recovery path
+if an apply locks you out. The policy also carries a commented root-SSH rule for
+the case where the `{{ admin_user }}` account breaks on every host at once. Any
+console edit shows up as drift in the next `terraform plan`; reconcile it back
+into `policy.hujson` rather than leaving the two diverged.
+
+## Staged rollout
+
+The policy and the Ansible tailscale role have a chicken-and-egg relationship
+around `tag:subnet-router`, so run them in this order:
+
+1. **Apply this policy first.** It creates `tagOwners` (without which
+   `tailscale up --advertise-tags=tag:subnet-router` is rejected) and the route
+   auto-approver. `group:admins` is listed alongside the tag in `autoApprovers`
+   precisely so still-untagged hosts stay approved during the transition.
+2. **Run the Ansible tailscale role**, so the hosts adopt the tag and advertise
+   the LAN.
+3. **Tighten.** Once `tailscale status` shows every host tagged and every route
+   approved, remove the `group:admins` entry from `autoApprovers.routes` so only
+   tag-owned devices can approve the LAN route, and re-apply.
 
 ## Two-phase Split-DNS
 

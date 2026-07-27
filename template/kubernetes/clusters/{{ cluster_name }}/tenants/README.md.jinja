@@ -48,6 +48,10 @@ metadata:
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/audit: restricted
+    # DELIBERATELY ABSENT: {{ internal_domain }}/cluster-secrets: "true".
+    # That label is what the PLATFORM ClusterSecretStore's spec.conditions admit,
+    # and it would give this tenant read access to every item in the platform
+    # vault. The tenant gets its own store, below.
 ---
 # One-time bootstrap (NOT Flux-managed), scoped to this tenant so revocation is
 # independent:
@@ -60,6 +64,12 @@ kind: ClusterSecretStore
 metadata:
   name: onepassword-example-app
 spec:
+  # Scoped to this tenant's namespace, so the NEXT tenant cannot name this store
+  # and read through it. A ClusterSecretStore without conditions is usable from
+  # every namespace in the cluster.
+  conditions:
+    - namespaces:
+        - example-app
   provider:
     onepassword:
       connectHost: http://onepassword-connect.external-secrets.svc.cluster.local:8080
@@ -150,9 +160,22 @@ spec:
 
 ## Before onboarding the first tenant
 
-- **Vault isolation.** A tenant `ClusterSecretStore` pointing at the shared
-  vault can read every item in it. Acceptable for a single-operator homelab;
-  give tenants their own vault (or their own Connect server) otherwise.
+- **Never label a tenant namespace into the platform store.** The platform
+  `ClusterSecretStore` (`infrastructure/configs/cluster-secret-store.yaml`)
+  carries `spec.conditions` admitting only namespaces labelled
+  `{{ internal_domain }}/cluster-secrets: "true"`. That condition is the only
+  thing standing between a tenant and the CI runner tokens, the identity
+  provider's keys and the SMTP credentials — the tenant's `admin` RoleBinding
+  lets it create ExternalSecrets freely, and RBAC in its own namespace cannot
+  re-impose the boundary. Adding that label to a tenant namespace hands over the
+  whole platform vault in one line. Give the tenant its own store instead, as
+  the example above does.
+- **Vault isolation.** Even a tenant's *own* `ClusterSecretStore` can read every
+  item in whatever vault it points at, so a per-tenant store over the shared
+  vault only isolates the token, not the contents. Acceptable for a
+  single-operator homelab; give tenants their own vault (or their own Connect
+  server) otherwise. Their store also needs its own `spec.conditions` — scope it
+  to the tenant namespace, or the next tenant can name it too.
 - **Traefik cross-namespace refs.** The platform runs the Traefik CRD provider
   with `allowCrossNamespace: true` so app IngressRoutes can use the shared
   middlewares in the `traefik` namespace. A tenant-authored IngressRoute can

@@ -118,10 +118,43 @@ spec:
       grafana.ini:
         server:
           root_url: https://grafana.${cluster_internal_domain}
+
+        # SSO-ONLY, AND THAT MEANS ALL THREE OF THE SETTINGS BELOW. The chart
+        # ships a built-in `admin` account whose password is a WELL-KNOWN
+        # CHART DEFAULT (`prom-operator`), and that account is a Grafana Admin:
+        # it can read every datasource, run arbitrary queries against Prometheus
+        # and Loki, edit dashboards and mint API tokens.
+        #
+        #   disable_login_form            removes the browser login form, but
+        #                                 ONLY the browser form — it does not
+        #                                 close the HTTP path.
+        #   auth.basic.enabled=false      closes that path. Without it, anyone
+        #                                 who can reach the ingress can still
+        #                                 `curl -u admin:prom-operator .../api/...`
+        #                                 and get full Admin.
+        #   disable_initial_admin_creation removes the account itself, so the
+        #                                 chart's password authenticates nothing
+        #                                 even if basic auth is re-enabled later.
+        #
+        # Authorization then comes entirely from the OIDC role mapping below:
+        # the first member of the admin group to sign in becomes a Grafana
+        # Admin. Running WITHOUT an identity provider means deleting all three
+        # of these AND the OIDC block, and setting a real admin password
+        # (`grafana.admin.existingSecret` pointed at an ESO-managed Secret) —
+        # never leaving the chart default in place.
+        #
+        # BREAK-GLASS (identity provider down, nobody can sign in): temporarily
+        # set disable_login_form: false, auth.basic.enabled: true and
+        # disable_initial_admin_creation: false, wire
+        # `grafana.admin.existingSecret` to a Secret you control, reconcile, fix
+        # the IdP, then revert. Do not leave that state committed.
         auth:
-          # SSO-only. Drop this (and the OIDC block below) if you run without an
-          # identity provider — then the built-in login form is your only path in.
           disable_login_form: true
+        auth.basic:
+          enabled: false
+        security:
+          disable_initial_admin_creation: true
+
         analytics:
           check_for_updates: false
           check_for_plugin_updates: false
@@ -154,6 +187,23 @@ spec:
 
       # Dashboard sidecar — discovers ConfigMaps labelled grafana_dashboard in
       # every namespace, so app modules ship their own dashboards.
+      #
+      # skipReload on BOTH sidecars follows from the SSO-only posture above. By
+      # default each sidecar POSTs Grafana's /api/admin/provisioning/*/reload
+      # endpoint using the built-in admin account over HTTP basic auth — a path
+      # that no longer exists, so every write would log a 401 and reload nothing.
+      #
+      # Dashboards need nothing further: Grafana's file provisioner rescans the
+      # provisioning directory on its own interval (~10s).
+      #
+      # DATASOURCES DO. Grafana reads datasource provisioning files ONLY at
+      # startup, and the Prometheus datasource itself arrives as a
+      # sidecar-discovered ConfigMap from this chart. Without initDatasources the
+      # sidecar would write that file just after Grafana had already finished
+      # provisioning, and a fresh install would come up with NO datasource until
+      # something restarted the pod. initDatasources adds the sidecar as an
+      # init container so every datasource file exists before Grafana starts —
+      # the chart documents it as the required companion to skipReload.
       sidecar:
         dashboards:
           enabled: true
@@ -161,9 +211,12 @@ spec:
           labelValue: "1"
           searchNamespace: ALL
           folderAnnotation: grafana_folder
+          skipReload: true
         datasources:
           # Fixed UID so dashboard JSON can reference "prometheus".
           uid: prometheus
+          skipReload: true
+          initDatasources: true
 
       additionalDataSources:
         - name: Loki
@@ -448,15 +501,22 @@ spec:
       enabled: false
     kubeControllerManager:
       enabled: false
-    # k3s DOES expose etcd metrics on :2381 (plain HTTP) when servers run with
-    # etcd-expose-metrics. Enabling this also re-enables the upstream etcd alert
-    # rules (quorum, leader flapping, DB size), which are gated on kubeEtcd.
+    # etcd is the one component whose failure loses the cluster, so it is
+    # monitored. k3s serves etcd metrics on :2381 over plain HTTP (the k3s role
+    # sets `etcd-expose-metrics` on every server, and the host firewall scopes
+    # 2381 to the k3s node set). Enabling this component is ALSO what enables the
+    # upstream etcd alert rules — quorum loss, leader flapping, DB-size growth,
+    # fsync latency — which are gated on kubeEtcd.enabled.
     #
-    # endpoints is a site value (the server-node IPs) and cannot come from a
-    # substituted ConfigMap key, because Helm needs a real YAML list. Fill it in
-    # a site overlay, or leave this disabled and lose the etcd rules.
+    # endpoints is the one site value here that cannot be an ordinary
+    # substitution: Helm needs a real YAML list, not a string. ${cluster_etcd_endpoints}
+    # is therefore stored in cluster-config as a JSON FLOW SEQUENCE, which parses
+    # as a list once Flux substitutes it inline. Keep it in step with the server
+    # addresses in the inventory — stale entries show up as etcd targets that are
+    # permanently down (loud), never as silence.
     kubeEtcd:
-      enabled: false
+      enabled: true
+      endpoints: ${cluster_etcd_endpoints}
       service:
         enabled: true
         port: 2381
@@ -856,10 +916,30 @@ spec:
 
               # 50h deliberately tolerates one skipped night: the offsite run
               # chains off the local snapshot job, which can defer, and a 26h
-              # window would flap on a single deferred night. The absent() arm is
-              # loud on purpose (role removed, or the host is unreachable).
+              # window would flap on a single deferred night.
+              #
+              # The absent() arm is GATED, because ungated it fires an hour after
+              # a fresh bootstrap and every hour after that, on every cluster that
+              # has not opted into the offsite tier (`restic_offsite_enabled` ships
+              # false) — and a permanently-firing alert is one nobody reads,
+              # including the day it means something.
+              #
+              # The gate is a metric NAME, not a boolean, and that is forced:
+              # Flux substitutes TEXT, so `${...}` is only valid PromQL inside a
+              # quoted string, and these rules are linted pre-substitution by
+              # `scripts/lint-prometheus-config.sh`. So:
+              #   tier OFF (default) — ${cluster_offsite_backup_probe_metric} is
+              #     `up`, which always has series, so absent() is never true and
+              #     the arm is inert.
+              #   tier ON — set the key to
+              #     `restic_offsite_last_success_timestamp_seconds` in the same
+              #     change that flips `restic_offsite_enabled`. absent() then
+              #     means what it should: the unit was never installed, was
+              #     removed, or the storage host is unreachable.
               - alert: OffsiteBackupStale
-                expr: (time() - restic_offsite_last_success_timestamp_seconds > 180000) or absent(restic_offsite_last_success_timestamp_seconds)
+                expr: >-
+                  (time() - restic_offsite_last_success_timestamp_seconds > 180000)
+                  or absent({__name__=~"${cluster_offsite_backup_probe_metric}"})
                 for: 1h
                 labels:
                   severity: warning

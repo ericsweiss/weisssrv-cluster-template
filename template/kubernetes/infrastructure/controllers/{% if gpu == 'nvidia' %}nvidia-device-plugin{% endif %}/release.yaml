@@ -1,6 +1,18 @@
 ---
 # Advertises the node's GPU to the kubelet as the nvidia.com/gpu extended
-# resource. Telemetry comes from DCGM in the observability stage, not here.
+# resource.
+#
+# NO GPU TELEMETRY SHIPS WITH THIS MODULE. The device plugin exports nothing
+# about utilisation, VRAM, temperature, power or per-pod GPU usage — it only
+# tells the scheduler the resource exists. A GPU node is therefore DARK in
+# Grafana until you add an exporter, and the time-slicing configured at the
+# bottom of this file (several pods sharing one card's memory) is exactly the
+# arrangement where that blindness bites: the first symptom of VRAM exhaustion
+# is a workload OOMing inside CUDA with nothing on a dashboard to explain it.
+#
+# NVIDIA's DCGM exporter is the answer, and adding it is a small, bounded change
+# — see "GPU telemetry" in infrastructure/observability/README.md for the exact
+# HelmRepository/HelmRelease/ServiceMonitor and the two version pins it needs.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:

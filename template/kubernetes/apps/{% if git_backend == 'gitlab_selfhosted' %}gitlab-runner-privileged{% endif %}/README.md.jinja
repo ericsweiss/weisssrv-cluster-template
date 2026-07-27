@@ -11,7 +11,7 @@ kubectl, secret injection, container builds.
 > that contains untrusted projects.**
 
 Tags are cooperative routing, not access control. Any project on the instance can
-write `tags: [infrastructure]` in its `.gitlab-ci.yml`. If this runner is
+write `tags: [{{ ci_runner_tag }}]` in its `.gitlab-ci.yml`. If this runner is
 registered instance-wide, that one line gets an arbitrary authenticated user root
 + DinD execution on your cluster, on a runner that also has SSH reach to your
 hosts. That is a privilege-escalation path into the whole estate.
@@ -39,6 +39,13 @@ policy, and a distinct tag (`tenant-build`). Do not widen this one.
 - **Separate ServiceAccount.**
 - **`enforce: privileged` PSS**, because the DinD job pods genuinely require it.
   This is exactly why it must not be the namespace untrusted jobs land in.
+- **`<label-domain>/runner-class` is the TIER, not the tag.** Job pods here are
+  labelled `runner-class=infrastructure`, the shared runner's are labelled
+  `runner-class=shared`, and three things key off those two fixed values: the
+  pod anti-affinity in `release.yaml`, the unrestricted-egress NetworkPolicy in
+  `networkpolicy.yaml`, and kured's `--blocking-pod-selector`. Renaming the CI
+  tag (`ci_runner_tag`) deliberately does **not** move them — that is why the
+  tag beside them is generated while these stay literal.
 
 `protected: false` is deliberate and, unlike the shared runner's, is a real
 residual risk: it lets this privileged runner execute MR pipelines from
@@ -80,7 +87,7 @@ race the cgroup setup and die at prepare.
 | Value | Where |
 |---|---|
 | Runner token | secrets item **GitLab Runner Privileged** → `runner-token` |
-| Tag | `infrastructure` (and `runUntagged: false`) |
+| Tag | `{{ ci_runner_tag }}` — generated from the `ci_runner_tag` answer on BOTH sides (this runner's `tags:` and every job's `tags:` in `.gitlab-ci.yml`), so they cannot drift. With `runUntagged: false`. |
 | Job image | `runners.config` TOML, digest-pinned |
 | Concurrency | `concurrent` + `resourcequota.yaml` (together) |
 

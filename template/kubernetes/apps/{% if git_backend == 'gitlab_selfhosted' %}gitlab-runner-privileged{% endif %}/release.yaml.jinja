@@ -2,8 +2,26 @@
 # Privileged (infrastructure) GitLab Runner. Shared fields come from
 # components/gitlab-runner-common; only this runner's deltas live here.
 #
-# READ THE README BEFORE CHANGING THE TAG OR REGISTRATION: the registration
-# scope, not the tag, is what keeps root+DinD execution off untrusted projects.
+# ===========================================================================
+# REGISTER THIS RUNNER AS A **PROJECT** RUNNER, LOCKED TO THIS REPOSITORY.
+# Never an instance runner. Never a group runner over a group that contains
+# untrusted projects.
+#
+# The registration SCOPE is the security boundary — the tag is not. Tags are
+# cooperative routing: any project on the instance can write
+# `tags: [{{ ci_runner_tag }}]` in its own .gitlab-ci.yml. Registered
+# instance-wide, that one line gets an arbitrary authenticated user root +
+# Docker-in-Docker execution on this cluster, on a runner that also holds SSH
+# reach to the hosts.
+#
+# Verify right after registering, and again after ANY re-registration:
+#     GET /api/v4/runners/<id>   ->   "runner_type": "project_type"
+#
+# This is not hypothetical: in the system this template generalizes the docs
+# stated the rule while the live registration was `instance_type`, and another
+# project's pipeline was observed executing on it. Nothing enforced or checked
+# it. Full reasoning, and the tenant-build alternative, in README.md.
+# ===========================================================================
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -20,12 +38,17 @@ spec:
     concurrent: 9
 
     runners:
-      name: k3s-runner-infrastructure
+      name: k3s-runner-{{ ci_runner_tag }}
 
       secret: gitlab-runner-privileged-token
 
-      # Only jobs that ask for this tag land here...
-      tags: "infrastructure"
+      # THE TAG THE RUNNER CLAIMS. It must equal the `ci_runner_tag` answer,
+      # because that is the tag every job in this repository's pipeline declares
+      # (`tags:` in .gitlab-ci.yml). If the two ever drift, nothing errors: the
+      # tagged jobs simply queue against a tag no runner offers and sit
+      # "pending" until their timeout. Both sides are generated from the same
+      # answer so they cannot drift — do not hardcode either one.
+      tags: "{{ ci_runner_tag }}"
       # ...and untagged jobs never do (they go to the shared runner).
       runUntagged: false
 
@@ -36,7 +59,7 @@ spec:
       #
       # The isolation boundary is the runner REGISTRATION SCOPE, not the tag: tags
       # are cooperative routing, and any project on the instance can declare
-      # tags:[infrastructure]. The registration behind this token MUST be a
+      # tags:[{{ ci_runner_tag }}]. The registration behind this token MUST be a
       # PROJECT runner locked to this repository — never an instance runner.
       protected: false
 
@@ -111,6 +134,14 @@ spec:
             # starts race the cgroup setup and die at prepare, which is the
             # dominant flake class. Soft, so the scheduler still packs under
             # pressure rather than leaving jobs Pending.
+            #
+            # NOTE the value below is `infrastructure` — the TIER name, NOT the
+            # runner tag. runner-class is a Kubernetes-side taxonomy with exactly
+            # two values, `infrastructure` and `shared`, and three consumers that
+            # must all agree on it: this anti-affinity, the egress NetworkPolicy
+            # in networkpolicy.yaml, and kured's --blocking-pod-selector. Renaming
+            # the CI tag must not silently move any of those, so it is a fixed
+            # literal here even though the tag beside it is generated.
             [runners.kubernetes.affinity.pod_anti_affinity]
               [[runners.kubernetes.affinity.pod_anti_affinity.preferred_during_scheduling_ignored_during_execution]]
                 weight = 100

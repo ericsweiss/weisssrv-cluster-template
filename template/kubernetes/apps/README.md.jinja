@@ -29,9 +29,33 @@ for its own sake. Your actual apps go in one of two places:
 {%- endif %}
 
 Each module has a README covering what it does, when you want it, what to
-configure and how to remove it. **Read `gitlab-runner-privileged/README.md`
-before registering that runner** — its registration scope, not its tag, is what
-keeps root+DinD execution off untrusted projects.
+configure and how to remove it.
+{%- if git_backend == 'gitlab_selfhosted' %}
+
+### Before you register the privileged runner
+
+> **Register it as a PROJECT runner locked to this repository. Never an instance
+> runner; never a group runner over a group containing untrusted projects.**
+
+The registration *scope* is the security boundary, not the tag: tags are
+cooperative routing, and any project on the instance can write
+`tags: [{{ ci_runner_tag | default('infrastructure') }}]` in its own
+`.gitlab-ci.yml`. Registered instance-wide, that one line gets an arbitrary
+authenticated user root + Docker-in-Docker execution on this cluster, on a runner
+that also holds SSH reach to the hosts. In the system this template generalizes,
+the docs stated the rule while the live registration was `instance_type` and
+another project's pipeline was observed running on it — nothing checked it.
+
+Verify after registering, and after any re-registration or token rotation:
+
+```bash
+# Expect "project_type"
+curl -sH "PRIVATE-TOKEN: $TOKEN" "https://{{ git_host }}/api/v4/runners/<id>" | jq .runner_type
+```
+
+`gitlab-runner-privileged/README.md` has the full reasoning, the sizing model and
+the tenant-build alternative.
+{%- endif %}
 
 ## House style for a new module
 
