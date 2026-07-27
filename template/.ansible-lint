@@ -17,6 +17,12 @@ exclude_paths:
   - venv/
   # `task lib:sync` checkout — the library lints itself upstream.
   - .weisssrv-lib/
+  # Where ansible-galaxy installs weisssrv.infra (and where ansible-lint
+  # auto-installs it when `offline: false` and it is missing). Without this,
+  # `task lint` run before `task ansible:install-collections` reports the
+  # LIBRARY's line lengths as failures in a repository that does not own them.
+  - ansible_collections/
+  - ansible/ansible_collections/
 
 # Let ansible-lint resolve the collection dependencies it needs to check FQCNs.
 offline: false

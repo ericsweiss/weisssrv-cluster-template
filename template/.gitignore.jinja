@@ -35,6 +35,11 @@ venv/
 .ansible/
 .ansible-home/
 
+# Installed collections. `task ansible:install-collections` puts weisssrv.infra
+# here, and ansible-lint auto-installs it to the same place — either way it is
+# fetched at the pinned lib_ref, never committed.
+ansible_collections/
+
 # Pinned weisssrv-lib checkout (`task lib:sync`) and the version checker's cache
 .weisssrv-lib/
 .version-cache/

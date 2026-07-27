@@ -126,13 +126,12 @@ checks live there. Summary:
 | `admin_user` / `admin_email` | — | SSH login on every host; system-mail and ACME address |
 | `alert_email` | `admin_email` | Alertmanager critical receiver |
 | `timezone` | `UTC` | IANA name |
-| `git_backend` / `git_host` / `git_namespace` | `gitlab_selfhosted` | Where Flux reads from and CI runs |
-| `git_repo` | `cluster_name` | Repository name, when it differs from the cluster name |
+| `git_backend` / `git_host` / `git_namespace` | `gitlab_selfhosted` | Where Flux reads from and CI runs. The repository is `git_namespace/cluster_name` — there is no separate repo-name answer |
 | `secrets_backend` / `onepassword_vault` | `onepassword` | Credential source for hosts and cluster |
 | `dns_backend` | `cloudflare` | Zone module, external-dns, ACME DNS-01 |
 | `compute_node_count` | `2` | Compute hosts in the starter inventory (plus the NAS node) |
 | `nas_host` / `smtp_host` | derived from `internal_domain` | NFS server (mounted by name) and SMTP relay |
-| `node_exporter_job_regex` | `node-exporter` | Prometheus job the host alert rules scope to |
+| `node_exporter_job_regex` | `node-exporter\|node-exporter-host` | Prometheus jobs the host alert rules scope to; both shipped names are required |
 | `vpn_tailscale` | `false` | Overlay VPN: host role, operator, ACL module |
 | `tailnet_dns_suffix` | `CHANGEME.ts.net` | Asked only with `vpn_tailscale`; MagicDNS suffix — must be replaced |
 | `gpu` | `none` | `nvidia` adds VFIO prep, device plugin, DCGM |
