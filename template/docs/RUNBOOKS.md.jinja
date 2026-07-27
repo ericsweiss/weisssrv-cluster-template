@@ -1,0 +1,476 @@
+# Runbooks — {{ cluster_name }}
+
+Day-two operations for this cluster. This is the file every alert's
+`runbook_url` points at, so the section headings below are load-bearing: renaming
+one breaks the links baked into `cluster_runbook_base_url`.
+
+`task --list` is the authoritative command reference. Every command on this page
+is one the generated `Taskfile.yml` defines — if a command here does not exist,
+that is a bug, not a missing feature you need to install.
+
+The reasoning behind these shapes (Flux stages, substitution, storage tiers, the
+DNS split) lives in the template's
+[ARCHITECTURE.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/ARCHITECTURE.md).
+
+---
+
+## Where to look first
+
+| Question | Command |
+|---|---|
+| Is the platform healthy? | `task flux:status` |
+| Is Flux itself healthy? | `task flux:verify` |
+| Are the hosts converged? | `task infra:verify` |
+| Are the nodes healthy? | `task k3s:status` |
+| Is observability up? | `task observability:status` |
+| What changed recently? | `git log --oneline -20` |
+| Which secret references does this repo use? | `task secrets:show` (references only, never values) |
+| Why is this service down? | its dashboard, then its logs, then its NetworkPolicy |
+
+There is no state-snapshot task: the repository *is* the intended state, and
+`task flux:status` plus `task infra:verify` are how you compare the cluster
+against it.
+
+If `task` itself fails before running anything, the usual causes are a missing
+tool (`task lint` names each one in its precondition message), an unauthenticated
+1Password CLI (`task op:check`), or the collection not being installed
+(`task ansible:install-collections`).
+
+---
+
+## The change workflow
+
+Every change, including one-line fixes, takes the same path:
+
+```bash
+git switch -c <branch>
+# edit
+task lint                      # the local mirror of the CI lint stage
+task flux:lint                 # if kubernetes/ changed (task lint runs it too)
+git commit && git push -u origin <branch>
+# open a merge request; let the pipeline and review run
+# merge → Flux reconciles kubernetes/, CI deploys the Ansible side
+task flux:status && task infra:verify
+```
+
+Never push to the default branch. Flux and the deploy jobs act on it, so a push
+is a deploy without a review.
+
+Gates worth remembering, because forgetting them fails the pipeline rather than
+your machine:
+
+| You touched | Also run | Commit |
+|---|---|---|
+| a version pin in `group_vars/all.yml` | `task flux:sync-versions` | the ConfigMap alongside |
+| `hosts.yml` | `task hosts:sync` | `scripts/hosts.env` alongside |
+| anything under `kubernetes/` | `task flux:lint` | — |
+| alert or recording rules | `task lint:prometheus-config` | — |
+
+`task lint:prometheus-config` is deliberately **not** part of `task lint`: it
+needs `promtool` and `amtool`, which are not workstation defaults.
+
+---
+
+## Making Flux act now
+
+```bash
+task flux:status                     # every Kustomization, HelmRelease, ExternalSecret
+task flux:verify                     # flux check + the full resource list
+task flux:reconcile                  # force source refresh + reconcile everything
+
+flux reconcile kustomization apps --with-source
+flux reconcile helmrelease <name> -n <namespace>
+```
+
+Reconciliation is push-triggered, with a short poll as the fallback, so a merged
+change normally lands within a minute. Forcing is for when you are watching.
+
+Fast local iteration, reverted on the next pass — use it to check a render, not
+to deploy:
+
+```bash
+task flux:dev-apply -- kubernetes/apps/<app>
+```
+
+---
+
+## Deploying an Ansible change
+
+```bash
+task infra:check                                   # dry run, the whole site play
+task infra:check -- --limit <host>                 # dry run, one host
+task infra:deploy                                  # the whole base layer (site.yml)
+task infra:verify
+```
+
+`task infra:deploy` runs `playbooks/site.yml`, which is also the correct entry
+point on a fresh cluster: it orders the certificate plays before the NAS plays,
+and `nfs_tls` fails loudly if the wildcard certificate is not on the server yet.
+The narrower tasks are for re-runs once that ordering has been satisfied once:
+
+```bash
+task infra:base            # base.yml only — users, SSH, packages, resolver config
+task dns:deploy            # dns.yml — resolvers, then ACME issuance and sync
+task storage:deploy        # storage.yml — the NAS alone
+task proxmox:ha            # HA rules, resource pools, replication
+task zfs:encrypt           # encryption mechanism + boot units, where pools are encrypted
+```
+
+For a single role, address the play directly:
+
+```bash
+cd ansible && ansible-playbook -i inventories/prod/hosts.yml \
+  playbooks/site.yml --tags <tag> --limit <host>
+```
+
+Secrets are injected by the task wrapper (`op run`), so a bare
+`ansible-playbook` outside `op run` fails on the `undef(hint=...)` guards in
+`group_vars/all.yml`. Prefer the task; if you must run the playbook directly,
+run it under `op run --`.
+
+All roles are idempotent; re-running is the normal way to apply a change and the
+first thing to try when a host has drifted.
+
+---
+
+## Upgrades
+
+### An application or chart version
+
+```bash
+task maintenance:check-versions           # what is outdated, across every source
+task maintenance:update-version SERVICE=<name>
+task flux:sync-versions
+git add ansible/inventories/prod/group_vars/all.yml \
+        kubernetes/infrastructure/sources/versions-configmap.yaml
+git commit -m "Bump <name>"
+```
+
+`task maintenance:update-all-versions` does the same for every outdated pin at
+once. Versions are pinned deliberately: nothing tracks `latest`, and no bot
+merges bumps unattended — the scheduled job opens one merge request and leaves
+it for a human.
+
+### Host packages
+
+```bash
+task maintenance:update-packages          # add -- -e auto_reboot=true to reboot
+task maintenance:update-applications      # host-level apps to their pinned versions
+task maintenance:update-full              # both, rolling and interactive
+task infra:verify
+```
+
+Silence the alerts a planned restart will trip **before** starting, or the next
+real incident arrives in a channel everyone has learned to ignore. There is no
+task for this; go through Alertmanager directly:
+
+```bash
+kubectl get svc -n observability                     # find the Alertmanager service
+kubectl -n observability port-forward svc/<alertmanager-svc> 9093:9093
+# then http://localhost:9093 → Silences → New Silence
+```
+
+### Kubernetes nodes
+
+```bash
+# bump k3s_version in group_vars/all.yml, then:
+task maintenance:update-k3s-nodes         # drains, upgrades and uncordons node by node
+task k3s:status
+```
+
+Servers first, one at a time, watching the etcd quorum. Rolling back is a
+version bump in the other direction plus the same task.
+`task maintenance:update-cluster` chains the node upgrade and the pin sweep.
+
+### The platform library
+
+Bumping `lib_ref` upgrades the Ansible collection, the CI templates and the
+Terraform modules together. Read the library's changelog first
+([weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib), and
+`ansible_collections/weisssrv/infra/MIGRATING.md` for role-level breaking
+changes), then:
+
+```bash
+task ansible:install-collections    # re-installs at the new ref
+task lib:sync                       # refresh .weisssrv-lib, the vendored scripts' source
+task lint
+```
+
+### The template itself
+
+See § Updating the template.
+
+---
+
+## Adding a node
+
+### A hypervisor host
+
+1. Install the OS, static address, join the cluster (`pvecm add <existing-node>`).
+2. Create the admin user with passwordless sudo and deploy your SSH key.
+3. Add it to `hosts.yml` under the `compute` (or `nas`) group, with its
+   `proxmox_role` and `firewall_ipsets`. Facts that apply to one host only
+   (NIC names, VFIO ids, per-host disks) go inline on the host entry, or in an
+   optional `host_vars/<host>.yml` you create — the generated tree ships none.
+4. `task hosts:sync` and commit `scripts/hosts.env` alongside.
+5. `task infra:base -- --limit <host>`
+6. Redeploy the firewall so the new address enters the derived IP sets:
+   `cd ansible && ansible-playbook -i inventories/prod/hosts.yml playbooks/site.yml --tags proxmox_firewall`
+7. Verify: `pvecm status`, `pve-firewall status`, `task ansible:ping`.
+
+### A Kubernetes agent
+
+1. Add the VM to `hosts.yml` under `k3s_agents` with its address, `vmid` and
+   the `proxmox_host` it lives on; give it the `k3s_labels` you want it
+   scheduled by.
+2. `task hosts:sync`, commit.
+3. `task k3s:provision-vms -- --limit <vm>`
+4. `task k3s:deploy -- --limit <vm>`
+5. `kubectl get nodes` — the new node is `Ready` and carries its labels.
+
+Adding a **server** additionally changes the etcd quorum: go from three to five,
+never to four, and verify `kubectl get nodes -l node-role.kubernetes.io/etcd`
+before and after. Server addresses also feed
+`cluster_apiserver_egress_cidr` in `cluster-config` — that key is a hand-edited
+CIDR, not derived, so widen or re-narrow it in the same change.
+
+---
+
+## Adding an application
+
+**In the cluster**: create `kubernetes/apps/<name>/` — namespace, workload,
+storage, `ExternalSecret` if it needs credentials, certificate, ingress route,
+NetworkPolicy, autoscaling policy — and add it to the parent kustomization. Copy
+the closest existing neighbour rather than writing from scratch; the shapes are
+deliberately uniform. Reference site values as `${cluster_...}` substitutions,
+never as literals, and run `task flux:lint` before committing — it fails on any
+placeholder the ConfigMaps do not define.
+
+**As a guest**: define the VM or container in `hosts.yml` with its resources and
+any `vm_additional_disks` zvols, add a playbook, and route to it through the
+ingress (`kubernetes/apps/vm-ingress/` is the worked example). Guests need the
+same treatment as pods: firewall rules, backups, log shipping, metrics, an
+alert.
+
+Either way the service is not finished until it has logs, metrics, a
+down-or-stale alert, and a probe if users hit it directly.
+
+---
+
+## Rotating a secret
+
+**In-cluster** (anything an `ExternalSecret` produces):
+
+```bash
+# update the item in the vault, then:
+task flux:rotate-secret -- <namespace>/<name>    # force sync + restart consumers
+task flux:refresh-secret -- <namespace>/<name>   # sync only, no restart
+```
+
+Both take a `<namespace>/<name>` pair naming the **ExternalSecret**, not the app;
+anything else is rejected. `kubectl get externalsecrets -A` lists the valid
+arguments.
+
+Restarting matters more than it looks: the operator re-fetches on a long
+interval and the reloader deliberately ignores Secret changes, so a rotation
+without a restart is a silent no-op.
+
+**Host-side** (anything injected with `op run`): update the item, then re-run the
+task that consumes it. `task secrets:show` prints every reference this
+repository uses, so you can see which item a given task needs before touching it.
+
+**The bootstrap credentials** cannot rotate themselves. Regenerate the Connect
+server credentials and re-run `task flux:bootstrap-secrets`, which recreates
+both hand-made Kubernetes Secrets and mints a fresh Connect token.
+
+---
+
+## Certificates
+
+```bash
+kubectl get certificates -A                          # in-cluster
+kubectl describe certificaterequest -n <ns> <name>    # why it is stuck
+cd ansible && ansible-playbook -i inventories/prod/hosts.yml \
+  playbooks/site.yml --tags acme_certs                # host-side renewal
+task certs:show-host-keys                            # the pinned distribution host keys
+```
+
+Almost every failure is one of: the DNS token cannot see the zone, the challenge
+record has not propagated yet, or the account hit a rate limit after a loop of
+failed attempts. Check propagation with
+`dig +short TXT _acme-challenge.<name> @1.1.1.1` before assuming anything is
+broken.
+
+Renewed host-side certificates are distributed over SSH with a pinned host key;
+a distribution failure after a rebuild usually means the pinned key is stale —
+`task certs:show-host-keys` prints the current ones to paste back into the
+inventory.
+
+The NAS depends on this: `nfs_tls` refuses to publish a require-TLS export
+without the wildcard certificate and key in place, so a certificate failure
+surfaces as a storage failure on the next `task storage:deploy`.
+
+---
+
+## Suspending, rolling back, and breaking glass
+
+```bash
+task flux:suspend -- <ns>/<kind>/<name>        # stop reconciling one resource
+task flux:resume  -- <ns>/<kind>/<name>        # same arguments
+
+git revert <commit> && git push                # the normal rollback
+helm history <release> -n <ns>                 # while suspended, if you must
+```
+
+Suspend from leaf to root so no stage reconciles into a half-suspended state.
+Anything you do by hand while suspended is undone by the resume unless you have
+also changed git — which is the point.
+
+---
+
+## Storage
+
+**A degraded pool**
+
+```bash
+zpool status -v <pool>          # which device, which errors
+zpool replace <pool> <old> /dev/disk/by-id/<new>
+zpool status 1                  # watch the resilver
+```
+
+Always reference disks by `/dev/disk/by-id/`. Check SMART on the surviving
+members before assuming the failure is isolated; drives bought together fail
+together. Pools are never created or destroyed by Ansible — `nas_storage` only
+enforces properties on pools and datasets that already exist, and a declared
+dataset that is missing fails the deploy loudly.
+
+**NFS clients hung after a server restart**
+
+Established mounts do not recover from a server that went away: the export is
+back but the client holds a stale handle. Restart the consumers — for pods,
+delete them so they remount. If the server itself refuses to stop, reset the
+failed unit and start it again rather than forcing a reboot.
+
+**Something landed on the wrong storage class**
+
+Every PV in the cluster is static with `storageClassName: ""`. If an alert says
+one is on the default class, the claim was created before the manifest was
+fixed — a StatefulSet's volume template is immutable, so the fix is: scale to
+zero, copy the data to the intended volume, delete the claim, recreate it bound
+to the right volume, scale back up.
+
+---
+
+## Backups and restore
+
+What the generated cluster ships, and what it does **not**:
+
+| Layer | State | Where it is configured |
+|---|---|---|
+| ZFS snapshots on the storage host | on, once you declare the datasets | `nas_storage_zfs_pools` in `group_vars/nas.yml` |
+| Hypervisor guest backups (vzdump) | on for guests that opt in | `proxmox_backup_storage` / `proxmox_backup_vzdump_jobs` in `group_vars/nas.yml` |
+| etcd snapshots | on, taken by k3s; copied off-node to the NAS | `k3s_etcd_snapshot_*` in `group_vars/k3s.yml`; on demand with `task k3s:backup` |
+| Per-application logical dumps | per app | e.g. `kubernetes/apps/authentik/pg-dump.yaml` |
+| Replication to an archive pool | **off by default** | `nas_storage_archive_backup_enabled` in `group_vars/nas.yml` |
+| Offsite (restic over rclone) | **off by default** | `restic_offsite_enabled` in `group_vars/nas.yml` |
+
+The bottom two are opt-in and unconfigured on a fresh cluster. Enabling offsite
+means setting `restic_offsite_enabled: true`, filling in `restic_offsite_repo`,
+`restic_offsite_cache_dir` and `restic_offsite_sources`, adding
+`restic_offsite_repo_password` and the rclone remote's credentials to the vault,
+and adding the matching `op://` references to the `storage:deploy` task's `env:`
+block. The role asserts all of them, so a half-configured enable fails the
+deploy rather than backing up nothing quietly.
+
+Put the cache directory on an **encrypted** dataset: it holds the repository
+tree — file paths — in plaintext even though the data blobs are client-encrypted.
+
+Until offsite is on, the `OffsiteBackup*` alerts describe a backup that does not
+exist (`OffsiteBackupStale` carries an `absent()` arm and fires immediately) —
+either configure it or gate those rules off deliberately.
+
+Inspect what exists:
+
+```bash
+task k3s:backup                                              # take an etcd snapshot now
+ssh {{ admin_user }}@{{ nas_host }} 'zfs list -t snapshot'   # local snapshots
+ssh {{ admin_user }}@{{ nas_host }} 'ls /var/lib/vz/dump'    # hypervisor guest backups
+```
+
+Rehearse restores on a schedule, not after an incident:
+
+1. Restore one application's most recent logical dump into a scratch database
+   and diff a table you know.
+2. Restore one file from the offsite repository and compare checksums.
+3. Boot one guest from its hypervisor backup on a spare host.
+
+Two values are unrecoverable by design and belong somewhere **outside** the
+vault that holds them: the offsite repository password, and any application's
+own backup-encryption key. Losing either makes the corresponding copies
+decorative.
+
+---
+
+## When Flux is unhappy
+
+| Symptom | First command | Usual cause |
+|---|---|---|
+| Kustomization stuck `Reconciling` | `flux get kustomizations` then `kubectl describe kustomization <n> -n flux-system` | a dependency stage is not Ready, or `wait: true` on something that never becomes healthy |
+| `HelmRelease Ready=False` | `flux get hr -A` then `kubectl describe hr <n> -n <ns>` | values schema change across a chart major, or a CRD it expects is missing |
+| `ExternalSecret SecretSyncError` | `kubectl describe externalsecret <n> -n <ns>` | item or field name does not exist in the vault — the event names what it looked for |
+| Literal `${cluster_...}` in a live object | `task flux:lint` | key missing from `cluster-config`, or the Kustomization does not substitute from it |
+| Pod `Pending` forever | `kubectl describe pod` | affinity selecting a node label that no node carries |
+| Everything Ready, nothing works | `kubectl get svc -A \| grep LoadBalancer` | address pool exhausted or the VIP is not being advertised |
+
+```bash
+kubectl logs -n flux-system deploy/kustomize-controller --tail=100
+kubectl logs -n flux-system deploy/helm-controller --tail=100
+```
+
+---
+
+## Post-failover reconciliation
+
+After the HA layer moves a guest, the repository and the cluster disagree about
+where things live. Reconcile deliberately: confirm the guest is healthy on its
+new host (`task proxmox:ha-status`), check whether replication jobs still point
+at the right source, and either accept the new placement in `hosts.yml` or
+migrate it back. Leaving it undecided means the next deploy fights the HA
+manager.
+
+---
+
+## Updating the template
+
+```bash
+copier update --vcs-ref <newer-tag>   # replays .copier-answers.yml against a newer template
+git diff                              # review like any other change
+task lint
+```
+
+Copier three-way-merges: files you never touched update cleanly, files you
+rewrote produce conflicts you resolve by hand. Review the diff — a template
+update can change defaults, not just add files.
+
+To change a site value copier baked in (a VIP, a domain), edit the value in
+`.copier-answers.yml`, run `copier update`, and check that the corresponding
+`cluster-config` key changed. Editing only the ConfigMap works until the next
+update reintroduces the old answer.
+
+---
+
+## Where the platform is documented
+
+This repository holds *this cluster*. The building blocks are documented
+upstream:
+
+| What | Where |
+|---|---|
+| Role variables and behaviour | [`ansible_collections/weisssrv/infra/roles/<role>/README.md`](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) in weisssrv-lib |
+| The collection's inventory-wide variable table | [collection README](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/README.md) |
+| Role breaking changes across refs | [MIGRATING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/MIGRATING.md) |
+| CI template inputs | [docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md) |
+| What a `lib_ref` bump can break | [docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md) |
+| The generator, its answers and its own docs | [weisssrv-cluster-template](https://git.ericsweiss.com/eric/weisssrv-cluster-template) |
+
+This cluster's pipeline is described in [ci-pipeline.md](ci-pipeline.md).

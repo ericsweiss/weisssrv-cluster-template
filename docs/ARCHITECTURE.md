@@ -142,6 +142,14 @@ matches nothing. `cluster_apiserver_egress_cidr` must list the **server node
 addresses**, not the API VIP — kube-proxy rewrites the destination before
 NetworkPolicy is evaluated, so allowing the VIP allows nothing.
 
+The second one ships **deliberately wide and needs narrowing by hand.** The
+server addresses live in the inventory, not in a copier answer, so the generator
+cannot know them: it writes the whole LAN CIDR and says so in a comment. Until
+you replace it with the server `/32`s — a post-inventory step called out in
+[SETUP.md](SETUP.md) § 2 — the API-server egress allowance is LAN-wide. It is
+the one shipped value in `cluster-config` that is knowingly looser than the rule
+above.
+
 A renamed or missing key fails **quietly in the cluster**: Flux substitutes an
 unknown `${placeholder}` with an empty string rather than erroring, so the
 object applies and the misconfiguration surfaces later as a service listening on
@@ -286,9 +294,19 @@ Metrics, logs and alerts are a platform property, not a per-application chore:
   through the ingress, so there is one authenticated path.
 - **Dashboards** — provisioned from ConfigMaps, so a dashboard is a reviewable
   file rather than a thing someone edited in a UI at 2am.
-- **Alerts** — rules live beside the stack and are unit-tested with `promtool`;
-  a dead-man's-switch alert fires continuously and pages if it *stops*, which is
-  the only way to detect that alerting itself is down.
+- **Alerts** — rules live beside the stack; a dead-man's-switch alert fires
+  continuously and pages if it *stops*, which is the only way to detect that
+  alerting itself is down. `task lint:prometheus-config` checks the rules and
+  the Alertmanager configuration with `promtool` / `amtool`. It will also run
+  `promtool test rules` over `tests/prometheus-rules/*.test.yaml` — the
+  generated tree ships no such tests, so that step reports "skipping" until you
+  write the first one. Rule *unit tests* are a hook the template provides, not
+  coverage it gives you.
+- **Runbooks** — every alert carries a `runbook_url` built from
+  `cluster_runbook_base_url`, pointing at `docs/RUNBOOKS.md` **in the generated
+  repository**, which the template ships. Three headings there are a contract
+  with the rules: `#where-to-look-first`, `#certificates`,
+  `#backups-and-restore`.
 
 The expectation the template encodes: a new service is not done until it has
 logs, metrics, a down-or-stale alert, and a probe if users reach it directly.
@@ -314,6 +332,27 @@ retention. The offsite copy is encrypted before it leaves the network, so the
 provider holds ciphertext and the object-store credentials are scoped so they
 cannot delete — deletions happen through a lifecycle policy, not through the key
 the backup job holds.
+
+**The bottom two layers of that diagram are opt-in and ship off.** A generated
+cluster gives you local snapshots, per-application logical dumps and
+hypervisor-level guest backups; the archive replication
+(`nas_storage_archive_backup_enabled: false`) and the offsite restic link
+(`restic_offsite_enabled: false`, both in `group_vars/nas.yml`) are switches you
+turn on once you have somewhere to send them. The template cannot know your
+archive pool or your object store, and a backup job pointed at a repository that
+does not exist fails nightly.
+
+Enabling offsite means setting `restic_offsite_repo`,
+`restic_offsite_cache_dir` and `restic_offsite_sources` in the inventory,
+putting `restic_offsite_repo_password` and the rclone remote's credentials in
+the vault, and adding the matching `op://` references to the `storage:deploy`
+task's `env:` block. Put the cache directory on an encrypted dataset: it holds
+the repository tree — file *paths* — in plaintext even though the data blobs are
+client-encrypted.
+
+Note the asymmetry that makes this worth doing promptly: the `OffsiteBackup*`
+alert rules ship **enabled**, so a fresh cluster alerts on a chain it does not
+yet have. Either configure it or gate the alerts off deliberately.
 
 The important discipline is not the chain but the rehearsal: a restore that has
 never been performed is a plan, not a backup.
@@ -372,7 +411,7 @@ repository that cannot reconcile.
 ├── .copier-answers.yml         what this cluster was generated from
 ├── ansible/
 │   ├── requirements.yml        weisssrv.infra pinned at lib_ref
-│   ├── inventories/prod/       hosts, group_vars, host_vars — the site's data
+│   ├── inventories/prod/       hosts.yml + group_vars/ — the site's data
 │   └── playbooks/              site, base, dns, storage, k3s, proxmox-*, maintenance/
 ├── terraform/                  DNS zone, tailnet ACL, SSO objects
 ├── kubernetes/
@@ -380,8 +419,38 @@ repository that cannot reconcile.
 │   ├── components/             reusable kustomize components
 │   ├── infrastructure/         sources, crds, controllers, configs, observability
 │   └── apps/                   one directory per application
-├── scripts/                    verification, state collection, generators
-├── docs/                       this cluster's own operational documentation
+├── scripts/                    verification, generators, the version registry
+├── docs/                       RUNBOOKS.md (what every alert links to),
+│                               ci-pipeline.md, plus anything you add
 ├── Taskfile.yml                every operation, grouped by namespace
 └── .gitlab-ci.yml              lint, validate, deploy — from the library's templates
 ```
+
+Notice what is **not** there: `ansible/roles/`. Playbooks address
+`weisssrv.infra.<role>` by FQCN and the collection is installed from
+`requirements.yml` at `lib_ref`, so the generated tree carries no role source at
+all. That is the single biggest reason a generated cluster stays small, and the
+reason the variables you set in `group_vars/` are documented somewhere else.
+
+---
+
+## Where the platform is documented
+
+A generated repository documents *one cluster*. Everything it is assembled from
+is documented in [weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib),
+and both the generated docs and the generated agent skill link there rather than
+restating it:
+
+| What | Where in weisssrv-lib |
+|---|---|
+| Role variables and behaviour | [`ansible_collections/weisssrv/infra/roles/<role>/README.md`](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) |
+| The inventory-wide variables roles alias (the "Use" table) | [collection README](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/README.md) |
+| Role breaking changes across refs | [MIGRATING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/MIGRATING.md) |
+| CI template inputs | [docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md) |
+| What a `lib_ref` bump can break | [docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md) |
+| The upstream of the vendored `scripts/` copies | [docs/SCRIPTS.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/SCRIPTS.md) |
+
+Filling in the inventory — the step [SETUP.md](SETUP.md) § 2 calls the one part
+no template can generate — is done against those role READMEs. Reaching them
+from your workstation is a prerequisite, not a convenience: see
+[PRE-SETUP.md](PRE-SETUP.md) § 5a.

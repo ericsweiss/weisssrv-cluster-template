@@ -24,9 +24,14 @@ two or more compute nodes. Fewer nodes work, with caveats noted below.
 
 ### Cluster shape
 
-- **Three compute nodes minimum** if you want the k3s control plane to tolerate
-  a node failure: the template lays out three server VMs holding an etcd quorum,
-  and putting two of them on the same host defeats it.
+- **Three hosts minimum** if you want the k3s control plane to tolerate a node
+  failure: the template lays out three server VMs holding an etcd quorum, and
+  putting two of them on the same host defeats it. The shipped default is
+  `compute_node_count: 2`, which reaches three hosts by placing **one etcd
+  member on the storage node** — so budget that node for a 2 vCPU / 6 GB server
+  VM plus a 4 vCPU / 8 GB agent on top of its ZFS ARC. Answer
+  `compute_node_count: 3` instead if you would rather keep the storage node out
+  of the control plane.
 - **One storage node.** It owns the ZFS pools, the NFS exports every stateful
   workload mounts, and the zvols passed through to application VMs. It is the
   one node whose loss stops the cluster.
@@ -82,20 +87,32 @@ before you start; the answers marked → become copier answers.
 | Public ingress VIP | `metallb_public_vip` | the address you port-forward to |
 | Internal ingress VIP | `metallb_internal_vip` | LAN-only services |
 
-A worked plan for a `/24`, which you are free to copy or ignore — the point is
-that the blocks are contiguous and outside DHCP:
+This is the plan the **starter inventory actually ships with**, so copying it
+means the generated `hosts.yml` needs re-addressing only if you disagree with
+it. The blocks are contiguous and, deliberately, all sit below the VIPs:
 
 ```
 x.x.x.1          router
-x.x.x.2-.99      DHCP pool and workstations
-x.x.x.100        public ingress VIP
-x.x.x.101        internal ingress VIP
-x.x.x.102-.109   Proxmox hosts
-x.x.x.150-.169   infrastructure and application guests
-x.x.x.161        Kubernetes API VIP
-x.x.x.200-.219   k3s agent VMs
-x.x.x.220-.229   k3s server VMs
+x.x.x.11         storage (NAS) host
+x.x.x.12-.19     compute hosts
+x.x.x.21/.22     DNS resolvers (LXC)
+x.x.x.23         SMTP relay (LXC)
+x.x.x.31-.39     k3s server VMs
+x.x.x.41-.49     k3s agent VMs
+x.x.x.50-.99     application guests you add later
+x.x.x.100        public ingress VIP        ← metallb_public_vip
+x.x.x.101        internal ingress VIP      ← metallb_internal_vip
+x.x.x.161        Kubernetes API VIP        ← k3s_api_vip
+x.x.x.170-.254   DHCP pool and workstations
 ```
+
+The DHCP pool goes at the **top** here for one reason: most consumer routers
+default to handing out `.100`–`.199` or the whole `.2`–`.254` range, and every
+address above is static. Shrink the pool to a block that contains none of them
+before you generate, or you will spend the first deploy chasing address
+conflicts. If you would rather keep your existing pool where it is, re-address
+`hosts.yml` after generation — every hostname and address in it is a placeholder
+and the file says so.
 
 Also decide and note:
 
@@ -181,46 +198,116 @@ eval "$(op signin)"
 # Create the vault that will hold this cluster's items → onepassword_vault
 op vault create Homelab
 
-# Connect server credentials — produces ./1password-credentials.json plus a
-# token you mint separately. Keep the JSON file out of git; it is the one
-# artifact that cannot be re-derived.
-op connect server create <cluster-name> --vaults Homelab
-op connect token create eso --server <cluster-name> --vaults Homelab
+# Connect server credentials. The server NAME IS LOAD-BEARING: the generated
+# `task flux:bootstrap-secrets` looks for `<cluster_name>-connect` and mints its
+# own token against it. Use exactly this form.
+op connect server create <cluster_name>-connect --vaults Homelab
 
 # CI service account, scoped read-only to the same vault
 op service-account create ci --vault Homelab:read_items
 ```
 
-Both Connect artifacts become the only two Kubernetes Secrets ever created by
-hand; everything else in the cluster is produced from them. Losing them is
-recoverable (regenerate and re-create the two Secrets); losing the vault is not.
+`op connect server create` writes **`1password-credentials.json`** into the
+current directory. Do not mint a token by hand — `task flux:bootstrap-secrets`
+creates `<cluster_name>-eso` itself during bring-up, which is also how you
+rotate it later. Move the JSON file into the generated repository's root before
+running that task; the task's precondition looks for
+`./1password-credentials.json` and nowhere else. It is gitignored there — that
+file is a read credential for the whole vault, and it is the one artifact that
+cannot be re-derived from anything else.
+
+The credentials file and the minted token become the only two Kubernetes Secrets
+ever created by hand; everything else in the cluster is produced from them.
+Losing them is recoverable (regenerate the server and re-run the task); losing
+the vault is not.
 
 ### Items to create
 
-Create these before the phase that needs them — the generated repository's docs
-list the exact field names, and each application adds its own. The platform set:
+**Item titles and field names are load-bearing.** A title is a path segment in
+an `op://<vault>/<Item Title>/<field>` reference, and it is also the
+`remoteRef.key` an `ExternalSecret` sends to 1Password Connect; a field name is
+the last path segment / `remoteRef.property`. A mismatch is not a warning: `op
+run` hard-fails the whole task, and an `ExternalSecret` sits in
+`SecretSyncError` forever.
 
-| Item | Fields | Needed by |
+The names below are exactly what the generated repository asks for. Create the
+items with these titles, or rename both sides — the references live in
+`ansible/inventories/prod/group_vars/all.yml`, `Taskfile.yml` and the
+`ExternalSecret` manifests. `task secrets:show` in the generated repository
+prints the live list (references only, never values) if you ever need to
+re-derive it.
+
+Note the two 1Password quirks the field names reflect: a Login item's fields are
+`username` and `password`, and an API Credential item's secret field is
+`credential`. That is why an account ID lives in `username` on the Cloudflare
+items.
+
+#### Host-side — resolved by `op run` (Ansible, Terraform, Task, CI)
+
+| Item title | Fields | Needed by |
 |---|---|---|
-| SSH key | public key, private key | base host configuration |
-| DNS provider token | credential, account id | certificates, external DNS, DDNS |
-| DNS provider Terraform token | credential, account id | Terraform |
-| SMTP relay upstream | username, app password | outbound system mail |
-| SMTP relay auth | username, password | hosts authenticating to the relay |
-| Mail alias | root alias address | where system mail lands |
-| DNS admin | username, password | the filtering resolver's web UI |
-| File share user | password | SMB access to the NAS |
-| Certificate distribution key | private key, public key | pushing renewed certs to non-cluster hosts |
-| k3s cluster token | credential | node join |
-| Git access token | credential | Flux reading the repository |
-| CI service account token | credential | pipeline secret injection |
-| Connect access token | credential | External Secrets Operator |
-| Storage pool passphrases | passphrase, one item per encrypted pool | unlocking pools at boot |
-| Alert webhook | url | alert delivery |
-| Virtualization API token | user, token name, token secret | the Proxmox metrics exporter |
+| `SSH Key` | `public key`, `private key` | base host config, guest cloud-init; CI reads the private half for deploy jobs |
+| `Email Config` | `root_alias` | destination for cron, fail2ban and SMART mail |
+| `AdGuard Home` | `password` | the filtering resolver's admin UI |
+| `Cert Distribution Key` | `private key`, `public key` | pushing renewed certificates to non-cluster hosts |
+| `Cloudflare DNS Token` | `credential`, `username` (account ID) | ACME DNS-01 on the hosts; also read by the cluster (below) |
+| `Cloudflare Terraform Token` | `credential`, `username` (account ID) | `task terraform:*` — the zone module only |
+| `SMTP Smarthost` | `username`, `password` | the relay authenticating upstream |
+| `SMTP Relay Auth` | `username`, `password` | hosts authenticating to the relay; also read by the cluster |
+| `Samba NAS User` | `password` | SMB access to the NAS |
+| `K3s Cluster Token` | `credential` | server node join |
+| `K3s Agent Token` | `credential` | agent join — worker-only, so a compromised agent cannot register a server |
+| `Loki Push Auth` | `username`, `password` | host-side Alloy pushing journald through the ingress |
+| `1Password Connect` | `token` | the boot-time ZFS key fetch (`task zfs:encrypt`) |
+| `Git Access Token` | `credential` | `task flux:bootstrap` — needs `api`, `read_repository`, `write_repository` |
+| `Git Terraform State Token` | `credential` | the GitLab-managed Terraform HTTP state backend |
+| `GitHub Token` | `credential` | `task maintenance:check-versions` (upstream release lookups; a bare read-only PAT) |
+| `Authentik Terraform Token` | `credential` | the `terraform:authentik-init` / `-plan` / `-apply` tasks — created after Authentik is up |
+| `Tailscale Auth Key` | `credential` | enrolling hosts, only with `vpn_tailscale` |
+| `Tailscale OAuth` | `client id`, `credential` | the `terraform:tailscale-init` / `-plan` / `-apply` tasks, only with `vpn_tailscale` |
+
+`Loki Push Auth` deserves a call-out: it is in the `env:` block of
+`infra:deploy`, `dns:deploy` and `storage:deploy`, so a missing item fails all
+three at the very start of bring-up, long before anything logs anything.
+
+#### In-cluster — fetched by External Secrets from Connect
+
+These never appear in an `op://` reference; they are `remoteRef.key` /
+`remoteRef.property` pairs in `ExternalSecret` manifests.
+
+| Item title | Fields | Consumed by |
+|---|---|---|
+| `Cloudflare DNS Token` | `credential` | cert-manager, external-dns, the DDNS job (same item as above) |
+| `SMTP Relay Auth` | `username`, `password` | Alertmanager and Authentik outbound mail (same item as above) |
+| `Loki Push Auth` | `htpasswd` | the Loki ingress basic-auth middleware — an **htpasswd line**, not the plain password |
+| `Alertmanager Webhook` | `url` | the chat receiver |
+| `Healthchecks Watchdog` | `ping url` | the dead-man's-switch heartbeat (note the **space** in the field name) |
+| `Grafana SSO` | `oidc-client-id`, `oidc-client-secret` | Grafana's OIDC login |
+| `Authentik Secrets` | `secret-key`, `postgresql-password`, `postgresql-admin-password` | the identity provider and its database |
+| `GitLab Runner` | `runner-token` | the shared in-cluster runner |
+| `GitLab Runner Privileged` | `runner-token` | the privileged runner (image builds) |
+| `Registry Cache Upstream` | `username`, `password` | the pull-through registry cache's upstream credentials |
+| `Tailscale Operator OAuth` | `client-id`, `client-secret` | the Kubernetes operator, only with `vpn_tailscale` |
+
+Two of these block the **first** reconcile rather than degrading gracefully:
+without `Healthchecks Watchdog` the `alertmanager-config` ExternalSecret never
+syncs, so Alertmanager gets no `configSecret` at all; without `Grafana SSO`
+Grafana sits in `CreateContainerConfigError`. Create both before phase 6 even if
+you have no heartbeat service and no identity provider yet — a placeholder value
+is enough to let the stack come up.
+
+Four items cannot exist until the thing that issues them exists, so create them
+as the bring-up reaches them: `GitLab Runner` and `GitLab Runner Privileged`
+(registration tokens, from the GitLab project), `Authentik Terraform Token`
+(minted in Authentik after it is running), and `Registry Cache Upstream` (your
+registry account). Until then, those workloads stay in `SecretSyncError`, which
+is loud and harmless.
 
 Generate every random value with something like `openssl rand -base64 32` and
-paste it in; do not invent memorable ones.
+paste it in; do not invent memorable ones. Encrypted-pool passphrases are not in
+this list: the boot-time key load reaches Connect with the `1Password Connect`
+token above, and each pool's passphrase item is named by your own
+`zfs_encryption` inventory settings.
 
 > One value deserves special care: if you enable offsite backups, the backup
 > repository password can never be rotated and its loss makes every offsite copy
@@ -249,10 +336,49 @@ You need, before generating:
   ships in-cluster runner manifests, which means the first pipeline runs cannot
   happen until the cluster exists — expect to bring the platform up manually
   first and let CI take over afterwards.
-- The library, `weisssrv-lib`, must be **resolvable from your instance** for
-  `include: project:` to work. If you are not on the instance that hosts it,
-  plan to vendor the CI templates instead; this is the one part of the generated
-  pipeline that assumes a shared instance.
+
+---
+
+## 5a. Library access
+
+The generated repository is not self-contained: it consumes **weisssrv-lib** in
+four places, and three of them run from *your workstation*, not from CI. Decide
+this before you generate, because all three are copier answers.
+
+| Where | What it fetches | How |
+|---|---|---|
+| `ansible/requirements.yml` | the `weisssrv.infra` collection | `git+<lib_url>` over HTTPS, at `lib_ref` |
+| `terraform/*/main.tf` | the zone / ACL / SSO modules | `git::<lib_url>` module sources, at `lib_ref` |
+| `task lib:sync` | the source of the vendored `scripts/` copies | `git clone <lib_url>` |
+| `.gitlab-ci.yml` | the lint / validate / test / security jobs | `include: project: <lib_project>` — resolved **on the GitLab instance the pipeline runs on** |
+
+Three answers control it:
+
+- **`lib_url`** — the clone URL your workstation uses. If you cannot reach
+  `git.ericsweiss.com`, fork or mirror the library somewhere you can and point
+  this at your copy. Nothing else changes.
+- **`lib_ref`** — the tag everything is pinned to. It must exist on whatever
+  `lib_url` points at; a ref that does not exist fails at
+  `task ansible:install-collections`, at `terraform init`, and in CI, each with a
+  different error message.
+- **`lib_project`** — the GitLab *project path* for `include: project:`. This
+  one is instance-local: `include: project:` cannot cross instances. If your
+  cluster does not live on the instance hosting the library, mirror the library
+  onto your instance and set `lib_project` to its path there, or vendor the CI
+  templates.
+
+Confirm access before generating:
+
+```bash
+git ls-remote <lib_url> 'refs/tags/<lib_ref>*'   # must print a SHA
+```
+
+Role variables, the CI templates' inputs and what a `lib_ref` bump can break are
+documented in the library, not here — see
+[the collection README](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/README.md),
+[docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md)
+and
+[docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md).
 
 ---
 
@@ -318,18 +444,41 @@ Requires:
 
 ## 9. Workstation tooling
 
+`task lint` in the generated repository is the authoritative completeness check:
+every gate names the binary it is missing in its precondition message. The list
+below is what it takes to get a clean run.
+
 ```bash
 # macOS
 brew install copier go-task/tap/go-task ansible jq yq
 brew install hashicorp/tap/terraform
 brew install --cask 1password-cli
 brew install kubernetes-cli fluxcd/tap/flux
+# the gates task lint runs that the list above does not cover:
+brew install kustomize kubeconform gettext shellcheck
+pip install ansible-lint yamllint pyyaml
 
-# Debian/Ubuntu: pipx install copier; the rest from each project's instructions
+# Debian/Ubuntu: pipx install copier; apt install kubectl-equivalents, shellcheck,
+#   gettext-base; pip install ansible-lint yamllint pyyaml; the rest from each
+#   project's instructions
 ```
 
+`gettext` is for `envsubst`, which `flux:lint` uses to expand `${cluster_...}`
+placeholders before schema validation; `kustomize` and `kubeconform` are the
+other two halves of that gate. `ansible-lint` and `yamllint` are the lint stage's
+first two steps.
+
+Not required for `task lint`, but required by the gate you run after touching
+alert rules (`task lint:prometheus-config`): **`promtool`** and **`amtool`**,
+which ship in the Prometheus and Alertmanager release tarballs.
+
+`ansible-galaxy` comes with Ansible; the generated repository wraps it as
+`task ansible:install-collections`, which is the first command to run after
+generating (SETUP § 3).
+
 Versions the generated repository expects: Task 3.x, Ansible core 2.18+,
-Terraform 1.15+, `op` 2.x, Python 3.11+, copier 9+.
+Terraform ≥ 1.5 and < 2.0 (what every generated `versions.tf` declares),
+`op` 2.x, Python 3.11+, copier 9+.
 
 ---
 
@@ -360,10 +509,23 @@ Names and accounts
 
 - [ ] Two domains decided, both in the DNS provider account
 - [ ] Both API tokens created with the scopes above; account ID noted
-- [ ] Vault created; CLI signed in; Connect credentials and token generated
+- [ ] Vault created; CLI signed in
+- [ ] Connect server created as `<cluster_name>-connect`;
+      `1password-credentials.json` saved somewhere safe (no token minted by hand)
 - [ ] CI service account token created
 - [ ] Git project created empty; Flux token created
 - [ ] Optional: tailnet auth key and OAuth clients
-- [ ] Every item from § 4 present in the vault
+- [ ] Every host-side item from § 4 present in the vault
+- [ ] Every in-cluster item from § 4 present, including `Healthchecks Watchdog`
+      and `Grafana SSO` (placeholders are fine)
+
+Library and tooling
+
+- [ ] `lib_url` decided and reachable: `git ls-remote <lib_url> 'refs/tags/<lib_ref>*'`
+      prints a SHA
+- [ ] `lib_project` decided — the library exists on the GitLab instance your
+      pipelines run on, or you plan to vendor the CI templates
+- [ ] Workstation tooling from § 9 installed, including the `task lint` gates
+      (kustomize, kubeconform, gettext, shellcheck, yamllint, ansible-lint)
 
 Then continue with [SETUP.md](SETUP.md).

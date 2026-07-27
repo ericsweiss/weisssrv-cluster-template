@@ -20,8 +20,11 @@ workflow and the invariants, and points at the documents that hold everything
 else. It does not restate them — open the file it names. Paths are
 repository-relative.
 
-`README.md` is the top-level fact source, `docs/` holds this cluster's
-procedures, and `task --list` owns the command set.
+`README.md` is the top-level fact source, `docs/RUNBOOKS.md` holds this
+cluster's day-two procedures, `docs/ci-pipeline.md` describes the pipeline, and
+`task --list` owns the command set. Never cite a `task` name you have not seen
+in `task --list` — the documentation is gated against it, and inventing one is
+the failure mode this skill exists to prevent.
 
 ## Invariants
 
@@ -63,11 +66,13 @@ Violating one of these breaks production or fails review.
 | Changing | Read first | Then |
 |---|---|---|
 | A Kubernetes application | the closest existing directory under `kubernetes/apps/` | mirror its shape: namespace, workload, storage, ExternalSecret, certificate, ingress route, NetworkPolicy, autoscaling policy |
-| A host or guest | `ansible/inventories/prod/` and the role's README in the library | inventory first, playbook second; per-host facts go in `host_vars/` |
+| A host or guest | `ansible/inventories/prod/` and the [role's README in the library](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) | inventory first, playbook second; per-host facts go inline on the host entry in `hosts.yml` (there is no `host_vars/` unless you create one) |
+| Storage: pools, datasets, exports | `ansible/inventories/prod/group_vars/nas.yml` | declare only what exists — Ansible never creates or destroys a pool; per-guest zvols are `vm_additional_disks` in `hosts.yml` |
 | Terraform state (DNS, tailnet, SSO) | the module directory and its README | plan, review, apply; SSO objects are a supervised apply |
-| A version pin or an upgrade | `docs/` § upgrades | `task maintenance:check-versions`, then bump, sync, commit both files |
-| An incident | the service's dashboard, then its logs | `task flux:status`, `task infra:verify`, `task k3s:status` |
-| Cluster access or a credential | `docs/` § secrets | `task flux:rotate-secret`, or re-run the playbook for host-side values |
+| A version pin or an upgrade | `docs/RUNBOOKS.md` § Upgrades | `task maintenance:check-versions`, then bump, `task flux:sync-versions`, commit both files |
+| An incident | `docs/RUNBOOKS.md` § Where to look first, then the service's dashboard and logs | `task flux:status`, `task infra:verify`, `task k3s:status` |
+| Cluster access or a credential | `docs/RUNBOOKS.md` § Rotating a secret | `task flux:rotate-secret -- <ns>/<name>`, or re-run the task that injects it host-side |
+| A platform (role / CI / Terraform-module) change | [weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib) | it changes upstream and this repo bumps `lib_ref`; never vendor a role here |
 
 ## Pre-merge gates
 
@@ -98,9 +103,21 @@ Run from the repository root:
 
 ## Upstream
 
-The platform this cluster is assembled from lives in **weisssrv-lib**: the
-Ansible collection, the CI templates, the Terraform modules and the helper
-scripts, all pinned at one ref. The generator is
-**weisssrv-cluster-template**; `.copier-answers.yml` records what this cluster
-was generated from, and `copier update` pulls in template improvements. A fix
-that would benefit any cluster belongs upstream, not here.
+The platform this cluster is assembled from lives in
+**[weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib)**: the Ansible
+collection, the CI templates, the Terraform modules and the helper scripts, all
+pinned at `{{ lib_ref }}`. The generator is
+**[weisssrv-cluster-template](https://git.ericsweiss.com/eric/weisssrv-cluster-template)**;
+`.copier-answers.yml` records what this cluster was generated from, and
+`copier update` pulls in template improvements. A fix that would benefit any
+cluster belongs upstream, not here.
+
+When a variable, a CI input or a migration note is not in this repository, it is
+in the library:
+
+- role behaviour and variables — that role's `README.md` under
+  `ansible_collections/weisssrv/infra/roles/`
+- the inventory-wide variables roles alias — the collection `README.md`
+- role breaking changes across refs — `ansible_collections/weisssrv/infra/MIGRATING.md`
+- CI template inputs — `docs/INCLUDE-CONTRACT.md`
+- what a `lib_ref` bump can break — `docs/VERSIONING.md`

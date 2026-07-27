@@ -36,17 +36,24 @@ First time only, in this order. Each phase leaves a working state.
 
 1. **Prerequisites** — hosts reachable over SSH as `{{ admin_user }}` with
    passwordless sudo, ZFS pools created, vault items present.
-2. **Inventory** — fill in `hosts.yml`, `host_vars/`, and check the platform
+2. **Collection** — `task ansible:install-collections`. The roles are fetched at
+   `{{ lib_ref }}`, not vendored, so nothing Ansible-shaped works before this.
+3. **Inventory** — fill in `hosts.yml` (every name and address in it is a
+   placeholder), the pools and exports in `group_vars/nas.yml`, and the platform
    defaults in `group_vars/all.yml`. Then `task hosts:sync` and
    `task flux:sync-versions`, committing the generated files.
-3. **Gates** — `task lint` and `task ansible:ping` must both be clean.
-4. **Base layer** — `task infra:check`, then `task infra:deploy`, then
-   `task infra:verify`. Point DHCP at the new resolvers once DNS is up.
-5. **Kubernetes nodes** — `task k3s:provision-vms`, `task k3s:deploy`,
-   `task k3s:kubeconfig`.
-6. **GitOps** — `task flux:bootstrap-secrets` to create the two
-   bootstrap Secrets, push this repository, then `task flux:bootstrap`.
-7. **Publish** — `task terraform:apply`, forward `443/tcp` to
+4. **Gates** — `task lint` and `task ansible:ping` must both be clean.
+5. **Base layer** — `task infra:check`, then `task infra:deploy`, then
+   `task infra:verify`. `infra:deploy` runs `site.yml`, which is the only entry
+   point that orders the certificate plays before the NAS plays — use it on a
+   fresh cluster rather than the per-stage tasks. Point DHCP at the new
+   resolvers once DNS is up.
+6. **Kubernetes nodes** — `task k3s:provision-vms`, `task k3s:deploy`,
+   `task k3s:kubeconfig`, then `export KUBECONFIG=~/.kube/config-k3s`.
+7. **GitOps** — put `1password-credentials.json` in this repository's root, run
+   `task flux:bootstrap-secrets` to create the two bootstrap Secrets, push this
+   repository, then `task flux:bootstrap`.
+8. **Publish** — `task terraform:apply`, forward `443/tcp` to
    `{{ metallb_public_vip }}`, and register CI runners.
 
 The long form, with what each phase actually does and what to check:
@@ -97,15 +104,20 @@ kubernetes/
   clusters/{{ cluster_name }}/  Flux entrypoint and the stage Kustomizations
   infrastructure/            sources → crds → controllers → configs → observability
   apps/                      one directory per application
-scripts/                     verification, state collection, generators
-docs/                        this cluster's own operational notes
+scripts/                     verification, generators, the version registry
+docs/                        RUNBOOKS.md, ci-pipeline.md — and anything you add
 Taskfile.yml                 every operation
 ```
 
 ## Reference
 
+- [docs/RUNBOOKS.md](docs/RUNBOOKS.md) — day two: reconcile, upgrade, add a
+  node, rotate a secret, certificates, backups. Every alert's `runbook_url`
+  points here, so keep its section headings stable.
+- [docs/ci-pipeline.md](docs/ci-pipeline.md) — what the pipeline runs and what
+  it needs from the GitLab instance
 - [ARCHITECTURE.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/ARCHITECTURE.md)
   — the Flux stage graph, substitution model, storage tiers, DNS split, backups
-- [RUNBOOKS.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/RUNBOOKS.md)
-  — reconcile, upgrade, add a node, rotate a secret, restore
-- `docs/` in this repository — anything specific to {{ cluster_name }}
+- [weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib) — the roles, CI
+  templates and Terraform modules this cluster is assembled from, pinned at
+  `{{ lib_ref }}`. Role variables are documented in each role's README there.

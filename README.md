@@ -10,8 +10,8 @@ GitOps repository for a **Proxmox + ZFS + k3s** homelab cluster: Ansible for the
 host and guest layer, Terraform for external state (DNS, tailnet, SSO), and Flux
 reconciling everything inside the cluster.
 
-You answer about twenty questions — domains, LAN, VIPs, backends — and get a
-repository that lints clean, has no site literals scattered through it, and is
+You answer about thirty-five questions — domains, LAN, VIPs, backends — and get
+a repository that lints clean, has no site literals scattered through it, and is
 ready to point at real hardware.
 
 ## What this is not
@@ -40,12 +40,37 @@ weisssrv-cluster-template ..... THIS REPO — assembles a cluster from those blo
         ^
         | tenant repos reconciled by the cluster's Flux
         |
-weisssrv-app-template ......... one application deployed onto such a cluster
+weisssrv-project-template ..... one application deployed onto such a cluster
 ```
+
+| Repository | Where |
+|---|---|
+| weisssrv-lib | <https://git.ericsweiss.com/eric/weisssrv-lib> |
+| weisssrv-cluster-template | <https://git.ericsweiss.com/eric/weisssrv-cluster-template> (this repo) |
+| weisssrv-project-template | <https://git.ericsweiss.com/eric/weisssrv-project-template> |
 
 `weisssrv` is the reference instantiation this template was generalized from.
 Kubernetes manifests live **here**, not in the library: a generated cluster is
 self-contained, with no remote kustomize bases to break.
+
+### Where the platform is documented
+
+This repository documents *assembling a cluster*. The pieces it assembles are
+documented in the library, and the generated cluster's docs and agent skill both
+link there rather than restating it:
+
+| What | Where |
+|---|---|
+| Role variables and behaviour | [`ansible_collections/weisssrv/infra/roles/<role>/README.md`](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) |
+| The inventory-wide variables roles alias | [collection README](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/README.md) |
+| Role breaking changes across refs | [MIGRATING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/MIGRATING.md) |
+| CI template inputs | [docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md) |
+| What a `lib_ref` bump can break | [docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md) |
+| The vendored scripts' upstream | [docs/SCRIPTS.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/SCRIPTS.md) |
+
+The inventory that [docs/SETUP.md](docs/SETUP.md) § 2 calls "the one part no
+template can generate" is filled in against those role READMEs — they define
+every variable it sets.
 
 ## Quickstart
 
@@ -59,11 +84,17 @@ pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/we
 
 # 3. Generate
 copier copy https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
-#   or, through the library CLI, which validates source and destination first:
-weisssrv-new-cluster ~/src/mycluster --vcs-ref v0.1.0
+#   or, through the library CLI (console script: weisssrv-new-project), whose
+#   new-cluster subcommand checks source and destination before calling copier.
+#   It takes TWO positionals, and the library marks it EXPERIMENTAL:
+weisssrv-new-project new-cluster \
+  https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster \
+  --vcs-ref v0.1.0
 
 # 4. Bring it up
-cd ~/src/mycluster && git init && git add -A && git commit -m "Generate cluster"
+cd ~/src/mycluster
+task ansible:install-collections   # the roles are fetched, not vendored
+git init && git add -A && git commit -m "Generate cluster"
 # then follow docs/SETUP.md in this repo (long form) or README.md "Bring-up"
 # in the generated one (checklist form).
 ```
@@ -119,15 +150,15 @@ someone else's addresses by accident.
 <cluster>/
 ├── ansible/
 │   ├── requirements.yml            weisssrv.infra pinned at lib_ref
-│   ├── inventories/prod/           hosts.yml + group_vars + host_vars (yours to fill)
+│   ├── inventories/prod/           hosts.yml + group_vars (yours to fill)
 │   └── playbooks/                  site, base, dns, storage, k3s, maintenance/
 ├── terraform/                      DNS zone, tailnet ACL, SSO objects
 ├── kubernetes/
 │   ├── clusters/<cluster_name>/    Flux entrypoint + the five stage Kustomizations
 │   ├── infrastructure/             sources → crds → controllers → configs → observability
 │   └── apps/                       one directory per application
-├── scripts/                        state collection, verification, generators
-├── docs/                           this cluster's own operational docs
+├── scripts/                        verification, generators, version registry
+├── docs/                           RUNBOOKS.md (what the alerts link to) + ci-pipeline.md
 ├── Taskfile.yml                    every operation, grouped by namespace
 └── .gitlab-ci.yml                  lint / validate / deploy, from the library templates
 ```
@@ -161,7 +192,8 @@ provide.
 | [docs/PRE-SETUP.md](docs/PRE-SETUP.md) | Before running copier — hardware, network plan, accounts, tokens, keys |
 | [docs/SETUP.md](docs/SETUP.md) | Generating, then bringing the cluster up the first time |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Understanding the shape: Flux stages, substitution, storage, DNS, backups |
-| [docs/RUNBOOKS.md](docs/RUNBOOKS.md) | Day two — reconcile, upgrade, add a node, rotate a secret |
+| [docs/CI.md](docs/CI.md) | What the generated pipeline runs, and what it needs from your instance |
+| [docs/RUNBOOKS.md](docs/RUNBOOKS.md) | Day two — reconcile, upgrade, add a node, rotate a secret. The runbooks are *shipped into* the generated cluster (that is what every alert's `runbook_url` points at); this page is the index and the source link |
 
 ## Updating a generated cluster
 

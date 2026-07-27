@@ -39,7 +39,7 @@ Runs in **substitute mode**: it mirrors what kustomize-controller does at
 reconcile time. Both postBuild ConfigMaps —
 `kubernetes/infrastructure/sources/versions-configmap.yaml` and
 `kubernetes/infrastructure/sources/cluster-config.yaml` — are exported by
-`scripts/flux-render.sh`, every `${placeholder}` in a built Kustomization must
+`scripts/flux-env.sh`, every `${placeholder}` in a built Kustomization must
 resolve to one of their keys, and the substituted output is schema-validated
 with kubeconform.
 
@@ -47,8 +47,9 @@ A placeholder that resolves to nothing is the failure this catches: Flux and
 `envsubst` both render an unknown variable as an **empty string**, so without
 the gate a typo reaches the cluster as a manifest with a blank hostname.
 
-`scripts/flux-render.sh` here is a superset of the library's copy — it accepts
-several ConfigMaps. Do not replace it with the library version.
+`scripts/flux-render.sh` is the library's copy, vendored unmodified (CI checks
+it byte-for-byte). The multi-ConfigMap handling lives in the local wrapper
+`scripts/flux-env.sh`, which is what both CI and `task flux:lint` invoke.
 
 ## Prerequisites
 

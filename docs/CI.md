@@ -82,9 +82,10 @@ its own gate cannot be generated.
 ## Library pin
 
 Every `include:` in both pipelines points at `eric/weisssrv-lib`. This
-repository's own includes are on the `feat/v0.2.0-building-blocks` branch and
-must move to `v0.2.0` when the library cuts the tag; the generated pipeline
-pins whatever `lib_ref` the operator answered.
+repository's own includes are pinned to the `v0.2.0` release tag; the generated
+pipeline pins whatever `lib_ref` the operator answered (default `v0.2.0`).
+Never pin a branch: a branch moves under you, and the one this repository was
+built against was deleted when it merged.
 
 `render-validate` clones the library with `CI_JOB_TOKEN`, so the job does not
 depend on anonymous access — the library project must list this project on its
