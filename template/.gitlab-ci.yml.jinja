@@ -266,6 +266,36 @@ include:
 # Local jobs
 # ==============================================================================
 
+# The version-bump-bot below only reports pins that exist in
+# scripts/version-registry.py. A pin added to all.yml without an entry there is
+# never checked and never mentioned — the weekly job stays green while it
+# silently skips it, which is the worst shape a security gate can take. This is
+# the offline check that keeps the registry in step with the pins; it needs no
+# credentials and no network, hence stage: lint rather than maintenance.
+version-coverage:
+  stage: lint
+  image: python:3.13-slim
+  tags: ["{{ runner_tag }}"]
+  needs: []
+  script:
+    - python3 scripts/check-versions.py --check-coverage
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - "ansible/inventories/prod/group_vars/all.yml"
+        - "scripts/version-registry.py"
+        - "scripts/check-versions.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - "ansible/inventories/prod/group_vars/all.yml"
+        - "scripts/version-registry.py"
+        - "scripts/check-versions.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
 # The `changes:` list on a deploy job is a contract, and nothing else enforces
 # it: a playbook or inventory path that no deploy job lists goes green on every
 # MR while never actually deploying. This fails the MR that introduces the gap,

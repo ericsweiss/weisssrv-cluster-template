@@ -199,7 +199,7 @@ tasks:
       - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/storage.yml {{.CLI_ARGS}}
 
   certs:show-host-keys:
-    desc: Print SSH host keys for the cert distribution targets (paste into host_vars)
+    desc: "Print SSH host keys for the cert distribution targets (paste into group_vars/dns.yml -> _acme_certs_targets)"
     dir: "{{.ANSIBLE_DIR}}"
     cmds:
       - ansible-playbook -i {{.INVENTORY}} playbooks/show-cert-host-keys.yml {{.CLI_ARGS}}
@@ -874,8 +874,16 @@ tasks:
   terraform:authentik-init:
     desc: Initialize the SSO module
     dir: "{{.TERRAFORM_DIR}}/authentik"
+    # The anchor is shared by authentik-plan and authentik-apply, so all three
+    # tasks see the same credentials.
     env: &tf_authentik_env
       TF_VAR_authentik_token: op://{{.OP_VAULT}}/Authentik Terraform Token/credential
+      # Grafana's OIDC client secret is SUPPLIED to Authentik, not minted by it:
+      # the same vault field the Grafana ExternalSecret reads. Without this the
+      # provider generates a secret that exists only in Terraform state, so the
+      # value in the cluster and the value in Authentik diverge the first time
+      # either is rebuilt — and the login cannot be reproduced or rotated.
+      TF_VAR_oauth2_client_secret_grafana: op://{{.OP_VAULT}}/Grafana SSO/oidc-client-secret
       TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/authentik"
       TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/authentik/lock"
       TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/authentik/lock"
@@ -948,6 +956,7 @@ tasks:
       - task: lint:shellcheck
       - task: lint:doc-links
       - task: lint:taskfile-smoke
+      - task: lint:version-coverage
       - task: ansible:lint
       - task: terraform:fmt-check
       - task: terraform:validate
@@ -981,6 +990,18 @@ tasks:
     cmds:
       - task --list >/dev/null
       - bash scripts/check-taskfile.sh
+
+  lint:version-coverage:
+    desc: Assert every pin in all.yml has a scripts/version-registry.py entry
+    # Offline and instant: it reads the two local files and compares key sets,
+    # which is why it belongs in `lint` rather than with the network-bound
+    # maintenance:check-versions. Without it a pin added to all.yml is simply
+    # absent from the checker's world, so the weekly version-bump-bot stays
+    # green while never once reporting that pin as outdated — the failure is
+    # invisible in exactly the place (identity provider, resolver, GPU driver)
+    # where staleness is a security problem.
+    cmds:
+      - python3 scripts/check-versions.py --check-coverage
 
   lint:prometheus-config:
     desc: Lint the alert rules and Alertmanager config with promtool/amtool

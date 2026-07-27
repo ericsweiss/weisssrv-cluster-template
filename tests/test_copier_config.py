@@ -5,6 +5,7 @@ cluster. These tests pin the schema and the mechanics the template relies on.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import jinja2
@@ -38,7 +39,6 @@ REQUIRED_QUESTIONS = {
     "git_backend",
     "git_host",
     "git_namespace",
-    "git_repo",
     "secrets_backend",
     "onepassword_vault",
     "dns_backend",
@@ -178,6 +178,88 @@ def test_no_question_is_dead():
         if name not in used and config_text.count(name) < 2
     )
     assert not dead, f"copier.yml declares questions nothing reads: {dead}"
+
+
+def _validator_message(name: str, **context) -> str:
+    """Render a question's validator the way copier does: a non-empty result is
+    the rejection message, an empty one means the answer is accepted."""
+    env = jinja2.Environment()  # noqa: S701 - rendering our own config, no user input
+    env.filters = _AnyFilter(env.filters)
+    env.filters["regex_search"] = lambda value, pattern: re.search(pattern, str(value))
+    return env.from_string(QUESTIONS[name]["validator"]).render(**context).strip()
+
+
+# The two job labels the template SHIPS, and therefore the two the alert rules
+# name. Neither is an operator choice: `node-exporter` is the kube-prometheus
+# chart's DaemonSet job, `node-exporter-host` the static Proxmox/VM scrape.
+SHIPPED_EXPORTER_JOBS = ("node-exporter", "node-exporter-host")
+
+
+@pytest.mark.parametrize(
+    "answer,rejected",
+    [
+        ("node-exporter|node-exporter-host", False),   # the default
+        ("node-exporter|node-exporter-host|extra", False),  # extended, both kept
+        ("hostwatch|hostwatch-node", True),            # replaced wholesale
+        ("node-exporter", True),                       # host scrape dropped
+        ("node-exporter-host", True),                  # DaemonSet dropped
+        ("", True),                                    # empty widens every alert
+    ],
+)
+def test_node_exporter_job_regex_validator_requires_the_shipped_jobs(answer, rejected):
+    """The answer is free text, but only values containing BOTH shipped job
+    labels are ever correct for an unmodified render — a value that drops one
+    renders `job=~"..."` into rules that then match zero series, and a rule
+    matching nothing never fires and never alerts anyone to its own silence."""
+    message = _validator_message("node_exporter_job_regex", node_exporter_job_regex=answer)
+    assert bool(message) is rejected, (
+        f"node_exporter_job_regex={answer!r} was "
+        f"{'accepted' if not message else 'rejected'}, expected the opposite"
+    )
+
+
+def test_node_exporter_default_names_every_shipped_job():
+    """The default and the manifests must not drift apart: this is what makes
+    the validator above enforce something real rather than an arbitrary list."""
+    default = str(QUESTIONS["node_exporter_job_regex"]["default"])
+    assert set(default.split("|")) == set(SHIPPED_EXPORTER_JOBS), (
+        f"the default {default!r} no longer matches the shipped exporter jobs "
+        f"{SHIPPED_EXPORTER_JOBS}"
+    )
+
+
+# Answers that need no prose: their inline `help` is self-contained AND nothing
+# outside the template has to be arranged before answering them. Everything else
+# must be named in an operator doc, because the operator decides it BEFORE the
+# first prompt appears. Keep this list short — an entry is documentation given
+# up.
+DOC_EXEMPT = {
+    "lan_prefix": "derived from lan_cidr; the prompt's default is the answer",
+    "alert_email": "defaults to admin_email, which the docs cover",
+    "enable_semantic_release": "a repo-workflow toggle with no external prerequisite",
+}
+
+_DOCS = ("PRE-SETUP.md", "SETUP.md")
+
+
+def test_every_question_is_named_in_an_operator_doc():
+    """A question named in neither doc is one an operator meets for the first
+    time at the prompt, with no chance to have prepared for it — which is how
+    `tailnet_dns_suffix` came to ship a sentinel default that passes its own
+    validator and leaves the tailnet resolver permanently broken."""
+    prose = "\n".join(
+        (REPO_ROOT / "docs" / name).read_text(encoding="utf-8")
+        for name in _DOCS
+        if (REPO_ROOT / "docs" / name).is_file()
+    )
+    assert prose, "neither operator doc could be read — this gate examined nothing"
+    undocumented = sorted(
+        name for name in QUESTIONS if name not in DOC_EXEMPT and name not in prose
+    )
+    assert not undocumented, (
+        "copier questions named in neither docs/PRE-SETUP.md nor docs/SETUP.md:\n  "
+        + "\n  ".join(undocumented)
+    )
 
 
 def test_answer_fixture_covers_every_question():

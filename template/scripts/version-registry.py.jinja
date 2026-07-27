@@ -1,0 +1,272 @@
+"""Tracked-version registry — site data for weisssrv-lib's check-versions.py.
+
+`task maintenance:check-versions` reads this file (the checker's default lookup
+path) and compares each entry's upstream against the pin in `vars_file`;
+`task maintenance:update-version SERVICE=<name>` rewrites the pin and
+regenerates the cluster-versions ConfigMap.
+
+What ships here is the PLATFORM set — an entry for EVERY pin in `vars_file`,
+including the ones the optional modules add. Add an entry per application you
+adopt (its `var_name` is the key in the vars file, so a typo shows up as "pin
+not found"), and delete the entry for anything you remove.
+
+Coverage is enforced, not trusted: `task lint:version-coverage` (and the CI job
+of the same name) runs `check-versions.py --check-coverage`, which fails when a
+pin in `vars_file` has no entry here. Without that gate the weekly
+version-bump-bot stays green while silently never reporting the untracked pins —
+the failure mode is invisible precisely because the pin does not exist in the
+checker's world. A pin with genuinely no upstream to track goes in
+`untracked_allowlist` WITH a rationale, never in neither place.
+
+This file is rendered from the template, so its entries follow the same
+`{% raw %}{% if %}{% endraw %}` conditions as the pins in
+ansible/inventories/prod/group_vars/all.yml — an entry whose pin was never
+generated would report "unknown" forever.
+
+Field reference: weisssrv-lib docs/SCRIPTS.md. Categories are
+github | dockerhub | ghcr | lsio | helm | apt_repo | manual, each with its own
+fetch fields. `held: True` reports an upstream but never writes it — say why in
+`notes`, which is the most valuable column in this file.
+"""
+
+# Charts reconciled by Flux: nothing to deploy, the push is the deploy.
+_FLUX = "git push (Flux reconciles)"
+
+
+def _chart(name, key, repo, chart, **extra):
+    entry = {
+        "name": name,
+        "var_name": f"helm_chart_versions.{key}",
+        "category": "helm",
+        "helm_repo": repo,
+        "helm_chart": chart,
+        "deploy_command": _FLUX,
+    }
+    entry.update(extra)
+    return entry
+
+
+CONFIG = {
+    # Every path is repo-root relative.
+    "vars_file": "ansible/inventories/prod/group_vars/all.yml",
+    "cache_dir": ".version-cache",
+    "default_deploy_command": "task infra:deploy",
+    # Named files holding pins that live outside vars_file — digest-locked CI
+    # images, for instance: {"ci": ".gitlab-ci.yml"}.
+    "version_file_aliases": {},
+    # Pins with no upstream to track (--check-coverage ignores these). Every
+    # entry needs a rationale comment: an unexplained name here is a pin nobody
+    # will ever look at again.
+    "untracked_allowlist": [],
+    "services": [
+        # --- Host-side binaries and packages --------------------------------
+        {
+            "name": "AdGuard Home",
+            "var_name": "adguard_home_version",
+            "category": "github",
+            "github_repo": "AdguardTeam/AdGuardHome",
+            "version_prefix": "v",
+            "strip_prefix": True,
+            "deploy_command": "task dns:deploy",
+            "notes": "Internet-facing resolver on both DNS hosts; security fixes land here.",
+        },
+        {
+            "name": "adguardhome-sync",
+            "var_name": "adguard_sync_version",
+            "category": "github",
+            "github_repo": "bakito/adguardhome-sync",
+            "version_prefix": "v",
+            "strip_prefix": True,
+            "deploy_command": "task dns:deploy",
+            "notes": "Replicates config from the primary resolver to the secondary.",
+        },
+        {
+            "name": "Grafana Alloy (host)",
+            "var_name": "alloy_host_version",
+            # The apt package on every host, distinct from
+            # helm_chart_versions.alloy (the in-cluster chart). Tracking only
+            # the chart would leave the fleet-wide journald shipper unchecked.
+            # The repo line is arch-agnostic `stable main`, so binary-amd64 is
+            # the right index for an amd64 fleet.
+            "category": "apt_repo",
+            "apt_index_url": "https://apt.grafana.com/dists/stable/main/binary-amd64/Packages.gz",
+            "apt_package": "alloy",
+            "source_url": "https://apt.grafana.com/dists/stable/main/binary-amd64/Packages.gz",
+        },
+        {
+            "name": "k3s",
+            "var_name": "k3s_version",
+            "category": "github",
+            "github_repo": "k3s-io/k3s",
+            "version_prefix": "v",
+            "strip_prefix": False,
+            # Upstream also tags rc/alpha builds and the +k3sN suffix moves
+            # independently of the Kubernetes version.
+            "tag_filter": r"^v\d+\.\d+\.\d+\+k3s\d+$",
+            "deploy_command": "task maintenance:update-k3s-nodes",
+            "notes": "bump the install-script sha256 in the same change",
+        },
+        # --- Platform charts ------------------------------------------------
+        _chart("cert-manager", "cert_manager", "https://charts.jetstack.io", "cert-manager"),
+        _chart(
+            "external-dns",
+            "external_dns",
+            "https://kubernetes-sigs.github.io/external-dns",
+            "external-dns",
+        ),
+        _chart(
+            "external-secrets",
+            "external_secrets",
+            "https://charts.external-secrets.io",
+            "external-secrets",
+        ),
+        _chart("MetalLB", "metallb", "https://metallb.github.io/metallb", "metallb"),
+        _chart("Traefik", "traefik", "https://traefik.github.io/charts", "traefik"),
+        _chart(
+            "kube-prometheus-stack",
+            "kube_prometheus_stack",
+            "https://prometheus-community.github.io/helm-charts",
+            "kube-prometheus-stack",
+            notes="bump prometheus_operator_crds in lockstep — the CRDs must match the operator",
+        ),
+        _chart(
+            "prometheus-operator-crds",
+            "prometheus_operator_crds",
+            "https://prometheus-community.github.io/helm-charts",
+            "prometheus-operator-crds",
+        ),
+        _chart("Loki", "loki", "https://grafana.github.io/helm-charts", "loki"),
+        _chart("Alloy", "alloy", "https://grafana.github.io/helm-charts", "alloy"),
+        _chart(
+            "Blackbox Exporter",
+            "prometheus_blackbox_exporter",
+            "https://prometheus-community.github.io/helm-charts",
+            "prometheus-blackbox-exporter",
+        ),
+        _chart(
+            "1Password Connect",
+            "onepassword_connect",
+            "https://1password.github.io/connect-helm-charts",
+            "connect",
+            notes="Chart is named `connect`; it serves every ExternalSecret in the cluster.",
+        ),
+        _chart("VPA", "vpa", "https://charts.fairwinds.com/stable", "vpa"),
+        _chart("kured", "kured", "https://kubereboot.github.io/charts", "kured"),
+        _chart("Reloader", "reloader", "https://stakater.github.io/stakater-charts", "reloader"),
+        # --- Applications ---------------------------------------------------
+        {
+            # Deployed from the goauthentik chart, so the pin is read as a CHART
+            # version: the chart publishes a few days after the matching GitHub
+            # release, and pinning a tag Flux cannot resolve fails reconciliation
+            # with "no 'authentik' chart with version ... found". Query the chart
+            # repo, not the release feed.
+            "name": "Authentik",
+            "var_name": "authentik_version",
+            "category": "helm",
+            "helm_repo": "https://charts.goauthentik.io",
+            "helm_chart": "authentik",
+            "source_url": "https://github.com/goauthentik/authentik/releases",
+            "deploy_command": _FLUX,
+            "notes": "The cluster's identity provider — staleness here is an SSO CVE.",
+        },
+        {
+            "name": "PostgreSQL (Authentik)",
+            "var_name": "postgresql_version",
+            "category": "dockerhub",
+            "docker_image": "library/postgres",
+            "tag_regex": r"^(\d+(?:\.\d+)?)-trixie$",
+            "pin_major_version": True,
+            "deploy_command": _FLUX,
+            "notes": (
+                "Also the client the pg_dump CronJob runs, so the major must "
+                "match the server; updates are offered within the major only."
+            ),
+        },
+        {
+            # CNCF distribution image, Docker Hub `library/registry`. Bare X.Y.Z
+            # only — the regex excludes the floating majors/minors (3, 3.1) and
+            # the pre-releases (3.0.0-rc.4) that share the repo.
+            "name": "Registry cache (distribution)",
+            "var_name": "registry_cache_version",
+            "category": "dockerhub",
+            "docker_image": "library/registry",
+            "tag_regex": r"^(\d+\.\d+\.\d+)$",
+            "source_url": "https://hub.docker.com/_/registry/tags",
+            "deploy_command": _FLUX,
+        },
+{%- if git_backend == 'gitlab_selfhosted' %}
+        {
+            "name": "GitLab Runner",
+            "var_name": "gitlab_runner_helm_version",
+            "category": "helm",
+            "helm_repo": "https://charts.gitlab.io",
+            "helm_chart": "gitlab-runner",
+            "source_url": "https://gitlab.com/gitlab-org/charts/gitlab-runner/tags",
+            "deploy_command": _FLUX,
+            "notes": "Shared by both runner tiers; keep within one minor of the GitLab instance.",
+        },
+{%- endif %}
+{%- if vpn_tailscale %}
+        # --- Overlay VPN ----------------------------------------------------
+        _chart(
+            "Tailscale Operator",
+            "tailscale_operator",
+            "https://pkgs.tailscale.com/helmcharts",
+            "tailscale-operator",
+            source_url="https://github.com/tailscale/tailscale/releases",
+            notes="Publishes internal services to the tailnet; tracks the host tailscale package.",
+        ),
+        {
+            "name": "CoreDNS (tailnet resolver)",
+            "var_name": "coredns_tailnet_version",
+            "category": "dockerhub",
+            "docker_image": "rancher/mirrored-coredns-coredns",
+            "tag_regex": r"^(\d+\.\d+\.\d+)$",
+            "deploy_command": _FLUX,
+            "notes": (
+                "The rancher mirror k3s already caches on every node — bumping "
+                "past what k3s ships costs a fresh pull on each node."
+            ),
+        },
+{%- endif %}
+{%- if gpu == 'nvidia' %}
+        # --- GPU ------------------------------------------------------------
+        _chart(
+            "NVIDIA device plugin",
+            "nvidia_device_plugin",
+            "https://nvidia.github.io/k8s-device-plugin",
+            "nvidia-device-plugin",
+            source_url="https://github.com/NVIDIA/k8s-device-plugin/releases",
+        ),
+        {
+            # nvidia-open from NVIDIA's CUDA apt repo. `manual`: the repo
+            # publishes a directory index rather than a package feed this
+            # checker can diff, and the apt version (X.Y.Z-N) carries a Debian
+            # revision no release tag has. Manual still REPORTS the pin with its
+            # source, which is the whole point — an unlisted pin reports nothing.
+            "name": "NVIDIA driver (nvidia-open, CUDA repo)",
+            "var_name": "nvidia_driver_version",
+            "category": "manual",
+            "source_url": "https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/",
+            "deploy_command": "task k3s:deploy",
+            "notes": "Exact nvidia-open apt version (X.Y.Z-N); must be new enough for the CUDA build your workloads ship.",
+        },
+        {
+            "name": "NVIDIA container toolkit",
+            "var_name": "nvidia_container_toolkit_version",
+            "category": "manual",
+            "source_url": "https://github.com/NVIDIA/nvidia-container-toolkit/releases",
+            "deploy_command": "task k3s:deploy",
+            "notes": "Apt version X.Y.Z-N from nvidia.github.io/libnvidia-container/stable/deb — the -N revision the GitHub tag lacks is why this is manual.",
+        },
+        {
+            "name": "NVIDIA cuda-keyring",
+            "var_name": "nvidia_cuda_keyring_version",
+            "category": "manual",
+            "source_url": "https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/",
+            "deploy_command": "task k3s:deploy",
+            "notes": "cuda-keyring_<version>_all.deb; bump nvidia_cuda_keyring_sha256 in all.yml in the SAME change — the .deb runs maintainer scripts as root.",
+        },
+{%- endif %}
+    ],
+}

@@ -309,24 +309,19 @@ git_namespace:
   type: str
   help: >-
     Group or user path that owns this repository on git_host, without the
-    repository name (which is cluster_name). Subgroups are allowed.
+    repository name. THE REPOSITORY MUST BE NAMED cluster_name: every path the
+    template composes — the Flux bootstrap target, the GitLab-managed Terraform
+    state project, the README's repository row and the runbook_url prefix on
+    every alert — is `git_namespace/cluster_name`. There is deliberately no
+    separate repository-name answer; a second name only ever produced renders
+    that disagreed with themselves (`flux bootstrap` CREATES the repository it
+    is pointed at, so the mismatch surfaces as a second, empty repo rather than
+    an error). Subgroups are allowed.
   placeholder: "homelab"
   validator: >-
     {% if not (git_namespace | regex_search('^[a-zA-Z0-9][a-zA-Z0-9._-]*(/[a-zA-Z0-9][a-zA-Z0-9._-]*)*$')) %}
     git_namespace must be a path segment such as "homelab" or
     "homelab/infra" — no leading or trailing slash.
-    {% endif %}
-
-git_repo:
-  type: str
-  help: >-
-    Repository name under git_namespace, when it differs from cluster_name.
-    Only the generated runbook links and clone URLs read it.
-  default: "{{ cluster_name }}"
-  validator: >-
-    {% if not (git_repo | regex_search('^[a-zA-Z0-9][a-zA-Z0-9._-]*$')) %}
-    git_repo must be a single repository name — no slashes (put groups in
-    git_namespace).
     {% endif %}
 
 secrets_backend:
@@ -411,17 +406,29 @@ smtp_host:
 node_exporter_job_regex:
   type: str
   help: >-
-    Prometheus job label(s) the HOST node-exporters register under, as a regex
+    Prometheus job label(s) the node-exporters register under, as a regex
     alternation — the node and storage alert rules scope themselves to it. The
-    default covers both shipped sources: the in-cluster DaemonSet
-    (`node-exporter`) and the static scrape of the Proxmox hosts and VMs
-    (`node-exporter-host`, from the observability exporters). Change it only if
-    you scrape the hosts under a different job label.
+    two shipped names are NOT choices: `node-exporter` is the kube-prometheus
+    chart's own DaemonSet job and `node-exporter-host` is the static scrape of
+    the Proxmox hosts and VMs (a Service whose name is a literal in
+    kubernetes/infrastructure/observability/exporters/). Both must stay in the
+    alternation or the rules that name them match zero series and every host
+    alert goes permanently silent. Extend it (append `|my-job`) only when you
+    add a THIRD exporter source of your own.
   default: "node-exporter|node-exporter-host"
   validator: >-
+    {% set _shipped = ['node-exporter', 'node-exporter-host'] %}
+    {% set _members = node_exporter_job_regex.split('|') | map('trim') | list %}
+    {% set _absent = _shipped | reject('in', _members) | list %}
     {% if not node_exporter_job_regex.strip() %}
     node_exporter_job_regex is required — an empty value silently widens every
     host alert to the whole cluster.
+    {% elif _absent %}
+    node_exporter_job_regex must keep every job label this template actually
+    ships as an alternation member; missing: {{ _absent | join(', ') }}.
+    The rules referencing them would match no series, and a rule that matches
+    nothing never fires. Add labels, do not replace them:
+    "node-exporter|node-exporter-host|{{ node_exporter_job_regex.split('|') | first }}".
     {% endif %}
 
 # --------------------------------------------------------------------------

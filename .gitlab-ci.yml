@@ -3,11 +3,13 @@
 # the template is linted by the same tooling it hands to a generated cluster.
 #
 # The gate that matters is `render-validate`: it renders this template with
-# tests/answers-weisssrv-shaped.yml and runs the REAL toolchain over the output
-# — yamllint, kustomize + kubeconform through the Flux substitution loop, and
-# `ansible-playbook --syntax-check` against the weisssrv.infra collection. A
-# template change that produces an invalid cluster fails here rather than in
-# someone's homelab.
+# BOTH answer fixtures — the reference-shaped one and the deliberately unlike
+# contrast one — and runs the REAL toolchain over each output: yamllint,
+# kustomize + kubeconform through the Flux substitution loop, the vendored-script
+# fidelity check, and `ansible-playbook --syntax-check` against the
+# weisssrv.infra collection. A template change that produces an invalid cluster
+# fails here rather than in someone's homelab, and a value copied from the
+# reference cluster fails on the contrast render rather than passing both.
 #
 # Every job is TAG-LESS and non-root safe (pip --user, workspace-local tool
 # downloads), so they land on the shared runner.
@@ -157,7 +159,18 @@ render-validate:
         "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" \
         "$LIB_CHECKOUT"
   script:
+    # BOTH fixtures. answers-weisssrv-shaped.yml has the reference cluster's
+    # shape, which makes it blind to a value hardcoded FROM that cluster — it
+    # renders byte-identical to a correct substitution. answers-unlike.yml is
+    # the contrast render: different LAN, domains, names, vault and runner tag,
+    # both optional modules OFF, 5 compute hosts, one resolver. Validating only
+    # the shaped one leaves every `{% if not %}` branch and every site-identity
+    # leak checked by nothing that runs the real toolchain.
     - python3 tests/validate_render.py --lib-path "$LIB_CHECKOUT"
+    - |
+      python3 tests/validate_render.py \
+        --answers tests/answers-unlike.yml \
+        --lib-path "$LIB_CHECKOUT"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never

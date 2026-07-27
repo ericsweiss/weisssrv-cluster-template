@@ -222,6 +222,118 @@ def check_vendored(render: Path, lib_path: Path | None) -> None:
     print(f"  vendored ok ({len(vendored)} scripts byte-identical to the library)")
 
 
+_ASSIGNMENT = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*:", re.MULTILINE)
+
+
+def _opt_in_roles(roles_dir: Path) -> set[str]:
+    """Library roles that ship `<role>_enabled: false` in defaults/main.yml.
+
+    That default IS the opt-in contract: every task in such a role is gated on
+    the flag, so invoking the role without setting the flag runs a play that
+    does exactly nothing — successfully.
+    """
+    found = set()
+    for role in sorted(p for p in roles_dir.iterdir() if p.is_dir()):
+        defaults = role / "defaults" / "main.yml"
+        if not defaults.is_file():
+            continue
+        doc = yaml.safe_load(defaults.read_text()) or {}
+        flag = f"{role.name}_enabled"
+        if flag in doc and not doc[flag]:
+            found.add(role.name)
+    return found
+
+
+def _role_invocations(playbooks_dir: Path):
+    """(playbook, role-name, when-clause-text) for every library role a shipped
+    playbook invokes, from `roles:` entries and include_role/import_role tasks."""
+    def when_text(entry: dict) -> str:
+        clause = entry.get("when")
+        return " ".join(clause) if isinstance(clause, list) else str(clause or "")
+
+    for path in sorted(playbooks_dir.rglob("*.yml")):
+        try:
+            plays = yaml.safe_load(path.read_text())
+        except yaml.YAMLError:
+            continue
+        for play in plays if isinstance(plays, list) else []:
+            if not isinstance(play, dict):
+                continue
+            for entry in play.get("roles") or []:
+                if isinstance(entry, dict):
+                    yield path, str(entry.get("role", "")), when_text(entry)
+                elif isinstance(entry, str):
+                    yield path, entry, ""
+            for block in ("pre_tasks", "tasks", "post_tasks"):
+                for task in play.get(block) or []:
+                    if not isinstance(task, dict):
+                        continue
+                    for verb in ("include_role", "import_role"):
+                        if isinstance(task.get(verb), dict):
+                            yield path, str(task[verb].get("name", "")), when_text(task)
+
+
+def check_role_opt_ins(render: Path, lib_path: Path | None) -> None:
+    """An opt-in role invoked UNCONDITIONALLY must have its flag set in the
+    inventory.
+
+    This is the shape of a defect that cannot fail loudly on its own: the
+    playbook runs, every task in the role skips on `when: <flag> | bool`, the
+    play reports ok, and the thing the role exists to do never happens. It
+    shipped exactly once — `acme_certs` was invoked by site.yml while
+    `acme_certs_enabled` was set nowhere in the inventory, so no certificate was
+    ever issued and the NAS play then died on the missing wildcard cert, several
+    phases downstream of the actual cause.
+
+    An invocation GUARDED by the flag itself is fine: that is a deliberate
+    "off unless the inventory turns it on", and the guard makes it visible.
+    """
+    if not lib_path:
+        raise Failure("--lib-path is required to read the roles' opt-in defaults")
+    roles_dir = lib_path / "ansible_collections" / "weisssrv" / "infra" / "roles"
+    if not roles_dir.is_dir():
+        raise Failure(f"{roles_dir} does not exist (is --lib-path a weisssrv-lib checkout?)")
+    opt_in = _opt_in_roles(roles_dir)
+    if not opt_in:
+        raise Failure(
+            "no role in the collection declares `<role>_enabled: false` — the "
+            "opt-in convention this check reads has changed, and it is now "
+            "examining nothing"
+        )
+
+    inventory = render / "ansible" / "inventories" / "prod"
+    assigned: set[str] = set()
+    for path in sorted(inventory.rglob("*.yml")) + sorted(inventory.rglob("*.yaml")):
+        for line in path.read_text().splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            assigned.update(_ASSIGNMENT.findall(line))
+
+    checked, problems = 0, []
+    for path, role, when in _role_invocations(render / "ansible" / "playbooks"):
+        name = role.rsplit(".", 1)[-1]
+        if name not in opt_in:
+            continue
+        checked += 1
+        flag = f"{name}_enabled"
+        if flag in assigned or flag in when:
+            continue
+        problems.append(
+            f"{path.relative_to(render)} invokes {role} unconditionally, but "
+            f"{flag} is set nowhere in inventories/prod — every task in the role "
+            "will skip and the play will still report success"
+        )
+    if not checked:
+        raise Failure(
+            "no opt-in role invocation was examined — either the playbooks stopped "
+            f"using the collection's opt-in roles ({', '.join(sorted(opt_in))}) or "
+            "the invocation scan is stale"
+        )
+    if problems:
+        raise Failure("\n".join(problems))
+    print(f"  role opt-ins ok ({checked} invocations of {len(opt_in)} opt-in roles)")
+
+
 def check_ansible(render: Path, lib_path: Path | None, workdir: Path) -> None:
     _need("ansible-playbook")
     ansible_dir = render / "ansible"
@@ -294,7 +406,9 @@ def main() -> int:
     parser.add_argument("--answers", type=Path, default=render_cluster.ANSWERS)
     parser.add_argument("--lib-path", type=Path, help="weisssrv-lib checkout for the collection.")
     parser.add_argument(
-        "--skip", default="", help="Comma-separated: yamllint,flux,vendored,ansible"
+        "--skip",
+        default="",
+        help="Comma-separated: yamllint,flux,vendored,role-opt-ins,ansible",
     )
     args = parser.parse_args()
 
@@ -313,13 +427,16 @@ def main() -> int:
                 fn(render)
             except Failure as exc:
                 failed.append(f"[{name}] {exc}")
-        if "vendored" in skip or not args.lib_path:
-            print("  vendored skipped" if "vendored" in skip else "  vendored skipped (no --lib-path)")
-        else:
-            try:
-                check_vendored(render, args.lib_path)
-            except Failure as exc:
-                failed.append(f"[vendored] {exc}")
+        for name, fn in (("vendored", check_vendored), ("role-opt-ins", check_role_opt_ins)):
+            if name in skip:
+                print(f"  {name} skipped")
+            elif not args.lib_path:
+                print(f"  {name} skipped (no --lib-path)")
+            else:
+                try:
+                    fn(render, args.lib_path)
+                except Failure as exc:
+                    failed.append(f"[{name}] {exc}")
         if "ansible" in skip:
             print("  ansible skipped")
         else:

@@ -29,7 +29,6 @@ timezone: America/Los_Angeles
 git_backend: gitlab_selfhosted
 git_host: git.example.com
 git_namespace: homelab
-git_repo: homelab
 
 secrets_backend: onepassword
 onepassword_vault: Homelab
