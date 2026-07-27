@@ -40,14 +40,14 @@ weisssrv-cluster-template ..... THIS REPO — assembles a cluster from those blo
         ^
         | tenant repos reconciled by the cluster's Flux
         |
-weisssrv-project-template ..... one application deployed onto such a cluster
+weisssrv-app-template ..... one application deployed onto such a cluster
 ```
 
 | Repository | Where |
 |---|---|
 | weisssrv-lib | <https://git.ericsweiss.com/eric/weisssrv-lib> |
 | weisssrv-cluster-template | <https://git.ericsweiss.com/eric/weisssrv-cluster-template> (this repo) |
-| weisssrv-project-template | <https://git.ericsweiss.com/eric/weisssrv-project-template> |
+| weisssrv-app-template | <https://git.ericsweiss.com/eric/weisssrv-app-template> |
 
 `weisssrv` is the reference instantiation this template was generalized from.
 Kubernetes manifests live **here**, not in the library: a generated cluster is

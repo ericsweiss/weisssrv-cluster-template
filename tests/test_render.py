@@ -34,7 +34,7 @@ REPO_ROOT = render_cluster.REPO_ROOT
 # the reference cluster's GitLab, and a pinned collection/module source or a
 # doc link legitimately points there wherever the generated cluster lives.
 FORBIDDEN = ("esweiss.com", "ericsweiss.com")
-UPSTREAM_REPOS = ("weisssrv-lib", "weisssrv-cluster-template", "weisssrv-project-template")
+UPSTREAM_REPOS = ("weisssrv-lib", "weisssrv-cluster-template", "weisssrv-app-template")
 TEXT_SUFFIXES = {
     ".yml", ".yaml", ".md", ".py", ".sh", ".tf", ".cfg", ".toml", ".json",
     ".j2", ".jinja", ".txt", ".hujson", ".env",
