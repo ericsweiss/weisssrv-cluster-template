@@ -88,8 +88,13 @@ copier copy https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/
 #   new-cluster subcommand checks source and destination before calling copier.
 #   It takes TWO positionals, and the library marks it EXPERIMENTAL:
 weisssrv-new-project new-cluster \
-  https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster \
-  --vcs-ref v0.1.0
+  https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
+
+# Both generation blocks above are runnable as written, which is why neither
+# pins a template ref: they take the default branch. To pin a release, add
+# `--vcs-ref <template-tag>` — but only a tag this repository has actually cut
+# (`git ls-remote --tags <template-url>`); a ref that does not exist fails at
+# clone time, before the first question.
 
 # 4. Bring it up
 cd ~/src/mycluster
@@ -119,6 +124,7 @@ checks live there. Summary:
 | `external_domain` | — | Internet zone; must differ from the internal one |
 | `lan_cidr` | — | Drives firewall IP sets, NFS allowlists, NetworkPolicy egress |
 | `lan_prefix` | derived from `lan_cidr` | First three octets, for composing host addresses |
+| `lan_gateway` | `<lan_prefix>.1` | Default route for every host and guest; both guest-provisioning roles assert it |
 | `k3s_api_vip` | — | kube-vip API endpoint |
 | `metallb_public_vip` / `metallb_internal_vip` | — | Ingress entrypoints, public and LAN-only |
 | `k3s_pod_cidr` / `k3s_service_cidr` | `10.42.0.0/16` / `10.43.0.0/16` | k3s defaults; change only on a LAN collision |
@@ -134,7 +140,7 @@ checks live there. Summary:
 | `node_exporter_job_regex` | `node-exporter\|node-exporter-host` | Prometheus jobs the host alert rules scope to; both shipped names are required |
 | `vpn_tailscale` | `false` | Overlay VPN: host role, operator, ACL module |
 | `tailnet_dns_suffix` | `CHANGEME.ts.net` | Asked only with `vpn_tailscale`; MagicDNS suffix — must be replaced |
-| `gpu` | `none` | `nvidia` adds VFIO prep, device plugin, DCGM |
+| `gpu` | `none` | `nvidia` adds VFIO prep, driver + container toolkit, device plugin; GPU telemetry is a documented add-on, **not shipped** (`kubernetes/infrastructure/observability/README.md`) |
 | `lib_url` / `lib_ref` | upstream URL / `v0.2.0` | weisssrv-lib source and pin for collection, CI includes, TF modules |
 | `lib_project` | path part of `lib_url` | GitLab project path for `include: project:` (instance-local) |
 | `ci_runner_tag` / `ci_cpu_selector` | `infrastructure` / `<internal_domain>/cpu=modern` | Runner tag and the secret-detection CPU pin |
@@ -198,9 +204,13 @@ provide.
 
 ```bash
 cd ~/src/mycluster
-copier update --vcs-ref v0.2.0      # replays .copier-answers.yml against a newer template
+copier update --vcs-ref <template-tag>   # replays .copier-answers.yml against a newer template
 task lint && task flux:lint
 ```
+
+`<template-tag>` is a tag of **this** repository — not `lib_ref`, which is
+weisssrv-lib's own version and is answered separately. List what exists with
+`git ls-remote --tags https://git.ericsweiss.com/eric/weisssrv-cluster-template.git`.
 
 `copier update` produces a diff you review like any other change: it never
 touches files you rewrote beyond recognition without telling you. Bumping

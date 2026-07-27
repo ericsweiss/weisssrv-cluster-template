@@ -62,6 +62,30 @@ Compute nodes want one local SSD pool for guest disks. Always create pools with
 `ashift=12` and reference disks by `/dev/disk/by-id/` — neither is changeable
 later.
 
+**A zpool is not yet a Proxmox storage.** Every guest the template creates lands
+on a Proxmox *storage ID*, chosen from `proxmox_storage_defaults` in
+`ansible/inventories/prod/group_vars/all.yml`, and the generated file ships two:
+`ssd` on the storage node (`proxmox_role: nas`) and `local-ssd` on the compute
+nodes. A stock Proxmox VE install registers only `local` and `local-zfs`, and
+nothing in the generated repository runs `pvesm` — pool *registration*, like
+pool *creation*, is left to you. Register them after creating the pools:
+
+```bash
+# on the storage node, for the app-data pool
+pvesm add zfspool ssd       -pool <app-data-pool> -content images,rootdir
+# on every compute node, for its local guest pool
+pvesm add zfspool local-ssd -pool <local-pool>    -content images,rootdir
+```
+
+Either use those two IDs, or re-point `proxmox_storage_defaults` at the IDs you
+already have. Getting it wrong is loud rather than subtle — `pct create` / `qm
+create` names the storage it could not find and lists what exists — but it lands
+on every guest of the first deploy.
+
+One pool name is *not* free: the shipped `vm_additional_disks` entries in
+`hosts.yml` name zvol paths under `ssd/appdata/...`, so the app-data **zpool**
+is assumed to be called `ssd` as well. Rename it there if yours is not.
+
 If you plan to use at-rest encryption, decide now: the template's encryption
 model makes each dataset its own encryption root and loads keys at boot from the
 secrets backend. Retrofitting encryption means recreating datasets.
@@ -77,7 +101,7 @@ before you start; the answers marked → become copier answers.
 |---|---|---|
 | LAN network in CIDR | `lan_cidr` | e.g. `192.168.1.0/24` |
 | First three octets | `lan_prefix` | derived from the above for a /24 |
-| Router / gateway address | — | usually `.1` |
+| Router / gateway address | `lan_gateway` | usually `.1`; **required** — both guest-provisioning roles assert it before creating anything |
 | DHCP pool range | — | must **not** overlap anything below |
 | Proxmox host addresses | — | one per node, static, contiguous block |
 | Resolver addresses | `upstream_dns_servers` | space-separated, preference order; the DNS containers are **created** at these, not forwarded to |
@@ -312,8 +336,29 @@ Two of these block the **first** reconcile rather than degrading gracefully:
 without `Healthchecks Watchdog` the `alertmanager-config` ExternalSecret never
 syncs, so Alertmanager gets no `configSecret` at all; without `Grafana SSO`
 Grafana sits in `CreateContainerConfigError`. Create both before phase 6 even if
-you have no heartbeat service and no identity provider yet — a placeholder value
-is enough to let the stack come up.
+you have no heartbeat service and no identity provider yet.
+
+**A placeholder is enough for most of it, and wrong for two fields.** On
+`Healthchecks Watchdog` → `ping url`, and on `Grafana SSO` →
+`oidc-client-id`, a placeholder is genuinely temporary: the value is read on
+every reconcile, so replacing it later takes effect. The other two are not:
+
+- `Grafana SSO` → **`admin-password`** must be a real random value *from the
+  start*. Grafana creates its built-in admin only while its user table is empty,
+  so this password is applied exactly once, at Grafana's first start against an
+  empty database — and that database is on a persistent volume, so there is no
+  second first start. Editing the vault field afterwards changes nothing; the
+  fix is `grafana cli admin reset-admin-password` (SETUP § 7 step 4). This is the
+  one credential that works when the identity provider does not, so leaving it
+  at a placeholder puts a Grafana Admin behind a guessable password on the
+  internal ingress, reachable exactly during the incident nobody is watching.
+- `Grafana SSO` → **`oidc-client-secret`** must be a real random value before
+  `task terraform:authentik-apply`. Terraform is authoritative in that
+  direction: it *sets* Authentik's client secret **from** this field, so a
+  placeholder here becomes the live OIDC client secret rather than being
+  replaced by one Authentik generated.
+
+Generate both with `openssl rand -base64 32` when you create the item.
 
 Four items cannot exist until the thing that issues them exists, so create them
 as the bring-up reaches them: `GitLab Runner` and `GitLab Runner Privileged`
@@ -544,6 +589,9 @@ Hardware and OS
 - [ ] Repositories configured, systems updated, rebooted
 - [ ] ZFS pools created on the storage node, `zpool status` clean
 - [ ] Compute-node local pools created
+- [ ] Those pools registered as Proxmox storages (`pvesm add zfspool ssd …` on
+      the storage node, `local-ssd` on each compute node), or
+      `proxmox_storage_defaults` planned to point at the IDs you already have
 - [ ] Time synchronized across nodes
 
 Access
@@ -574,7 +622,10 @@ Names and accounts
       broken resolver)
 - [ ] Every host-side item from § 4 present in the vault
 - [ ] Every in-cluster item from § 4 present, including `Healthchecks Watchdog`
-      and `Grafana SSO` (placeholders are fine)
+      and `Grafana SSO` — placeholders are fine **except** `Grafana SSO` →
+      `admin-password` (applied once, at Grafana's first start) and
+      `oidc-client-secret` (Terraform pushes it into Authentik); both must be
+      real random values
 
 Library and tooling
 

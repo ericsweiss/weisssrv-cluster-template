@@ -156,8 +156,12 @@ object applies and the misconfiguration surfaces later as a service listening on
 nothing. Catching it is the gate's job, not the cluster's — see below.
 
 `cluster-versions` is generated from `group_vars/all.yml` by
-`task flux:sync-versions` and drift-gated in CI, so a version can only change in
-one place.
+`task flux:sync-versions` and drift-gated by the generated pipeline's `repo-sync`
+job (and by `task lint:repo-sync` locally), which regenerates it and diffs — so a
+version can only change in one place. Without that gate the stale case is
+silent: this file is what `flux-lint` substitutes *from*, so it renders and
+passes on the old value, while `maintenance:check-versions` reads `all.yml` and
+reports the pin as current.
 
 The division of labour: **copier fills the ConfigMap and genuinely structural
 spots** — a directory named after the cluster, a Terraform variable file, an
@@ -388,7 +392,7 @@ implementation has to satisfy.
 | Git / CI | self-hosted GitLab | `.gitlab-ci.yml`, Flux `GitRepository`, in-cluster runners and agent | a pipeline definition, a Flux source the controller supports, a token model for both |
 | Overlay VPN | Tailscale (optional) | host role, in-cluster operator, ACL Terraform module, firewall admin set | node enrolment, a way to publish cluster services, policy as code |
 | SSO | Authentik | one application namespace, forward-auth middleware, Terraform object inventory | an OIDC/forward-auth provider and a declarative object model |
-| GPU | NVIDIA (optional) | VFIO host prep, node driver, device plugin, telemetry | passthrough prep, a device plugin, a scheduling label |
+| GPU | NVIDIA (optional) | VFIO host prep, node driver, device plugin, telemetry (operator-added) | passthrough prep, a device plugin, a scheduling label |
 | Virtualization | Proxmox VE | `proxmox_*` roles, guest definitions in the inventory | guest lifecycle, HA, backup, firewall primitives |
 | Storage | ZFS + NFS + zvols | storage role, static PVs, encryption units | pools or their equivalent, a PV mechanism, an at-rest encryption story |
 

@@ -312,6 +312,23 @@ The NAS depends on this: `nfs_tls` refuses to publish a require-TLS export
 without the wildcard certificate and key in place, so a certificate failure
 surfaces as a storage failure on the next `task storage:deploy`.
 
+**The FIRST certificate is issued by hand, once.** Ansible installs acme.sh, the
+renewal cron and the push channel, and it never runs `--issue` — so on a cluster
+that has never had a wildcard there is nothing to distribute, and the storage
+host's `nfs_tls` stops on the missing file with an error that names a task which
+cannot fix it. The order that works on a fresh cluster is: deploy everything
+except the storage host, `task certs:show-host-keys` and paste the pins, then on
+`dns-01` as root, with the DNS-provider credentials exported:
+
+```bash
+/root/.acme.sh/acme.sh --issue --dns dns_cf --server letsencrypt \
+  --keylength ec-256 -d '{{ internal_domain }}' -d '*.{{ internal_domain }}'
+```
+
+then a full `task infra:deploy`. The certificate play prints that command
+verbatim whenever no certificate exists yet, and every renewal after it is
+automatic. This is a one-time step per cluster, not a runbook you return to.
+
 ---
 
 ## Suspending, rolling back, and breaking glass
@@ -335,6 +352,21 @@ set `auth.disable_login_form: false` and `auth.basic.enabled: true` in
 `kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml`,
 reconcile, sign in, fix the provider, then revert both. Do not leave that state
 committed.
+
+If that password is refused, it is almost certainly because the account's
+password is **whatever the vault held at Grafana's first start** and the field
+has been edited since. Grafana applies `admin_password` only while its user
+table is empty, and the database is on a persistent volume, so nothing after
+that first start re-applies it — not an ExternalSecret refresh, not a rollout
+restart. Reset it against the database instead, and put the same value back in
+the vault so the two agree:
+
+```bash
+kubectl -n observability exec deploy/kube-prometheus-stack-grafana -c grafana -- \
+  grafana cli --homepath /usr/share/grafana admin reset-admin-password '<new>'
+```
+
+That is also the rotation procedure: a vault edit alone changes nothing.
 
 ---
 

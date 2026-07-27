@@ -48,13 +48,34 @@ First time only, in this order. Each phase leaves a working state.
    point that orders the certificate plays before the NAS plays — use it on a
    fresh cluster rather than the per-stage tasks. Point DHCP at the new
    resolvers once DNS is up.
+
+   **A fresh cluster takes two passes here, not one.** Ansible installs and
+   renews the wildcard certificate but never issues the first one, and the push
+   targets cannot be pinned before the containers that carry those host keys
+   exist. So: `task infra:deploy -- --limit '!{{ nas_host.split('.')[0] }}'`,
+   then `task certs:show-host-keys` and paste each pin into
+   `_acme_certs_targets` in `ansible/inventories/prod/group_vars/dns.yml`, then
+   one manual `acme.sh --issue` on `dns-01` (the certificate play prints the
+   exact command), then a full `task infra:deploy`. A single pass instead stops
+   on the storage host, where `nfs_tls` hard-fails on the missing certificate.
+   SETUP.md § 4 walks it, and `docs/RUNBOOKS.md` § Certificates has it too.
 6. **Kubernetes nodes** — `task k3s:provision-vms`, `task k3s:deploy`,
    `task k3s:kubeconfig`, then `export KUBECONFIG=~/.kube/config-k3s`.
 7. **GitOps** — put `1password-credentials.json` in this repository's root, run
    `task flux:bootstrap-secrets` to create the two bootstrap Secrets, push this
    repository, then `task flux:bootstrap`.
-8. **Publish** — `task terraform:apply`, forward `443/tcp` to
-   `{{ metallb_public_vip }}`, and register CI runners.
+8. **Publish** — `task terraform:init` (once per module, per checkout — the
+   state lives in a remote backend and `plan` refuses to run without it), then
+   `task terraform:plan` and `task terraform:apply`. Forward `443/tcp` to
+   `{{ metallb_public_vip }}` and register CI runners.
+9. **Single sign-on** — the platform is green but nothing can be signed into
+   yet: Grafana is SSO-only and its identity provider is this cluster's own
+   Authentik, freshly deployed and empty. Run the one-time
+   `https://auth.{{ internal_domain }}/if/flow/initial-setup/` flow (available
+   only until an admin exists), mint an `akadmin` token into the vault, then
+   `task terraform:authentik-init`, `task terraform:authentik-plan`,
+   `task terraform:authentik-apply`. SETUP.md § 7 step 4 covers the group
+   membership and the two `Grafana SSO` fields that must be real values.
 
 The long form, with what each phase actually does and what to check:
 [SETUP.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/SETUP.md).

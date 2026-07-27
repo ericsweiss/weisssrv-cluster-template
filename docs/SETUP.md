@@ -126,8 +126,17 @@ task hosts:sync           # inventory → scripts/hosts.env, consumed by the she
 task flux:sync-versions   # group_vars versions → kubernetes/.../versions-configmap.yaml
 ```
 
-Both are drift-gated in CI: if the generated file does not match its source, the
-pipeline fails. Never hand-edit either output.
+Both outputs are drift-gated, locally by `task lint:repo-sync` (part of
+`task lint`) and in CI by the `repo-sync` job: each regenerates the file from its
+source and diffs, so a hand-edited or stale output fails. Never hand-edit
+either.
+
+That gate is also why these two commands belong **here** rather than later.
+`scripts/hosts.env` ships as an inert placeholder — every list empty, so a task
+that iterates one stops with an explicit message instead of SSHing somewhere
+wrong — and a placeholder is by definition out of sync with the roster. Until you
+run `task hosts:sync`, § 3's `task lint` reports exactly that, naming the command
+to run.
 
 ### The site-values ConfigMap
 
@@ -259,11 +268,22 @@ the same dependency:
 |---|---|---|
 | 1 | `task infra:base -- --limit proxmox` | users, SSH hardening, packages, timezone on the bare-metal hosts — limited to them because no container exists yet |
 | 2 | `task dns:deploy` | provisions the resolver containers, then the validating recursive resolver and the filtering frontend, then acme.sh + the renewal cron + the cert push channel, then the secondary sync |
-| 3 | the certificate step above | pin the host keys, issue the wildcard once, re-run `task dns:deploy` to distribute it |
-| 4 | `task storage:deploy` | NFS-over-TLS, ZFS properties and datasets, exports, Samba, backups, exporters |
-| 5 | `task infra:deploy` | everything else site.yml carries: the SMTP relay, Proxmox host config, firewall, host metrics and log shipping |
-| 6 | `task proxmox:ha` | HA rules, resource pools, replication jobs |
-| 7 | `task infra:verify` | post-deploy verification across all of the above |
+| 3 | `task infra:deploy -- --limit mail` | provisions the SMTP relay container and its base config. **Do not skip it or move it later:** it is a certificate distribution target, and step 4 can only pin the host key of a host that exists |
+| 4 | the certificate step above | pin the host keys, issue the wildcard once, re-run `task dns:deploy` to distribute it |
+| 5 | `task storage:deploy` | NFS-over-TLS, ZFS properties and datasets, exports, Samba, backups, exporters |
+| 6 | `task infra:deploy` | everything else site.yml carries: the relay's Postfix config, Proxmox host config, firewall, host metrics and log shipping |
+| 7 | `task proxmox:ha` | HA rules, resource pools, replication jobs |
+| 8 | `task infra:verify` | post-deploy verification across all of the above |
+
+The two-pass path at the top of this section gets step 3 for free — its first
+pass is `site.yml` minus the storage host, which provisions the resolvers *and*
+the relay before anything is pinned. Splitting the stages is what re-introduces
+the ordering, which is why it is a numbered step here.
+
+If you do end up pinning before a target exists, nothing is lost and nothing is
+silent: the empty pin is skipped by the certificate play, `task infra:verify`
+fails naming that host, and § 9's host-key row is the loop back — re-run
+`task certs:show-host-keys`, paste the pin, re-run `task dns:deploy`.
 
 Notes on that table, because each one has bitten someone:
 
@@ -271,9 +291,11 @@ Notes on that table, because each one has bitten someone:
   cron and distribution to non-cluster hosts all run inside `dns.yml` (and
   inside `site.yml`), on the DNS hosts. There is no `certs:deploy` — only
   `task certs:show-host-keys`, which captures the pins those pushes need.
-- **The SMTP relay lands in step 5, not in a step of its own.** It is
-  provisioned and configured by `site.yml`, which is why that step is not
-  optional.
+- **The relay is provisioned in step 3 and configured in step 6.** Both are
+  `site.yml`; step 3 is the same run limited to the `mail` group, which is
+  enough to give the container an address and an SSH host key. Its Postfix
+  configuration needs the wildcard certificate (`smtpd_tls_security_level:
+  encrypt` on submission), so it lands after the certificate step, not before.
   `task mail:deploy` exists for redeploying the relay *alone* later (an upstream
   smarthost, a SASL credential, a Postfix parameter).
 - **Run these through `task`, not bare `ansible-playbook`.** The tasks wrap the
@@ -375,6 +397,17 @@ This reads the git token from the vault, installs the Flux controllers, commits
 their manifests to `kubernetes/clusters/<cluster_name>/flux-system/`, and creates
 the `GitRepository` plus the top-level `Kustomization` that watches this repo.
 
+> **The first pipeline's `flux-lint` job is expected to fail, once.** It builds
+> the cluster root, which lists `flux-system/` — and `flux-system/`'s
+> kustomization names `gotk-components.yaml` and `gotk-sync.yaml`, which
+> `flux bootstrap` has not written yet. The local `task flux:lint` guards
+> exactly this case and prints "cluster root skipped"; the library's CI job runs
+> the same build without the guard, so the push above is the one window where
+> the two disagree. Bootstrap commits both files, and the next pipeline is
+> green. Most operators never see it — PRE-SETUP § 5 notes that the runners are
+> themselves in-cluster workloads, so the first pipelines usually queue rather
+> than run.
+
 ### 6c. Watch it converge
 
 ```bash
@@ -472,15 +505,20 @@ Once the platform is Ready:
      Authentik already — on a fresh install that is `akadmin` and nobody else.
    - **The client id** is the map key — the literal string `grafana`. The vault
      item `Grafana SSO` → `oidc-client-id` must be exactly that.
-   - **The client secret** has to match on both sides. Either read it out of
-     Authentik after the apply (Applications > Providers > Grafana) and store it
-     in `Grafana SSO` → `oidc-client-secret`, or keep Terraform authoritative by
-     adding `TF_VAR_oauth2_client_secret_grafana: op://<vault>/Grafana SSO/oidc-client-secret`
-     to the `env:` block of the three `terraform:authentik-*` tasks *before* the
-     apply. `terraform/authentik/README.md` § Adding an application is the
-     pattern to repeat for every app you add.
+   - **The client secret** is supplied *to* Authentik, not read back from it.
+     The three `terraform:authentik-*` tasks share one env block, and it already
+     injects `TF_VAR_oauth2_client_secret_grafana` from `Grafana SSO` →
+     `oidc-client-secret`. So Terraform is authoritative: whatever is in that
+     field becomes the provider's client secret, and Grafana reads the same
+     field through its ExternalSecret — the two match by construction, and
+     rotation is one vault edit plus a re-apply. What that means for you is that
+     the field must hold a **real random value** (`openssl rand -base64 32`)
+     *before* the apply. PRE-SETUP § 4 blesses placeholders on this item for the
+     fields that are re-read every reconcile; this is not one of them.
+     `terraform/authentik/README.md` § Adding an application is the pattern to
+     repeat for every app you add.
 
-   Then push the real values into the cluster and sign in:
+   Then push the OIDC values into the cluster and sign in:
 
    ```bash
    task flux:refresh-secret -- observability/observability-secrets
@@ -491,6 +529,24 @@ Once the platform is Ready:
    (Reloader is configured with `ignoreSecrets: true`, so a credential Secret
    changing is deliberately a manual restart.)
 
+   **The third field on that item does not work this way.** `Grafana SSO` →
+   `admin-password` is the break-glass built-in admin, and Grafana applies it
+   only while its user table is empty — that is, at its **first** start, which
+   has already happened by the time you read this. The refresh and restart above
+   change the OIDC credentials and leave that account exactly as it was. If the
+   field held a placeholder in phase 0, the account still has the placeholder.
+   Fix it now, in one change, so the vault and the database agree:
+
+   ```bash
+   # 1. put a real random value in Grafana SSO -> admin-password
+   task flux:refresh-secret -- observability/observability-secrets
+   # 2. make the database agree — nothing else does
+   kubectl -n observability exec deploy/kube-prometheus-stack-grafana -c grafana -- \
+     grafana cli --homepath /usr/share/grafana admin reset-admin-password '<new>'
+   ```
+
+   That is also the rotation procedure from here on.
+
    If the identity provider is ever down, or a group mapping locks everyone out,
    Grafana's break-glass is a two-line change: set `auth.disable_login_form:
    false` and `auth.basic.enabled: true` in
@@ -498,7 +554,7 @@ Once the platform is Ready:
    reconcile, and sign in as `admin` with `Grafana SSO` → `admin-password`.
    Revert both when the IdP is back —
    `kubernetes/infrastructure/observability/README.md` explains why the account
-   exists at all.
+   exists at all, and why its password is a one-shot.
 5. **CI** — register runners, add the CI service-account token as a masked
    variable, and push a branch to watch the pipeline run. From here changes ship
    as merge requests, not as local `task` invocations. `docs/ci-pipeline.md` in

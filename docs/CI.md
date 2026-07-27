@@ -13,19 +13,27 @@ repository at `docs/ci-pipeline.md`.
 ## The gate that matters: `render-validate`
 
 Structural tests can only prove that files exist and match each other. The
-`render-validate` job proves the output is *usable*: it renders the template
-with `tests/answers-weisssrv-shaped.yml` and then runs, over the result,
+`render-validate` job proves the output is *usable*. It renders the template
+**twice** — once from `tests/answers-weisssrv-shaped.yml` and once from
+`tests/answers-unlike.yml` — and runs the validator over each, because a value
+hard-coded from the reference cluster renders byte-identically to a correct
+substitution in the shaped fixture and is only visible in a second, unlike one.
 
-1. `yamllint` across `ansible/`, `kubernetes/`, `terraform/` and `.gitlab-ci.yml`;
-2. the **Flux render loop** — for every Kustomization under
-   `kubernetes/clusters/<name>/`: `kustomize build` the target path, check that
-   every `${placeholder}` in the output is a key of one of the two postBuild
-   ConfigMaps, substitute, then `kubeconform`. This mirrors what
-   `ci/validate/flux-lint.yml` does inside a real cluster repo, including using
-   the generated repo's own `scripts/flux-render.sh`;
-3. `ansible-playbook --syntax-check` on every rendered playbook, with
-   `weisssrv.infra` resolved from a checkout of the library at the ref the
-   answer fixture pins.
+`tests/validate_render.py` runs six checks over a render:
+
+| Check | What it proves | Needs |
+|---|---|---|
+| `yamllint` | the tree passes the generated repo's own `.yamllint` | `yamllint` |
+| `flux` | for every Kustomization under `kubernetes/clusters/<name>/`: `kustomize build` the target path, assert every `${placeholder}` is a key of one of the two postBuild ConfigMaps, substitute, `kubeconform`. Mirrors `ci/validate/flux-lint.yml`, through the generated repo's own `scripts/flux-env.sh` | `kustomize`, `kubeconform` |
+| `vendored` | every script in the render's `scripts/` is byte-identical to the library's copy | `--lib-path` |
+| `role-opt-ins` | no playbook invokes a `<role>_enabled: false` role without the inventory setting the flag — a role that runs and does nothing, successfully | `--lib-path` |
+| `role-inputs` | every input an invoked role *asserts* and gives no default is assigned in `inventories/prod` — the shape that took out `proxmox_lxc_gateway` | `--lib-path` |
+| `ansible` | `ansible-playbook --syntax-check` on every rendered playbook, with `weisssrv.infra` resolved from the library | `ansible-playbook` |
+
+**`vendored`, `role-opt-ins` and `role-inputs` are silently skipped without
+`--lib-path`** — they read the library's roles and scripts, so there is nothing
+to compare against. The validator prints `skipped (no --lib-path)` for each. A
+local run without it is therefore weaker than CI, which always passes one.
 
 A template change that produces a cluster which cannot reconcile fails here
 instead of in someone's homelab.
@@ -34,9 +42,11 @@ instead of in someone's homelab.
 
 ```bash
 python3 -m pytest tests -q                      # structure + copier schema
-python3 tests/validate_render.py                # + the real toolchain
-python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib
+python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib          # all six checks
+python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
+  --answers tests/answers-unlike.yml            # the contrast fixture
 python3 tests/render_cluster.py --out /tmp/x    # just render, and keep it
+python3 tests/validate_render.py --render-dir /tmp/x --lib-path ~/src/weisssrv-lib
 ```
 
 The render always happens from a **copy** of the working tree with `.git`
@@ -46,26 +56,36 @@ review.
 
 Requirements: `copier>=9`, `pytest`, `pyyaml` for the pytest suite; plus
 `yamllint`, `kustomize`, `kubeconform` and `ansible-playbook` for the
-validator. Any missing tool is reported by name; `--skip yamllint,flux,ansible`
-narrows the run.
+validator. Any missing tool is reported by name. `--skip` takes any of
+`yamllint,flux,vendored,role-opt-ins,role-inputs,ansible`.
 
 `--lib-path` points at a weisssrv-lib checkout — the directory that *contains*
-`ansible_collections/`. Use it to exercise an unmerged library change, or
-simply to avoid the network. Without it the collection is installed from the
-git ref in the render's `requirements.yml`. The library's galaxy dependencies
-(`ansible.posix`, `community.general`) are installed either way, with the
-operator's own `~/.ansible/collections` as the offline fallback.
+`ansible_collections/`. Use it to exercise an unmerged library change, to avoid
+the network, and — as the table above says — to run three of the six checks at
+all. Without it the collection is installed from the git ref in the render's
+`requirements.yml`. The library's galaxy dependencies (`ansible.posix`,
+`community.general`) are installed either way, with the operator's own
+`~/.ansible/collections` as the offline fallback.
 
-## The answer fixture
+## The two answer fixtures
 
-`tests/answers-weisssrv-shaped.yml` has the same shape as the reference cluster
-— flat `/24`, split-horizon domains, three VIPs — with placeholder identity and
-both optional modules (`vpn_tailscale`, `gpu`) turned **on**, because the
-conditional branches are the ones a defaults-only render never reaches.
-
+Both are complete answer sets, and every question must be answered in **both**:
 `tests/test_copier_config.py` fails if a question is added to `copier.yml`
-without an entry here: an unanswered question falls back to its default and
-stops being exercised.
+without an entry in the shaped fixture, and the render suite's
+`test_the_two_fixtures_answer_differently` asserts that the two files answer the
+same question set — so a new question that reaches only one of them fails there
+instead.
+
+| Fixture | Shape | Reaches |
+|---|---|---|
+| `answers-weisssrv-shaped.yml` | the reference cluster's shape with placeholder identity: flat `/24`, split-horizon domains, three VIPs, smallest roster | both optional modules **on** (`vpn_tailscale`, `gpu: nvidia`), multi-resolver, semantic-release off |
+| `answers-unlike.yml` | deliberately unlike it in every answer that can differ: other LAN, other domains, other names, other vault, other runner tag, largest roster | both optional modules **off**, a single resolver, a third exporter job, semantic-release on |
+
+They are a pytest *parameter* (the `cluster` fixture), so most assertions run
+against both renders for the price of one render each. `answers-unlike.yml` is
+also what `test_render_b_carries_no_fixture_a_values` diffs against: any answer
+from the shaped fixture appearing in the unlike render is a hard-coded literal,
+not a substitution.
 
 ## Adding a check
 
