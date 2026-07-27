@@ -45,3 +45,11 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Secret material that the bring-up path places IN the repo root.
+# flux:bootstrap-secrets reads ./1password-credentials.json, and SETUP tells
+# you to `git add -A` in the same session — without these it lands in git.
+1password-credentials.json
+*.key
+*.pem
+*.tfvars
