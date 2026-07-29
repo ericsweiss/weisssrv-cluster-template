@@ -140,6 +140,13 @@ include:
   # extra_validation is the parity the library documents: the kustomize corpus
   # never renders a chart, so `.spec.values` is otherwise unvalidated, and an
   # HPA/VPA pair fighting over the same workload has no other gate.
+  # ON BUMPING lib_ref PAST v0.2.0: add `require_cluster_root: false` below.
+  # From v0.3.0 that input defaults to TRUE (so a bootstrapped cluster that loses
+  # its flux-system content fails instead of silently skipping), and this repo has
+  # no gotk-components.yaml / gotk-sync.yaml until `flux bootstrap` runs — so
+  # without the explicit false the very first pipeline of a freshly generated
+  # cluster fails on a root it cannot build yet. The job prints that hint on
+  # failure; this note is here so it never has to.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/validate/flux-lint.yml
