@@ -116,6 +116,24 @@ include:
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []
+      # Sized for THIS repo's initial-import MR, which is an entire template
+      # tree: pr-agent measured its diff at 675k tokens, sat under the 900k cap
+      # so nothing was compressed, and the job died at the 45m default having
+      # produced nothing — and because the job is allow_failure, the pipeline
+      # went green with no review attached.
+      #
+      # max_model_tokens below the diff size deliberately triggers pr-agent's own
+      # compression, which drops the least relevant files rather than attempting
+      # the whole tree in one call. `review` only: the `improve` pass is the
+      # expensive one (measured at 1478s on a 52k-token diff in weisssrv-lib) and
+      # per-line suggestions over a compressed initial import are worth little.
+      #
+      # Revert all four once this repo's MRs are normal-sized; they are a
+      # concession to a 327-file first commit, not a standing configuration.
+      max_model_tokens: "120000"
+      commands: "review"
+      ai_timeout: "1800"
+      timeout: "90m"
       needs:
         - job: yaml-lint
           optional: true
