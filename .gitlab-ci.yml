@@ -153,6 +153,12 @@ render-validate:
     # The collection is cloned rather than installed from the pinned ref, so the
     # gate does not depend on anonymous access to the library project.
     LIB_CHECKOUT: "$CI_PROJECT_DIR/.tmp/lib"
+    # The runner pod's uid has no passwd entry, and ansible resolves the current
+    # user from these — without them every `--syntax-check` in this job dies with
+    # "No username set in the environment" before parsing a single playbook. The
+    # library's collection-checks job carries the same pair for the same reason.
+    USER: gitlab-runner
+    LOGNAME: gitlab-runner
   before_script:
     - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
     - mkdir -p "$CI_PROJECT_DIR/.bin"
