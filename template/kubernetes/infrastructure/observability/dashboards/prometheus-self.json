@@ -435,7 +435,7 @@
           "tableColumn": "",
           "targets": [
             {
-              "expr": "sum(sum_over_time(prometheus_rule_group_iterations_missed_total{job=~\"$job\",instance=~\"$instance\"}[$interval]))",
+              "expr": "sum(increase(prometheus_rule_group_iterations_missed_total{job=~\"$job\",instance=~\"$instance\"}[$interval]))",
               "format": "time_series",
               "intervalFactor": 2,
               "refId": "A",
@@ -515,7 +515,7 @@
           "tableColumn": "",
           "targets": [
             {
-              "expr": "sum(sum_over_time(prometheus_target_scrapes_exceeded_sample_limit_total{job=~\"$job\",instance=~\"$instance\"}[$interval]))",
+              "expr": "sum(increase(prometheus_target_scrapes_exceeded_sample_limit_total{job=~\"$job\",instance=~\"$instance\"}[$interval]))",
               "format": "time_series",
               "intervalFactor": 2,
               "refId": "A",
@@ -595,7 +595,7 @@
           "tableColumn": "",
           "targets": [
             {
-              "expr": "sum(sum_over_time(prometheus_tsdb_reloads_failures_total{job=~\"$job\",instance=~\"$instance\"}[$interval]))",
+              "expr": "sum(increase(prometheus_tsdb_reloads_failures_total{job=~\"$job\",instance=~\"$instance\"}[$interval]))",
               "format": "time_series",
               "intervalFactor": 2,
               "refId": "A",
@@ -675,7 +675,7 @@
           "tableColumn": "",
           "targets": [
             {
-              "expr": "sum(sum_over_time(prometheus_target_scrapes_exceeded_sample_limit_total{job=~\"$job\",instance=~\"$instance\"}[$interval])) + \nsum(sum_over_time(prometheus_target_scrapes_sample_duplicate_timestamp_total{job=~\"$job\",instance=~\"$instance\"}[$interval])) + \nsum(sum_over_time(prometheus_target_scrapes_sample_out_of_bounds_total{job=~\"$job\",instance=~\"$instance\"}[$interval])) + \nsum(sum_over_time(prometheus_target_scrapes_sample_out_of_order_total{job=~\"$job\",instance=~\"$instance\"}[$interval])) ",
+              "expr": "sum(increase(prometheus_target_scrapes_exceeded_sample_limit_total{job=~\"$job\",instance=~\"$instance\"}[$interval])) + \nsum(increase(prometheus_target_scrapes_sample_duplicate_timestamp_total{job=~\"$job\",instance=~\"$instance\"}[$interval])) + \nsum(increase(prometheus_target_scrapes_sample_out_of_bounds_total{job=~\"$job\",instance=~\"$instance\"}[$interval])) + \nsum(increase(prometheus_target_scrapes_sample_out_of_order_total{job=~\"$job\",instance=~\"$instance\"}[$interval])) ",
               "format": "time_series",
               "intervalFactor": 2,
               "refId": "A",

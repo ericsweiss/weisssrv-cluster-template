@@ -2352,7 +2352,7 @@
           "steppedLine": false,
           "targets": [
             {
-              "expr": "rate(alertmanager_nflog_snapshot_duration_seconds_sum{instance=~\"$instance\"}[$__interval]) / rate(alertmanager_nflog_snapshot_duration_seconds_sum{instance=~\"$instance\"}[$__interval])",
+              "expr": "rate(alertmanager_nflog_snapshot_duration_seconds_sum{instance=~\"$instance\"}[$__interval]) / rate(alertmanager_nflog_snapshot_duration_seconds_count{instance=~\"$instance\"}[$__interval])",
               "format": "time_series",
               "hide": false,
               "intervalFactor": 1,
@@ -2454,7 +2454,7 @@
           "steppedLine": false,
           "targets": [
             {
-              "expr": "rate(alertmanager_nflog_snapshot_duration_seconds_sum{instance=~\"$instance\"}[$__interval]) / rate(alertmanager_nflog_snapshot_duration_seconds_sum{instance=~\"$instance\"}[$__interval])",
+              "expr": "rate(alertmanager_nflog_snapshot_duration_seconds_sum{instance=~\"$instance\"}[$__interval]) / rate(alertmanager_nflog_snapshot_duration_seconds_count{instance=~\"$instance\"}[$__interval])",
               "format": "time_series",
               "hide": false,
               "intervalFactor": 1,
@@ -2556,7 +2556,7 @@
           "steppedLine": false,
           "targets": [
             {
-              "expr": "rate(alertmanager_nflog_snapshot_duration_seconds_sum{instance=~\"$instance\"}[$__interval]) / rate(alertmanager_nflog_snapshot_duration_seconds_sum{instance=~\"$instance\"}[$__interval])",
+              "expr": "rate(alertmanager_nflog_snapshot_duration_seconds_sum{instance=~\"$instance\"}[$__interval]) / rate(alertmanager_nflog_snapshot_duration_seconds_count{instance=~\"$instance\"}[$__interval])",
               "format": "time_series",
               "hide": false,
               "intervalFactor": 1,
@@ -2658,7 +2658,7 @@
           "steppedLine": false,
           "targets": [
             {
-              "expr": "rate(alertmanager_nflog_snapshot_duration_seconds_sum{instance=~\"$instance\"}[$__interval]) / rate(alertmanager_nflog_snapshot_duration_seconds_sum{instance=~\"$instance\"}[$__interval])",
+              "expr": "rate(alertmanager_nflog_snapshot_duration_seconds_sum{instance=~\"$instance\"}[$__interval]) / rate(alertmanager_nflog_snapshot_duration_seconds_count{instance=~\"$instance\"}[$__interval])",
               "format": "time_series",
               "hide": false,
               "intervalFactor": 1,
