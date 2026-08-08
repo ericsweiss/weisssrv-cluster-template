@@ -123,29 +123,28 @@ include:
       # never the variable. At `high` the same reviews complete in ~7m. v0.3.0
       # made `high` the library default; this repo still pins v0.2.0, so it is
       # set explicitly here rather than by bumping seven includes on a green MR.
-      #
-      # The token/command concessions below were sized against that wrong
-      # diagnosis. They are kept for now because this MR really is a 327-file
-      # initial import, but they are worth revisiting once it lands:
-      #
-      # pr-agent measured this diff at 675k tokens, sat under the 900k cap so
-      # nothing was compressed, and the job died having produced nothing — and
-      # because the job is allow_failure, the pipeline went green with no review
-      # attached, which is the part that actually hurt.
-      #
-      # max_model_tokens below the diff size deliberately triggers pr-agent's own
-      # compression, which drops the least relevant files rather than attempting
-      # the whole tree in one call. `review` only: the `improve` pass is the
-      # expensive one (measured at 1478s on a 52k-token diff in weisssrv-lib) and
-      # per-line suggestions over a compressed initial import are worth little.
-      #
-      # Revert all four once this repo's MRs are normal-sized; they are a
-      # concession to a 327-file first commit, not a standing configuration.
       reasoning_effort: "high"
-      max_model_tokens: "120000"
-      commands: "review"
-      ai_timeout: "1800"
-      timeout: "90m"
+      # The token cap and `commands: review` that used to sit here were sized
+      # against that wrong diagnosis, and were a concession to the 327-file
+      # initial import (!1) rather than a standing configuration. Both are gone
+      # now that MRs here are ordinary, so this repo gets the same `review
+      # improve` pass as the other three. Until this change, "the reviewer found
+      # nothing" meant strictly less here than elsewhere — no per-line
+      # suggestions were ever requested — which is the kind of asymmetry that
+      # makes a green pipeline unreadable across repos.
+      #
+      # ai_timeout is NOT left to the v0.2.0 default of 600s. That is per CALL,
+      # and `improve` is the expensive one (1478s measured at xhigh on a 52k
+      # diff); 600s would cut it off, and behind allow_failure the amputation
+      # reads as a clean pipeline. 1200s matches what the library adopted as its
+      # own default in v0.3.0.
+      ai_timeout: "1200"
+      # Stated rather than inherited, because the value is only correct in
+      # relation to the two above it: the job must outlast ai_timeout x
+      # len(commands) — 2 x 1200s = 40m — plus image pull and clone. It happens
+      # to equal the v0.2.0 default, but inheriting it would hide the arithmetic
+      # that has to be redone whenever either input moves.
+      timeout: "45m"
       needs:
         - job: yaml-lint
           optional: true
