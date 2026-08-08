@@ -750,7 +750,7 @@
           "sort": "desc"
         }
       },
-      "title": "Node Network Traffic (eth0)",
+      "title": "Node Network Traffic",
       "type": "timeseries",
       "targets": [
         {
@@ -758,7 +758,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(node_network_receive_bytes_total{job=\"node-exporter\", device=\"eth0\"}[5m]) * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info)",
+          "expr": "sum by (instance) (rate(node_network_receive_bytes_total{job=\"node-exporter\", device!~\"lo|veth.*|docker.*|br-.*|cni.*|flannel.*|cali.*|tunl.*|dummy.*|kube-.*|nodelocaldns.*|tailscale.*|wg.*\"}[5m])) * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info)",
           "legendFormat": "{{ nodename }} rx",
           "refId": "A"
         },
@@ -767,7 +767,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "-rate(node_network_transmit_bytes_total{job=\"node-exporter\", device=\"eth0\"}[5m]) * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info)",
+          "expr": "-sum by (instance) (rate(node_network_transmit_bytes_total{job=\"node-exporter\", device!~\"lo|veth.*|docker.*|br-.*|cni.*|flannel.*|cali.*|tunl.*|dummy.*|kube-.*|nodelocaldns.*|tailscale.*|wg.*\"}[5m])) * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info)",
           "legendFormat": "{{ nodename }} tx",
           "refId": "B"
         }
@@ -3053,7 +3053,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100",
+          "expr": "label_join((kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100, \"pvc_key\", \"/\", \"namespace\", \"persistentvolumeclaim\")",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -3064,7 +3064,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "kubelet_volume_stats_capacity_bytes",
+          "expr": "label_join(kubelet_volume_stats_capacity_bytes, \"pvc_key\", \"/\", \"namespace\", \"persistentvolumeclaim\")",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -3075,7 +3075,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "kubelet_volume_stats_used_bytes",
+          "expr": "label_join(kubelet_volume_stats_used_bytes, \"pvc_key\", \"/\", \"namespace\", \"persistentvolumeclaim\")",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -3086,7 +3086,7 @@
         {
           "id": "seriesToColumns",
           "options": {
-            "byField": "persistentvolumeclaim"
+            "byField": "pvc_key"
           }
         },
         {
@@ -3118,21 +3118,24 @@
               "service 2": true,
               "service 3": true,
               "namespace 2": true,
-              "namespace 3": true
+              "namespace 3": true,
+              "pvc_key": true,
+              "persistentvolumeclaim 2": true,
+              "persistentvolumeclaim 3": true
             },
             "indexByName": {
               "namespace 1": 0,
-              "persistentvolumeclaim": 1,
               "Value #C": 2,
               "Value #B": 3,
-              "Value #A": 4
+              "Value #A": 4,
+              "persistentvolumeclaim 1": 1
             },
             "renameByName": {
               "namespace 1": "Namespace",
-              "persistentvolumeclaim": "PVC",
               "Value #A": "Usage %",
               "Value #B": "Capacity",
-              "Value #C": "Used"
+              "Value #C": "Used",
+              "persistentvolumeclaim 1": "PVC"
             }
           }
         }

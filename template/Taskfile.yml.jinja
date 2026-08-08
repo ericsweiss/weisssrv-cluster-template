@@ -518,7 +518,27 @@ tasks:
           exit 1
         fi
         IFS='/' read -r NS NAME <<< "{{.CLI_ARGS}}"
+        # Wait for the sync to actually HAPPEN, not merely for Ready to be true.
+        # An ExternalSecret that was already Ready stays Ready across the
+        # annotation, so `kubectl wait --for=condition=Ready` returns instantly
+        # and rotate-secret would restart consumers against the OLD value — the
+        # failure mode is silent and looks like a successful rotation.
+        # status.refreshTime advances only when ESO has completed a fetch, so
+        # waiting for it to CHANGE is the signal that means what we need.
+        BEFORE=$(kubectl get -n "$NS" externalsecret "$NAME" \
+          -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
         kubectl annotate --overwrite -n "$NS" externalsecret "$NAME" force-sync="$(date +%s)"
+        for _ in $(seq 1 60); do
+          AFTER=$(kubectl get -n "$NS" externalsecret "$NAME" \
+            -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
+          [ -n "$AFTER" ] && [ "$AFTER" != "$BEFORE" ] && break
+          sleep 1
+        done
+        if [ "$AFTER" = "$BEFORE" ]; then
+          echo "ERROR: $NS/$NAME did not refresh within 60s (refreshTime unchanged: ${BEFORE:-none})" >&2
+          echo "Consumers were NOT restarted; the old secret value is still in place." >&2
+          exit 1
+        fi
         kubectl wait -n "$NS" externalsecret "$NAME" --for=condition=Ready --timeout=60s
 
   flux:rotate-secret:
