@@ -116,11 +116,22 @@ include:
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []
-      # Sized for THIS repo's initial-import MR, which is an entire template
-      # tree: pr-agent measured its diff at 675k tokens, sat under the 900k cap
-      # so nothing was compressed, and the job died at the 45m default having
-      # produced nothing — and because the job is allow_failure, the pipeline
-      # went green with no review attached.
+      # ROOT CAUSE, established 2026-08-08: the 45m death with no output was
+      # `xhigh`, not diff size. v0.2.0 defaults reasoning_effort to xhigh, and
+      # measured on weisssrv-lib!4 that took 40.7m/44.6m/74.5m to SUCCEED and
+      # twice failed outright emitting nothing — on a 56k-token diff, so size was
+      # never the variable. At `high` the same reviews complete in ~7m. v0.3.0
+      # made `high` the library default; this repo still pins v0.2.0, so it is
+      # set explicitly here rather than by bumping seven includes on a green MR.
+      #
+      # The token/command concessions below were sized against that wrong
+      # diagnosis. They are kept for now because this MR really is a 327-file
+      # initial import, but they are worth revisiting once it lands:
+      #
+      # pr-agent measured this diff at 675k tokens, sat under the 900k cap so
+      # nothing was compressed, and the job died having produced nothing — and
+      # because the job is allow_failure, the pipeline went green with no review
+      # attached, which is the part that actually hurt.
       #
       # max_model_tokens below the diff size deliberately triggers pr-agent's own
       # compression, which drops the least relevant files rather than attempting
@@ -130,6 +141,7 @@ include:
       #
       # Revert all four once this repo's MRs are normal-sized; they are a
       # concession to a 327-file first commit, not a standing configuration.
+      reasoning_effort: "high"
       max_model_tokens: "120000"
       commands: "review"
       ai_timeout: "1800"
