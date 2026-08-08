@@ -1,0 +1,211 @@
+// Tailnet policy for the {{ cluster_name }} cluster (HuJSON: comments and
+// trailing commas are allowed; it is not plain JSON).
+//
+// LEAST-PRIVILEGE BY DEFAULT. Every rule below sources from `group:admins` and
+// names explicit destination ports — NOT `autogroup:member` with `*:*`. A fresh
+// tailnet starts allow-all, so the first apply is a real tightening: a device
+// that is not owned by a member of `group:admins` (a shared node, a family
+// member's phone, a device invited later) inherits ZERO reach into this cluster
+// until it is added deliberately.
+//
+// APPLY IS SUPERVISED. Applying REPLACES the live document wholesale, and a
+// mistake here can sever tailnet access and Tailscale SSH — this repository's
+// own remote-admin path — to every node at once. Work through the pre-apply
+// checklist in README.md, keep a non-tailnet path open (a LAN session or host
+// console), and read the whole `terraform plan` diff before approving it.
+{
+  // ---------------------------------------------------------------------
+  // Identity
+  // ---------------------------------------------------------------------
+  // The operators of this cluster. Seeded from the `admin_email` answer, which
+  // is the SYSTEM MAIL address — very often NOT the login you signed into
+  // Tailscale with (that is usually a Google/GitHub/Microsoft identity).
+  //
+  // >>> CONFIRM THIS LIST BEFORE THE FIRST APPLY. <<<
+  // Copy the exact login string from the admin console (Users page), or from
+  // `tailscale status --json`. Every acls/ssh rule below sources from this
+  // group, so a wrong entry means the policy grants nobody anything and you
+  // lose tailnet reach the moment it applies. Recovery is an edit in the admin
+  // console (Access controls), which a tailnet Admin can always make from a
+  // browser without being on the tailnet.
+  //
+  // Scoping to a group instead of `autogroup:member` is the point of this file:
+  // on a single-operator tailnet the two sets are identical TODAY, and the group
+  // keeps them identical only by deliberate choice on the day a second member,
+  // or a shared device, appears.
+  "groups": {
+    "group:admins": ["{{ admin_email }}"],
+  },
+
+  // ---------------------------------------------------------------------
+  // Tags
+  // ---------------------------------------------------------------------
+  // Tags let a device authenticate as a role instead of as a person, so an
+  // expiring user account cannot take nodes off the tailnet. These are the tags
+  // this repository actually advertises — keep them in sync with the Ansible
+  // layer and the Kubernetes operator, or `tailscale up --advertise-tags` is
+  // rejected and the tag-keyed rules below match nothing:
+  //
+  //   tag:subnet-router  ansible/inventories/prod/group_vars/proxmox.yml
+  //                      (tailscale_advertise_tags) — the Proxmox hosts that
+  //                      advertise the LAN into the tailnet.
+  //   tag:k8s-operator   the Tailscale Kubernetes operator's OWN device. `[]`
+  //                      means "owned by tailnet admins", which is what lets an
+  //                      admin mint the operator's OAuth client bearing it.
+  //   tag:k8s            applied to every proxy device the operator registers
+  //                      (kubernetes/infrastructure/controllers/tailscale-operator,
+  //                      proxyConfig.defaultTags). MUST be ownable by
+  //                      tag:k8s-operator or the operator cannot register them.
+  //
+  // `autogroup:admin` owns the host tag rather than group:admins on purpose: tag
+  // ownership has to keep working even while group:admins is being corrected.
+  "tagOwners": {
+    "tag:subnet-router": ["autogroup:admin"],
+    "tag:k8s-operator":  [],
+    "tag:k8s":           ["tag:k8s-operator"],
+  },
+
+  // ---------------------------------------------------------------------
+  // Network access
+  // ---------------------------------------------------------------------
+  // Ports are proto-agnostic (no "proto" field), so each matches BOTH tcp and
+  // udp — which is what DNS (53, 853) needs. ICMP is allowed automatically for
+  // any matched src/dst pair, so ping and traceroute work without a port.
+  "acls": [
+    // Rule 1 — the subnet-router HOSTS' own services, on their tailnet (100.x)
+    // address rather than through subnet routing: SSH and the Proxmox web UI.
+    // 80/443 are defensive (a host that later serves them is covered without a
+    // policy edit); the kube-API is reached through Rule 2, not here.
+    {
+      "action": "accept",
+      "src":    ["group:admins"],
+      "dst":    ["tag:subnet-router:22,80,443,8006"],
+    },
+
+    // Rule 2 — the LAN, via subnet routing. This is the day-to-day admin and
+    // browsing surface, and the one rule you will extend as you add services.
+    // Tailscale SNATs routed traffic to the advertising host's LAN address, so
+    // it arrives at the Proxmox firewall as an on-LAN source.
+    //
+    // Each port below is a service this template actually deploys:
+    //   22    SSH — hosts, LXC guests and k3s VMs
+    //   53    DNS (tcp+udp) — the AdGuard/unbound resolvers
+    //   80    HTTP ingress (Traefik; redirects to 443)
+    //   111   rpcbind — the debugging companion to 2049
+    //   443   HTTPS — every Traefik-fronted app
+    //   853   DNS-over-TLS (tcp+udp)
+    //   2049  NFS, for debugging the exports from a tailnet client
+    //   3000  the AdGuard Home admin UI/API
+    //   6443  kube-apiserver — the VIP and the server nodes
+    //   8006  Proxmox VE web UI, on the host LAN address
+    //
+    // Add a port here ONLY when something on the LAN must be reached directly
+    // rather than through Traefik. Common additions: 445 (SMB, once you populate
+    // nas_storage_samba_shares), 3389 (RDP), a git host's alternate SSH port, a
+    // media server's direct-play port.
+    //
+    // Deliberately NOT opened: the k3s-internal ports (etcd 2379-2381, kubelet
+    // 10250, the CNI transport, memberlist), the exporters' metrics ports and
+    // the cluster/corosync ports. Those are node-to-node traffic, never operator
+    // traffic, and the host firewall scopes them to the node IP sets anyway.
+    // LAN-local multicast discovery (mDNS, SSDP) is not carried over subnet
+    // routes at all, so listing it here would achieve nothing.
+    {
+      "action": "accept",
+      "src":    ["group:admins"],
+      "dst":    ["{{ lan_cidr }}:22,53,80,111,443,853,2049,3000,6443,8006"],
+    },
+
+    // Rule 3 — SSH between an operator's OWN untagged devices, and to the hosts
+    // during the window before they adopt tag:subnet-router.
+    //
+    // This rule is the NETWORK-ACCESS gate that backs the `ssh` block below:
+    // Tailscale requires BOTH a network rule and a matching ssh rule before a
+    // Tailscale SSH session is permitted, so `autogroup:self` in the ssh block
+    // grants nothing on its own. `autogroup:self` selects the source user's own
+    // UNTAGGED devices, so a host stops matching it the moment it is tagged and
+    // is covered by Rule 1 instead — a seamless handoff with no SSH gap. Scoped
+    // to port 22: this is not a re-introduction of the member-to-member mesh.
+    {
+      "action": "accept",
+      "src":    ["group:admins"],
+      "dst":    ["autogroup:self:22"],
+    },
+
+    // Rule 4 — the proxy DEVICES the Tailscale Kubernetes operator registers
+    // (tag:k8s):
+    //   :443  the Traefik tailnet Service — internal apps over the mesh, for a
+    //         remote client with no subnet route.
+    //   :53   the tailnet split-horizon resolver, which Tailscale Split-DNS
+    //         forwards the internal domain to (tcp+udp).
+    // Access is governed by the proxy device's tag, so no autoApprovers.services
+    // entry is needed for the single-proxy (non-HA) exposure this repo ships.
+    {
+      "action": "accept",
+      "src":    ["group:admins"],
+      "dst":    ["tag:k8s:53,443"],
+    },
+  ],
+
+  // ---------------------------------------------------------------------
+  // Route approval
+  // ---------------------------------------------------------------------
+  // A route is only usable once APPROVED. Auto-approval makes subnet-router
+  // failover between hosts real instead of a per-host click in the console.
+  //
+  // BOTH entries are listed on purpose during bring-up: the tag approves routes
+  // from hosts that have already adopted it, and group:admins keeps
+  // still-untagged (user-owned) hosts approved while the Ansible tailscale role
+  // rolls through them. FOLLOW-UP TIGHTENING: once every host shows the tag in
+  // `tailscale status` and its route is approved, drop the group entry so only
+  // tag-owned devices can auto-approve the LAN route.
+  "autoApprovers": {
+    "routes": {
+      "{{ lan_cidr }}": ["tag:subnet-router", "group:admins"],
+    },
+    // Exit-node advertisement is auto-approved for the tagged hosts only, so an
+    // operator's laptop cannot become an exit node for the tailnet by accident.
+    "exitNode": ["tag:subnet-router"],
+  },
+
+  // ---------------------------------------------------------------------
+  // Tailscale SSH
+  // ---------------------------------------------------------------------
+  // "check" re-authenticates the user in the browser periodically; "accept"
+  // would not, and this is a hardening baseline.
+  //
+  //   dst autogroup:self        the operator's own untagged devices, and the
+  //                             hosts before they are tagged (gated by acls
+  //                             Rule 3 above — Tailscale needs both).
+  //   dst tag:subnet-router     SSH INTO the Proxmox hosts once they are tagged;
+  //                             autogroup:self does NOT match tagged devices, so
+  //                             the tag must be named explicitly.
+  //   users autogroup:nonroot   root is NOT permitted. The operator connects as
+  //                             {{ admin_user }}, which has passwordless sudo on
+  //                             every host, and autogroup:nonroot already covers
+  //                             that account — naming it separately would only
+  //                             single out the sudo account as an SSH target.
+  //
+  // PRE-APPLY: confirm nonroot login + sudo works on EVERY host before applying,
+  // or dropping root here locks you out of Tailscale SSH.
+  "ssh": [
+    {
+      "action": "check",
+      "src":    ["group:admins"],
+      "dst":    ["autogroup:self", "tag:subnet-router"],
+      "users":  ["autogroup:nonroot"],
+    },
+
+    // BREAK-GLASS (commented). If dropping root ever locks you out — {{ admin_user }}'s
+    // sudo broke on every host at once — re-add root by uncommenting this and
+    // re-applying, or make the same edit directly in the admin console. A
+    // console edit shows up as drift in the next `terraform plan` until it is
+    // reconciled back into this file.
+    // {
+    //   "action": "check",
+    //   "src":    ["group:admins"],
+    //   "dst":    ["autogroup:self", "tag:subnet-router"],
+    //   "users":  ["autogroup:nonroot", "root"],
+    // },
+  ],
+}

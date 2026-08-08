@@ -1,0 +1,60 @@
+# Secrets / local env — never commit these. NOT `*.env`: scripts/hosts.env is
+# generated from the inventory and IS committed (CI diffs it), and a broad glob
+# would silently drop it.
+.env
+.env.*
+.tmp/
+
+# Kubeconfigs — fetched from the cluster, never committed
+kubeconfig
+*.kubeconfig
+.kube/
+
+# Generated state snapshots. These are large and regenerate on demand
+# (`task collect-state`); committing them makes every snapshot a diff.
+CLUSTER_STATUS.txt
+cluster-state-*.txt
+
+# Terraform state / plans. The provider lockfile IS committed — it belongs to
+# the root module and pins what CI validates against.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# ansible caches (local ansible-lint / molecule runs)
+.ansible/
+.ansible-home/
+
+# Installed collections. `task ansible:install-collections` puts weisssrv.infra
+# here, and ansible-lint auto-installs it to the same place — either way it is
+# fetched at the pinned lib_ref, never committed.
+ansible_collections/
+
+# Pinned weisssrv-lib checkout (`task lib:sync`) and the version checker's cache
+.weisssrv-lib/
+.version-cache/
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Secret material that the bring-up path places IN the repo root.
+# flux:bootstrap-secrets reads ./1password-credentials.json, and SETUP tells
+# you to `git add -A` in the same session — without these it lands in git.
+1password-credentials.json
+*.key
+*.pem
+*.tfvars

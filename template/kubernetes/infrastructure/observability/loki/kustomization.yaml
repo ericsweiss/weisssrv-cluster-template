@@ -1,0 +1,28 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - storage.yaml
+  - release.yaml
+  # nodeport.yaml is intentionally NOT reconciled: an always-on NodePort exposes
+  # an unauthenticated Loki push/read path on every node IP, bypassing both the
+  # basic-auth ingress and the allow-loki-ingress NetworkPolicy. It stays here as
+  # an apply-on-demand emergency fallback only.
+
+# Loki ruler rule files, delivered to the loki-sc-rules sidecar. The
+# loki_rule:"1" label matches the sidecar's LABEL env; the
+# k8s-sidecar-target-directory annotation (folderAnnotation in release.yaml)
+# makes the sidecar write the file into the tenant subdir the ruler scans.
+generatorOptions:
+  # Stable name (no content hash) so the sidecar keeps discovering it and no
+  # orphan rule ConfigMaps accumulate.
+  disableNameSuffixHash: true
+configMapGenerator:
+  - name: loki-rules-host-log-staleness
+    files:
+      - host-log-staleness.yaml
+    options:
+      labels:
+        loki_rule: "1"
+      annotations:
+        k8s-sidecar-target-directory: /rules/fake

@@ -1,0 +1,8 @@
+---
+# Egress to the public internet only (never the LAN). Patch the policy's
+# podSelector in the including kustomization when only some pods in the
+# namespace should have it. See netpol-egress-dns for the default-deny caveat.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - allow-egress-public.yaml

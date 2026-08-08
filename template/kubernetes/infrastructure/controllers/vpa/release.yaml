@@ -1,0 +1,64 @@
+---
+# Vertical Pod Autoscaler. Per-workload policies live next to the workloads
+# (configs/vpa/, observability/vpa.yaml, apps/*/vpa.yaml). Metrics come from the
+# k3s-bundled metrics-server.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: vpa
+  namespace: vpa-system
+spec:
+  interval: 30m
+  releaseName: vpa
+  chart:
+    spec:
+      chart: vpa
+      version: "${helm_chart_versions_vpa}"
+      sourceRef:
+        kind: HelmRepository
+        name: fairwinds-stable
+        namespace: flux-system
+      interval: 12h
+  install:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+  upgrade:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    recommender:
+      enabled: true
+      # Defaults (25m / 250Mi) floor every recommendation above what small
+      # exporters actually use.
+      extraArgs:
+        pod-recommendation-min-cpu-millicores: 10
+        pod-recommendation-min-memory-mb: 32
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          memory: 512Mi
+    updater:
+      enabled: true
+      # Upstream default --min-replicas=2 refuses to evict single-replica
+      # workloads, which would make every updateMode: Auto policy inert here.
+      extraArgs:
+        min-replicas: "1"
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 256Mi
+    admissionController:
+      enabled: true
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          memory: 256Mi

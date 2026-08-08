@@ -1,0 +1,49 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# gotk-components.yaml and gotk-sync.yaml are written by `flux bootstrap` (see
+# README.md in this directory) — they do not exist until you run it. This
+# kustomization is hand-authored and survives bootstrap; the patches below are
+# the supported way to customise the Flux install.
+resources:
+- gotk-components.yaml
+- gotk-sync.yaml
+patches:
+# Enforce restricted PSA (bootstrap default is warn-only). kustomize-controller
+# and helm-controller hold cluster-admin, so this is the namespace that most
+# needs an admission guard; all four controllers are restricted-compliant.
+- target:
+    kind: Namespace
+    name: flux-system
+  patch: |
+    - op: add
+      path: /metadata/labels/pod-security.kubernetes.io~1enforce
+      value: restricted
+    - op: add
+      path: /metadata/labels/pod-security.kubernetes.io~1enforce-version
+      value: latest
+# Right-size controller memory requests (bootstrap default 64Mi is well under
+# the observed working set). The VPA policies in
+# infrastructure/configs/vpa/flux-system.yaml take over from here.
+- target:
+    kind: Deployment
+    name: (source-controller|kustomize-controller|helm-controller)
+  patch: |
+    - op: replace
+      path: /spec/template/spec/containers/0/resources/requests/memory
+      value: 256Mi
+- target:
+    kind: Deployment
+    name: notification-controller
+  patch: |
+    - op: replace
+      path: /spec/template/spec/containers/0/resources/requests/memory
+      value: 128Mi
+# Drop the controllers' CPU limit: CPU is compressible, so a limit only adds
+# CFS throttling that hurts reconcile latency. The memory limit stays.
+- target:
+    kind: Deployment
+    name: (source-controller|kustomize-controller|helm-controller|notification-controller)
+  patch: |
+    - op: remove
+      path: /spec/template/spec/containers/0/resources/limits/cpu

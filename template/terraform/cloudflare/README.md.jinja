@@ -1,0 +1,68 @@
+# terraform/cloudflare
+
+Zone-wide settings and the Terraform-owned DNS records for **{{ external_domain }}**.
+
+The shape comes from `weisssrv-lib//terraform/modules/cloudflare-zone` at the
+pinned ref in `main.tf`; the record inventory is `dns.tf`, and it is the only
+file you normally edit.
+
+## Running it
+
+```bash
+task terraform:init     # once per checkout, and after a module ref bump
+task terraform:plan
+task terraform:apply
+```
+
+The tasks inject the API token, the account ID and the GitLab state backend
+through `op run`, so nothing here needs a `.tfvars` file. State lives under this
+project's GitLab-managed Terraform state, name `cloudflare`.
+
+`terraform init` fetches the library module over HTTPS. If the library
+repository is private, give git a credential for it first (`git credential`
+helper, a `~/.netrc` entry, or an SSH module source).
+
+## What Terraform owns, and what it does not
+
+| Record class | Owner | Why |
+|---|---|---|
+| Apex, CAA, SPF/DMARC | Terraform (`dns.tf`) | Zone-level policy; nothing in-cluster can create it |
+| Service names (`app.{{ external_domain }}`) | external-dns | Created from each IngressRoute, deleted with it |
+| The apex address | The DDNS CronJob | Terraform seeds it once, then ignores `content` |
+
+Adding a service record by hand here is how the two controllers start fighting:
+external-dns owns a name for as long as its IngressRoute exists.
+
+## Destroy protection
+
+`protected = true` on a record means the module routes it to a resource carrying
+`lifecycle.prevent_destroy`: removing the map entry then fails the plan instead
+of silently deleting the record. Use it for anything whose deletion is an outage
+or a security regression — the apex, any name carrying SSH or a VPN endpoint,
+and the whole CAA set.
+
+Because `lifecycle` blocks cannot take variables, the flag selects a *resource
+address*, so flipping it plans a destroy and create. Add a `moved {}` block for
+the change, and if the record is leaving `protected`, apply its removal from the
+protected set first — `prevent_destroy` blocks the destroy half.
+
+## Credentials
+
+| Item | Field | Used for |
+|---|---|---|
+| `Cloudflare Terraform Token` | `credential` | Zone:Read + DNS:Edit + Zone Settings:Edit |
+| `Cloudflare Terraform Token` | `username` | The account ID |
+| `Git Terraform State Token` | `credential` | The GitLab state backend |
+
+Keep the in-cluster DNS token (cert-manager, external-dns) as a *separate* item
+with DNS:Edit + Zone:Read only. Zone Settings:Edit is what lets a token turn off
+strict TLS for the whole domain.
+
+## Changing DNS provider
+
+`dns_backend` is an answer with one implementation. Everything provider-specific
+is in this directory plus two consumers: the cert-manager `ClusterIssuer`'s
+DNS-01 solver and the external-dns HelmRelease. A new backend needs a module
+with the same three inputs (`zone_name`, credentials, a `records` map), an
+issuer solver block, and an external-dns provider block —
+The template's [ARCHITECTURE.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/ARCHITECTURE.md) records the seam.

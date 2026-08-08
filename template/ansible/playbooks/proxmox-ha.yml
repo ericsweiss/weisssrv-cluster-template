@@ -1,0 +1,77 @@
+---
+# Proxmox HA: which guests HA manages, the node-affinity rules that constrain
+# where they may run, and the ZFS replication jobs that make a failover fast.
+# All of it is opt-in — see proxmox_ha_* in group_vars/proxmox.yml.
+
+- name: Configure Proxmox HA
+  hosts: proxmox
+  become: true
+  gather_facts: false
+  # HA config is cluster-wide, so it only has to land once. serial:1 plus
+  # ignore_unreachable walks the hosts until one succeeds — run_once would fail
+  # outright if the first host in inventory happened to be down.
+  serial: 1
+  max_fail_percentage: 100
+  any_errors_fatal: false
+  ignore_unreachable: true
+
+  pre_tasks:
+    - name: Check whether HA config already landed on another host
+      vars:
+        _applied_hosts: >-
+          {{ hostvars | dict2items
+             | selectattr('value._ha_config_applied', 'defined')
+             | selectattr('value._ha_config_applied', 'equalto', true)
+             | list }}
+      ansible.builtin.set_fact:
+        _ha_config_done: "{{ _applied_hosts | length > 0 }}"
+
+    - name: Skip if already configured
+      ansible.builtin.meta: end_host
+      when: _ha_config_done | default(false)
+
+  roles:
+    - role: weisssrv.infra.proxmox_ha
+      tags: [proxmox_ha]
+
+  post_tasks:
+    - name: Mark HA config as applied
+      ansible.builtin.set_fact:
+        _ha_config_applied: true
+
+# Runs on localhost so the check itself does not depend on a reachable host:
+# without it, "every host was unreachable" would look like success.
+- name: Verify HA configuration was applied
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Fail if no host applied the HA configuration
+      vars:
+        _applied_hosts: >-
+          {{ hostvars | dict2items
+             | selectattr('value._ha_config_applied', 'defined')
+             | selectattr('value._ha_config_applied', 'equalto', true)
+             | list }}
+      ansible.builtin.fail:
+        msg: >-
+          No Proxmox host was reachable to apply the HA configuration.
+      when: _applied_hosts | length == 0
+      tags: [proxmox_ha]
+
+# Replication is per-node, and the role's per-job source_node filter makes a
+# non-source host a read-only no-op — so this needs no per-guest host list. The
+# NAS is excluded: it is never a replication source for guest storage.
+- name: Configure Proxmox storage replication
+  hosts: compute
+  become: true
+  gather_facts: false
+  ignore_unreachable: true
+
+  tasks:
+    - name: Include replication management
+      ansible.builtin.include_role:
+        name: weisssrv.infra.proxmox_ha
+        tasks_from: replication
+      when: proxmox_ha_replication_jobs | default([]) | length > 0
+      tags: [proxmox_ha, proxmox_ha_replication]

@@ -1,0 +1,144 @@
+# {{ cluster_name }}
+
+Infrastructure as code for the **{{ cluster_name }}** cluster: Proxmox hosts and
+guests configured by Ansible, external state managed by Terraform, and
+everything inside Kubernetes reconciled from `kubernetes/` by Flux.
+
+Generated from
+[weisssrv-cluster-template](https://git.ericsweiss.com/eric/weisssrv-cluster-template);
+`.copier-answers.yml` records the answers and the template ref, and `copier
+update` replays them against a newer version.
+
+## This cluster
+
+| | |
+|---|---|
+| Internal zone | `{{ internal_domain }}` |
+| External zone | `{{ external_domain }}` |
+| LAN | `{{ lan_cidr }}` |
+| Kubernetes API | `{{ k3s_api_vip }}` |
+| Ingress (public / internal) | `{{ metallb_public_vip }}` / `{{ metallb_internal_vip }}` |
+| Repository | `{{ git_host }}/{{ git_namespace }}/{{ cluster_name }}` |
+| Secrets | {{ secrets_backend }}{% if secrets_backend == 'onepassword' %}, vault `{{ onepassword_vault }}`{% endif %} |
+| DNS | {{ dns_backend }} |
+| Overlay VPN | {% if vpn_tailscale %}Tailscale{% else %}none{% endif %} |
+| GPU | {% if gpu == 'none' %}none{% else %}{{ gpu }}{% endif %} |
+| Platform library | `weisssrv.infra` @ `{{ lib_ref }}` |
+
+The host roster lives in `ansible/inventories/prod/hosts.yml`; site values that
+Kubernetes manifests need are in
+`kubernetes/infrastructure/sources/cluster-config.yaml` and reach the manifests
+as Flux substitutions, never as literals.
+
+## Bring-up
+
+First time only, in this order. Each phase leaves a working state.
+
+1. **Prerequisites** — hosts reachable over SSH as `{{ admin_user }}` with
+   passwordless sudo, ZFS pools created, vault items present.
+2. **Collection** — `task ansible:install-collections`. The roles are fetched at
+   `{{ lib_ref }}`, not vendored, so nothing Ansible-shaped works before this.
+3. **Inventory** — fill in `hosts.yml` (every name and address in it is a
+   placeholder), the pools and exports in `group_vars/nas.yml`, and the platform
+   defaults in `group_vars/all.yml`. Then `task hosts:sync` and
+   `task flux:sync-versions`, committing the generated files.
+4. **Gates** — `task lint` and `task ansible:ping` must both be clean.
+5. **Base layer** — `task infra:check`, then `task infra:deploy`, then
+   `task infra:verify`. `infra:deploy` runs `site.yml`, which is the only entry
+   point that orders the certificate plays before the NAS plays — use it on a
+   fresh cluster rather than the per-stage tasks. Point DHCP at the new
+   resolvers once DNS is up.
+
+   **A fresh cluster takes two passes here, not one.** Ansible installs and
+   renews the wildcard certificate but never issues the first one, and the push
+   targets cannot be pinned before the containers that carry those host keys
+   exist. So: `task infra:deploy -- --limit '!{{ nas_host.split('.')[0] }}'`,
+   then `task certs:show-host-keys` and paste each pin into
+   `_acme_certs_targets` in `ansible/inventories/prod/group_vars/dns.yml`, then
+   one manual `acme.sh --issue` on `dns-01` (the certificate play prints the
+   exact command), then a full `task infra:deploy`. A single pass instead stops
+   on the storage host, where `nfs_tls` hard-fails on the missing certificate.
+   SETUP.md § 4 walks it, and `docs/RUNBOOKS.md` § Certificates has it too.
+6. **Kubernetes nodes** — `task k3s:provision-vms`, `task k3s:deploy`,
+   `task k3s:kubeconfig`, then `export KUBECONFIG=~/.kube/config-k3s`.
+7. **GitOps** — put `1password-credentials.json` in this repository's root, run
+   `task flux:bootstrap-secrets` to create the two bootstrap Secrets, push this
+   repository, then `task flux:bootstrap`.
+8. **Publish** — `task terraform:init` (once per module, per checkout — the
+   state lives in a remote backend and `plan` refuses to run without it), then
+   `task terraform:plan` and `task terraform:apply`. Forward `443/tcp` to
+   `{{ metallb_public_vip }}` and register CI runners.
+9. **Single sign-on** — the platform is green but nothing can be signed into
+   yet: Grafana is SSO-only and its identity provider is this cluster's own
+   Authentik, freshly deployed and empty. Run the one-time
+   `https://auth.{{ internal_domain }}/if/flow/initial-setup/` flow (available
+   only until an admin exists), mint an `akadmin` token into the vault, then
+   `task terraform:authentik-init`, `task terraform:authentik-plan`,
+   `task terraform:authentik-apply`. SETUP.md § 7 step 4 covers the group
+   membership and the two `Grafana SSO` fields that must be real values.
+
+The long form, with what each phase actually does and what to check:
+[SETUP.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/SETUP.md).
+
+## Everyday operations
+
+`task --list` is the authoritative reference. The ones used daily:
+
+```bash
+task lint                     # everything CI lints, locally
+task flux:status              # is the platform healthy
+task flux:reconcile           # stop waiting for the poll
+task infra:deploy             # apply the host layer
+task infra:verify             # confirm it converged
+task k3s:status               # nodes, etcd, workloads
+task maintenance:check-versions
+```
+
+## How changes ship
+
+- **Kubernetes**: edit YAML under `kubernetes/`, commit, merge. Flux applies it.
+  `kubectl apply` and `helm upgrade` are diagnostics, not deployment — drift is
+  reverted on the next reconcile.
+- **Hosts**: edit under `ansible/`, merge, and the deploy job runs the playbook.
+  Every role is idempotent, so re-running is always safe.
+- **Everything**: via a branch and a merge request. Never push to the default
+  branch — Flux and the deploy jobs act on it.
+- **Versions**: pinned once in `group_vars/all.yml`. Change one, run
+  `task flux:sync-versions`, commit both files. Manifests carry `${...}`
+  placeholders, never a literal tag.
+- **Secrets**: never in git. Host tooling reads
+  {% if secrets_backend == 'onepassword' %}`op://{{ onepassword_vault }}/<item>/<field>`{% else %}the secrets backend{% endif %}
+  at run time; workloads read a Secret produced from an `ExternalSecret`.
+- **Roles**: no `ansible/roles/` directory. Playbooks address
+  `weisssrv.infra.<role>` by FQCN, pinned at `{{ lib_ref }}` in
+  `ansible/requirements.yml`. A role change happens in the library, not here.
+
+## Layout
+
+```
+ansible/
+  requirements.yml           the platform collection, pinned
+  inventories/prod/          this cluster's hosts, groups and per-host facts
+  playbooks/                 site, base, dns, storage, k3s, maintenance/
+terraform/                   public DNS{% if vpn_tailscale %}, tailnet policy{% endif %}, SSO objects
+kubernetes/
+  clusters/{{ cluster_name }}/  Flux entrypoint and the stage Kustomizations
+  infrastructure/            sources → crds → controllers → configs → observability
+  apps/                      one directory per application
+scripts/                     verification, generators, the version registry
+docs/                        RUNBOOKS.md, ci-pipeline.md — and anything you add
+Taskfile.yml                 every operation
+```
+
+## Reference
+
+- [docs/RUNBOOKS.md](docs/RUNBOOKS.md) — day two: reconcile, upgrade, add a
+  node, rotate a secret, certificates, backups. Every alert's `runbook_url`
+  points here, so keep its section headings stable.
+- [docs/ci-pipeline.md](docs/ci-pipeline.md) — what the pipeline runs and what
+  it needs from the GitLab instance
+- [ARCHITECTURE.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/ARCHITECTURE.md)
+  — the Flux stage graph, substitution model, storage tiers, DNS split, backups
+- [weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib) — the roles, CI
+  templates and Terraform modules this cluster is assembled from, pinned at
+  `{{ lib_ref }}`. Role variables are documented in each role's README there.

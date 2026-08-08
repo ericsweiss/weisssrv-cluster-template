@@ -1,0 +1,248 @@
+---
+# CI for the template itself. The generic jobs come from the shared library, so
+# the template is linted by the same tooling it hands to a generated cluster.
+#
+# The gate that matters is `render-validate`: it renders this template with
+# BOTH answer fixtures — the reference-shaped one and the deliberately unlike
+# contrast one — and runs the REAL toolchain over each output: yamllint,
+# kustomize + kubeconform through the Flux substitution loop, the vendored-script
+# fidelity check, and `ansible-playbook --syntax-check` against the
+# weisssrv.infra collection. A template change that produces an invalid cluster
+# fails here rather than in someone's homelab, and a value copied from the
+# reference cluster fails on the contrast render rather than passing both.
+#
+# Every job is TAG-LESS and non-root safe (pip --user, workspace-local tool
+# downloads), so they land on the shared runner.
+#
+# `release` is LAST on purpose: the semantic-release job sets no `needs:`, so
+# stage ordering is what gates a tag on every gate above it having passed —
+# including `render-validate`. A template tag is what a generated cluster's
+# `copier update` resolves to, so it must never be cut from a tree that does not
+# render. See docs/VERSIONING.md.
+stages:
+  - lint
+  - test
+  - security
+  - ai-review
+  - release
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+variables:
+  LIB_PROJECT: "eric/weisssrv-lib"
+  COPIER_VERSION: "9.17.0"
+  PYYAML_VERSION: "6.0.2"
+  YAMLLINT_VERSION: "1.38.0"
+  ANSIBLE_CORE_VERSION: "2.18.18"
+  KUBECONFORM_VERSION: "0.6.7"
+  KUBECONFORM_SHA256: "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73"
+  KUSTOMIZE_VERSION: "5.4.3"
+  KUSTOMIZE_SHA256: "3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7"
+
+include:
+  # Only genuine YAML: files under template/ that carry the .jinja suffix are
+  # Jinja sources, not documents. The render-validate job below yamllints the
+  # rendered tree, which is where template/ actually gets covered.
+  - project: eric/weisssrv-lib
+    ref: v0.2.0
+    file: /ci/lint/yaml-lint.yml
+    inputs:
+      tags: []
+      image: python:3.13-slim
+      config: "-c .yamllint"
+      targets: "copier.yml tests/ .gitlab-ci.yml"
+      changes:
+        - "copier.yml"
+        - "tests/**/*"
+        - ".yamllint"
+        - ".gitlab-ci.yml"
+
+  - project: eric/weisssrv-lib
+    ref: v0.2.0
+    file: /ci/lint/python-lint.yml
+    inputs:
+      tags: []
+      image: python:3.13-slim
+      # The Python under template/ is static (no .jinja suffix), so it is linted
+      # here as well as in every repository it ships to. `scripts` is this
+      # repository's OWN tooling (the vendored release script), not payload.
+      targets: "scripts tests template/tests template/scripts"
+      changes:
+        - "scripts/**/*.py"
+        - "tests/**/*.py"
+        - "template/**/*.py"
+        - "ruff.toml"
+        - ".gitlab-ci.yml"
+
+  # The shell the template ships is static (no .jinja suffix), so it can be
+  # checked in place rather than only after a render.
+  - project: eric/weisssrv-lib
+    ref: v0.2.0
+    file: /ci/lint/shellcheck.yml
+    inputs:
+      tags: []
+      direct_globs: "template/scripts/*.sh"
+      find_dir: ""
+      changes:
+        - "template/scripts/**/*.sh"
+        - ".gitlab-ci.yml"
+
+  # copier.yml schema checks + the full render invariants. Everything in the
+  # repository feeds the render, hence the catch-all `changes`.
+  - project: eric/weisssrv-lib
+    ref: v0.2.0
+    file: /ci/test/python-tests.yml
+    inputs:
+      tags: []
+      image: python:3.13
+      apt_packages: ""
+      test_dir: "tests"
+      pip_packages: "copier==9.17.0"
+      changes:
+        - "**/*"
+
+  - project: eric/weisssrv-lib
+    ref: v0.2.0
+    file: /ci/security/secret-detection.yml
+    inputs:
+      tags: []
+
+  - project: eric/weisssrv-lib
+    ref: v0.2.0
+    file: /ci/review/pr-agent.yml
+    inputs:
+      tags: []
+      # ROOT CAUSE, established 2026-08-08: the 45m death with no output was
+      # `xhigh`, not diff size. v0.2.0 defaults reasoning_effort to xhigh, and
+      # measured on weisssrv-lib!4 that took 40.7m/44.6m/74.5m to SUCCEED and
+      # twice failed outright emitting nothing — on a 56k-token diff, so size was
+      # never the variable. At `high` the same reviews complete in ~7m. v0.3.0
+      # made `high` the library default; this repo still pins v0.2.0, so it is
+      # set explicitly here rather than by bumping seven includes on a green MR.
+      #
+      # The token/command concessions below were sized against that wrong
+      # diagnosis. They are kept for now because this MR really is a 327-file
+      # initial import, but they are worth revisiting once it lands:
+      #
+      # pr-agent measured this diff at 675k tokens, sat under the 900k cap so
+      # nothing was compressed, and the job died having produced nothing — and
+      # because the job is allow_failure, the pipeline went green with no review
+      # attached, which is the part that actually hurt.
+      #
+      # max_model_tokens below the diff size deliberately triggers pr-agent's own
+      # compression, which drops the least relevant files rather than attempting
+      # the whole tree in one call. `review` only: the `improve` pass is the
+      # expensive one (measured at 1478s on a 52k-token diff in weisssrv-lib) and
+      # per-line suggestions over a compressed initial import are worth little.
+      #
+      # Revert all four once this repo's MRs are normal-sized; they are a
+      # concession to a 327-file first commit, not a standing configuration.
+      reasoning_effort: "high"
+      max_model_tokens: "120000"
+      commands: "review"
+      ai_timeout: "1800"
+      timeout: "90m"
+      needs:
+        - job: yaml-lint
+          optional: true
+        - job: python-tests
+          optional: true
+        - job: render-validate
+          optional: true
+
+  # Cuts THIS template's tag from the conventional commits merged to main — the
+  # tag a generated cluster's `copier update` resolves to and records as
+  # `_commit` in .copier-answers.yml. Untagged, copier falls back to the
+  # template's HEAD, so every update pulls unreleased work; see
+  # docs/VERSIONING.md.
+  #
+  # Everything else is the template's default: the job sets no `needs:` and
+  # `release` is declared LAST above, so stage ordering gates it on every job
+  # here passing; its rules are already main-only with schedules excluded, and
+  # `resource_group` serializes rapid merges. `script_path` defaults to the
+  # vendored scripts/semantic-release.py, which tests/validate_render.py holds
+  # byte-identical to the library at this ref. major_on_zero stays false: while
+  # the tag is 0.x a `feat!:` bumps MINOR, and calling a template 1.0.0 is a
+  # deliberate act (flip the input for that release).
+  - project: eric/weisssrv-lib
+    ref: v0.2.0
+    file: /ci/release/semantic-release.yml
+    inputs:
+      tags: []
+
+render-validate:
+  stage: test
+  image: python:3.13
+  tags: []
+  needs: []
+  variables:
+    # The collection is cloned rather than installed from the pinned ref, so the
+    # gate does not depend on anonymous access to the library project.
+    LIB_CHECKOUT: "$CI_PROJECT_DIR/.tmp/lib"
+    # The runner pod's uid has no passwd entry, and ansible resolves the current
+    # user from these — without them every `--syntax-check` in this job dies with
+    # "No username set in the environment" before parsing a single playbook. The
+    # library's collection-checks job carries the same pair for the same reason.
+    USER: gitlab-runner
+    LOGNAME: gitlab-runner
+  before_script:
+    - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
+    - mkdir -p "$CI_PROJECT_DIR/.bin"
+    - |
+      pip install --user --quiet \
+        "copier==${COPIER_VERSION}" \
+        "pyyaml==${PYYAML_VERSION}" \
+        "yamllint==${YAMLLINT_VERSION}" \
+        "ansible-core==${ANSIBLE_CORE_VERSION}"
+    - |
+      set -eo pipefail
+      # Non-root tool install: stdlib download, sha256 verify, extract into a
+      # workspace bin that before_script already put on PATH.
+      fetch_verified() {  # <file> <url> <sha256>
+        python -c "import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" "$2" "/tmp/$1"
+        echo "$3  /tmp/$1" | sha256sum -c -
+      }
+      fetch_verified kubeconform.tar.gz \
+        "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+        "$KUBECONFORM_SHA256"
+      tar xzf /tmp/kubeconform.tar.gz -C "$CI_PROJECT_DIR/.bin" kubeconform
+      fetch_verified kustomize.tar.gz \
+        "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+        "$KUSTOMIZE_SHA256"
+      tar xzf /tmp/kustomize.tar.gz -C "$CI_PROJECT_DIR/.bin" kustomize
+      kubeconform -v && kustomize version
+    - |
+      set -eo pipefail
+      # The ref under test is the fixture's, so the gate and the generated
+      # requirements.yml can never disagree about which library is exercised.
+      LIB_REF=$(python -c "import yaml; print(yaml.safe_load(open('tests/answers-weisssrv-shaped.yml'))['lib_ref'])")
+      git clone --depth 1 --branch "$LIB_REF" \
+        "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" \
+        "$LIB_CHECKOUT"
+  script:
+    # BOTH fixtures. answers-weisssrv-shaped.yml has the reference cluster's
+    # shape, which makes it blind to a value hardcoded FROM that cluster — it
+    # renders byte-identical to a correct substitution. answers-unlike.yml is
+    # the contrast render: different LAN, domains, names, vault and runner tag,
+    # both optional modules OFF, 5 compute hosts, one resolver. Validating only
+    # the shaped one leaves every `{% if not %}` branch and every site-identity
+    # leak checked by nothing that runs the real toolchain.
+    - python3 tests/validate_render.py --lib-path "$LIB_CHECKOUT"
+    - |
+      python3 tests/validate_render.py \
+        --answers tests/answers-unlike.yml \
+        --lib-path "$LIB_CHECKOUT"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes:
+        - "**/*"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes:
+        - "**/*"
+    - if: '$CI_PIPELINE_SOURCE == "web"'

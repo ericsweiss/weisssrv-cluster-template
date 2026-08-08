@@ -1,0 +1,14 @@
+---
+# A dedicated namespace, because the reaper must span BOTH runner namespaces and
+# so cannot live inside either. PSA restricted is satisfied: the pod is
+# runAsNonRoot, drops ALL caps, readOnlyRootFilesystem, seccomp RuntimeDefault.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitlab-runner-reaper
+  labels:
+    app.kubernetes.io/name: gitlab-runner-reaper
+    app.kubernetes.io/managed-by: flux
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

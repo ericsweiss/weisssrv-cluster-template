@@ -1,0 +1,15 @@
+---
+# Stops both replicas being evicted by a drain. Does not protect against hard
+# node loss if they co-locate — see the spread note in hpa.yaml.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: coredns
+  namespace: kube-system
+  labels:
+    k8s-app: kube-dns
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      k8s-app: kube-dns

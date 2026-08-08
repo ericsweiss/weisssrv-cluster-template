@@ -1,0 +1,48 @@
+---
+# Shared RBAC for tenant Flux reconciliation.
+#
+# Tenant Kustomizations reconcile under a namespace-scoped ServiceAccount bound
+# to the built-in `admin` ClusterRole. `admin` does NOT aggregate three CRD
+# groups a normal tenant app uses — traefik.io (IngressRoute/Middleware),
+# monitoring.coreos.com (ServiceMonitor/PrometheusRule) and autoscaling.k8s.io
+# (VerticalPodAutoscaler; NOT the `autoscaling` group admin has, which is HPA).
+# Without them the tenant's first route/monitor/VPA fails Forbidden and the
+# whole tenant Kustomization goes NotReady. external-secrets.io and
+# cert-manager.io are usually covered by admin's aggregated edit roles, but are
+# granted explicitly so the tenant story survives an install without them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tenant-crd-editor
+  labels:
+    app.kubernetes.io/managed-by: flux
+rules:
+  - apiGroups: ["traefik.io"]
+    resources:
+      - ingressroutes
+      - ingressroutetcps
+      - ingressrouteudps
+      - middlewares
+      - middlewaretcps
+      - traefikservices
+      - serverstransports
+      - tlsoptions
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources:
+      - servicemonitors
+      - podmonitors
+      - prometheusrules
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources:
+      - verticalpodautoscalers
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: ["external-secrets.io"]
+    resources:
+      - externalsecrets
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: ["cert-manager.io"]
+    resources:
+      - certificates
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]

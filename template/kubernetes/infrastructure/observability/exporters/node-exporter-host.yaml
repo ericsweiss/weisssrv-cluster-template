@@ -1,0 +1,86 @@
+---
+# Host node-exporter scrape target — the machines the in-cluster DaemonSet
+# cannot see.
+#
+# The `node_exporter_host` Ansible role runs prometheus-node-exporter directly
+# on the bare-metal Proxmox hosts, the resolver and relay LXCs, and the k3s
+# server VMs, on port **9101** (9100 belongs to the in-cluster DaemonSet, and a
+# k3s server runs both). Bare metal is where the hardware metrics live — hwmon
+# thermals, SMART, NIC counters, real disk I/O — none of which a VM can observe.
+# The guests contribute filesystem and, more importantly, TEXTFILE metrics: the
+# off-node etcd snapshot freshness and the offsite-backup timestamps that
+# `platform.backups` alerts on are written by host timers and exist nowhere else.
+# Without this file that whole layer is unscraped and those alerts can only ever
+# fire their absent() arms.
+#
+# Shape: one selectorless headless Service plus a hand-maintained Endpoints list.
+# There are no pods to select — these are addresses outside the cluster — so the
+# Endpoints object is written directly rather than being filled in by the
+# endpoints controller. `clusterIP: None` keeps kube-proxy from allocating a VIP
+# for a Service nothing will ever dial.
+#
+# `jobLabel: app.kubernetes.io/name` is what makes Prometheus label these series
+# `job="node-exporter-host"`. Without it the operator falls back to the Service
+# name, and the job selector every host rule uses would silently match nothing.
+#
+# THE JOB REGEX MUST INCLUDE THIS JOB. The platform rules select
+# `job=~"${cluster_node_exporter_job_regex}"`; set that key in cluster-config to
+# `node-exporter|node-exporter-host` so the filesystem, inode and node rules
+# cover the hosts as well as the pods. Leaving it at `node-exporter` alone means
+# the hosts are scraped, dashboards work, and none of the alerts apply to them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-exporter-host
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: node-exporter-host
+    app.kubernetes.io/part-of: observability
+spec:
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 9101
+      targetPort: 9101
+
+---
+# Address roster, substituted from cluster-config as a JSON flow sequence (a
+# real YAML list is required here and Flux substitutes text). The per-host
+# annotation of who is who lives with the key in
+# infrastructure/sources/cluster-config.yaml — edit it there, never here.
+#
+# A host that is listed but not yet running the role scrapes as `up == 0`, which
+# is the correct, visible failure. A host that runs the role but is missing from
+# the list is invisible, which is not — re-check this roster whenever the
+# inventory grows a machine.
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: node-exporter-host
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: node-exporter-host
+subsets:
+  - addresses: ${cluster_node_exporter_host_addresses}
+    ports:
+      - name: metrics
+        port: 9101
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: node-exporter-host
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: node-exporter-host
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-exporter-host
+  endpoints:
+    # 60s, not the 30s default: these are remote scrapes over the LAN of hosts
+    # whose metrics (thermals, SMART, backup timestamps) change slowly.
+    - port: metrics
+      interval: 60s

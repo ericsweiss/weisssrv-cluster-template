@@ -1,0 +1,11 @@
+---
+# example-route.yaml and certificate.yaml are deliberately NOT listed. The route
+# points at a placeholder address (an unreachable route is just a permanently
+# failing endpoint), and the certificate would be a pointless ACME order until
+# something terminates TLS here. Copy the route, edit it, then add YOUR file
+# AND certificate.yaml below.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - serverstransport.yaml

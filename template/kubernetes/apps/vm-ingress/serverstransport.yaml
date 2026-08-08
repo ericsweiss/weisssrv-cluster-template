@@ -1,0 +1,23 @@
+---
+# Shared transport for Traefik -> off-cluster HTTPS backends.
+#
+# Traefik connects by IP, so SNI does not naturally match the certificate the
+# backend presents. Setting serverName explicitly to a name covered by the
+# internal wildcard SAN makes verification succeed WITHOUT insecureSkipVerify.
+# The name is a sentinel and is never resolved.
+#
+# ServersTransport refs resolve in the IngressRoute's OWN namespace (Traefik's
+# CRD provider is namespace-scoped) — copy this resource into any other namespace
+# that has consuming routes.
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: vm-tls-wildcard
+  namespace: vm-ingress
+spec:
+  serverName: vm.${cluster_internal_domain}
+  maxIdleConnsPerHost: 32
+  forwardingTimeouts:
+    dialTimeout: 10s
+    responseHeaderTimeout: 30s
+    idleConnTimeout: 90s

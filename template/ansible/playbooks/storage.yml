@@ -1,0 +1,19 @@
+---
+# The NAS on its own. Re-runnable once the wildcard cert is already distributed;
+# on a FRESH cluster run site.yml instead, which orders the cert plays first.
+
+- name: Deploy NAS storage configuration
+  hosts: nas
+  become: true
+  roles:
+    # Before nas_storage: the handshake daemon must be up before any
+    # require-TLS export is (re)published.
+    - weisssrv.infra.nfs_tls
+    - weisssrv.infra.nas_storage
+    - weisssrv.infra.restic_offsite
+    - weisssrv.infra.proxmox_backup
+    - weisssrv.infra.zfs_exporter
+    # Also deployed by site.yml; repeated so a standalone storage deploy keeps
+    # host metrics and log shipping in sync.
+    - weisssrv.infra.node_exporter_host
+    - weisssrv.infra.alloy_host

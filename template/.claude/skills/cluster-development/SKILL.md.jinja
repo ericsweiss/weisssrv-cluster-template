@@ -1,0 +1,123 @@
+---
+name: cluster-development
+description: >-
+  Use when working in the {{ cluster_name }} cluster repository (Proxmox +
+  Ansible + Terraform + k3s/Flux) — changing or adding a Kubernetes app, an
+  Ansible-managed host or guest, or Terraform state; deploying; debugging the
+  cluster; running maintenance or version upgrades; incident response.
+  Establishes the non-negotiable workflow (branch + merge request, never push
+  the default branch, no secrets in git, Flux owns kubernetes/, versions are
+  single-sourced, site values are substituted not written), the pre-merge gate
+  commands, and where the canonical documentation lives. Read this before making
+  any change here.
+---
+
+# {{ cluster_name }} development
+
+Infrastructure as code for one Proxmox + ZFS + k3s cluster, generated from
+weisssrv-cluster-template. This skill is the operating map: it encodes the
+workflow and the invariants, and points at the documents that hold everything
+else. It does not restate them — open the file it names. Paths are
+repository-relative.
+
+`README.md` is the top-level fact source, `docs/RUNBOOKS.md` holds this
+cluster's day-two procedures, `docs/ci-pipeline.md` describes the pipeline, and
+`task --list` owns the command set. Never cite a `task` name you have not seen
+in `task --list` — the documentation is gated against it, and inventing one is
+the failure mode this skill exists to prevent.
+
+## Invariants
+
+Violating one of these breaks production or fails review.
+
+- **Never push to the default branch.** Every change ships as a branch plus a
+  merge request, including one-line fixes. Flux and the deploy jobs act on the
+  default branch, so a direct push is an unreviewed deploy.
+- **No secrets in git.** Host tooling references
+  {% if secrets_backend == 'onepassword' %}`op://{{ onepassword_vault }}/<item>/<field>`{% else %}the secrets backend{% endif %};
+  workloads read a Secret produced by an `ExternalSecret`. A new credential is
+  added to the vault and documented, never inlined.
+- **Flux owns all of `kubernetes/`.** No `kubectl apply -k` and no `helm upgrade`
+  as ongoing operations. The only exceptions: `task flux:dev-apply -- <path>`
+  (reverted on the next reconcile), the two bootstrap Secrets, and objects
+  Ansible provisions outside `kubernetes/`.
+- **Kubernetes manifests carry no site literals.** Domains, addresses and CIDRs
+  come from the `cluster-config` ConfigMap as `${cluster_...}` substitutions;
+  versions come from `cluster-versions`. Writing `{{ internal_domain }}` or an
+  address into a manifest is a review rejection — it is the exact debt this
+  repository was generated to avoid.
+- **Versions are single-sourced** in `ansible/inventories/prod/group_vars/all.yml`.
+  After changing a pin, run `task flux:sync-versions` and commit the regenerated
+  ConfigMap in the same commit. Never hand-edit a generated file.
+- **Ansible roles are not vendored.** There is no `ansible/roles/`. Playbooks
+  address `weisssrv.infra.<role>` by FQCN at the ref pinned in
+  `ansible/requirements.yml`. A role needing a change is changed in the library
+  and pulled in by bumping that ref — not copied in here.
+- **Never automate ZFS pool creation or destruction.** Ansible sets properties,
+  creates datasets and zvols, and mounts them. Pools are manual.
+- **Every service is observed.** A change that adds a service is incomplete
+  without logs, metrics, a down-or-stale alert, and a probe if users reach it
+  directly.
+- **No AI attribution** anywhere: commits, code, comments, documentation, merge
+  request text.
+
+## Decision tree
+
+| Changing | Read first | Then |
+|---|---|---|
+| A Kubernetes application | the closest existing directory under `kubernetes/apps/` | mirror its shape: namespace, workload, storage, ExternalSecret, certificate, ingress route, NetworkPolicy, autoscaling policy |
+| A host or guest | `ansible/inventories/prod/` and the [role's README in the library](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) | inventory first, playbook second; per-host facts go inline on the host entry in `hosts.yml` (there is no `host_vars/` unless you create one) |
+| Storage: pools, datasets, exports | `ansible/inventories/prod/group_vars/nas.yml` | declare only what exists — Ansible never creates or destroys a pool; per-guest zvols are `vm_additional_disks` in `hosts.yml` |
+| Terraform state (DNS, tailnet, SSO) | the module directory and its README | plan, review, apply; SSO objects are a supervised apply |
+| A version pin or an upgrade | `docs/RUNBOOKS.md` § Upgrades | `task maintenance:check-versions`, then bump, `task flux:sync-versions`, commit both files |
+| An incident | `docs/RUNBOOKS.md` § Where to look first, then the service's dashboard and logs | `task flux:status`, `task infra:verify`, `task k3s:status` |
+| Cluster access or a credential | `docs/RUNBOOKS.md` § Rotating a secret | `task flux:rotate-secret -- <ns>/<name>`, or re-run the task that injects it host-side |
+| A platform (role / CI / Terraform-module) change | [weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib) | it changes upstream and this repo bumps `lib_ref`; never vendor a role here |
+
+## Pre-merge gates
+
+Run from the repository root:
+
+- `task lint` — the local mirror of the CI lint stage. Run it for every change.
+- `task flux:lint` — whenever `kubernetes/` changed. It renders every
+  Kustomization, substitutes, and fails on any unresolved `${...}`.
+- `task flux:sync-versions` — whenever a version pin changed; commit both files.
+- `task hosts:sync` — whenever `hosts.yml` changed; commit the generated file.
+- `task lint:prometheus-config` — whenever alert or recording rules changed. It
+  is not part of `task lint`.
+- `task infra:check -- --limit <host>` — dry-run before deploying an Ansible
+  change to a live host.
+
+## Review and merge
+
+- Merge request pipelines run the path-filtered lint, validate, test and
+  security gates. They do not deploy.
+- Resolve every valid review finding and re-run the gates before merging. Fold
+  any available version bumps into the same revision rather than opening a
+  separate one.
+- Merge request descriptions state what was tested, in the past tense — not a
+  checklist of intentions.
+- After merge: Flux reconciles `kubernetes/` within about a minute
+  (`task flux:reconcile` forces it) and the deploy jobs run the Ansible side.
+  Verify with `task flux:status`, `task infra:verify`, `task k3s:status`.
+
+## Upstream
+
+The platform this cluster is assembled from lives in
+**[weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib)**: the Ansible
+collection, the CI templates, the Terraform modules and the helper scripts, all
+pinned at `{{ lib_ref }}`. The generator is
+**[weisssrv-cluster-template](https://git.ericsweiss.com/eric/weisssrv-cluster-template)**;
+`.copier-answers.yml` records what this cluster was generated from, and
+`copier update` pulls in template improvements. A fix that would benefit any
+cluster belongs upstream, not here.
+
+When a variable, a CI input or a migration note is not in this repository, it is
+in the library:
+
+- role behaviour and variables — that role's `README.md` under
+  `ansible_collections/weisssrv/infra/roles/`
+- the inventory-wide variables roles alias — the collection `README.md`
+- role breaking changes across refs — `ansible_collections/weisssrv/infra/MIGRATING.md`
+- CI template inputs — `docs/INCLUDE-CONTRACT.md`
+- what a `lib_ref` bump can break — `docs/VERSIONING.md`

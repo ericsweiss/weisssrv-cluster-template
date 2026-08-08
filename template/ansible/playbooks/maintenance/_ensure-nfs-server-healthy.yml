@@ -1,0 +1,62 @@
+---
+# Recover nfsd if a package upgrade left it down.
+#
+# Upgrading nfs-kernel-server (or a dependency) restarts nfs-server, and nfsd's
+# STOP can hang — leaving the unit inactive with :2049 dead. Every NFS-backed
+# workload in the cluster then wedges in ContainerCreating, so a maintenance run
+# must not walk away from it.
+#
+# Health is the TCP listener, not the unit state: nfs-server is Type=oneshot
+# (RemainAfterExit), so a healthy nfsd reports SubState "exited" — which
+# service_facts renders as state "stopped". Asserting on that would fail every
+# run, and restarting on it would re-enter the very stop path that hangs.
+#
+# A no-op on any host that does not run an enabled nfs-server.
+
+- name: Gather service facts
+  ansible.builtin.service_facts:
+
+- name: Ensure the NFS server is serving after the package upgrade
+  # ENABLED, not merely present, and not `static` (no [Install] means nobody
+  # enabled it, so we must not start it). Either unit name is accepted.
+  when:
+    - >-
+      ('nfs-server.service' in ansible_facts.services
+       and ansible_facts.services['nfs-server.service'].status == 'enabled')
+      or ('nfs-kernel-server.service' in ansible_facts.services
+          and ansible_facts.services['nfs-kernel-server.service'].status == 'enabled')
+  block:
+    - name: Probe nfsd, recovering it if TCP 2049 is not serving
+      block:
+        - name: Wait briefly for the NFS listener
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: 2049
+            state: started
+            timeout: 5
+          changed_when: false
+
+      rescue:
+        - name: Reset the failed state left by a hung stop
+          ansible.builtin.command: systemctl reset-failed nfs-server nfs-mountd
+          changed_when: true
+          failed_when: false
+
+        - name: Start nfs-server (started, not restarted — restart re-enters the stop hang)
+          ansible.builtin.systemd:
+            name: nfs-server.service
+            state: started
+          async: 90
+          poll: 5
+
+        - name: Re-export all filesystems
+          ansible.builtin.command: exportfs -ra
+          changed_when: true
+
+    - name: Fail loud if nfsd is still not serving on TCP 2049
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 2049
+        state: started
+        timeout: 20
+      changed_when: false

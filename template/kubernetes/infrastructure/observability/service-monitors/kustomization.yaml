@@ -1,0 +1,8 @@
+---
+# ServiceMonitors/PodMonitors for platform components that do not ship their own.
+# App modules ship their ServiceMonitor next to their manifests — Prometheus
+# discovers them in every namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - flux-system.yaml

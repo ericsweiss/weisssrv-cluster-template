@@ -1,0 +1,56 @@
+---
+# Grafana state (SQLite: service accounts, preferences) on NFS, so Grafana can
+# float to any node.
+#
+# The export directory is created and owned by the storage host's Ansible role —
+# a from-scratch build needs the storage deploy, not a manual mkdir. The export
+# squashes all client operations to a fixed uid:gid, so the container UID does
+# not matter but the directory ownership does.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: grafana-data
+  annotations:
+    # Lets Flux delete+recreate this PV when an immutable field (server,
+    # mountOptions) changes instead of stalling the Kustomization. Retain keeps
+    # the data.
+    kustomize.toolkit.fluxcd.io/force: "Enabled"
+  labels:
+    app: grafana
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: observability
+    name: grafana-data
+  nfs:
+    # Hostname, not IP: xprtsec=tls verifies the server certificate, whose SAN
+    # covers the name and not the address. An IP mount fails the handshake.
+    server: ${cluster_nas_host}
+    path: /appdata/grafana
+  mountOptions:
+    - nfsvers=4.2
+    - hard
+    - noatime
+    # NFSv4-over-TLS. Requires tlshd on every node (nfs_tls role) and an export
+    # that permits or requires xprtsec=tls. Drop this option if the export is
+    # plaintext — it is the one line that decides whether the mount is encrypted.
+    - xprtsec=tls
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  namespace: observability
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  volumeName: grafana-data
+  resources:
+    requests:
+      storage: 1Gi

@@ -1,0 +1,40 @@
+# This namespace holds the secrets-backend credentials and every synced Secret,
+# so it is the one namespace that also runs default-deny EGRESS: a future pod
+# added here starts with no network until it is granted one explicitly.
+# The shared components supply DNS + apiserver (and public egress for the
+# Connect sync sidecar); these two policies are the local additions.
+
+---
+# Webhook: called by the kube-apiserver post-DNAT from whichever server is
+# active, so the source cannot be pinned by IP.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-webhook-and-metrics-ingress
+  namespace: external-secrets
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 10250
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: external-secrets
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress

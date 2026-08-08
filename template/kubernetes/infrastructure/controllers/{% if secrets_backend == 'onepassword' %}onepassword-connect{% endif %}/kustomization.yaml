@@ -1,0 +1,10 @@
+---
+# Deployment-side resources only. The Connect Certificate + IngressRoute live in
+# the configs stage, alongside the ClusterIssuer and middlewares they reference.
+# The namespace itself belongs to external-secrets (Connect runs beside ESO).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - release.yaml
+  - networkpolicy.yaml
+  - pdb.yaml

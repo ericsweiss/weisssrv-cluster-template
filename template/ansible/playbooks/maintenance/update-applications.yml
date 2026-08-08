@@ -1,0 +1,296 @@
+---
+# Upgrade the platform services that are installed as binaries or packages
+# rather than reconciled by Flux, to the versions pinned in group_vars/all.yml.
+# Imported by update-full.yml, which is the single source of truth for the OS
+# half. Add a play here for any application host you introduce.
+
+- name: Update AdGuard Home
+  hosts: dns
+  become: true
+  serial: 1  # keep one resolver serving throughout
+  vars:
+    force_adguard_upgrade: false
+  tasks:
+    - name: Check the current version
+      ansible.builtin.command: "{{ adguard_home_install_path }}/AdGuardHome --version"
+      register: current_version
+      changed_when: false
+      failed_when: false
+
+    - name: Determine whether an upgrade is needed
+      ansible.builtin.set_fact:
+        needs_upgrade: >-
+          {{
+            force_adguard_upgrade or
+            current_version.rc != 0 or
+            adguard_home_version not in (current_version.stdout | default(''))
+          }}
+
+    - name: Upgrade AdGuard Home with failure recovery
+      when: needs_upgrade
+      block:
+        - name: Set the release architecture
+          ansible.builtin.set_fact:
+            adguard_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+        - name: Back up resolv.conf
+          ansible.builtin.copy:
+            src: /etc/resolv.conf
+            dest: /etc/resolv.conf.backup-upgrade
+            remote_src: true
+            mode: "0644"
+
+        # The adguard_home role keeps resolv.conf immutable in steady state, so
+        # the rewrites below would EPERM without clearing the flag first.
+        - name: Clear the immutable flag for the upgrade window
+          ansible.builtin.command:
+            cmd: chattr -i /etc/resolv.conf
+          changed_when: false
+          failed_when: false
+
+        # Each resolver resolves through itself, so it must borrow its peer
+        # while its own AdGuard is stopped. serial:1 guarantees the peer is up.
+        - name: Point resolution at the peer resolver
+          vars:
+            dns_peer: "{{ groups['dns'] | difference([inventory_hostname]) | first }}"
+          ansible.builtin.copy:
+            content: |
+              # Temporary: {{ inventory_hostname }} is mid-upgrade
+              nameserver {{ hostvars[dns_peer].ansible_host }}
+            dest: /etc/resolv.conf
+            mode: "0644"
+
+        - name: Stop AdGuard Home
+          ansible.builtin.service:
+            name: AdGuardHome
+            state: stopped
+
+        - name: Back up the AdGuard Home configuration
+          ansible.builtin.copy:
+            src: "{{ adguard_home_install_path }}/AdGuardHome.yaml"
+            dest: "{{ adguard_home_install_path }}/AdGuardHome.yaml.backup-{{ ansible_date_time.epoch }}"
+            remote_src: true
+            mode: "0644"
+
+        - name: Download the new release
+          ansible.builtin.get_url:
+            url: "https://github.com/AdguardTeam/AdGuardHome/releases/download/v{{ adguard_home_version }}/AdGuardHome_linux_{{ adguard_arch }}.tar.gz"
+            # Upstream filename, so the checksum lookup matches an entry in checksums.txt
+            dest: "/tmp/AdGuardHome_linux_{{ adguard_arch }}.tar.gz"
+            mode: "0644"
+            timeout: 60
+            checksum: "sha256:https://github.com/AdguardTeam/AdGuardHome/releases/download/v{{ adguard_home_version }}/checksums.txt"
+
+        - name: Extract the release
+          ansible.builtin.unarchive:
+            src: "/tmp/AdGuardHome_linux_{{ adguard_arch }}.tar.gz"
+            dest: /tmp
+            remote_src: true
+
+        - name: Install the new binary
+          ansible.builtin.copy:
+            src: /tmp/AdGuardHome/AdGuardHome
+            dest: "{{ adguard_home_install_path }}/AdGuardHome"
+            owner: root
+            group: root
+            mode: "0755"
+            remote_src: true
+
+        - name: Start AdGuard Home
+          ansible.builtin.service:
+            name: AdGuardHome
+            state: started
+
+        - name: Wait for AdGuard Home to be ready
+          ansible.builtin.wait_for:
+            port: "{{ adguard_home_http_port }}"
+            timeout: 60
+
+        - name: Restore resolv.conf
+          ansible.builtin.copy:
+            src: /etc/resolv.conf.backup-upgrade
+            dest: /etc/resolv.conf
+            remote_src: true
+            mode: "0644"
+
+        - name: Re-set the immutable flag
+          ansible.builtin.command:
+            cmd: chattr +i /etc/resolv.conf
+          changed_when: false
+          failed_when: false
+
+        - name: Clean up
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /etc/resolv.conf.backup-upgrade
+            - "/tmp/AdGuardHome_linux_{{ adguard_arch }}.tar.gz"
+            - /tmp/AdGuardHome
+
+      rescue:
+        # Best effort throughout: leaving a resolver stopped, or pointed at a
+        # peer that is about to be upgraded itself, is worse than the failure.
+        - name: Ensure AdGuard Home is running again
+          ansible.builtin.service:
+            name: AdGuardHome
+            state: started
+          failed_when: false
+
+        - name: Restore resolv.conf after the failure
+          ansible.builtin.shell: |
+            chattr -i /etc/resolv.conf 2>/dev/null || true
+            cp /etc/resolv.conf.backup-upgrade /etc/resolv.conf 2>/dev/null || true
+            chattr +i /etc/resolv.conf 2>/dev/null || true
+            rm -f /etc/resolv.conf.backup-upgrade
+          args:
+            executable: /bin/bash
+          changed_when: false
+          failed_when: false
+
+        - name: Fail with the original error
+          ansible.builtin.fail:
+            msg: "AdGuard Home upgrade failed; the service was restarted on the previous version."
+
+    - name: Report the resulting version
+      ansible.builtin.command: "{{ adguard_home_install_path }}/AdGuardHome --version"
+      changed_when: false
+      register: new_version
+
+    - name: Display the upgrade result
+      ansible.builtin.debug:
+        msg: "AdGuard Home {{ 'upgraded to' if needs_upgrade else 'already at' }}: {{ new_version.stdout }}"
+
+- name: Update adguardhome-sync
+  hosts: dns_primary
+  become: true
+  tasks:
+    - name: Check whether the binary exists
+      ansible.builtin.stat:
+        path: /usr/local/bin/adguardhome-sync
+      register: sync_binary
+
+    - name: Get the current version
+      ansible.builtin.command: /usr/local/bin/adguardhome-sync --version
+      register: current_sync_version
+      changed_when: false
+      failed_when: false
+      when: sync_binary.stat.exists
+
+    - name: Determine whether an upgrade is needed
+      ansible.builtin.set_fact:
+        needs_sync_upgrade: >-
+          {{
+            not sync_binary.stat.exists or
+            adguard_sync_version not in (current_sync_version.stdout | default(''))
+          }}
+
+    - name: Upgrade adguardhome-sync
+      when: needs_sync_upgrade
+      block:
+        - name: Set the release architecture
+          ansible.builtin.set_fact:
+            adguard_sync_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+        - name: Download the new release
+          ansible.builtin.get_url:
+            url: "https://github.com/bakito/adguardhome-sync/releases/download/v{{ adguard_sync_version }}/adguardhome-sync_{{ adguard_sync_version }}_linux_{{ adguard_sync_arch }}.tar.gz"  # noqa yaml[line-length]
+            dest: "/tmp/adguardhome-sync_{{ adguard_sync_version }}_linux_{{ adguard_sync_arch }}.tar.gz"
+            mode: "0644"
+            timeout: 60
+            checksum: "sha256:https://github.com/bakito/adguardhome-sync/releases/download/v{{ adguard_sync_version }}/checksums.txt"
+
+        - name: Extract the release
+          ansible.builtin.unarchive:
+            src: "/tmp/adguardhome-sync_{{ adguard_sync_version }}_linux_{{ adguard_sync_arch }}.tar.gz"
+            dest: /tmp
+            remote_src: true
+
+        - name: Stop the sync timer
+          ansible.builtin.systemd:
+            name: adguardhome-sync.timer
+            state: stopped
+
+        - name: Install the new binary
+          ansible.builtin.copy:
+            src: /tmp/adguardhome-sync
+            dest: /usr/local/bin/adguardhome-sync
+            owner: root
+            group: root
+            mode: "0755"
+            remote_src: true
+
+      always:
+        - name: Ensure the sync timer is running again
+          ansible.builtin.systemd:
+            name: adguardhome-sync.timer
+            state: started
+            daemon_reload: true
+
+    - name: Clean up
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/adguardhome-sync_{{ adguard_sync_version }}_linux_{{ adguard_sync_arch }}.tar.gz"
+        - /tmp/adguardhome-sync
+      when: needs_sync_upgrade
+
+- name: Update Tailscale on the subnet routers
+  hosts: proxmox
+  become: true
+  serial: 1
+  tasks:
+    - name: Check the current version
+      ansible.builtin.command: tailscale version
+      register: current_tailscale_version
+      changed_when: false
+      failed_when: false
+      when: tailscale_enabled | default(false) | bool
+
+    - name: Determine whether an upgrade is needed
+      ansible.builtin.set_fact:
+        # Tailscale's apt packages carry no Debian revision suffix, so the first
+        # line of `tailscale version` compares directly to the pin.
+        needs_tailscale_upgrade: >-
+          {{ current_tailscale_version.rc | default(1) != 0
+             or (current_tailscale_version.stdout_lines[0] | default('')) != tailscale_version }}
+      when: tailscale_enabled | default(false) | bool
+
+    - name: Upgrade the Tailscale package
+      ansible.builtin.apt:
+        name: "tailscale={{ tailscale_version }}"
+        state: present
+        update_cache: true
+        allow_downgrade: true
+      when:
+        - tailscale_enabled | default(false) | bool
+        - needs_tailscale_upgrade | default(false)
+
+    - name: Restart tailscaled  # noqa no-handler
+      ansible.builtin.systemd:
+        name: tailscaled
+        state: restarted
+        daemon_reload: true
+      when:
+        - tailscale_enabled | default(false) | bool
+        - needs_tailscale_upgrade | default(false)
+
+- name: Update Ansible collections
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    ansible_become: false
+  tasks:
+    - name: Reinstall the pinned collections
+      ansible.builtin.command: ansible-galaxy collection install -r requirements.yml --force
+      args:
+        chdir: "{{ playbook_dir }}/../.."
+      become: false
+      register: collection_update
+      changed_when: "'was installed successfully' in collection_update.stdout"
+
+    - name: Display the result
+      ansible.builtin.debug:
+        msg: "{{ collection_update.stdout_lines }}"

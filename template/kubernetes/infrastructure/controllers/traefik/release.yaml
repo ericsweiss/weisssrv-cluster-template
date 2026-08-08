@@ -1,0 +1,178 @@
+---
+# Ingress controller for both zones. One deployment, two LoadBalancer Services:
+# the chart's (public VIP, below) and traefik-internal (internal VIP). Routes
+# are separated by hostname and by the lan-tailscale-only middleware, not by
+# separate controllers.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: traefik
+  namespace: traefik
+spec:
+  interval: 30m
+  releaseName: traefik
+  chart:
+    spec:
+      chart: traefik
+      version: "${helm_chart_versions_traefik}"
+      sourceRef:
+        kind: HelmRepository
+        name: traefik
+        namespace: flux-system
+      interval: 12h
+  install:
+    crds: CreateReplace
+    remediation:
+      retries: 3
+  upgrade:
+    # Flux's default is Skip, which freezes the traefik.io CRDs at their
+    # first-install schema while the controller moves on.
+    crds: CreateReplace
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+
+    # Chart-native autoscaling rather than a standalone HPA: with
+    # autoscaling.enabled the chart omits .spec.replicas entirely, so a helm
+    # upgrade cannot re-assert replicas:1 and drop below the HA floor. The
+    # Traefik VPA is memory-only so it never contends with this on CPU.
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 6
+      metrics:
+        - type: Resource
+          resource:
+            name: cpu
+            target:
+              type: Utilization
+              averageUtilization: 70
+      # Require sustained pressure before adding a pod: image-pull bursts push
+      # per-pod CPU well past target and, with the default 0s window, jump the
+      # HPA straight to max.
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 120
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 60
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 120
+
+    deployment: {}
+
+    # Public VIP. externalTrafficPolicy: Local preserves the client source IP,
+    # which the ipAllowList middlewares depend on; MetalLB L2 is endpoint-aware,
+    # so it only announces from a node with a Ready Traefik pod.
+    # allocateLoadBalancerNodePorts: false — L2 announces the VIP directly and
+    # never uses NodePorts (a Service created before this flag was set keeps its
+    # stale nodePorts until they are removed by hand once).
+    service:
+      type: LoadBalancer
+      annotations:
+        metallb.io/loadBalancerIPs: "${cluster_metallb_public_vip}"
+      spec:
+        externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false
+
+    ingressRoute:
+      dashboard:
+        enabled: true
+        matchRule: Host(`traefik.${cluster_internal_domain}`)
+        entryPoints:
+          - websecure
+        middlewares:
+          - name: lan-tailscale-only
+            namespace: traefik
+          - name: hsts-header
+            namespace: traefik
+
+    log:
+      level: INFO
+    accessLog:
+      enabled: true
+      format: json
+
+    metrics:
+      prometheus:
+        enabled: true
+        entryPoint: metrics
+        serviceMonitor:
+          enabled: true
+          # Keep Traefik's own per-backend `service` label instead of letting
+          # Prometheus rewrite it to exported_service (the scraped Service is
+          # also called "traefik"), which would collapse every backend into one
+          # series in the dashboards.
+          honorLabels: true
+
+    providers:
+      kubernetesCRD:
+        enabled: true
+        # Required by this repo's design: app IngressRoutes reference the shared
+        # middlewares in the traefik namespace. The cost is that ANY IngressRoute
+        # can reference another namespace's middleware or Service — review this
+        # before letting untrusted authors write routes (see tenants/README.md).
+        allowCrossNamespace: true
+      kubernetesIngress:
+        enabled: true
+        publishedService:
+          enabled: true
+
+    ports:
+      web:
+        port: 80
+      websecure:
+        port: 443
+        # Traefik v3 defaults readTimeout to 60s, which kills any request whose
+        # BODY takes longer than that — large container-image pushes and file
+        # uploads through the ingress. 30m keeps a slowloris bound while fitting
+        # multi-GB uploads on slow links.
+        transport:
+          respondingTimeouts:
+            readTimeout: 30m
+
+    additionalArguments:
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+
+    # Prefer (not require) nodes labelled as ingress carriers, so the cluster
+    # still schedules Traefik before the k3s layer has labelled anything.
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: ${cluster_node_label_domain}/ingress
+                  operator: In
+                  values: ["true"]
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: traefik
+              topologyKey: kubernetes.io/hostname
+
+    tolerations: []
+
+    # CPU request sized so the 70% HPA target tracks real load: too small a
+    # request makes every burst read as several hundred percent and pins the
+    # HPA at max. Raise the request, not the threshold. Memory is the VPA's.
+    resources:
+      requests:
+        cpu: 250m
+        memory: 128Mi
+      limits:
+        memory: 512Mi

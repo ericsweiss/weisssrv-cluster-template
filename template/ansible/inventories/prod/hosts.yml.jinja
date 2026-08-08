@@ -1,0 +1,354 @@
+---
+{%- set n_compute = compute_node_count | default(2) | int %}
+{%- set nas_name = nas_host.split('.')[0] %}
+{%- set smtp_name = smtp_host.split('.')[0] %}
+{%- set resolvers = upstream_dns_servers.split() %}
+{%- set pve_hosts = [nas_name] %}
+{%- for i in range(1, n_compute + 1) %}
+{%- set _ = pve_hosts.append('pve-node-%02d' | format(i)) %}
+{%- endfor %}
+{%- set n_srv = 3 if pve_hosts | length >= 3 else 1 %}
+{%- set gpu_host = pve_hosts[-1] if gpu == 'nvidia' else '' %}
+# Starter roster for {{ cluster_name }} — one NAS host, {{ n_compute }} compute host(s),
+# {{ resolvers | length }} DNS resolver(s), one SMTP relay, and a {{ n_srv }}-server /
+# {{ pve_hosts | length }}-agent k3s cluster.
+#
+# The names and addresses that other layers depend on come from the answers, so
+# renaming them here alone is NOT enough — re-run `copier update` (or change the
+# answer) instead:
+#
+#   {{ nas_name }}  <- nas_host      (the NFS PVs mount it by name)
+#   {{ smtp_name }}  <- smtp_host     (Alertmanager + every null client submit to it)
+#   {{ resolvers | join(', ') }}  <- upstream_dns_servers (the in-cluster forwarders point here)
+#
+# Every OTHER hostname and address below is a placeholder: rename hosts to match
+# your hardware and re-address them to match your LAN. The scheme used here, so
+# you can extend it consistently:
+#
+#   {{ lan_prefix }}.11        NAS host              vmid = 100 + last octet
+#   {{ lan_prefix }}.12+       compute hosts
+#   {{ resolvers | join(' / ') }}    DNS resolvers (LXC)
+#   {{ lan_prefix }}.23        SMTP relay (LXC)
+#   {{ lan_prefix }}.31+       k3s servers (VM)
+#   {{ lan_prefix }}.41+       k3s agents (VM)
+#
+# Already claimed by answers, do not reuse: {{ k3s_api_vip }} (k3s API VIP),
+# {{ metallb_public_vip }} / {{ metallb_internal_vip }} (MetalLB).
+#
+# Bare-metal hosts are installed by hand (Proxmox VE ISO) and reachable over SSH
+# before the first run; every guest below is created by Ansible.
+
+all:
+  vars:
+    ansible_user: {{ admin_user }}
+    ansible_become: true
+    ansible_python_interpreter: /usr/bin/python3
+
+  children:
+    # Bare-metal hypervisors. proxmox_role picks each guest's default storage
+    # out of proxmox_storage_defaults (group_vars/all.yml).
+    proxmox:
+      children:
+        nas:
+        compute:
+
+    nas:
+      hosts:
+        {{ pve_hosts[0] }}:
+          ansible_host: {{ lan_prefix }}.11
+          proxmox_role: nas
+          # NFS-over-TLS server (the one host holding the wildcard cert+key);
+          # every other host and guest is a TLS client.
+          nfs_tls_is_server: true
+          # Encrypted pools need a key load before guests can start, so an
+          # unattended reboot can strand this host — maintenance defers it to an
+          # operator. Set true once you have proven an unattended reboot.
+          proxmox_self_reboot_safe: false
+          firewall_ipsets:
+            - pve_hosts
+            - core-cluster
+            - nfs_clients
+
+    compute:
+      hosts:
+{%- for host in pve_hosts[1:] %}
+        {{ host }}:
+          ansible_host: {{ lan_prefix }}.{{ 11 + loop.index }}
+          proxmox_role: compute
+{%- if gpu == 'nvidia' and host == gpu_host %}
+          # GPU passthrough host. REQUIRED: replace with the vendor:device IDs of
+          # every function of your card (`lspci -nn`); the role blacklists the
+          # in-tree driver and binds vfio-pci to them, then flags reboot-required.
+          vfio_passthrough_enabled: true
+          vfio_passthrough_pci_ids: []
+{%- endif %}
+          firewall_ipsets:
+            - pve_hosts
+            - core-cluster
+            - nfs_clients
+{%- endfor %}
+
+    # Recursive resolvers (unbound behind AdGuard Home), spread one per host so a
+    # host loss never takes them all. dns-01 is the config primary; the rest are
+    # synced from it. These addresses ARE the upstream_dns_servers answer — the
+    # in-cluster forwarders, group_vars/all.yml's dns_servers and the tailnet
+    # resolver all point at exactly this list, so an edit here without the
+    # matching answer change splits the two layers apart.
+    dns:
+      hosts:
+{%- for addr in resolvers %}
+        dns-{{ '%02d' | format(loop.index) }}:
+          ansible_host: {{ addr }}
+          # vmid = 100 + last octet, per the scheme above. Re-addressing a
+          # resolver moves its vmid — check it collides with nothing here.
+          vmid: {{ 100 + addr.split('.')[-1] | int }}
+          proxmox_host: {{ pve_hosts[loop.index % (pve_hosts | length)] }}
+{%- if loop.first %}
+          dns_role: primary
+          adguard_home_is_primary: true
+          # Certificate authority: acme.sh, the renewal cron and the push
+          # channel run HERE and nowhere else. A second resolver with this flag
+          # would issue its own wildcard against the same rate limit and push it
+          # over the first one. The cert settings live in group_vars/dns.yml.
+          acme_certs_enabled: true
+{%- if resolvers | length > 1 %}
+          # Pushes this resolver's config to every replica.
+          adguard_sync_enabled: true
+{%- else %}
+          # Only meaningful with a second resolver, and this roster has none to
+          # sync to — written out as an explicit false rather than left absent
+          # so the decision is on the page: site.yml invokes the role either
+          # way, and an unset opt-in flag is indistinguishable from an oversight.
+          # Add a second address to upstream_dns_servers and flip this to true.
+          adguard_sync_enabled: false
+{%- endif %}
+{%- else %}
+          dns_role: replica
+{%- endif %}
+          proxmox_resource_pool: infra-core
+          proxmox_startup_order: 10
+          proxmox_startup_delay: 10
+          firewall_ipsets:
+            - core-cluster
+          guest_security_groups:
+            - sg-vm-admin
+            - sg-dns
+            - sg-metrics
+{%- endfor %}
+
+    # Certificate distribution and the adguardhome-sync run from the primary
+    # only; the plays address this group rather than a hostname.
+    dns_primary:
+      hosts:
+        dns-01:
+
+    mail:
+      hosts:
+        {{ smtp_name }}:
+          ansible_host: {{ lan_prefix }}.23
+          vmid: 123
+          proxmox_host: {{ pve_hosts[1] if pve_hosts | length > 1 else pve_hosts[0] }}
+          proxmox_resource_pool: infra-core
+          proxmox_startup_order: 20
+          proxmox_startup_delay: 10
+          firewall_ipsets:
+            - core-cluster
+          guest_security_groups:
+            - sg-vm-admin
+            - sg-smtp-relay
+            - sg-metrics
+          # Guests honour policy_out (hosts do not): this flips the relay to
+          # default-deny egress, enforcing the sg-smtp-relay OUT allowlist.
+          guest_firewall_policy_out: "DROP"
+
+    # k3s control plane. {{ n_srv }} server(s) — etcd tolerates one loss at three,
+    # and only an ODD count adds fault tolerance. Each lands on a different host.
+    k3s_servers:
+      vars:
+        k3s_role: server
+        k3s_labels:
+          {{ internal_domain }}/control-plane: "true"
+        k3s_taints:
+          - key: node-role.kubernetes.io/control-plane
+            value: "true"
+            effect: NoSchedule
+      hosts:
+{%- for j in range(1, n_srv + 1) %}
+        k3s-srv-{{ '%02d' | format(j) }}:
+          ansible_host: {{ lan_prefix }}.{{ 30 + j }}
+          vmid: {{ 130 + j }}
+          proxmox_host: {{ pve_hosts[j - 1] }}
+{%- if j == 1 %}
+          # Bootstraps the cluster (`cluster-init`); every other server joins it.
+          k3s_is_first_server: true
+{%- endif %}
+          proxmox_resource_pool: platform
+          proxmox_vm_cpu_type: host
+          proxmox_vm_cores: 2
+          proxmox_vm_memory: 6144
+          proxmox_vm_disk_size: 64G
+          proxmox_startup_order: 30
+          proxmox_startup_delay: 10
+          firewall_ipsets:
+            - k3s_nodes
+            - core-cluster
+            - nfs_clients
+          guest_security_groups:
+            - sg-vm-admin
+            - sg-k3s-core
+            - sg-metrics
+{%- endfor %}
+
+    # One agent per host. Node labels are the scheduling contract the Kubernetes
+    # manifests select on (they reference the same prefix through the
+    # cluster-config ConfigMap), so renaming one here means renaming it there.
+    k3s_agents:
+      vars:
+        k3s_role: agent
+      hosts:
+{%- for k in range(1, pve_hosts | length + 1) %}
+{%- set agent_host = pve_hosts[k - 1] %}
+        k3s-agt-{{ '%02d' | format(k) }}:
+          ansible_host: {{ lan_prefix }}.{{ 40 + k }}
+          vmid: {{ 140 + k }}
+          proxmox_host: {{ agent_host }}
+          proxmox_resource_pool: platform
+          proxmox_vm_cpu_type: host
+          proxmox_vm_cores: 4
+          proxmox_vm_memory: 8192
+          proxmox_vm_disk_size: 64G
+          proxmox_startup_order: 40
+          proxmox_startup_delay: 10
+{%- if k == 1 %}
+          # Co-located with the NAS: keeps NFS-heavy and stateful workloads one
+          # hop from the exports. PreferNoSchedule (not NoSchedule) so it still
+          # takes overflow.
+          #
+          # THE STORAGE CONTRACT. These three disks back the three hostPath PVs
+          # the always-on Kubernetes stages declare, each pinned to the node
+          # carrying the `<node-label-domain>/nas` label below:
+          #
+          #   /mnt/prometheus-data  <- kube-prometheus-stack prometheus-data PV
+          #   /mnt/loki-data        <- loki loki-data PV
+          #   /mnt/postgres-data    <- authentik authentik-postgres-data PV
+          #
+          # Removing an entry leaves its PV permanently Pending, so drop one only
+          # together with the manifest that claims it. Sizes match the PV
+          # capacities; proxmox_vm creates the zvol (`zfs create -p`, so the
+          # parent datasets are made on demand) and the k3s role mounts it by
+          # UUID after mkfs. sparse: true keeps them thin-provisioned — the ssd
+          # pool is only charged for what is written.
+          #
+          # Each entry pins a stable scsi_slot — never reorder or reuse one, that
+          # would rebind a data-bearing zvol to another device. The data survives
+          # VM recreation: the zvols live on the Proxmox host's pool.
+          vm_additional_disks:
+            - name: prometheus-data
+              size: 150G
+              zvol: ssd/appdata/prometheus/data
+              mount_point: /mnt/prometheus-data
+              fstype: ext4
+              scsi_slot: 1
+              sparse: true
+              # Already captured by ZFS replication of ssd/appdata; without this
+              # the nightly vzdump would store 150G of TSDB in the VM image too.
+              vzdump_backup: false
+            - name: loki-data
+              size: 75G
+              zvol: ssd/appdata/loki/data
+              mount_point: /mnt/loki-data
+              fstype: ext4
+              scsi_slot: 2
+              sparse: true
+              vzdump_backup: false
+            - name: postgres-data
+              size: 10G
+              zvol: ssd/appdata/authentik/postgres
+              mount_point: /mnt/postgres-data
+              fstype: ext4
+              scsi_slot: 3
+              sparse: true
+              # The restorable copy is the nightly pg_dump on the NAS
+              # (/backups-apps/authentik), not this block device.
+              vzdump_backup: false
+{%- endif %}
+          k3s_labels:
+            {{ internal_domain }}/general: "true"
+            # CI job pods pin themselves to this label (ci_cpu_selector), and
+            # the runners only permit an override matching
+            # ^<domain>/cpu=(modern|legacy)$ — without it those jobs are
+            # unschedulable. Set legacy on a node lacking modern CPU flags.
+            {{ internal_domain }}/cpu: "modern"
+{%- if k == 1 %}
+            {{ internal_domain }}/nas: "true"
+{%- else %}
+            {{ internal_domain }}/ingress: "true"
+{%- endif %}
+{%- if gpu == 'nvidia' and agent_host == gpu_host %}
+            # The nvidia-device-plugin and DCGM exporter select on this label;
+            # only this node advertises nvidia.com/gpu.
+            {{ internal_domain }}/gpu: "nvidia"
+{%- endif %}
+{%- if k == 1 %}
+          k3s_taints:
+            - key: {{ internal_domain }}/nas
+              value: "true"
+              effect: PreferNoSchedule
+{%- endif %}
+{%- if gpu == 'nvidia' and agent_host == gpu_host %}
+          # Installs the NVIDIA driver + container toolkit here (k3s role
+          # tasks/gpu.yml) so k3s wires up the nvidia container runtime.
+          k3s_gpu_node: true
+          # REQUIRED: the PCI address of the card on {{ gpu_host }} (`lspci`).
+          # Bare `0000:BB:DD` (no function) passes the whole multifunction device.
+          # Applied at qm-create ONLY — attaching to an existing VM is a manual
+          # `qm set <vmid> --hostpci0 ...` in a maintenance window.
+          proxmox_vm_hostpci: []
+{%- endif %}
+          firewall_ipsets:
+            - k3s_nodes
+            - core-cluster
+            - nfs_clients
+          guest_security_groups:
+            - sg-vm-admin
+            - sg-k3s-core
+{%- if k != 1 %}
+            - sg-k3s-ingress-int
+            - sg-k3s-ingress-pub
+{%- endif %}
+            - sg-metrics
+{%- endfor %}
+
+    # Guests Ansible cannot log into (appliance images, Windows). They still get
+    # firewall rules: every task for them is delegated to their Proxmox host, so
+    # each entry needs ansible_connection: local, a vmid, a proxmox_host and
+    # guest_security_groups.
+    services:
+      vars:
+        # These plays only ever delegate; never let a local task sudo on the
+        # operator's own machine.
+        ansible_become: false
+      hosts: {}
+
+    lxc_containers:
+      children:
+        dns:
+        mail:
+
+    k3s:
+      children:
+        k3s_servers:
+        k3s_agents:
+
+    # Hosts that get the base role (SSH hardening, packages, timezone, fail2ban).
+    # k3s nodes get it from playbooks/k3s.yml instead, on their own lifecycle.
+    base_managed:
+      children:
+        proxmox:
+        dns:
+        mail:
+
+    # Application VMs/LXCs you add later, enrolled in rolling OS patching. Add
+    # each app's own group as a child here.
+    app_servers:
+      hosts: {}

@@ -1,0 +1,23 @@
+---
+# privileged PSA, DECLARED rather than inherited. The device-plugin DaemonSet
+# mounts the host's NVIDIA character devices and the kubelet device-plugin
+# socket under /var/lib/kubelet — hostPath mounts that baseline and restricted
+# both refuse — so `privileged` is the only enforce level it starts under.
+#
+# Every namespace in this repository states its posture explicitly, including
+# the ones that legitimately need `privileged` (metallb-system, tailscale).
+# An unlabelled namespace silently inherits the cluster default instead, so a
+# later change to that default either breaks this DaemonSet or quietly relaxes a
+# namespace whose pods hold host access. warn/audit match enforce here: they
+# never gate admission, and pinning them lower would emit a permanent warning on
+# the plugin's own pods, training the operator to ignore the signal.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nvidia-device-plugin
+  labels:
+    app.kubernetes.io/name: nvidia-device-plugin
+    app.kubernetes.io/managed-by: flux
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged

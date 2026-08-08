@@ -1,0 +1,39 @@
+---
+# Two single-address pools: the public ingress VIP and the internal ingress VIP.
+# autoAssign:false — each address is claimed explicitly by its Service via the
+# metallb.io/loadBalancerIPs annotation, so MetalLB can never hand a pinned VIP
+# to some other LoadBalancer that omitted an address.
+#
+# Both addresses must be OUTSIDE the router's DHCP range.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: public-pool
+  namespace: metallb-system
+spec:
+  autoAssign: false
+  addresses:
+    - ${cluster_metallb_public_vip}/32
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: internal-pool
+  namespace: metallb-system
+spec:
+  autoAssign: false
+  addresses:
+    - ${cluster_metallb_internal_vip}/32
+---
+# L2 (ARP) announcement. No interface list: MetalLB filters CNI/virtual
+# interfaces itself, and an explicit list breaks on nodes whose NIC is not
+# named eth0/ens18.
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: l2-advertisement
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - public-pool
+    - internal-pool

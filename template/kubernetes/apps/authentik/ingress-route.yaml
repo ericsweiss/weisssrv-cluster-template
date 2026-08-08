@@ -1,0 +1,48 @@
+---
+# Public: the SSO front door has to be reachable from wherever users are, so this
+# route carries no LAN restriction.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: authentik
+  namespace: authentik
+  annotations:
+    external-dns.alpha.kubernetes.io/target: ${cluster_external_domain}
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`auth.${cluster_external_domain}`)
+      kind: Rule
+      middlewares:
+        - name: hsts-header
+          namespace: traefik
+      services:
+        - name: authentik-server
+          port: 80
+  tls:
+    secretName: authentik-external-tls
+
+---
+# Internal: same backend, LAN/tailnet only.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: authentik-internal
+  namespace: authentik
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`auth.${cluster_internal_domain}`)
+      kind: Rule
+      middlewares:
+        - name: lan-tailscale-only
+          namespace: traefik
+        - name: hsts-header
+          namespace: traefik
+      services:
+        - name: authentik-server
+          port: 80
+  tls:
+    secretName: authentik-internal-tls

@@ -1,0 +1,80 @@
+---
+# Coordinated node reboots. The maintenance playbooks only TOUCH the sentinel
+# file; each node then reboots ITSELF under a cluster-wide lock.
+#
+# Why this instead of the playbook draining nodes: when the playbook runs from
+# an in-cluster CI executor pod, draining the node hosting that pod evicts the
+# playbook and deadlocks the job.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kured
+  namespace: kube-system
+spec:
+  interval: 30m
+  releaseName: kured
+  chart:
+    spec:
+      chart: kured
+      version: "${helm_chart_versions_kured}"
+      sourceRef:
+        kind: HelmRepository
+        name: kured
+        namespace: flux-system
+      interval: 12h
+  # disableWait: this is a DaemonSet in a wait:true Kustomization — one NotReady
+  # node (e.g. mid-reboot) would otherwise stall the whole controllers stage.
+  install:
+    disableWait: true
+    remediation:
+      retries: 3
+  upgrade:
+    disableWait: true
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    configuration:
+      period: "5m"
+      # One node at a time — this is what keeps the etcd quorum safe.
+      concurrency: 1
+      # NON-EXPIRING lock. kured's TTL is a pure time-based steal with no health
+      # check on the previous holder, so a finite TTL would let a second server
+      # reboot while the first is still down — exactly the 2-of-3-members-down
+      # outcome concurrency:1 exists to prevent. Cost: a kured pod that dies
+      # holding the lock blocks reboots until an operator clears the annotation
+      # (`kubectl -n kube-system annotate ds/kured weave.works/kured-node-lock-`).
+      lockTtl: "0"
+      # Never force: on drain failure leave the sentinel set and retry next
+      # period rather than hard-killing pods.
+      drainTimeout: "5m"
+      forceReboot: false
+      # Auto-clears on reboot because /var/run is a tmpfs symlink to /run — a
+      # system where it is not would loop-reboot.
+      rebootSentinel: "/var/run/reboot-required"
+      rebootCommand: "/bin/systemctl reboot"
+      annotateNodes: true
+      # Never reboot a node out from under a running CI job pod. Harmless if no
+      # pod carries the label.
+      blockingPodSelector:
+        - ${cluster_node_label_domain}/runner-class=infrastructure
+    # Reboot-orchestration metrics, so a stuck or blocked reboot cycle is
+    # alertable directly rather than only via node conditions.
+    service:
+      create: true
+    metrics:
+      create: true
+    # Per-node agent: must run everywhere, including tainted nodes.
+    tolerations:
+      - operator: Exists
+    priorityClassName: system-node-critical
+    rbac:
+      create: true
+    serviceAccount:
+      create: true
+    resources:
+      requests:
+        cpu: 10m
+        memory: 48Mi
+      limits:
+        memory: 96Mi

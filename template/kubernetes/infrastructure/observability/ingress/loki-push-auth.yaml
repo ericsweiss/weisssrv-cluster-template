@@ -1,0 +1,32 @@
+---
+# Basic auth for the Loki push ingress. Loki runs auth_enabled=false, so without
+# this gate anything that can reach the route could write logs. Host-side
+# collectors send the matching credentials (alloy_host role). The in-cluster
+# DaemonSet pushes via the ClusterIP and is unaffected.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: loki-push-auth
+  namespace: observability
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: ${cluster_secret_store}
+  target:
+    name: loki-push-auth
+    creationPolicy: Owner
+  data:
+    - secretKey: users
+      remoteRef:
+        key: Loki Push Auth
+        property: htpasswd
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: loki-push-auth
+  namespace: observability
+spec:
+  basicAuth:
+    secret: loki-push-auth

@@ -1,0 +1,98 @@
+# gitlab-runner-privileged (infrastructure tier)
+
+The **trusted** runner: root, Docker-in-Docker, unrestricted egress. It exists so
+this repository's own CI can deploy the cluster it runs on — Ansible over SSH,
+kubectl, secret injection, container builds.
+
+## The registration scope IS the security boundary
+
+> **Register this runner as a PROJECT runner locked to the infrastructure
+> repository. Never as an instance runner. Never as a group runner over a group
+> that contains untrusted projects.**
+
+Tags are cooperative routing, not access control. Any project on the instance can
+write `tags: [{{ ci_runner_tag }}]` in its `.gitlab-ci.yml`. If this runner is
+registered instance-wide, that one line gets an arbitrary authenticated user root
++ DinD execution on your cluster, on a runner that also has SSH reach to your
+hosts. That is a privilege-escalation path into the whole estate.
+
+This is not hypothetical. In the system this template generalizes, the docs
+stated the project-runner requirement while the live registration was
+`instance_type` — and a different project's pipeline was observed executing on
+it. The gap survived because nothing enforced or checked it.
+
+**Verify after registering**, and again after any runner re-registration:
+
+```
+GET /api/v4/runners/<id>   ->  "runner_type": "project_type"
+```
+
+If you want tenant repositories to build images, register a *second* privileged
+runner scoped to the tenant group, with its own namespace, quota and egress
+policy, and a distinct tag (`tenant-build`). Do not widen this one.
+
+## Isolation from the shared runner
+
+- **Separate namespace.** The shared runner's namespace-scoped RBAC cannot read
+  this runner's token Secret. Namespace separation — not the tag — is what makes
+  that true.
+- **Separate ServiceAccount.**
+- **`enforce: privileged` PSS**, because the DinD job pods genuinely require it.
+  This is exactly why it must not be the namespace untrusted jobs land in.
+- **`<label-domain>/runner-class` is the TIER, not the tag.** Job pods here are
+  labelled `runner-class=infrastructure`, the shared runner's are labelled
+  `runner-class=shared`, and three things key off those two fixed values: the
+  pod anti-affinity in `release.yaml`, the unrestricted-egress NetworkPolicy in
+  `networkpolicy.yaml`, and kured's `--blocking-pod-selector`. Renaming the CI
+  tag (`ci_runner_tag`) deliberately does **not** move them — that is why the
+  tag beside them is generated while these stay literal.
+
+`protected: false` is deliberate and, unlike the shared runner's, is a real
+residual risk: it lets this privileged runner execute MR pipelines from
+unprotected feature branches. It is accepted because every job in this repo's
+pipeline is tagged for this runner and MR CI would otherwise never run. **The
+project-lock above is what keeps that risk bounded to committers on this one
+repository.**
+
+## Sizing
+
+The governor is CPU, not memory. Per job, the real cost is roughly: build
+container ~0.9 cpu (the Ansible control process), DinD sidecar ~0.5 cpu, helper
+~0.1 — about 1.5 cpu, while memory is a few hundred MiB.
+
+Two failure modes to avoid, both observed:
+
+- **Understated cpu_request** lets the scheduler pack more jobs onto a small node
+  than its cores can run. Task-heavy jobs then inflate 4-7x, because the
+  exec-per-task connection model crawls under CPU starvation.
+- **`concurrent` above the schedulable pool** parks the overflow as *Pending
+  pods*, and pod-Pending time burns the JOB's timeout clock — jobs get killed
+  without ever starting. At or below pool capacity, the overflow waits in
+  GitLab's queue, where that clock does not run.
+
+Size `concurrent` to `(CI-eligible cores - co-tenant requests) / 1.5`, and keep
+`requests.cpu` in the ResourceQuota in lockstep.
+
+## Scheduling
+
+Job pods are **hard-excluded** from the storage node (`DoesNotExist` on its
+label, not `NotIn` — which would require the key to exist on every node). A
+memory-tight storage host forced to swap other guests' pages because a CI burst
+landed there is a real and expensive failure. Soft pod anti-affinity spreads jobs
+across the remaining agents, because simultaneous same-node DinD container starts
+race the cgroup setup and die at prepare.
+
+## Configure
+
+| Value | Where |
+|---|---|
+| Runner token | secrets item **GitLab Runner Privileged** → `runner-token` |
+| Tag | `{{ ci_runner_tag }}` — generated from the `ci_runner_tag` answer on BOTH sides (this runner's `tags:` and every job's `tags:` in `.gitlab-ci.yml`), so they cannot drift. With `runUntagged: false`. |
+| Job image | `runners.config` TOML, digest-pinned |
+| Concurrency | `concurrent` + `resourcequota.yaml` (together) |
+
+## Disable
+
+Remove the entry from `kubernetes/apps/kustomization.yaml`. Then move this repo's
+own CI jobs to the shared runner tag — anything needing SSH, DinD or root will
+stop working, which is the point of the tier.

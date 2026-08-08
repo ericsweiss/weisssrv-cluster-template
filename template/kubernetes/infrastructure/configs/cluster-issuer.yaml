@@ -1,0 +1,25 @@
+---
+# ACME issuer for both zones, solving DNS-01 through the DNS provider (works for
+# internal-only names, which HTTP-01 cannot reach). The solver block is the
+# DNS-backend seam — a different provider swaps this stanza and the token Secret
+# in shared-dns-secrets/.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ${cluster_issuer}
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ${cluster_acme_email}
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: dns-api-token
+              key: api-token
+        selector:
+          dnsZones:
+            - ${cluster_external_domain}
+            - ${cluster_internal_domain}

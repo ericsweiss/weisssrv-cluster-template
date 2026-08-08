@@ -1,0 +1,92 @@
+---
+# Full k3s cluster deployment: base configuration, then servers, then agents.
+# The VMs must already exist (k3s-provision-vms.yml).
+
+- name: Deploy base configuration to k3s nodes
+  hosts: k3s
+  become: true
+  roles:
+    - weisssrv.infra.base
+    - weisssrv.infra.qol
+    - weisssrv.infra.postfix_null_client
+    - weisssrv.infra.alloy_host
+
+# MUST precede the server/agent plays: the k3s role asserts tlshd is active
+# before it mounts the off-node etcd-snapshot export, and the agents mount the
+# NAS-backed PVs. Both are pure TLS clients — no cert of their own.
+- name: Deploy the NFS-over-TLS handshake daemon
+  hosts: k3s
+  become: true
+  roles:
+    - weisssrv.infra.nfs_tls
+
+- name: Deploy k3s servers
+  hosts: k3s_servers
+  become: true
+  serial: 1  # one etcd member at a time
+  roles:
+    - weisssrv.infra.k3s
+    # The servers' off-node etcd snapshot copy writes its freshness metric to
+    # the node_exporter textfile directory, and nothing else on a server exposes
+    # :9101. site.yml also deploys this role, but it skips the servers on a
+    # first run (the VMs do not exist yet), so without it here the metric behind
+    # EtcdSnapshotStale would never be scrapable. Agents are covered by the
+    # in-cluster DaemonSet on :9100 instead.
+    - weisssrv.infra.node_exporter_host
+
+- name: Deploy k3s agents
+  hosts: k3s_agents
+  become: true
+  # One at a time: a config change restarts the kubelet, and the ingress
+  # controller plus the MetalLB speaker run on the agents — a cluster-wide
+  # simultaneous bounce would blip the VIPs.
+  serial: 1
+  roles:
+    - weisssrv.infra.k3s
+
+- name: Deploy guest firewall rules
+  hosts: k3s
+  roles:
+    - weisssrv.infra.proxmox_firewall
+
+- name: Verify cluster health
+  hosts: k3s_servers[0]
+  become: true
+  tasks:
+    - name: Get node status
+      ansible.builtin.command: k3s kubectl get nodes -o wide
+      register: node_status
+      changed_when: false
+
+    - name: Display cluster status
+      ansible.builtin.debug:
+        msg: "{{ node_status.stdout_lines }}"
+
+    # STATUS is column 2; "Ready,SchedulingDisabled" (cordoned but healthy)
+    # passes. Skip the header row.
+    - name: Fail if any node is not Ready
+      ansible.builtin.assert:
+        that:
+          - item.split()[1] is match('^Ready')
+        fail_msg: "Node not Ready: {{ item }}"
+        quiet: true
+      loop: "{{ node_status.stdout_lines[1:] }}"
+      loop_control:
+        label: "{{ item.split()[0] }}"
+
+    - name: Get pod status across all namespaces
+      ansible.builtin.command: k3s kubectl get pods -A
+      register: pod_status
+      changed_when: false
+
+    - name: Display pod status
+      ansible.builtin.debug:
+        msg: "{{ pod_status.stdout_lines }}"
+
+    - name: Display next steps
+      ansible.builtin.debug:
+        msg: |
+          k3s cluster deployment complete.
+
+          Next: fetch the kubeconfig, then bootstrap Flux — every platform
+          controller and application reconciles from kubernetes/ in this repo.

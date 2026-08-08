@@ -1,0 +1,100 @@
+---
+# Grafana Alloy — container-log collector DaemonSet. Streams pod logs from every
+# node (including tainted ones) into Loki. Host journald is shipped separately by
+# the alloy_host Ansible role, not by this DaemonSet.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: alloy
+  namespace: observability
+spec:
+  interval: 30m
+  releaseName: alloy
+  timeout: 10m
+  chart:
+    spec:
+      chart: alloy
+      version: "${helm_chart_versions_alloy}"
+      sourceRef:
+        kind: HelmRepository
+        name: grafana
+        namespace: flux-system
+      interval: 12h
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    alloy:
+      enableReporting: false
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          memory: 256Mi
+      configMap:
+        content: |
+          discovery.kubernetes "pods" {
+            role = "pod"
+            selectors {
+              role = "pod"
+              field = "spec.nodeName=" + sys.env("HOSTNAME")
+            }
+          }
+
+          discovery.relabel "pods" {
+            targets = discovery.kubernetes.pods.targets
+
+            rule {
+              source_labels = ["__meta_kubernetes_namespace"]
+              target_label  = "namespace"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_name"]
+              target_label  = "pod"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_container_name"]
+              target_label  = "container"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_node_name"]
+              target_label  = "node"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_name"]
+              separator     = "/"
+              target_label  = "job"
+            }
+          }
+
+          // loki.source.kubernetes tails logs through the kube-apiserver and
+          // tracks read offsets in memory only, so an Alloy restart can gap or
+          // duplicate a small window and adds apiserver load. Accepted for the
+          // simpler setup; local.file_match + loki.source.file with a hostPath
+          // positions file survives restarts if this becomes a problem.
+          loki.source.kubernetes "pods" {
+            targets    = discovery.relabel.pods.output
+            forward_to = [loki.write.default.receiver]
+          }
+
+          loki.write "default" {
+            endpoint {
+              url = "http://loki.observability.svc.cluster.local:3100/loki/api/v1/push"
+            }
+          }
+
+    controller:
+      type: daemonset
+      tolerations:
+        - operator: Exists
+
+    serviceMonitor:
+      enabled: true
+
+    # The chart sets HOSTNAME from spec.nodeName via the downward API, so
+    # sys.env("HOSTNAME") above resolves to the node name.

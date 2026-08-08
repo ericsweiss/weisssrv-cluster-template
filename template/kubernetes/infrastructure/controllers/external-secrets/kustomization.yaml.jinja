@@ -1,0 +1,44 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: external-secrets
+resources:
+  - namespace.yaml
+  - release.yaml
+  - networkpolicy.yaml
+  - pdb.yaml
+
+# This namespace also runs default-deny EGRESS (networkpolicy.yaml), so each
+# shared component is scoped by the patches below to the pods that need it.
+components:
+  - ../../../components/netpol-baseline
+  - ../../../components/netpol-egress-dns
+  - ../../../components/netpol-egress-apiserver
+{%- if secrets_backend == 'onepassword' %}
+  # Public egress is for the 1Password Connect sync container ONLY — the ESO
+  # controllers never leave the cluster (they read Connect's local cache).
+  - ../../../components/netpol-egress-public
+{%- endif %}
+
+patches:
+  # Only the ESO controllers talk to the kube-apiserver.
+  - target:
+      kind: NetworkPolicy
+      name: allow-egress-apiserver
+    patch: |
+      - op: replace
+        path: /spec/podSelector
+        value:
+          matchLabels:
+            app.kubernetes.io/instance: external-secrets
+{%- if secrets_backend == 'onepassword' %}
+  - target:
+      kind: NetworkPolicy
+      name: allow-egress-public
+    patch: |
+      - op: replace
+        path: /spec/podSelector
+        value:
+          matchLabels:
+            app: onepassword-connect
+{%- endif %}

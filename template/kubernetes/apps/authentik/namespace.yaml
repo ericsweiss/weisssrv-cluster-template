@@ -1,0 +1,15 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: authentik
+  labels:
+    app.kubernetes.io/name: authentik
+    app.kubernetes.io/component: identity-provider
+    app.kubernetes.io/managed-by: flux
+    # Opts this namespace into the platform ClusterSecretStore, whose
+    # spec.conditions admit only namespaces carrying this label.
+    ${cluster_node_label_domain}/cluster-secrets: "true"
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

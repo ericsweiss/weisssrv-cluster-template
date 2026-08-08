@@ -1,0 +1,9 @@
+---
+# One file per tenant repo, listed here (Kustomize does not auto-discover).
+# tenant-crd-editor.yaml is the one always-present resource — a shared
+# ClusterRole, harmless while unbound. See README.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - tenant-crd-editor.yaml
+  # - <repo-slug>.yaml

@@ -1,0 +1,19 @@
+---
+# Default sizing for every operator-created proxy StatefulSet; Services opt in
+# with the `tailscale.com/proxy-class: default-proxyclass` annotation. Without
+# it the proxy container requests ~1Mi against a ~55Mi working set, which lands
+# it in the wrong QoS class and misleads the scheduler.
+apiVersion: tailscale.com/v1alpha1
+kind: ProxyClass
+metadata:
+  name: default-proxyclass
+spec:
+  statefulSet:
+    pod:
+      tailscaleContainer:
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+          limits:
+            memory: 128Mi

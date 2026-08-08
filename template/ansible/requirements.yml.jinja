@@ -1,0 +1,19 @@
+---
+# Every role this repo's playbooks address lives in weisssrv.infra — there is no
+# local roles/ directory, so upgrading the platform is a bump of `version:` here.
+collections:
+  # The collection lives in a subdirectory of the library repo, so the path goes
+  # on the URL fragment. `version:` takes a release tag (pin it) or a branch
+  # (local iteration against an unmerged library change).
+  - name: git+{{ lib_url | default('https://git.ericsweiss.com/eric/weisssrv-lib.git') }}#/ansible_collections/weisssrv/infra
+    type: git
+    version: {{ lib_ref }}
+
+  # Galaxy dependencies of weisssrv.infra: they install with it. Listed here
+  # only to pin the tested major line for `ansible-galaxy install -r`.
+  - name: ansible.posix
+    version: ">=2.1.0,<3.0.0"
+  - name: community.general
+    version: ">=12.2.0,<13.0.0"
+
+roles: []

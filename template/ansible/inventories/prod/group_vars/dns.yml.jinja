@@ -1,0 +1,190 @@
+---
+{%- set nas_name = nas_host.split('.')[0] %}
+{%- set smtp_name = smtp_host.split('.')[0] %}
+{%- set resolvers = upstream_dns_servers.split() %}
+# The resolvers: unbound (recursive, DoT upstream) behind AdGuard Home
+# (filtering, rewrites, the LAN-facing :53). Their addresses come from the
+# upstream_dns_servers answer, so this file and hosts.yml cannot drift apart.
+
+# systemd 257+ needs nesting inside an unprivileged container.
+proxmox_lxc_nesting: true
+
+# Resolver hosts answer their own queries: base points resolv.conf at 127.0.0.1
+# and falls back to the bootstrap resolvers only until AdGuard is up.
+base_is_resolver_host: true
+
+# --- unbound ----------------------------------------------------------------
+# Loopback-only; AdGuard is the only client. Declared here (not left to the role
+# default) because adguard_home_upstream_dns references it.
+unbound_port: 5335
+
+# --- AdGuard Home -----------------------------------------------------------
+adguard_home_admin_user: {{ admin_user }}
+adguard_home_admin_password: >-
+  {% raw %}{{ lookup('ansible.builtin.env', 'ADGUARD_ADMIN_PASSWORD')
+     or undef(hint='ADGUARD_ADMIN_PASSWORD must be set (run via the task wrapper / op run)') }}{% endraw %}
+
+adguard_home_http_port: 3000     # UI + DoH behind the ingress, which terminates TLS
+adguard_home_dns_port: 53
+adguard_home_dot_port: 853
+adguard_home_doq_port: 853
+adguard_home_tls_enabled: true   # DoT/DoQ are served by AdGuard directly
+adguard_home_tls_server_name: "dns.{% raw %}{{ internal_domain }}{% endraw %}"
+
+adguard_home_upstream_dns:
+  - "127.0.0.1:{% raw %}{{ unbound_port }}{% endraw %}"
+adguard_home_fallback_dns: []    # empty = never bypass unbound
+adguard_home_enable_dnssec: true
+adguard_home_protection_enabled: true
+adguard_home_dhcp_enabled: false
+
+# One A record per inventory host that has an address, built from the roster so
+# adding a host is a one-file change. Service names (ingress hostnames, VIPs)
+# are the explicit list below — extend it as apps land.
+_dns_addressed_hosts: >-
+  {% raw %}{{ groups['all'] | map('extract', hostvars)
+     | selectattr('ansible_host', 'defined') | list }}{% endraw %}
+_dns_service_rewrites:
+  # DoT/DoQ endpoint: every resolver answers for the same name.
+{%- for addr in resolvers %}
+  - domain: "dns.{% raw %}{{ internal_domain }}{% endraw %}"
+    answer: "{{ addr }}"
+{%- endfor %}
+  - domain: "k3s.{% raw %}{{ internal_domain }}{% endraw %}"
+    answer: "{% raw %}{{ k3s_api_vip }}{% endraw %}"
+  - domain: "vip-internal.{% raw %}{{ internal_domain }}{% endraw %}"
+    answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
+  - domain: "vip-public.{% raw %}{{ internal_domain }}{% endraw %}"
+    answer: "{% raw %}{{ metallb_public_vip }}{% endraw %}"
+  # Platform services fronted by the internal ingress. Every new internal app
+  # hostname gets a line here; external names live in the DNS-provider config.
+  - domain: "loki.{% raw %}{{ internal_domain }}{% endraw %}"
+    answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
+  - domain: "grafana.{% raw %}{{ internal_domain }}{% endraw %}"
+    answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
+  - domain: "traefik.{% raw %}{{ internal_domain }}{% endraw %}"
+    answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
+  - domain: "connect.{% raw %}{{ internal_domain }}{% endraw %}"
+    answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
+  # The identity provider. Every SSO-gated UI redirects here, and Grafana's
+  # OIDC endpoints are this name — without the rewrite the login loop dead-ends
+  # on NXDOMAIN and nobody can sign in to anything.
+  - domain: "auth.{% raw %}{{ internal_domain }}{% endraw %}"
+    answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
+
+adguard_home_rewrites: >-
+  {% raw %}{{ dict(_dns_addressed_hosts | map(attribute='inventory_hostname')
+            | map('regex_replace', '$', '.' ~ internal_domain) | list
+          | zip(_dns_addressed_hosts | map(attribute='ansible_host') | list))
+     | dict2items(key_name='domain', value_name='answer')
+     + _dns_service_rewrites }}{% endraw %}
+
+# Filtering allowlist entries and PTR records, e.g.
+#   - '@@||example.com^'
+#   - '||<host-ip-in-reverse-octet-order>.in-addr.arpa^$dnsrewrite=NOERROR;PTR;{{ nas_host }}.'
+adguard_home_user_rules: []
+
+# --- Certificates -----------------------------------------------------------
+# acme.sh with a DNS-01 challenge issues the wildcard on the primary resolver
+# and pushes it to each target over SSH with a dedicated, from=-pinned key.
+#
+# `acme_certs_enabled` is set PER HOST (on dns-01 in hosts.yml), not here: the
+# role is the certificate authority, so a second resolver running it would issue
+# its own wildcard against the same rate limit and push it to everyone else.
+#
+# The role installs acme.sh, the renewal cron and the distribution channel — it
+# never runs `--issue`. The FIRST wildcard is one manual command on the primary
+# resolver, which the role prints when no certificate exists yet; SETUP.md § 4
+# walks it. Renewals from then on are automatic.
+acme_certs_domain: {{ internal_domain }}
+acme_certs_email: "{% raw %}{{ admin_email }}{% endraw %}"
+acme_certs_ssh_private_key: >-
+  {% raw %}{{ lookup('ansible.builtin.env', 'ACME_SSH_PRIVATE_KEY')
+     or undef(hint='ACME_SSH_PRIVATE_KEY must be set (run via the task wrapper / op run)') }}{% endraw %}
+acme_certs_ssh_public_key: >-
+  {% raw %}{{ lookup('ansible.builtin.env', 'ACME_SSH_PUBLIC_KEY')
+     or undef(hint='ACME_SSH_PUBLIC_KEY must be set (run via the task wrapper / op run)') }}{% endraw %}
+# Without this the distribution key is usable from any source address.
+acme_certs_key_from: {{ resolvers[0] }}
+
+# The AUTHORITY side of the push: the local user whose ~/.ssh holds the
+# distribution private key, and the path the renewal hook reads it from. Both
+# match the role's own defaults and are written out anyway, because
+# ansible/playbooks/postflight.yml probes this exact channel and a playbook sees
+# inventory, never a role's defaults/main.yml — a `| default(...)` there on a
+# value the play cannot know is what turned a broken check into a passing-looking
+# one. `ssh_user` on each target below is the login user ON THE TARGET and is a
+# different thing entirely.
+acme_certs_ssh_user: root
+acme_certs_ssh_key_path: /root/.ssh/id_ed25519_certs
+
+# Hosts that receive the wildcard cert. host_key pins the target's SSH host key:
+# the push carries private-key material, so the channel runs with
+# StrictHostKeyChecking=yes and never accept-new. The NAS needs the cert for
+# NFS-over-TLS; the relay for SMTP submission; every replica resolver for DoT.
+#
+# The pins ship EMPTY on purpose. Every target except the NAS is a container
+# Ansible has not created yet, so its host key does not exist when this file is
+# first rendered. An unpinned entry is filtered out of
+# acme_certs_distribution_targets below rather than aborting the certificate
+# play — so a first deploy runs to completion and simply distributes to nobody.
+# Once the guests are up:
+#
+#     task certs:show-host-keys     # prints a paste-ready host_key per target
+#
+# paste each value in here and re-run `task dns:deploy`. `task infra:verify`
+# fails while any target is still unpinned, so a forgotten paste is reported
+# rather than silently skipped. Same workflow after a target is rebuilt — its
+# old pin stops matching and the push fails loudly until you re-capture it.
+_acme_certs_targets:
+{%- for addr in resolvers[1:] %}
+  - host: dns-{{ '%02d' | format(loop.index + 1) }}
+    ip: {{ addr }}
+    ssh_user: {{ admin_user }}
+    host_key: ""
+{%- endfor %}
+  - host: {{ smtp_name }}
+    ip: {{ lan_prefix }}.23
+    ssh_user: {{ admin_user }}
+    host_key: ""
+  - host: {{ nas_name }}
+    ip: {{ lan_prefix }}.11
+    ssh_user: {{ admin_user }}
+    host_key: ""
+acme_certs_distribution_targets: >-
+  {% raw %}{{ _acme_certs_targets
+     | selectattr('host_key', 'defined')
+     | rejectattr('host_key', 'equalto', '') | list }}{% endraw %}
+
+# --- Config replication -----------------------------------------------------
+{%- if resolvers | length > 1 %}
+# dns-01 -> dns-02, over the ingress so the hop is TLS. Enabled on the primary
+# only (adguard_sync_enabled in hosts.yml), and the role takes ONE replica — a
+# third resolver needs its own sync instance. TLS config is deliberately NOT
+# synced: certs are host-local and reconciled per host by adguard_home.
+{%- else %}
+# Inert with a single resolver: adguard_sync_enabled is set to false on the
+# primary in hosts.yml, so the role runs as a no-op. These values are kept
+# self-consistent so that adding a second resolver (a second
+# upstream_dns_servers address) is the only change needed.
+{%- endif %}
+adguard_sync_origin: "https://dns-01.{% raw %}{{ internal_domain }}{% endraw %}"
+adguard_sync_replica: "https://dns-{{ '%02d' | format(2 if resolvers | length > 1 else 1) }}.{% raw %}{{ internal_domain }}{% endraw %}"
+adguard_sync_admin_user: "{% raw %}{{ adguard_home_admin_user }}{% endraw %}"
+adguard_sync_admin_password: "{% raw %}{{ adguard_home_admin_password }}{% endraw %}"
+adguard_sync_features:
+  dns:
+    accessLists: true
+    serverConfig: true
+    rewrites: true
+  dhcp:
+    serverConfig: true
+    staticLeases: true
+  generalSettings: true
+  queryLogConfig: true
+  statsConfig: true
+  clientSettings: true
+  services: true
+  filters: true
+  theme: true
+  tlsConfig: false

@@ -1,0 +1,71 @@
+---
+# The CONTRAST fixture. answers-weisssrv-shaped.yml deliberately has the shape
+# of the reference cluster, which makes it blind to one whole class of defect: a
+# value hardcoded from that cluster (192.168.0.100, a NAS hostname, a runner
+# tag) renders byte-identical to a correct substitution, so no assertion on that
+# render alone can tell them apart.
+#
+# Every answer here is therefore deliberately UNLIKE its counterpart in the
+# other fixture — different LAN, different domains, different names, different
+# vault, different runner tag — and both optional modules are OFF, which is the
+# other half of the coverage (the `{% if %}` branches the shaped fixture never
+# takes). test_render_b_carries_no_fixture_a_values asserts that nothing from
+# fixture A survives into this render.
+#
+# Every question in copier.yml must have an entry here too.
+cluster_name: brinemoor
+internal_domain: internal.brinemoor.test
+external_domain: brinemoor.test
+
+lan_cidr: 10.77.4.0/24
+lan_prefix: 10.77.4
+lan_gateway: 10.77.4.1
+k3s_api_vip: 10.77.4.9
+metallb_public_vip: 10.77.4.7
+metallb_internal_vip: 10.77.4.8
+k3s_pod_cidr: 172.30.0.0/16
+k3s_service_cidr: 172.31.0.0/16
+upstream_dns_servers: 10.77.4.3
+
+admin_user: steward
+admin_email: steward@brinemoor.test
+alert_email: pager@brinemoor.test
+timezone: Europe/Lisbon
+
+git_backend: gitlab_selfhosted
+git_host: forge.brinemoor.test
+# Deliberately NOT equal to cluster_name: every repository path the render
+# composes is `git_namespace/cluster_name`, and a fixture where the namespace
+# and the cluster name coincide cannot prove which one a given path used.
+git_namespace: seaworks
+
+secrets_backend: onepassword
+onepassword_vault: Brinemoor
+
+dns_backend: cloudflare
+
+# The largest starter roster, against the shaped fixture's smallest.
+compute_node_count: 4
+nas_host: vault-keeper.internal.brinemoor.test
+smtp_host: postmark.internal.brinemoor.test
+# Both shipped job labels plus a third of this cluster's own: the shape an
+# operator who ADDS an exporter ends up with, and the only kind of divergence
+# copier.yml's validator permits (dropping either shipped label is rejected —
+# the rules naming it would match no series).
+node_exporter_job_regex: node-exporter|node-exporter-host|hostwatch
+
+# Both optional modules OFF — the branches the shaped fixture never renders.
+vpn_tailscale: false
+# Never asked here (vpn_tailscale is false), but answered anyway so the fixture
+# covers the whole question set — and answered UNLIKE fixture A's, like every
+# other value in this file.
+tailnet_dns_suffix: tail9z8y7x.ts.net
+gpu: none
+
+lib_url: https://git.ericsweiss.com/eric/weisssrv-lib.git
+lib_ref: v0.2.0
+lib_project: eric/weisssrv-lib
+
+ci_runner_tag: tidal-privileged
+ci_cpu_selector: internal.brinemoor.test/cpu=modern
+enable_semantic_release: true

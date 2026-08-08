@@ -1,0 +1,24 @@
+# Site data: which domains tailnet clients resolve through which nameserver.
+#
+# Empty is the correct starting value. Add the entry only after the resolver
+# device is registered and `tailscale status` shows it — the module resolves a
+# `device_hostname` at PLAN time, so an entry naming a device that does not
+# exist yet fails the plan for everyone.
+#
+# The map is a required module input with no default precisely so that an unset
+# value is an error rather than a silently planned destroy of live Split-DNS.
+locals {
+  split_dns = {}
+
+  # Once the in-cluster resolver is up, adopt the console entry first and then
+  # switch this on in one applied step:
+  #
+  #   terraform import 'module.tailnet.tailscale_dns_split_nameservers.this["{{ internal_domain }}"]' {{ internal_domain }}
+  #
+  # split_dns = {
+  #   "{{ internal_domain }}" = { device_hostname = "ts-dns" }
+  # }
+  #
+  # `device_hostname` derives the 100.x address at plan time, so a rebuilt
+  # resolver self-heals; a literal `nameservers = [...]` list does not.
+}

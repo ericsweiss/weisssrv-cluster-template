@@ -1,0 +1,56 @@
+---
+# Rolls workloads whose mounted ConfigMap changed — a plain Flux reconcile
+# updates the ConfigMap but leaves the pod's mounted copy stale. Opt-in only:
+# Reloader does nothing to workloads without the
+# `reloader.stakater.com/auto: "true"` annotation.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: reloader
+  namespace: reloader
+spec:
+  interval: 30m
+  releaseName: reloader
+  chart:
+    spec:
+      chart: reloader
+      version: "${helm_chart_versions_reloader}"
+      sourceRef:
+        kind: HelmRepository
+        name: stakater
+        namespace: flux-system
+      interval: 12h
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    reloader:
+      watchGlobally: true
+      # Drops cluster-wide Secret get/list/watch from Reloader's RBAC. Annotated
+      # workloads still reload on ConfigMap changes; a credential rotation is a
+      # manual restart. Flip only if you accept the secret-read surface.
+      ignoreSecrets: true
+      logFormat: json
+      podMonitor:
+        enabled: true
+      # Chart toggle: sets readOnlyRootFilesystem AND mounts the paired writable
+      # /tmp emptyDir. Setting it only in containerSecurityContext would leave
+      # the pod with no writable /tmp.
+      readOnlyRootFileSystem: true
+      deployment:
+        replicas: 1
+        containerSecurityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+          limits:
+            memory: 128Mi

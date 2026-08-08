@@ -1,0 +1,33 @@
+---
+# Stage 3/5 — platform controller HelmReleases (see the stage's
+# kustomization.yaml for the set). timeout 15m: a cold install of cert-manager
+# + ESO + their CRDs regularly exceeds 5m.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infrastructure-controllers
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 15m
+  dependsOn:
+    - name: infrastructure-sources
+    - name: infrastructure-crds
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/infrastructure/controllers
+  prune: true
+  wait: true
+  # Both ConfigMaps come from infrastructure-sources, which must be Ready
+  # before this stage runs — optional:false so a missing one fails loudly
+  # instead of rendering empty versions/domains.
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: cluster-versions
+        optional: false
+      - kind: ConfigMap
+        name: cluster-config
+        optional: false

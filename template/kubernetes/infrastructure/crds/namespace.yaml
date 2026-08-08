@@ -1,0 +1,17 @@
+---
+# Holds the HelmRelease bookkeeping for a chart of cluster-scoped CRDs — no pod
+# ever runs here. The PSA labels are still declared (at the strictest level)
+# rather than left to the cluster default, for the same reason `default` is
+# hardened in configs/default-namespace.yaml: a pod that lands here by accident
+# should be refused, not silently admitted under whatever default is in force.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prometheus-operator-crds
+  labels:
+    app.kubernetes.io/name: prometheus-operator-crds
+    app.kubernetes.io/part-of: kube-prometheus-stack
+    app.kubernetes.io/managed-by: flux
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

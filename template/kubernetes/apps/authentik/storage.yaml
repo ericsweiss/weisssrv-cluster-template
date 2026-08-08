@@ -1,0 +1,100 @@
+---
+# PostgreSQL data: a hostPath on the storage node, backed by a dedicated block
+# device mounted at /mnt/postgres-data (provisioned by the storage host's Ansible
+# role). Node affinity is on the storage-node LABEL, not a hostname.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: authentik-postgres-data
+  labels:
+    type: local
+    app: authentik
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /mnt/postgres-data
+    type: Directory
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: ${cluster_node_label_domain}/nas
+              operator: In
+              values:
+                - "true"
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: authentik-postgres-data
+  namespace: authentik
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 10Gi
+  volumeName: authentik-postgres-data
+
+---
+# Landing zone for the nightly logical pg_dump. The block device above is a
+# crash-consistent snapshot only; these dumps are the restorable copy — and,
+# being on a file-walkable dataset, they are what the offsite backup can actually
+# pick up (a raw block device cannot be walked).
+#
+# DEPLOY ORDER: the storage host's Ansible role creates and owns the export
+# directory. Run the storage deploy BEFORE this PV reconciles, or the first
+# CronJob run has nothing to mount.
+#
+# Hostname (not IP) + xprtsec=tls: the server certificate has no IP SAN, so an IP
+# mount fails the handshake. `server` is immutable on a bound PV — the force
+# annotation lets Flux delete+recreate on a change (Retain keeps the data).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: authentik-pg-dump
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: "Enabled"
+  labels:
+    type: nfs
+    app: authentik
+spec:
+  claimRef:
+    namespace: authentik
+    name: authentik-pg-dump
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  nfs:
+    server: ${cluster_nas_host}
+    path: /backups-apps/authentik
+  mountOptions:
+    - nfsvers=4.2
+    - hard
+    - noatime
+    - xprtsec=tls
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: authentik-pg-dump
+  namespace: authentik
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 5Gi
+  volumeName: authentik-pg-dump

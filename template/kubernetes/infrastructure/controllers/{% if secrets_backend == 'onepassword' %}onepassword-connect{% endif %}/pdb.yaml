@@ -1,0 +1,13 @@
+---
+# Keep the secret backend serving across drains: without a replica up, ESO
+# refreshes and any host-side key fetch both stall.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: onepassword-connect
+  namespace: external-secrets
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: onepassword-connect

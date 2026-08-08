@@ -1,0 +1,28 @@
+---
+# ansible-lint configuration. https://ansible.readthedocs.io/projects/lint/configuring/
+#
+# `profile: production` is not just a severity dial — it also decides WHICH
+# rules run. With no profile at all ansible-lint enables its opt-in rules too,
+# and `run-once` then fires on every legitimate `run_once:` in playbooks/, so a
+# freshly generated repository would fail its own lint gate on day one.
+#
+# Location matters: ansible-lint walks UP from its working directory, so this
+# file at the repository root is found both by the CI job (cwd = repo root,
+# targets `ansible/`) and by `task ansible:lint` (cwd = `ansible/`).
+profile: production
+
+exclude_paths:
+  - .cache/
+  - .venv/
+  - venv/
+  # `task lib:sync` checkout — the library lints itself upstream.
+  - .weisssrv-lib/
+  # Where ansible-galaxy installs weisssrv.infra (and where ansible-lint
+  # auto-installs it when `offline: false` and it is missing). Without this,
+  # `task lint` run before `task ansible:install-collections` reports the
+  # LIBRARY's line lengths as failures in a repository that does not own them.
+  - ansible_collections/
+  - ansible/ansible_collections/
+
+# Let ansible-lint resolve the collection dependencies it needs to check FQCNs.
+offline: false

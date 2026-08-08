@@ -1,0 +1,60 @@
+---
+# OS packages on the base infrastructure, then every application update.
+#
+# Inventory order is not a safety mechanism here: the reboot protections live in
+# _reboot-if-needed.yml (per-host proxmox_self_reboot_safe, and the CI
+# self-host detection that defers or detaches the executor host's reboot).
+
+- name: Full update - OS packages (rolling)
+  hosts: base_managed
+  become: true
+  serial: 1
+  tasks:
+    - name: Display the current host
+      ansible.builtin.debug:
+        msg: "=== Updating {{ inventory_hostname }} — OS packages ==="
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 0
+
+    - name: Upgrade packages (safe upgrade)
+      ansible.builtin.apt:
+        upgrade: safe
+        autoclean: true
+        autoremove: true
+      register: apt_upgrade
+
+    - name: Display the upgrade summary
+      ansible.builtin.debug:
+        msg: "{{ apt_upgrade.stdout_lines | default([]) }}"
+
+    - name: Check and reboot if needed
+      ansible.builtin.include_tasks: _reboot-if-needed.yml
+
+    - name: Verify SSH after reboot
+      ansible.builtin.service:
+        name: ssh
+        state: started
+      when: reboot_required | bool
+
+    - name: Ensure the NFS server is healthy after the upgrade
+      ansible.builtin.include_tasks: _ensure-nfs-server-healthy.yml
+
+- name: Full update - applications
+  ansible.builtin.import_playbook: update-applications.yml
+
+- name: Full update - summary
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    ansible_become: false
+  tasks:
+    - name: Display the completion message
+      ansible.builtin.debug:
+        msg: >-
+          Full update complete for the base infrastructure and applications.
+          k3s nodes and application hosts are patched by update-packages.yml;
+          k3s itself by update-k3s-nodes.yml. Verify before walking away.

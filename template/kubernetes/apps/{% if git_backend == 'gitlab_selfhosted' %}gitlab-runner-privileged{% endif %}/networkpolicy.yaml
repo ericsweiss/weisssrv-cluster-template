@@ -1,0 +1,90 @@
+# Policies for the privileged runner namespace. Nothing here serves traffic, so
+# ingress is denied outright by the netpol-baseline component.
+---
+# Namespace-wide default-deny EGRESS. The label-scoped allows below are additive,
+# so an unlabelled pod fails closed instead of getting silently unrestricted
+# egress in a privileged-PSS namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: gitlab-runner-privileged
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+---
+# Manager: long-polls GitLab and talks to the kube-API to spawn job pods. Same two
+# DNAT traps as the shared runner — the apiserver rule targets the SERVER NODE
+# range (kube-proxy rewrites the API VIP before policy evaluation), and the
+# ingress VIP is allowed both pre-DNAT (ipBlock) and post-DNAT (namespace).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: managers-egress
+  namespace: gitlab-runner-privileged
+spec:
+  podSelector:
+    matchLabels:
+      app: gitlab-runner-privileged
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: ${cluster_apiserver_egress_cidr}
+      ports:
+        - protocol: TCP
+          port: 6443
+    - to:
+        - ipBlock:
+            cidr: ${cluster_metallb_internal_vip}/32
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# Infrastructure job pods deploy the cluster itself — Ansible over SSH, kubectl,
+# secret fetches — and keep unrestricted egress BY DESIGN. This is only safe
+# because the runner is project-locked (README) and PSS-privileged jobs never run
+# untrusted code here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: infrastructure-jobs-egress
+  namespace: gitlab-runner-privileged
+spec:
+  podSelector:
+    matchLabels:
+      ${cluster_node_label_domain}/runner-class: infrastructure
+  policyTypes:
+    - Egress
+  egress:
+    - {}

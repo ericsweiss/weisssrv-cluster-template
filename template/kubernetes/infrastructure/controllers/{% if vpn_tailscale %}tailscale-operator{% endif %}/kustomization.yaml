@@ -1,0 +1,17 @@
+---
+# NetworkPolicy: default-deny INGRESS only. The operator exposes no container
+# ports, Service, ServiceMonitor or webhook, and the proxy pods receive tailnet
+# traffic on their tailscale0 interface — off the CNI path — so the deny cannot
+# break the data plane. Egress stays open: the proxies forward to
+# dynamically-created backends and reach the tailnet control plane/DERP.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: tailscale
+resources:
+  - namespace.yaml
+  - externalsecret.yaml
+  - release.yaml
+  - proxyclass.yaml
+
+components:
+  - ../../../components/netpol-baseline

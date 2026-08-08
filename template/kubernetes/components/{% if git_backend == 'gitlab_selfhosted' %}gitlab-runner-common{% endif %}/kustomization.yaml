@@ -1,0 +1,105 @@
+---
+# HelmRelease fields that are byte-identical in BOTH runner releases. They used
+# to be hand-mirrored with a "keep in sync" comment; the two runners are the
+# shared-vs-privileged trust boundary, so a fix applied here can no longer be
+# forgotten in one file.
+#
+# Each runner's release.yaml keeps only its genuine deltas: name/namespace,
+# releaseName, secret, tags, runUntagged/protected, concurrent, the executor TOML,
+# image/privileged, serviceAccount and per-runner job resources.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  # `target` selects what gets patched; the patch's own metadata.name is required
+  # for the strategic-merge parse but is ignored for matching, so it does not
+  # rename the selected HelmRelease.
+  - target:
+      kind: HelmRelease
+    patch: |
+      apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: gitlab-runner-common
+      spec:
+        interval: 30m
+        # The liveness probe plus the GitLab connection handshake can take 6-8
+        # minutes on a cold start; the 5m default times out prematurely.
+        timeout: 15m
+        chart:
+          spec:
+            chart: gitlab-runner
+            version: "${gitlab_runner_helm_version}"
+            sourceRef:
+              kind: HelmRepository
+              name: gitlab
+              namespace: flux-system
+            interval: 12h
+        install:
+          timeout: 15m
+          remediation:
+            retries: 3
+        upgrade:
+          timeout: 15m
+          remediation:
+            retries: 3
+            remediateLastFailure: true
+        values:
+          # Use the name that resolves to the INTERNAL ingress path if your DNS is
+          # split-horizon, so runner<->GitLab traffic stays on the LAN instead of
+          # hairpinning through the public record. clone_url (in the executor TOML)
+          # must match: GitLab's external_url governs clone URLs, which do not
+          # follow gitlabUrl on their own.
+          gitlabUrl: https://${cluster_git_host}
+
+          # One manager pod; job parallelism is `concurrent` per runner. Pinned at
+          # 1 so an out-of-band `kubectl scale --replicas=0` (used to drain CI
+          # during cluster maintenance) is reconciled back instead of leaving the
+          # deployment silently at 0.
+          replicas: 1
+
+          checkInterval: 30
+
+          # RBAC bound only to the manager SA; job pods run as an unprivileged SA.
+          # clusterWideAccess:false confines the manager to its own namespace. Jobs
+          # that must touch other namespaces bring their own kubeconfig.
+          rbac:
+            create: true
+            clusterWideAccess: false
+            rules:
+              - apiGroups: [""]
+                resources: ["pods", "pods/exec", "pods/attach", "pods/log", "secrets", "configmaps"]
+                verbs: ["get", "list", "watch", "create", "update", "delete", "patch"]
+              - apiGroups: [""]
+                resources: ["services"]
+                verbs: ["get", "list", "watch"]
+
+          # Manager pod resources (NOT the job pods).
+          resources:
+            requests:
+              cpu: 150m
+              memory: 128Mi
+            limits:
+              # No CPU limit: the manager is a trusted control loop that bursts
+              # when spawning and reaping job pods, and CFS throttling here was a
+              # chronic CPUThrottlingHigh source. The request still grants a
+              # scheduling share; the memory limit stays.
+              memory: 512Mi
+
+          affinity:
+            nodeAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  preference:
+                    matchExpressions:
+                      - key: ${cluster_node_label_domain}/nas
+                        operator: DoesNotExist
+
+          tolerations:
+            - key: ${cluster_node_label_domain}/ingress
+              operator: Equal
+              value: "true"
+              effect: PreferNoSchedule
+            - key: ${cluster_node_label_domain}/compute
+              operator: Equal
+              value: "true"
+              effect: PreferNoSchedule

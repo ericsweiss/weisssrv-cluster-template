@@ -1,0 +1,661 @@
+---
+# weisssrv-cluster-template — answer schema.
+#
+# Every question below is recorded in the generated repo's .copier-answers.yml
+# and replayed on `copier update`, so the set is API: renaming or removing a
+# question is a breaking change for every cluster generated from this template.
+#
+# Site identity (domains, IPs, vault name) deliberately has NO default — a
+# cluster cannot be generated without it. Values that are genuinely generic
+# (timezone, backend selection, library ref) do carry one.
+
+_min_copier_version: "9.0.0"
+_subdirectory: template
+_templates_suffix: .jinja
+_answers_file: .copier-answers.yml
+
+# Jinja defaults, minus surprises: trim_blocks/lstrip_blocks stay OFF so the
+# `{%- ... -%}` whitespace control used throughout template/ behaves the way it
+# reads. Templates must not rely on block trimming.
+_envops:
+  keep_trailing_newline: true
+
+# Replaces copier's built-in list, so the built-ins are repeated here.
+_exclude:
+  - "copier.yml"
+  - "copier.yaml"
+  - "~*"
+  - "*.py[co]"
+  - "__pycache__"
+  - ".git"
+  - ".DS_Store"
+  - ".svn"
+
+_message_after_copy: |
+  Generated the {{ cluster_name }} cluster repository.
+
+  It is not deployable yet — the host roster is the one thing this template
+  cannot guess. Next:
+
+    1. cd into the new directory, `git init`, and make the first commit.
+    2. Fill in ansible/inventories/prod/hosts.yml (and add host_vars/ files
+       for per-host data), then run `task hosts:sync`.
+    3. Create the {{ secrets_backend }} items the generated
+       ansible/inventories/prod/group_vars/all.yml references; the full
+       inventory with field names is in the template's PRE-SETUP.md:
+       https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/PRE-SETUP.md
+    4. Follow the bring-up order in the generated README.md ("Bring-up"),
+       or the long form at
+       https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/SETUP.md
+
+  Everything in kubernetes/ reads its site values from the cluster-config
+  ConfigMap, not from literals — edit that ConfigMap, never the manifests,
+  when an address or domain changes.
+
+_message_after_update: |
+  Updated {{ cluster_name }} to template {{ _copier_conf.vcs_ref or 'HEAD' }}.
+
+  Re-run the local gates before committing: `task lint`, and `task flux:lint`
+  if anything under kubernetes/ changed.
+
+# --------------------------------------------------------------------------
+# Cluster identity
+# --------------------------------------------------------------------------
+
+cluster_name:
+  type: str
+  help: >-
+    Short name for this cluster. Becomes the Proxmox cluster name, the
+    kubernetes/clusters/<name>/ directory Flux bootstraps into, and the
+    prefix of generated hostnames.
+  placeholder: "homelab"
+  validator: >-
+    {% if not (cluster_name | regex_search('^[a-z][a-z0-9-]{1,30}[a-z0-9]$')) %}
+    cluster_name must be 3-32 characters of lowercase letters, digits and
+    hyphens, starting with a letter and ending with a letter or digit — it is
+    used as a DNS label and as a directory name.
+    {% endif %}
+
+internal_domain:
+  type: str
+  help: >-
+    Zone for internal service names (resolved by the cluster's own DNS to LAN
+    addresses). Also used as the Kubernetes node-label namespace.
+  placeholder: "lan.example.com"
+  validator: >-
+    {% if not (internal_domain | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
+    internal_domain must be a lowercase fully-qualified domain, e.g. lan.example.com
+    {% endif %}
+
+external_domain:
+  type: str
+  help: >-
+    Zone for internet-facing service names, managed through the DNS backend.
+    Must differ from internal_domain — the split-horizon design issues one
+    certificate and one ingress route per zone, and identical zones collide.
+  placeholder: "example.com"
+  validator: >-
+    {% if not (external_domain | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
+    external_domain must be a lowercase fully-qualified domain, e.g. example.com
+    {% elif external_domain == internal_domain %}
+    external_domain must differ from internal_domain. Use a subdomain for the
+    internal zone (lan.example.com) if you only own one domain.
+    {% endif %}
+
+# --------------------------------------------------------------------------
+# Network
+# --------------------------------------------------------------------------
+
+lan_cidr:
+  type: str
+  help: >-
+    The flat LAN every node and guest lives on, in CIDR form. Firewall IP sets,
+    NFS export allowlists and NetworkPolicy egress rules are derived from it.
+  placeholder: "192.168.1.0/24"
+  validator: >-
+    {% if not (lan_cidr | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(8|1[0-9]|2[0-9]|3[0-2])$')) %}
+    lan_cidr must be an IPv4 network in CIDR form with a /8-/32 prefix,
+    e.g. 192.168.1.0/24
+    {% endif %}
+
+lan_prefix:
+  type: str
+  help: >-
+    First three octets of the LAN, used to compose host addresses in the
+    inventory. Defaults to the network part of lan_cidr; override only if the
+    LAN is not a /24.
+  default: "{{ lan_cidr.split('/')[0].rsplit('.', 1)[0] }}"
+  validator: >-
+    {% if not (lan_prefix | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){2}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    lan_prefix must be three octets with no trailing dot, e.g. 192.168.0
+    {% endif %}
+
+# The gateway-vs-VIP collision is tested on the THREE VIP QUESTIONS BELOW, not
+# here. A validator sees only the answers given so far (copier renders it against
+# AnswersMap.combined, whose `user` map fills in question order), and all three
+# VIPs are asked after this one — so a test here would compare against three
+# undefined names, pass everything interactively, and fire only in
+# `--data`/update mode where every answer is present up front. That is a check
+# that reads as enforcement and enforces nothing on the path the docs document.
+# Rule: only compare an answer against answers declared ABOVE it.
+lan_gateway:
+  type: str
+  help: >-
+    Default gateway (your router) for every host and guest on the LAN. REQUIRED:
+    the Proxmox container and VM roles assert it before `pct create` / `qm
+    create`, so without it the very first task of the first play of
+    `task infra:deploy` stops. Usually the LAN's .1.
+  default: "{{ lan_prefix }}.1"
+  validator: >-
+    {% if not (lan_gateway | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    lan_gateway must be an IPv4 address, e.g. {{ lan_prefix }}.1
+    {% elif not lan_gateway.startswith(lan_prefix + '.') %}
+    lan_gateway must sit inside lan_prefix ({{ lan_prefix }}.x) — every guest is
+    created on the flat LAN and routes through it directly.
+    {% endif %}
+
+k3s_api_vip:
+  type: str
+  help: >-
+    Floating address kube-vip advertises for the Kubernetes API. Must be free,
+    outside the DHCP pool, and on the LAN — nothing assigns it statically.
+  placeholder: "{{ lan_prefix }}.161"
+  validator: >-
+    {% if not (k3s_api_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    k3s_api_vip must be an IPv4 address, e.g. {{ lan_prefix }}.161
+    {% elif not k3s_api_vip.startswith(lan_prefix + '.') %}
+    k3s_api_vip must sit inside lan_prefix ({{ lan_prefix }}.x) — kube-vip
+    advertises it with ARP on the LAN segment.
+    {% elif k3s_api_vip == lan_gateway %}
+    k3s_api_vip must differ from lan_gateway ({{ lan_gateway }}) — kube-vip
+    would ARP-advertise your router's address and fight it for the LAN.
+    {% endif %}
+
+metallb_public_vip:
+  type: str
+  help: >-
+    LoadBalancer address for the internet-facing ingress entrypoint (the one
+    your router port-forwards 80/443 to).
+  placeholder: "{{ lan_prefix }}.100"
+  validator: >-
+    {% if not (metallb_public_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    metallb_public_vip must be an IPv4 address, e.g. {{ lan_prefix }}.100
+    {% elif not metallb_public_vip.startswith(lan_prefix + '.') %}
+    metallb_public_vip must sit inside lan_prefix ({{ lan_prefix }}.x).
+    {% elif metallb_public_vip in [k3s_api_vip, lan_gateway] %}
+    metallb_public_vip must differ from k3s_api_vip ({{ k3s_api_vip }}) and from
+    lan_gateway ({{ lan_gateway }}) — MetalLB answers ARP for it, so sharing
+    either address takes the API or the router off the LAN.
+    {% endif %}
+
+metallb_internal_vip:
+  type: str
+  help: >-
+    LoadBalancer address for LAN-only ingress. Internal DNS rewrites point
+    *.{{ internal_domain }} here.
+  placeholder: "{{ lan_prefix }}.101"
+  validator: >-
+    {% if not (metallb_internal_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    metallb_internal_vip must be an IPv4 address, e.g. {{ lan_prefix }}.101
+    {% elif not metallb_internal_vip.startswith(lan_prefix + '.') %}
+    metallb_internal_vip must sit inside lan_prefix ({{ lan_prefix }}.x).
+    {% elif metallb_internal_vip in [k3s_api_vip, metallb_public_vip, lan_gateway] %}
+    metallb_internal_vip must differ from k3s_api_vip ({{ k3s_api_vip }}),
+    metallb_public_vip ({{ metallb_public_vip }}) and lan_gateway
+    ({{ lan_gateway }}) — MetalLB answers ARP for it.
+    {% endif %}
+
+k3s_pod_cidr:
+  type: str
+  help: >-
+    Cluster CIDR k3s allocates pod addresses from. The k3s default is almost
+    always right; change it only if it collides with the LAN or a route your
+    nodes already carry.
+  default: "10.42.0.0/16"
+  validator: >-
+    {% if not (k3s_pod_cidr | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(8|1[0-9]|2[0-9]|3[0-2])$')) %}
+    k3s_pod_cidr must be an IPv4 network in CIDR form, e.g. 10.42.0.0/16
+    {% endif %}
+
+k3s_service_cidr:
+  type: str
+  help: >-
+    Service CIDR k3s allocates ClusterIPs from. Must not overlap k3s_pod_cidr
+    or the LAN.
+  default: "10.43.0.0/16"
+  validator: >-
+    {% if not (k3s_service_cidr | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(8|1[0-9]|2[0-9]|3[0-2])$')) %}
+    k3s_service_cidr must be an IPv4 network in CIDR form, e.g. 10.43.0.0/16
+    {% elif k3s_service_cidr == k3s_pod_cidr %}
+    k3s_service_cidr must differ from k3s_pod_cidr.
+    {% endif %}
+
+upstream_dns_servers:
+  type: str
+  help: >-
+    Addresses of this cluster's resolvers, space-separated, in preference
+    order. The starter inventory builds one AdGuard+unbound container at each
+    address, points every host's resolv.conf at the list, and forwards
+    non-cluster names from in-cluster DNS to it — so these are the addresses
+    the containers are CREATED at, not pre-existing servers to forward to.
+    Two (one per host) is the smallest resilient answer.
+
+    These are the ONLY guest addresses you choose here. Every other one in the
+    starter inventory is composed from a fixed scheme (.11+ hosts, .23 relay,
+    .31+ k3s servers, .41+ agents), and a resolver's Proxmox vmid is DERIVED
+    from its address (100 + last octet) — so an answer landing in one of those
+    bands produces two guests on one address under one vmid. The validator
+    below rejects exactly that; hosts.yml's header lists the whole scheme.
+  default: "{{ lan_prefix }}.21 {{ lan_prefix }}.22"
+  validator: >-
+    {% set _addrs = upstream_dns_servers.split() %}
+    {% set _vips = {k3s_api_vip: 'the k3s API VIP',
+                    metallb_public_vip: 'the public MetalLB VIP',
+                    metallb_internal_vip: 'the internal MetalLB VIP',
+                    lan_gateway: 'the LAN gateway'} %}
+    {% set ns = namespace(taken=[]) %}
+    {% for a in _addrs %}
+    {% set _o = a.split('.')[-1] | int %}
+    {% if a in _vips %}
+    {% set ns.taken = ns.taken + [a ~ ' is ' ~ _vips[a]] %}
+    {% elif a.startswith(lan_prefix ~ '.') and 11 <= _o <= 19 %}
+    {% set ns.taken = ns.taken + [a ~ ' is in the .11-.19 Proxmox host band'] %}
+    {% elif a.startswith(lan_prefix ~ '.') and _o == 23 %}
+    {% set ns.taken = ns.taken + [a ~ ' is the SMTP relay (.23, vmid 123)'] %}
+    {% elif a.startswith(lan_prefix ~ '.') and 31 <= _o <= 39 %}
+    {% set ns.taken = ns.taken + [a ~ ' is in the .31-.39 k3s server band (vmids 131+)'] %}
+    {% elif a.startswith(lan_prefix ~ '.') and 41 <= _o <= 49 %}
+    {% set ns.taken = ns.taken + [a ~ ' is in the .41-.49 k3s agent band (vmids 141+)'] %}
+    {% endif %}
+    {% endfor %}
+    {% if not (upstream_dns_servers | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])( ((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))*$')) %}
+    upstream_dns_servers must be one or more IPv4 addresses separated by single
+    spaces, e.g. "{{ lan_prefix }}.21 {{ lan_prefix }}.22"
+    {% elif _addrs | unique | list | length != _addrs | length %}
+    upstream_dns_servers lists the same address twice — one container is built
+    per address, so a repeat is one resolver, not two.
+    {% elif ns.taken %}
+    upstream_dns_servers collides with the addresses the starter inventory
+    composes: {{ ns.taken | join('; ') }}. These are the only resolver addresses
+    you pick, but they are NOT the only ones generated — hosts.yml lays out
+    .11+ (Proxmox hosts), .23 (SMTP relay), .31+ (k3s servers) and .41+ (k3s
+    agents), and a resolver's vmid is 100 + its last octet, so a collision here
+    duplicates BOTH the address and the vmid (pct and qm share one namespace).
+    Pick addresses outside those bands — .21/.22 if they are free, otherwise
+    anything in .20-.22, .24-.30 or .50+.
+    {% endif %}
+
+# --------------------------------------------------------------------------
+# Operator
+# --------------------------------------------------------------------------
+
+admin_user:
+  type: str
+  help: >-
+    Unprivileged login Ansible uses on every host, with passwordless sudo and
+    key-only SSH. It must already exist on the Proxmox nodes before the first
+    playbook run (see PRE-SETUP).
+  placeholder: "ops"
+  validator: >-
+    {% if not (admin_user | regex_search('^[a-z_][a-z0-9_-]{0,31}$')) %}
+    admin_user must be a valid POSIX username: lowercase letters, digits,
+    underscore and hyphen, not starting with a digit.
+    {% elif admin_user == 'root' %}
+    admin_user must not be root — the base role hardens SSH by disabling root
+    login, which would lock Ansible out.
+    {% endif %}
+
+admin_email:
+  type: str
+  help: >-
+    Destination for system mail (cron, SMART, ZFS events) and the ACME account
+    address used when requesting certificates.
+  placeholder: "you@example.com"
+  validator: >-
+    {% if not (admin_email | regex_search('^[^@\s]+@[^@\s]+\.[^@\s]{2,}$')) %}
+    admin_email must be an email address.
+    {% endif %}
+
+alert_email:
+  type: str
+  help: >-
+    Recipient for critical Alertmanager notifications. Separate from
+    admin_email when pages should reach a different inbox; defaults to it.
+  default: "{{ admin_email }}"
+  validator: >-
+    {% if not (alert_email | regex_search('^[^@\s]+@[^@\s]+\.[^@\s]{2,}$')) %}
+    alert_email must be an email address.
+    {% endif %}
+
+timezone:
+  type: str
+  help: IANA timezone applied to every managed host.
+  default: "UTC"
+  validator: >-
+    {% if not (timezone | regex_search('^(UTC|[A-Za-z]+/[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)?)$')) %}
+    timezone must be an IANA name such as UTC, Europe/Berlin or
+    America/Los_Angeles.
+    {% endif %}
+
+# --------------------------------------------------------------------------
+# Backends
+#
+# Each choice list carries every backend the generated tree has a seam for.
+# Choices that are not implemented fail here rather than producing a repo that
+# looks complete and does not reconcile. docs/ARCHITECTURE.md "Backend seams"
+# records what a new implementation has to provide.
+# --------------------------------------------------------------------------
+
+git_backend:
+  type: str
+  help: >-
+    Where THIS CLUSTER'S repository lives — the one Flux bootstraps into and
+    this pipeline runs in. It does not constrain where tenant (application)
+    repositories live: Flux clones those over HTTPS or SSH from any host, so a
+    GitHub-hosted tenant on a GitLab-hosted cluster is a supported, ordinary
+    setup (kubernetes/clusters/<name>/tenants/README.md).
+  default: gitlab_selfhosted
+  choices:
+    Self-hosted GitLab: gitlab_selfhosted
+    GitHub (not implemented): github
+  validator: >-
+    {% if git_backend != 'gitlab_selfhosted' %}
+    git_backend '{{ git_backend }}' is not implemented as the home of the
+    CLUSTER repository — only 'gitlab_selfhosted' generates a repo that
+    bootstraps and reconciles, because the generated pipeline and the Flux
+    bootstrap task are GitLab-shaped. This says nothing about tenant repos:
+    those may live on GitHub or anywhere else Flux can clone from, whatever you
+    answer here. See docs/ARCHITECTURE.md "Backend seams".
+    {% endif %}
+
+git_host:
+  type: str
+  help: >-
+    Hostname of the git server, without scheme or path — the Flux GitRepository
+    URL, the CI include refs and the container registry host are built from it.
+  default: "{% if git_backend == 'github' %}github.com{% endif %}"
+  placeholder: "git.example.com"
+  validator: >-
+    {% if not (git_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
+    git_host must be a bare hostname such as git.example.com — no https://,
+    no trailing path.
+    {% endif %}
+
+git_namespace:
+  type: str
+  help: >-
+    Group or user path that owns this repository on git_host, without the
+    repository name. THE REPOSITORY MUST BE NAMED cluster_name: every path the
+    template composes — the Flux bootstrap target, the GitLab-managed Terraform
+    state project, the README's repository row and the runbook_url prefix on
+    every alert — is `git_namespace/cluster_name`. There is deliberately no
+    separate repository-name answer; a second name only ever produced renders
+    that disagreed with themselves (`flux bootstrap` CREATES the repository it
+    is pointed at, so the mismatch surfaces as a second, empty repo rather than
+    an error). Subgroups are allowed.
+  placeholder: "homelab"
+  validator: >-
+    {% if not (git_namespace | regex_search('^[a-zA-Z0-9][a-zA-Z0-9._-]*(/[a-zA-Z0-9][a-zA-Z0-9._-]*)*$')) %}
+    git_namespace must be a path segment such as "homelab" or
+    "homelab/infra" — no leading or trailing slash.
+    {% endif %}
+
+secrets_backend:
+  type: str
+  help: >-
+    Source of every credential. Host tooling reads it at run time; in-cluster
+    workloads reach it through External Secrets Operator.
+  default: onepassword
+  choices:
+    1Password (CLI + Connect): onepassword
+
+onepassword_vault:
+  type: str
+  when: "{{ secrets_backend == 'onepassword' }}"
+  help: >-
+    Name of the 1Password vault holding this cluster's items. Every op:// URI
+    and every ExternalSecret resolves against it.
+  placeholder: "Homelab"
+  validator: >-
+    {% if not onepassword_vault.strip() %}
+    onepassword_vault is required — it is the first path segment of every
+    op://<vault>/<item>/<field> reference the generated repo emits.
+    {% endif %}
+
+dns_backend:
+  type: str
+  help: >-
+    Authoritative DNS for external_domain. Drives the Terraform zone module,
+    external-dns and the ACME DNS-01 solver.
+  default: cloudflare
+  choices:
+    Cloudflare: cloudflare
+
+# --------------------------------------------------------------------------
+# Starter host roster
+#
+# The inventory is NOT generated from answers — hosts.yml is a skeleton you
+# fill in. These four shape that skeleton and the handful of in-cluster
+# manifests that must name a host before the inventory exists.
+# --------------------------------------------------------------------------
+
+compute_node_count:
+  type: int
+  help: >-
+    Number of compute (non-NAS) Proxmox hosts in the starter inventory. With
+    the NAS node that is compute_node_count + 1 hosts; 2 gives the three-node
+    etcd quorum k3s wants. Edit hosts.yml afterwards either way.
+  default: 2
+  validator: >-
+    {% if compute_node_count | int < 1 %}
+    compute_node_count must be at least 1 — the NAS node alone cannot carry a
+    k3s server quorum.
+    {% endif %}
+
+nas_host:
+  type: str
+  help: >-
+    FQDN of the NAS / NFS server, UNDER internal_domain. NFS PVs mount it BY
+    NAME (the wildcard certificate has no IP SAN, so an IP mount fails the TLS
+    handshake) — and the wildcard covers *.{{ internal_domain }} only, so a
+    name outside that zone fails the handshake for the same reason an IP does.
+    Its short name is also the storage host's name in the Ansible inventory, so
+    this answer renames the host on both sides at once.
+  default: "pve-nas-01.{{ internal_domain }}"
+  validator: >-
+    {% if not (nas_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
+    nas_host must be a fully-qualified lowercase hostname, e.g.
+    pve-nas-01.{{ internal_domain }}
+    {% elif not nas_host.endswith('.' ~ internal_domain) %}
+    nas_host must sit under internal_domain ({{ internal_domain }}) — e.g.
+    {{ nas_host.split('.')[0] }}.{{ internal_domain }}. The internal wildcard
+    certificate covers *.{{ internal_domain }} and nothing else, and the NFS PVs
+    mount this name with `xprtsec=tls`, which verifies the server certificate's
+    SAN; the internal resolver answers for that zone only, so a name outside it
+    does not resolve on the LAN either. The symptom is Grafana, Loki and the
+    authentik backup PV stuck unbound on a tlshd handshake error, several phases
+    after this answer.
+    {% endif %}
+
+smtp_host:
+  type: str
+  help: >-
+    FQDN of the SMTP relay Alertmanager and the hosts' null-client submit to,
+    UNDER internal_domain. Submission is `smtpd_tls_security_level: encrypt`
+    against the same internal wildcard certificate, and the internal resolver
+    answers for that zone only. Its short name is also the relay container's
+    name in the Ansible inventory, so this answer renames the host on both
+    sides at once.
+  default: "smtp-relay.{{ internal_domain }}"
+  validator: >-
+    {% if not (smtp_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
+    smtp_host must be a fully-qualified lowercase hostname, e.g.
+    smtp-relay.{{ internal_domain }}
+    {% elif not smtp_host.endswith('.' ~ internal_domain) %}
+    smtp_host must sit under internal_domain ({{ internal_domain }}) — e.g.
+    {{ smtp_host.split('.')[0] }}.{{ internal_domain }}. The wildcard
+    certificate covers *.{{ internal_domain }} only and the internal resolver
+    answers for that zone only, so a name outside it neither resolves on the LAN
+    nor presents a certificate the null clients will submit to. This one fails
+    quietly: mail queues instead of erroring.
+    {% endif %}
+
+node_exporter_job_regex:
+  type: str
+  help: >-
+    Prometheus job label(s) the node-exporters register under, as a regex
+    alternation — the node and storage alert rules scope themselves to it. The
+    two shipped names are NOT choices: `node-exporter` is the kube-prometheus
+    chart's own DaemonSet job and `node-exporter-host` is the static scrape of
+    the Proxmox hosts and VMs (a Service whose name is a literal in
+    kubernetes/infrastructure/observability/exporters/). Both must stay in the
+    alternation or the rules that name them match zero series and every host
+    alert goes permanently silent. Extend it (append `|my-job`) only when you
+    add a THIRD exporter source of your own.
+  default: "node-exporter|node-exporter-host"
+  validator: >-
+    {% set _shipped = ['node-exporter', 'node-exporter-host'] %}
+    {% set _members = node_exporter_job_regex.split('|') | map('trim') | list %}
+    {% set _absent = _shipped | reject('in', _members) | list %}
+    {% if not node_exporter_job_regex.strip() %}
+    node_exporter_job_regex is required — an empty value silently widens every
+    host alert to the whole cluster.
+    {% elif _absent %}
+    node_exporter_job_regex must keep every job label this template actually
+    ships as an alternation member; missing: {{ _absent | join(', ') }}.
+    The rules referencing them would match no series, and a rule that matches
+    nothing never fires. Add labels, do not replace them:
+    "node-exporter|node-exporter-host|{{ node_exporter_job_regex.split('|') | first }}".
+    {% endif %}
+
+# --------------------------------------------------------------------------
+# Optional modules
+# --------------------------------------------------------------------------
+
+vpn_tailscale:
+  type: bool
+  help: >-
+    Enable the Tailscale overlay: the host role, the in-cluster operator, the
+    tailnet ACL Terraform module, and the tailnet half of the admin firewall
+    rules. Requires a Tailscale account and OAuth clients (see PRE-SETUP).
+  default: false
+
+tailnet_dns_suffix:
+  type: str
+  when: "{{ vpn_tailscale }}"
+  help: >-
+    MagicDNS suffix of your tailnet ("<tailnet>.ts.net", from the Tailscale
+    admin console DNS page). The in-cluster tailnet resolver hands out CNAMEs
+    into it, so there is no usable default: a placeholder here leaves remote
+    access to internal names broken with nothing failing to say so. You have
+    already answered that you have a tailnet, so you can name it.
+  placeholder: "tail1a2b3c.ts.net"
+  validator: >-
+    {% if not (tailnet_dns_suffix | regex_search('^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+ts\.net$')) %}
+    tailnet_dns_suffix must be a MagicDNS name ending in .ts.net, e.g.
+    tail1a2b3c.ts.net
+    {% elif tailnet_dns_suffix.startswith('CHANGEME') %}
+    tailnet_dns_suffix is still the CHANGEME placeholder. Read the real suffix
+    off the Tailscale admin console's DNS page ("Tailnet name") — the in-cluster
+    tailnet resolver CNAMEs internal names into this domain, so a placeholder
+    ships remote access broken and silent. Answer vpn_tailscale as false if you
+    do not have a tailnet yet.
+    {% endif %}
+
+gpu:
+  type: str
+  help: >-
+    GPU passthrough for one compute node. 'nvidia' adds VFIO host prep, the
+    driver and container toolkit on the GPU agent, and the in-cluster device
+    plugin (time-sliced). GPU TELEMETRY IS NOT SHIPPED — DCGM needs a chart
+    pin in your own version file; the four-step recipe is in
+    kubernetes/infrastructure/observability/README.md (GPU telemetry).
+  default: none
+  choices:
+    No GPU: none
+    NVIDIA (VFIO passthrough): nvidia
+
+# --------------------------------------------------------------------------
+# Library pin
+# --------------------------------------------------------------------------
+
+lib_url:
+  type: str
+  help: >-
+    Clone URL of weisssrv-lib. Read by ansible/requirements.yml, the Terraform
+    module sources and `task lib:sync`. Point it at a fork or a private mirror
+    if you do not consume the upstream library.
+  default: "https://git.ericsweiss.com/eric/weisssrv-lib.git"
+  validator: >-
+    {% if not (lib_url | regex_search('^https?://[^\s]+\.git$')) %}
+    lib_url must be an http(s) clone URL ending in .git, e.g.
+    https://git.example.com/group/weisssrv-lib.git
+    {% endif %}
+
+lib_ref:
+  type: str
+  help: >-
+    weisssrv-lib ref the generated repo pins: the Ansible collection in
+    requirements.yml, the CI template includes and the Terraform module
+    sources. Use a RELEASE TAG (vX.Y.Z) — the library's include contract is
+    explicit that a branch is never a valid pin, and a branch deleted after
+    merge takes every include, module source and collection install with it.
+  default: "v0.2.0"
+  validator: >-
+    {% if not (lib_ref | regex_search('^[A-Za-z0-9][A-Za-z0-9._/-]*$')) %}
+    lib_ref must be a git ref — normally a release tag such as v0.2.0.
+    {% endif %}
+
+lib_project:
+  type: str
+  help: >-
+    GitLab project PATH of weisssrv-lib on the instance this cluster's pipeline
+    runs on. `include: project:` resolves instance-locally, so it is separate
+    from lib_url; the default is lib_url's path, which is right when the
+    library and the cluster live on the same GitLab.
+  default: "{{ lib_url.split('://')[1].split('/', 1)[1] | replace('.git', '') }}"
+  validator: >-
+    {% if not (lib_project | regex_search('^[a-zA-Z0-9][a-zA-Z0-9._-]*(/[a-zA-Z0-9][a-zA-Z0-9._-]*)+$')) %}
+    lib_project must be a namespace/project path such as eric/weisssrv-lib —
+    no scheme, no leading or trailing slash.
+    {% endif %}
+
+# --------------------------------------------------------------------------
+# CI
+# --------------------------------------------------------------------------
+
+ci_runner_tag:
+  type: str
+  help: >-
+    Runner tag every generated CI job carries. Must match a runner registered
+    on the project, or the pipeline queues forever.
+  default: "infrastructure"
+  validator: >-
+    {% if not ci_runner_tag.strip() %}
+    ci_runner_tag is required — an untagged job only lands on a runner that
+    accepts untagged jobs.
+    {% endif %}
+
+ci_cpu_selector:
+  type: str
+  help: >-
+    Node selector (label=value) pinning the secret-detection job to a modern
+    CPU — gitleaks SIGILLs on hosts without SSE4.2. Must satisfy the runner's
+    node_selector_overwrite_allowed regex (`^[a-z0-9.-]+/cpu=(modern|legacy)$`),
+    AND the label must actually be applied to at least one k3s node — a
+    selector no node carries leaves the job Pending forever. Add it to the
+    agents' `k3s_labels` in ansible/inventories/prod/hosts.yml before the first
+    pipeline; see kubernetes/README.md's node-label contract.
+  default: "{{ internal_domain }}/cpu=modern"
+  validator: >-
+    {% if not (ci_cpu_selector | regex_search('^[^\s=]+=[^\s=]+$')) %}
+    ci_cpu_selector must be a single label=value pair, e.g.
+    {{ internal_domain }}/cpu=modern
+    {% endif %}
+
+enable_semantic_release:
+  type: bool
+  help: >-
+    Add the release stage and the semantic-release include to the generated
+    pipeline. Off by default: a cluster repo is normally released by hand.
+  default: false

@@ -1,0 +1,11 @@
+---
+# Tailscale operator charts — puts selected in-cluster Services on the
+# tailnet as real mesh devices (loadBalancerClass: tailscale).
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: tailscale
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://pkgs.tailscale.com/helmcharts

@@ -1,0 +1,17 @@
+---
+# Cluster entrypoint — the flux-system Kustomization written by `flux bootstrap`
+# reconciles this path. It applies the Flux controllers plus the five
+# infrastructure stages (sources -> crds -> controllers -> configs ->
+# observability), apps (dependsOn infrastructure-configs, parallel to
+# observability), and the tenants folder.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - flux-system
+  - infrastructure-sources.yaml
+  - infrastructure-crds.yaml
+  - infrastructure-controllers.yaml
+  - infrastructure-configs.yaml
+  - infrastructure-observability.yaml
+  - apps.yaml
+  - tenants

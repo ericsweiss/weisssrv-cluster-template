@@ -1,0 +1,24 @@
+[defaults]
+inventory = inventories/prod/hosts.yml
+remote_user = {{ admin_user }}
+retry_files_enabled = False
+stdout_callback = default
+callback_result_format = yaml
+callbacks_enabled = timer, profile_tasks
+
+[privilege_escalation]
+become = True
+become_method = sudo
+become_user = root
+become_ask_pass = False
+
+# host_key_checking stays on; accept-new is TOFU (record on first contact, refuse
+# loudly if a host's key ever changes). After a legitimate host rebuild:
+#   ssh-keygen -R <host-or-ip> && ssh-keyscan -t ed25519 <host-or-ip> >> ~/.ssh/known_hosts
+# Never "fix" a key-change failure by disabling the check.
+[ssh_connection]
+pipelining = True
+ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=~/.ssh/known_hosts
+
+[inventory]
+enable_plugins = yaml, ini

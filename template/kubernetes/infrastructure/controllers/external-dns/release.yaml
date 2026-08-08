@@ -1,0 +1,82 @@
+---
+# Publishes DNS records for Ingresses, Services and Traefik IngressRoutes into
+# the EXTERNAL zone. The internal zone is served by the LAN resolver, not here.
+# The provider block is the DNS-backend seam — see infrastructure/README.md.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: external-dns
+  namespace: external-dns
+spec:
+  interval: 30m
+  releaseName: external-dns
+  chart:
+    spec:
+      chart: external-dns
+      version: "${helm_chart_versions_external_dns}"
+      sourceRef:
+        kind: HelmRepository
+        name: external-dns
+        namespace: flux-system
+      interval: 12h
+  install:
+    # The provider token Secret is created by the configs stage, which depends
+    # on this one. Without disableWait, Helm --wait blocks on pod readiness ->
+    # pods block on the Secret -> bootstrap deadlock. Upgrades run in steady
+    # state where the Secret already exists.
+    disableWait: true
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    provider:
+      name: cloudflare
+    extraArgs:
+      # Proxy public records (hides the origin IP, absorbs DDoS). Drop this for
+      # records that need the origin reachable directly.
+      - --cloudflare-proxied
+    env:
+      - name: CF_API_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: dns-api-token
+            key: api-token
+    sources:
+      - ingress
+      - service
+      - traefik-proxy
+    domainFilters:
+      - ${cluster_external_domain}
+    # Ownership registry: `policy: sync` only ever deletes records carrying
+    # THIS owner's TXT record, so Terraform-managed and DDNS-managed records in
+    # the same zone are never touched. Keep record names disjoint per owner.
+    policy: sync
+    registry: txt
+    txtOwnerId: "${cluster_name}"
+    txtPrefix: "_external-dns."
+    logLevel: info
+    logFormat: json
+    interval: 5m
+    triggerLoopOnEvent: true
+    rbac:
+      create: true
+      additionalPermissions:
+        - apiGroups:
+            - traefik.io
+          resources:
+            - ingressroutes
+          verbs:
+            - get
+            - list
+            - watch
+    serviceMonitor:
+      enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 128Mi

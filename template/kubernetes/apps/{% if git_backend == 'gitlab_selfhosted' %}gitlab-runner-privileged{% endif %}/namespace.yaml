@@ -1,0 +1,20 @@
+---
+# Dedicated namespace for the privileged runner. The separation from the shared
+# runner's namespace IS the isolation boundary: the shared runner's
+# namespace-scoped RBAC cannot read this runner's token Secret. PSS enforce stays
+# `privileged` because the DinD job pods legitimately require it — which is
+# precisely why untrusted jobs must never land here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitlab-runner-privileged
+  labels:
+    app.kubernetes.io/name: gitlab-runner-privileged
+    app.kubernetes.io/part-of: gitlab
+    app.kubernetes.io/managed-by: flux
+    # Opts this namespace into the platform ClusterSecretStore, whose
+    # spec.conditions admit only namespaces carrying this label.
+    ${cluster_node_label_domain}/cluster-secrets: "true"
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged

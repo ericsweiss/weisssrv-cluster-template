@@ -1,0 +1,12 @@
+---
+# Shared by pre-commit, the CI yaml-lint job and `task lint` so all three agree.
+# `relaxed` with line-length disabled — inline documentation comments run long.
+extends: relaxed
+
+rules:
+  line-length: disable
+  # Files under template/ are Jinja sources: a rendered document may legitimately
+  # start with a control block, so the `---` requirement is advisory here.
+  document-start:
+    present: true
+    level: warning

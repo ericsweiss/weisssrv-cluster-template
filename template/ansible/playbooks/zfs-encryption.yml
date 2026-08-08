@@ -1,0 +1,15 @@
+---
+# Boot-time ZFS encryption-key fetch on every Proxmox host. Deploying the
+# mechanism is safe everywhere; it only activates on hosts that declare
+# zfs_encryption_pools.
+
+- name: Deploy ZFS-encryption boot-time unlock
+  hosts: proxmox
+  become: true
+  vars:
+    # Read from the environment so the token never reaches argv or a fact.
+    zfs_encryption_connect_token: >-
+      {{ lookup('ansible.builtin.env', 'ZFS_ENCRYPTION_CONNECT_TOKEN', default='') }}
+  roles:
+    - role: weisssrv.infra.zfs_encryption
+      tags: [zfs_encryption]

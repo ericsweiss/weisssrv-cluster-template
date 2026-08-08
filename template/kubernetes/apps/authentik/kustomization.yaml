@@ -1,0 +1,35 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: authentik
+
+resources:
+  - namespace.yaml
+  - externalsecret.yaml
+  - storage.yaml
+  - release.yaml
+  - ingress-route.yaml
+  - middleware.yaml
+  - certificate.yaml
+  - networkpolicy.yaml
+  - vpa.yaml
+  - pg-dump.yaml
+
+components:
+  - ../../components/netpol-baseline
+  - ../../components/netpol-egress-dns
+  - ../../components/netpol-egress-public
+
+patches:
+  # netpol-egress-public selects every pod in the namespace by default. Public
+  # HTTPS is only for the server/worker (blueprints, GeoIP) — PostgreSQL and the
+  # dump job have no business on the internet.
+  - target:
+      kind: NetworkPolicy
+      name: allow-egress-public
+    patch: |
+      - op: replace
+        path: /spec/podSelector
+        value:
+          matchLabels:
+            app.kubernetes.io/name: authentik

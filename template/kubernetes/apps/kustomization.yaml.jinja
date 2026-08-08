@@ -1,0 +1,17 @@
+---
+# One entry per app module. Removing a line makes Flux prune that module's
+# namespace and everything in it — which is the documented way to disable one.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - authentik
+  - registry-cache
+  - vm-ingress
+{%- if vpn_tailscale %}
+  - tailnet-dns
+{%- endif %}
+{%- if git_backend == 'gitlab_selfhosted' %}
+  - gitlab-runner
+  - gitlab-runner-privileged
+  - gitlab-runner-reaper
+{%- endif %}

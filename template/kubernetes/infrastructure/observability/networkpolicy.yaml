@@ -1,0 +1,98 @@
+# Pod-network controls for the observability namespace.
+#
+# Loki runs auth_enabled=false, so without these its ClusterIP :3100 is writable
+# by any pod cluster-wide (the basic-auth middleware only guards the ingress).
+# Prometheus, Alertmanager (holds the notification credentials) and Grafana are
+# likewise unguarded at the pod layer by default.
+#
+# default-deny-ingress comes from components/netpol-baseline. Egress is
+# deliberately left open: the exporters here reach many LAN hosts, Alertmanager
+# reaches the SMTP relay and the webhook receivers, and Prometheus remote-scrapes
+# host node-exporters — enumerating that surface is out of scope.
+
+---
+# Intra-namespace ingress: Prometheus scrapes every component here, Grafana
+# queries Prometheus and Loki, the operator talks to its workloads.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-intra-namespace-ingress
+  namespace: observability
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+
+---
+# Loki :3100 — push ingestion from host-side collectors arrives via the Traefik
+# ingress; the in-cluster Alloy DaemonSet is covered by the intra-namespace rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-loki-ingress
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 3100
+
+---
+# Grafana UI from Traefik only. Prometheus :9090 / Alertmanager :9093 have no
+# ingress route (access is kubectl port-forward); add a per-port allowance here
+# if one is ever created.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ui-ingress-from-traefik
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 3000
+
+---
+# prometheus-operator admission webhooks (:10250). The apiserver calls the
+# operator pod directly and runs on the host network, so its source IP is not
+# selectable — allow the port from anywhere (it serves only the webhook). Without
+# this the default-deny blocks the call and, with failurePolicy=Ignore, invalid
+# PrometheusRules are admitted unvalidated.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-operator-admission-webhook
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kube-prometheus-stack-prometheus-operator
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 10250

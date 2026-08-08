@@ -1,0 +1,15 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudflare-ddns
+  labels:
+    app.kubernetes.io/name: cloudflare-ddns
+    app.kubernetes.io/managed-by: flux
+    ${cluster_node_label_domain}/dns-api-token: "true"
+    # Opts this namespace into the platform ClusterSecretStore, whose
+    # spec.conditions admit only namespaces carrying this label.
+    ${cluster_node_label_domain}/cluster-secrets: "true"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

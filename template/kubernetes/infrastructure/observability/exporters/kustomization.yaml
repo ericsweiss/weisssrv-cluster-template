@@ -1,0 +1,9 @@
+---
+# Platform exporters. App and hardware exporters (SNMP, ZFS, hypervisor, per-app
+# sidecars) are site data — add them here in a site overlay, or ship them with the
+# app module that needs them.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - blackbox-exporter.yaml
+  - node-exporter-host.yaml

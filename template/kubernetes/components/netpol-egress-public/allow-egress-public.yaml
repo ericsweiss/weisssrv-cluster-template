@@ -1,0 +1,52 @@
+---
+# Public-unicast HTTPS (+ DNS) egress. The except list is the RFC-reserved and
+# private IPv4 space — it is a standards constant, NOT this cluster's LAN, and
+# is the single copy for the whole repo. It stops a compromised platform pod
+# from reaching the LAN, loopback, cloud-metadata or CGNAT/tailnet space.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-public
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              # RFC1918 private space.
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              # "This network" / unspecified (RFC 1122).
+              - 0.0.0.0/8
+              # Loopback (RFC 1122).
+              - 127.0.0.0/8
+              # Link-local (RFC 3927), incl. 169.254.169.254 cloud metadata.
+              - 169.254.0.0/16
+              # CGNAT (RFC 6598) — the tailnet range; same trust boundary as LAN.
+              - 100.64.0.0/10
+              # IETF protocol assignments (RFC 6890).
+              - 192.0.0.0/24
+              # TEST-NET-1/2/3 (RFC 5737).
+              - 192.0.2.0/24
+              - 198.51.100.0/24
+              - 203.0.113.0/24
+              # Benchmarking (RFC 2544).
+              - 198.18.0.0/15
+              # Multicast (RFC 5771).
+              - 224.0.0.0/4
+              # Reserved / future use (RFC 1112), incl. 255.255.255.255.
+              - 240.0.0.0/4
+      ports:
+        - protocol: TCP
+          port: 443
+        # Public DNS: the cert-manager DNS-01 self-check resolves the challenge
+        # TXT against the zone's authoritative nameservers directly. Without it
+        # challenges stall and renewals silently fail.
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

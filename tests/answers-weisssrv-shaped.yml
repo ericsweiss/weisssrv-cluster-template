@@ -1,0 +1,68 @@
+---
+# Answer fixture for the render tests: the same SHAPE as the reference cluster
+# (flat /24 LAN, split-horizon domains, three VIPs, both optional modules on)
+# with placeholder identity. No real host, domain or credential appears here —
+# the render tests assert that none of the reference cluster's values survive
+# into a generated repository.
+#
+# Every question in copier.yml must have an entry: `copier copy --defaults`
+# would otherwise fall back to a default, and a question that gains one later
+# would silently stop being exercised.
+cluster_name: homelab
+internal_domain: lan.example.com
+external_domain: example.com
+
+lan_cidr: 192.168.0.0/24
+lan_prefix: 192.168.0
+lan_gateway: 192.168.0.1
+k3s_api_vip: 192.168.0.161
+metallb_public_vip: 192.168.0.100
+metallb_internal_vip: 192.168.0.101
+k3s_pod_cidr: 10.42.0.0/16
+k3s_service_cidr: 10.43.0.0/16
+upstream_dns_servers: 192.168.0.21 192.168.0.22
+
+admin_user: ops
+admin_email: ops@example.com
+alert_email: ops@example.com
+timezone: America/Los_Angeles
+
+git_backend: gitlab_selfhosted
+git_host: git.example.com
+git_namespace: homelab
+
+secrets_backend: onepassword
+onepassword_vault: Homelab
+
+dns_backend: cloudflare
+
+# Starter roster: 2 compute + the NAS node = 3 hosts, the smallest shape that
+# carries a 3-node etcd quorum.
+compute_node_count: 2
+nas_host: pve-nas-01.lan.example.com
+smtp_host: smtp-relay.lan.example.com
+# Both shipped host-metric sources: the in-cluster DaemonSet and the static
+# scrape of the Proxmox hosts (matches copier.yml's default).
+node_exporter_job_regex: node-exporter|node-exporter-host
+
+# Both optional modules ON: their conditional branches are the ones a
+# defaults-only render would never reach.
+vpn_tailscale: true
+# A real-SHAPED suffix, not the CHANGEME sentinel: the question's validator
+# rejects the placeholder, because a cluster generated with it ships a tailnet
+# resolver CNAMEing internal names into a domain that does not exist — broken
+# remote access with nothing failing to say so.
+tailnet_dns_suffix: tail1a2b3c.ts.net
+gpu: nvidia
+
+# The library is the one upstream this fixture legitimately names. The ref is a
+# RELEASE TAG, matching copier.yml's default: a fixture pinned to a branch would
+# exercise CI includes, Terraform module sources and the galaxy requirement at a
+# ref no real user gets — and break outright the moment the branch is deleted.
+lib_url: https://git.ericsweiss.com/eric/weisssrv-lib.git
+lib_ref: v0.2.0
+lib_project: eric/weisssrv-lib
+
+ci_runner_tag: infrastructure
+ci_cpu_selector: lan.example.com/cpu=modern
+enable_semantic_release: false

@@ -1,0 +1,7 @@
+---
+# kube-apiserver egress for controllers that watch/patch cluster state.
+# See netpol-egress-dns for the default-deny caveat.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - allow-egress-apiserver.yaml

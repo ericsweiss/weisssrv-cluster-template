@@ -1,0 +1,55 @@
+---
+# Export map for scripts/generate-hosts-env.py: which inventory group becomes
+# which shell variable in scripts/hosts.env. Regenerate with `task hosts:sync`
+# after editing the inventory; CI fails when the committed file is stale.
+#
+# `group` names must exist in ansible/inventories/prod/hosts.yml AND must hold
+# hosts directly — a group that only lists `children:` resolves to nothing,
+# which is why the two hypervisor roles are exported separately and combined.
+# A missing group is an error unless the entry sets `required: false`. Add an
+# entry here when you add a guest the Taskfile or a script reaches by address.
+output: scripts/hosts.env
+exports:
+  # Hostnames, not addresses: the Proxmox nodes are reached through SSH config
+  # (and through the tailnet when off-LAN), so their names must resolve.
+  - key: NAS_HOSTS
+    group: nas
+    value: names
+  - key: NAS_IPS
+    group: nas
+    value: ips
+  - key: COMPUTE_HOSTS
+    group: compute
+    value: names
+  - key: COMPUTE_IPS
+    group: compute
+    value: ips
+  - key: PVE_HOSTS
+    combine:
+      - NAS_HOSTS
+      - COMPUTE_HOSTS
+  - key: PVE_IPS
+    combine:
+      - NAS_IPS
+      - COMPUTE_IPS
+  - key: DNS_IPS
+    group: dns
+    value: ips
+  - key: MAIL_IPS
+    group: mail
+    value: ips
+  - key: K3S_SERVERS
+    group: k3s_servers
+    value: ips
+  - key: K3S_AGENTS
+    group: k3s_agents
+    value: ips
+  # Everything an operator or CI job SSHes into — used for known-hosts seeding
+  # and the reachability sweeps.
+  - key: ALL_SSH_IPS
+    combine:
+      - PVE_IPS
+      - DNS_IPS
+      - MAIL_IPS
+      - K3S_SERVERS
+      - K3S_AGENTS
