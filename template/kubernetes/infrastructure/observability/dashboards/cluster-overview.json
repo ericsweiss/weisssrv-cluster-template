@@ -3053,7 +3053,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "label_join((kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100, \"pvc_key\", \"/\", \"namespace\", \"persistentvolumeclaim\")",
+          "expr": "label_join(max by (namespace,persistentvolumeclaim) (kubelet_volume_stats_used_bytes) / max by (namespace,persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes) * 100, \"pvc_key\", \"/\", \"namespace\", \"persistentvolumeclaim\")",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -3064,7 +3064,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "label_join(kubelet_volume_stats_capacity_bytes, \"pvc_key\", \"/\", \"namespace\", \"persistentvolumeclaim\")",
+          "expr": "label_join(max by (namespace,persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes), \"pvc_key\", \"/\", \"namespace\", \"persistentvolumeclaim\")",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -3075,7 +3075,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "label_join(kubelet_volume_stats_used_bytes, \"pvc_key\", \"/\", \"namespace\", \"persistentvolumeclaim\")",
+          "expr": "label_join(max by (namespace,persistentvolumeclaim) (kubelet_volume_stats_used_bytes), \"pvc_key\", \"/\", \"namespace\", \"persistentvolumeclaim\")",
           "format": "table",
           "instant": true,
           "legendFormat": "",
