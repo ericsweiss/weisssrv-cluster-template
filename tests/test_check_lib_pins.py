@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import importlib.util
 import textwrap
+
+import pytest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -221,6 +223,210 @@ def test_fix_reports_failure_when_the_result_still_violates(
     rc = clp.main(["--ci-file", str(p), "--fix"])
     assert rc == 1
     assert "FAILED after rewrite" in capsys.readouterr().err
+
+
+def test_fix_ignores_project_ref_pairs_outside_the_include_block(
+    tmp_path: Path,
+) -> None:
+    """--fix must only touch `include:`, the one thing check() reads.
+
+    A job whose variables happen to carry `project:` and `ref:` keys is not an
+    include entry. Rewriting it would edit a value the gate never verifies, and
+    the post-fix check() cannot catch it either — check() only ever looks at the
+    parsed include list.
+    """
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.0"
+        include:
+          - project: eric/weisssrv-lib
+            ref: v0.3.2
+            file: /ci/lint/yaml-lint.yml
+        mirror-job:
+          variables:
+            project: eric/weisssrv-lib
+            ref: v0.1.1
+          script:
+            - echo "$ref"
+        """
+    )
+    p = _write(tmp_path, content)
+    assert clp.fix(p) == 1  # the include entry only
+    doc = clp.load_ci(p)
+    assert doc["include"][0]["ref"] == "v0.5.0"
+    assert doc["mirror-job"]["variables"]["ref"] == "v0.1.1"
+    assert clp.check(p) == []
+
+
+def test_fix_rewrites_an_empty_ref_without_corrupting_the_line(
+    tmp_path: Path,
+) -> None:
+    """`line.replace("", want, 1)` would insert at column 0 and mangle the file."""
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.0"
+        include:
+          - project: eric/weisssrv-lib
+            ref:
+            file: /ci/lint/yaml-lint.yml
+        """
+    )
+    p = _write(tmp_path, content)
+    assert clp.fix(p) == 1
+    assert "    ref: v0.5.0\n" in p.read_text()
+    assert clp.check(p) == []
+
+
+def test_fix_preserves_a_trailing_comment_on_the_ref_line(tmp_path: Path) -> None:
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.0"
+        include:
+          - project: eric/weisssrv-lib
+            ref: v0.3.2  # pinned deliberately
+            file: /ci/lint/yaml-lint.yml
+        """
+    )
+    p = _write(tmp_path, content)
+    assert clp.fix(p) == 1
+    assert "ref: v0.5.0  # pinned deliberately" in p.read_text()
+
+
+def test_fix_leaves_a_nested_inputs_ref_alone(tmp_path: Path) -> None:
+    """`inputs:` can carry its own `ref` input; only the entry's pin is ours."""
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.0"
+        include:
+          - project: eric/weisssrv-lib
+            ref: v0.3.2
+            file: /ci/thing.yml
+            inputs:
+              ref: some-user-value
+        """
+    )
+    p = _write(tmp_path, content)
+    assert clp.fix(p) == 1
+    doc = clp.load_ci(p)
+    assert doc["include"][0]["ref"] == "v0.5.0"
+    assert doc["include"][0]["inputs"]["ref"] == "some-user-value"
+
+
+def test_fix_does_not_treat_a_hash_inside_the_ref_as_a_comment(
+    tmp_path: Path,
+) -> None:
+    """In YAML a `#` opens a comment only when whitespace precedes it."""
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.0"
+        include:
+          - project: eric/weisssrv-lib
+            ref: v1.0#rc1
+            file: /ci/lint/yaml-lint.yml
+        """
+    )
+    p = _write(tmp_path, content)
+    assert clp.fix(p) == 1
+    # The whole old value is replaced — no fragment survives as a comment.
+    assert "#rc1" not in p.read_text()
+    assert clp.check(p) == []
+
+
+def test_fix_replaces_a_quoted_ref_value(tmp_path: Path) -> None:
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.0"
+        include:
+          - project: eric/weisssrv-lib
+            ref: "v0.3.2"
+            file: /ci/lint/yaml-lint.yml
+        """
+    )
+    p = _write(tmp_path, content)
+    assert clp.fix(p) == 1
+    assert clp.load_ci(p)["include"][0]["ref"] == "v0.5.0"
+    assert clp.check(p) == []
+
+
+def test_fix_ignores_a_nested_inputs_project_and_ref_pair(tmp_path: Path) -> None:
+    """`inputs:` may carry `project` and `ref` of its own — they are inputs.
+
+    This is what defeated every indentation heuristic: the nested pair looks
+    exactly like an entry's own pin to a line scanner, but check() reads only
+    the direct include mappings and never sees it.
+    """
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.0"
+        include:
+          - project: eric/weisssrv-lib
+            ref: v0.3.2
+            file: /ci/thing.yml
+            inputs:
+              project: eric/weisssrv-lib
+              ref: user-supplied
+        """
+    )
+    p = _write(tmp_path, content)
+    assert clp.fix(p) == 1
+    entry = clp.load_ci(p)["include"][0]
+    assert entry["ref"] == "v0.5.0"
+    assert entry["inputs"]["ref"] == "user-supplied"
+    assert clp.check(p) == []
+
+
+def test_fix_refuses_a_block_scalar_ref_and_leaves_the_file_alone(
+    tmp_path: Path,
+) -> None:
+    """A `ref: >-` body survives a first-line rewrite and breaks the document.
+
+    Rather than special-casing block scalars, fix() re-parses its own output
+    and refuses anything that did not land as the exact intended string. The
+    file must be untouched when it refuses — a half-edited CI file is worse
+    than an unedited one.
+    """
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.0"
+        include:
+          - project: eric/weisssrv-lib
+            ref: >-
+              v0.3.2
+            file: /ci/lint/yaml-lint.yml
+        """
+    )
+    p = _write(tmp_path, content)
+    before = p.read_text()
+    with pytest.raises(SystemExit):
+        clp.fix(p)
+    assert p.read_text() == before
+
+
+def test_fix_refuses_a_value_yaml_would_retype(tmp_path: Path) -> None:
+    """`ref: on` parses back as True, not the string that was written."""
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "on"
+        include:
+          - project: eric/weisssrv-lib
+            ref: v0.3.2
+            file: /ci/lint/yaml-lint.yml
+        """
+    )
+    p = _write(tmp_path, content)
+    before = p.read_text()
+    with pytest.raises(SystemExit):
+        clp.fix(p)
+    assert p.read_text() == before
 
 
 def test_real_repo_ci_file_passes() -> None:

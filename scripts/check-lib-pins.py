@@ -118,6 +118,58 @@ def check(
     return problems
 
 
+def _ref_key_lines(text: str, project: str) -> set[int]:
+    """0-based line numbers of the `ref:` KEY in each library include entry.
+
+    Derived from the parsed node tree rather than by scanning for `project:`
+    lines. Every indentation heuristic tried here leaked: a nested `inputs:`
+    block may legitimately carry `project` and `ref` keys of its own, and a
+    line scanner cannot tell those from an entry's own pin without effectively
+    reimplementing the parser. Composing the document gives the source line of
+    exactly the nodes `check()` reads, so --fix edits precisely what the gate
+    verifies and nothing else.
+    """
+    root = yaml.compose(text, Loader=_RefTolerantLoader)
+    if not isinstance(root, yaml.MappingNode):
+        return set()
+
+    include_node = next(
+        (
+            value
+            for key, value in root.value
+            if isinstance(key, yaml.ScalarNode) and key.value == "include"
+        ),
+        None,
+    )
+    if include_node is None:
+        return set()
+
+    entries = (
+        include_node.value
+        if isinstance(include_node, yaml.SequenceNode)
+        else [include_node]
+    )
+
+    found: set[int] = set()
+    for entry in entries:
+        if not isinstance(entry, yaml.MappingNode):
+            continue
+        fields = {
+            key.value: (key, value)
+            for key, value in entry.value
+            if isinstance(key, yaml.ScalarNode)
+        }
+        proj = fields.get("project")
+        ref = fields.get("ref")
+        if ref is None or proj is None:
+            continue
+        if isinstance(proj[1], yaml.ScalarNode) and proj[1].value == project:
+            # The KEY's line, not the value's: an empty `ref:` parses to null,
+            # whose node can be marked on the FOLLOWING line.
+            found.add(ref[0].start_mark.line)
+    return found
+
+
 def fix(path: Path, project: str = LIB_PROJECT, ref_var: str = REF_VAR) -> int:
     """Rewrite every library include `ref:` to the declared value."""
     doc = load_ci(path)
@@ -125,34 +177,55 @@ def fix(path: Path, project: str = LIB_PROJECT, ref_var: str = REF_VAR) -> int:
     if not want:
         raise SystemExit(f"{path}: variables.{ref_var} is not set; nothing to sync")
 
-    # Line-level rewrite so comments and formatting survive: only `ref:` lines
-    # that belong to a library entry are touched, identified by the `project:`
-    # line that opens the block.
-    lines = path.read_text().splitlines(keepends=True)
-    in_lib_entry = False
+    # Textual rewrite so comments and formatting survive, but the lines to
+    # touch come from the parsed tree (see _ref_key_lines) rather than a scan.
+    text = path.read_text()
+    targets = _ref_key_lines(text, project)
+    lines = text.splitlines(keepends=True)
     changed = 0
-    for n, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("- project:") or stripped.startswith("project:"):
-            # EXACT value equality, matching check(). A suffix test would treat
-            # `acme/eric/weisssrv-lib` as ours and rewrite a ref that check()
-            # never policed — a --fix that edits what it does not verify. Parsed
-            # as YAML rather than string-stripped so a quoted value or a trailing
-            # comment resolves the same way it does for the include itself.
-            try:
-                value = yaml.safe_load(stripped.split(":", 1)[1].strip())
-            except yaml.YAMLError:
-                value = None
-            in_lib_entry = value == project
-            continue
-        if in_lib_entry and stripped.startswith("ref:"):
-            current = stripped.split(":", 1)[1].strip()
-            if current != want:
-                lines[n] = line.replace(current, want, 1)
-                changed += 1
-            in_lib_entry = False
+    for n in sorted(targets):
+        line = lines[n]
+        # A `#` only opens a YAML comment when whitespace precedes it, and a
+        # quoted scalar may contain one outright. Splitting on a bare `#` would
+        # cut a ref like `v1.0#rc1` in half and paste the remainder back as a
+        # comment.
+        m = re.match(
+            r"""^(\s*)ref:[^\S\n]*"""
+            r"""("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|.*?)"""
+            r"""([^\S\n]+#.*|[^\S\n]*)$""",
+            line.rstrip("\n"),
+        )
+        if m and m.group(2) != want:
+            newline = "\n" if line.endswith("\n") else ""
+            # `ref: ` rebuilt rather than reused: an EMPTY `ref:` has no
+            # trailing space to preserve, so reusing the matched prefix would
+            # emit `ref:v0.5.0`.
+            lines[n] = f"{m.group(1)}ref: {want}{m.group(3)}{newline}"
+            changed += 1
     if changed:
-        path.write_text("".join(lines))
+        updated = "".join(lines)
+        # Verify by OUTCOME rather than enumerating the ways a textual rewrite
+        # can go wrong. A `ref: >-` block scalar leaves its body behind; a value
+        # YAML would retype (`on`, `null`, a date) lands as the wrong type; an
+        # aliased include can carry marks from elsewhere. Each has its own
+        # special case, and the list is open-ended — so instead: re-parse, and
+        # require every library pin to have landed as the exact string intended.
+        # Anything else keeps the original file. Nothing is written until this
+        # passes, so a refusal is never a half-edited file.
+        try:
+            reparsed = yaml.load(updated, Loader=_RefTolerantLoader) or {}
+        except yaml.YAMLError as exc:
+            raise SystemExit(
+                f"{path}: rewrite would produce invalid YAML ({exc}); "
+                "file left unchanged"
+            ) from exc
+        landed = [entry.get("ref") for entry in lib_includes(reparsed, project)]
+        if any(ref != want for ref in landed):
+            raise SystemExit(
+                f"{path}: rewrite did not land cleanly (pins parsed back as "
+                f"{landed!r}, wanted {want!r}); file left unchanged"
+            )
+        path.write_text(updated)
     return changed
 
 
