@@ -39,7 +39,7 @@ variables:
   # a literal and scripts/check-lib-pins.py (vendored from the library) fails the
   # pipeline if they drift from it or pin a branch. Bump here, then
   # `scripts/check-lib-pins.py --fix`.
-  WEISSSRV_LIB_REF: "v0.5.1"
+  WEISSSRV_LIB_REF: "v0.5.2"
   COPIER_VERSION: "9.17.0"
   PYYAML_VERSION: "6.0.2"
   YAMLLINT_VERSION: "1.38.0"
@@ -54,7 +54,7 @@ include:
   # Jinja sources, not documents. The render-validate job below yamllints the
   # rendered tree, which is where template/ actually gets covered.
   - project: eric/weisssrv-lib
-    ref: v0.5.1
+    ref: v0.5.2
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: []
@@ -68,7 +68,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.5.1
+    ref: v0.5.2
     file: /ci/lint/python-lint.yml
     inputs:
       tags: []
@@ -87,7 +87,7 @@ include:
   # The shell the template ships is static (no .jinja suffix), so it can be
   # checked in place rather than only after a render.
   - project: eric/weisssrv-lib
-    ref: v0.5.1
+    ref: v0.5.2
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: []
@@ -100,7 +100,7 @@ include:
   # copier.yml schema checks + the full render invariants. Everything in the
   # repository feeds the render, hence the catch-all `changes`.
   - project: eric/weisssrv-lib
-    ref: v0.5.1
+    ref: v0.5.2
     file: /ci/test/python-tests.yml
     inputs:
       tags: []
@@ -112,13 +112,13 @@ include:
         - "**/*"
 
   - project: eric/weisssrv-lib
-    ref: v0.5.1
+    ref: v0.5.2
     file: /ci/security/secret-detection.yml
     inputs:
       tags: []
 
   - project: eric/weisssrv-lib
-    ref: v0.5.1
+    ref: v0.5.2
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []
@@ -162,7 +162,7 @@ include:
   # the tag is 0.x a `feat!:` bumps MINOR, and calling a template 1.0.0 is a
   # deliberate act (flip the input for that release).
   - project: eric/weisssrv-lib
-    ref: v0.5.1
+    ref: v0.5.2
     file: /ci/release/semantic-release.yml
     inputs:
       tags: []

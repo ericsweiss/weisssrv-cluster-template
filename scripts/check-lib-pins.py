@@ -61,14 +61,41 @@ _RefTolerantLoader.add_multi_constructor(
 
 
 def load_ci(path: Path) -> dict:
-    return yaml.load(path.read_text(), Loader=_RefTolerantLoader) or {}
+    return parse_ci(path.read_text(encoding="utf-8"))
+
+
+def parse_ci(text: str) -> dict:
+    """Parse already-read text, so a caller that also needs the raw source
+    reads the file ONCE. Two reads could disagree if the file changed between
+    them, and --fix rewrites lines located by one read into text from another.
+    """
+    doc = yaml.load(text, Loader=_RefTolerantLoader)
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        # Valid YAML, wrong shape. Raised as a YAMLError so it lands on the
+        # operator-error path (exit 2) rather than reaching `doc.get(...)` and
+        # surfacing as an AttributeError traceback.
+        raise yaml.YAMLError("the top-level CI document must be a mapping")
+    variables = doc.get("variables")
+    if variables is not None and not isinstance(variables, dict):
+        # Same hole one level down: `variables: invalid` cleared the check
+        # above and then reached `.get(ref_var)` on a string.
+        raise yaml.YAMLError("`variables:` must be a mapping")
+    return doc
 
 
 def lib_includes(doc: dict, project: str = LIB_PROJECT) -> list[dict]:
     """The include entries that pin the library."""
     includes = doc.get("include") or []
     if isinstance(includes, dict):
-        includes = [includes]
+        includes = [includes]        # a single entry, written unwrapped
+    elif not isinstance(includes, list):
+        # `include:` may legitimately be one string (a local file), and when
+        # malformed can be any scalar. None of those carries a project pin —
+        # and iterating a non-iterable scalar raised TypeError, which reached
+        # the caller as a traceback instead of a reported problem.
+        includes = []
     return [
         i for i in includes if isinstance(i, dict) and i.get("project") == project
     ]
@@ -79,9 +106,19 @@ def declared_ref(doc: dict, ref_var: str = REF_VAR) -> str | None:
 
 
 def files_of(entry: dict) -> list[str]:
-    """`file:` is a string OR a list — a list shares one ref across templates."""
+    """`file:` is a string OR a list — a list shares one ref across templates.
+
+    An entry may carry no `file:` at all (a malformed include, or one using a
+    different selector). Naming it `<entry with no file:>` beats reporting the
+    drift against a bare `None`, which reads like a bug in this script.
+    """
     f = entry.get("file")
-    return list(f) if isinstance(f, list) else [f]
+    if isinstance(f, list):
+        # `or [...]`: an EMPTY list must not collapse the caller's reporting
+        # loop to zero iterations — that would let a drifted pin pass the gate
+        # silently, which is the failure this whole script exists to prevent.
+        return [str(x) for x in f] or ["<entry with an empty file: list>"]
+    return [str(f)] if f else ["<entry with no file:>"]
 
 
 def check(
@@ -101,7 +138,9 @@ def check(
     want = declared_ref(doc, ref_var)
     if not want:
         return [f"{path}: variables.{ref_var} is not set (the single source)"]
-    if not TAG_RE.match(want):
+    # fullmatch, not match: Python's `$` also matches before a trailing
+    # newline, so a multiline scalar like "v0.5.1\n" would pass the tag gate.
+    if not isinstance(want, str) or TAG_RE.fullmatch(want) is None:
         problems.append(
             f"{path}: {ref_var} is {want!r}, which is not a release tag "
             "(vX.Y.Z). The include contract forbids pinning a branch."
@@ -133,16 +172,71 @@ def _ref_key_lines(text: str, project: str) -> set[int]:
     if not isinstance(root, yaml.MappingNode):
         return set()
 
-    include_node = next(
-        (
-            value
-            for key, value in root.value
-            if isinstance(key, yaml.ScalarNode) and key.value == "include"
-        ),
-        None,
-    )
-    if include_node is None:
+    include_pairs = [
+        (key, value)
+        for key, value in root.value
+        if isinstance(key, yaml.ScalarNode) and key.value == "include"
+    ]
+    if not include_pairs:
         return set()
+    if len(include_pairs) > 1:
+        # PyYAML keeps the LAST duplicate key, so check() reads that one while
+        # taking the first here would rewrite a block GitLab and the gate both
+        # ignore — and the post-write verification would then pass against the
+        # other block. The two halves must agree on which block they mean.
+        raise SystemExit(
+            "multiple top-level `include:` keys make the rewrite ambiguous "
+            "(YAML keeps the last, so the others are silently ignored); "
+            "merge them into one block and retry"
+        )
+    include_key, include_node = include_pairs[0]
+
+    # An ALIAS resolves to its anchored node, so a `ref` reached through
+    # `include: *shared` carries source marks pointing at the ANCHOR — which may
+    # sit anywhere in the file. Rewriting there would edit shared configuration,
+    # and the re-parse would still agree, because the alias makes the include
+    # read back correctly. So targets are bounded to the include block's own
+    # textual span; anything outside it is left for check() to report.
+    include_start = include_key.start_mark.index
+    # The node's own end mark is the exact span. Deriving it from the NEXT
+    # top-level key instead can overshoot when that key is reached through an
+    # alias, whose mark points back at the anchor — which would pull unrelated
+    # jobs into the span and refuse a fix that was safe. That errs in the safe
+    # direction, but the precise bound is also the simpler one.
+    include_end = include_node.end_mark.index
+    if include_end <= include_start:
+        # The include value is ITSELF an alias, so its composed node carries the
+        # anchor's marks and the span reads as empty. Fall back to the
+        # conservative bound, which keeps the alias inside it and refused.
+        include_end = min(
+            (
+                key.start_mark.index
+                for key, _ in root.value
+                if key.start_mark.index > include_start
+            ),
+            default=len(text),
+        )
+
+    # Bounding to the span is not enough on its own: an alias whose ANCHOR also
+    # lives inside `include:` — under another entry's `inputs:`, say — passes the
+    # bound while still redirecting the rewrite at shared nested configuration.
+    # Composing resolves aliases away, so they are detected on the event stream.
+    # Refusing is the conservative answer: fix() reports the drift unrepaired
+    # rather than editing a line that belongs to something else. Scoped to the
+    # span, so an alias elsewhere in the file does not disable --fix.
+    for event in yaml.parse(text, Loader=_RefTolerantLoader):
+        if not include_start <= event.start_mark.index < include_end:
+            continue
+        is_alias = isinstance(event, yaml.AliasEvent)
+        # An anchor DEFINED here can be referenced from outside the block, so
+        # rewriting this pin would change what that reference resolves to.
+        defines_anchor = not is_alias and getattr(event, "anchor", None)
+        if is_alias or defines_anchor:
+            raise SystemExit(
+                "the `include:` block contains a YAML anchor or alias, which "
+                "may share configuration with the rest of the file; refusing "
+                "to rewrite it. Update the pins by hand."
+            )
 
     entries = (
         include_node.value
@@ -166,20 +260,30 @@ def _ref_key_lines(text: str, project: str) -> set[int]:
         if isinstance(proj[1], yaml.ScalarNode) and proj[1].value == project:
             # The KEY's line, not the value's: an empty `ref:` parses to null,
             # whose node can be marked on the FOLLOWING line.
-            found.add(ref[0].start_mark.line)
+            if include_start <= ref[0].start_mark.index < include_end:
+                found.add(ref[0].start_mark.line)
     return found
 
 
 def fix(path: Path, project: str = LIB_PROJECT, ref_var: str = REF_VAR) -> int:
     """Rewrite every library include `ref:` to the declared value."""
-    doc = load_ci(path)
+    text = path.read_text(encoding="utf-8")
+    doc = parse_ci(text)
     want = declared_ref(doc, ref_var)
     if not want:
         raise SystemExit(f"{path}: variables.{ref_var} is not set; nothing to sync")
+    # Validated BEFORE anything is written. Without this, pointing the variable
+    # at a branch made --fix propagate that branch to every include and only
+    # then report failure — leaving the file worse than it found it, which is
+    # the opposite of what a repair command should do on bad input.
+    if not isinstance(want, str) or TAG_RE.fullmatch(want) is None:
+        raise SystemExit(
+            f"{path}: variables.{ref_var} must be a release tag (vX.Y.Z), got "
+            f"{want!r}; file left unchanged"
+        )
 
     # Textual rewrite so comments and formatting survive, but the lines to
     # touch come from the parsed tree (see _ref_key_lines) rather than a scan.
-    text = path.read_text()
     targets = _ref_key_lines(text, project)
     lines = text.splitlines(keepends=True)
     changed = 0
@@ -202,6 +306,16 @@ def fix(path: Path, project: str = LIB_PROJECT, ref_var: str = REF_VAR) -> int:
             # emit `ref:v0.5.0`.
             lines[n] = f"{m.group(1)}ref: {want}{m.group(3)}{newline}"
             changed += 1
+    remaining = check(path, project, ref_var) if not changed else []
+    if remaining:
+        # fix() reporting 0 is a claim that nothing needed doing. It cannot add
+        # a `ref:` that is absent, rewrite a flow-style entry, or reach a pin
+        # that lives outside `include:` — and returning 0 for any of those hands
+        # the caller a clean result over an unrepaired file.
+        raise SystemExit(
+            f"{path}: --fix could not repair this file; fix it by hand:\n  "
+            + "\n  ".join(remaining)
+        )
     if changed:
         updated = "".join(lines)
         # Verify by OUTCOME rather than enumerating the ways a textual rewrite
@@ -225,7 +339,7 @@ def fix(path: Path, project: str = LIB_PROJECT, ref_var: str = REF_VAR) -> int:
                 f"{path}: rewrite did not land cleanly (pins parsed back as "
                 f"{landed!r}, wanted {want!r}); file left unchanged"
             )
-        path.write_text(updated)
+        path.write_text(updated, encoding="utf-8")
     return changed
 
 
@@ -251,6 +365,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
+    # An unreadable or malformed input is an OPERATOR error (wrong path, bad
+    # permissions, broken YAML), not a pin finding — exit 2 so CI can tell the
+    # two apart, and print one line rather than a traceback. Same contract as
+    # check-kubectl-version-pin.py.
+    #
+    # This wraps the REAL calls rather than a preflight read: a preflight only
+    # proves the file was readable a moment ago, and the work re-reads it
+    # afterwards, outside the guard. SystemExit from fix() passes through
+    # untouched — it inherits BaseException, and those refusals are already
+    # worded for the caller.
+    try:
+        return _run(args)
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"ERROR: could not read {args.ci_file}: {exc}", file=sys.stderr)
+        return 2
+    except yaml.YAMLError as exc:
+        print(f"ERROR: {args.ci_file} is not valid YAML: {exc}", file=sys.stderr)
+        return 2
+
+
+def _run(args: argparse.Namespace) -> int:
     if args.fix:
         changed = fix(args.ci_file, args.project, args.ref_var)
         # Verify the result rather than trusting the rewrite. --fix cannot

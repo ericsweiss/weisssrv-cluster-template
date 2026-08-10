@@ -63,7 +63,7 @@ tailnet_dns_suffix: tail9z8y7x.ts.net
 gpu: none
 
 lib_url: https://git.ericsweiss.com/eric/weisssrv-lib.git
-lib_ref: v0.5.1
+lib_ref: v0.5.2
 lib_project: eric/weisssrv-lib
 
 ci_runner_tag: tidal-privileged

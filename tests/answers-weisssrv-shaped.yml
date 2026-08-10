@@ -60,7 +60,7 @@ gpu: nvidia
 # exercise CI includes, Terraform module sources and the galaxy requirement at a
 # ref no real user gets — and break outright the moment the branch is deleted.
 lib_url: https://git.ericsweiss.com/eric/weisssrv-lib.git
-lib_ref: v0.5.1
+lib_ref: v0.5.2
 lib_project: eric/weisssrv-lib
 
 ci_runner_tag: infrastructure

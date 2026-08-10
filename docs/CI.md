@@ -103,8 +103,8 @@ its own gate cannot be generated.
 ## Library pin
 
 Every `include:` in both pipelines points at `eric/weisssrv-lib`. This
-repository's own includes are pinned to the `v0.5.1` release tag; the generated
-pipeline pins whatever `lib_ref` the operator answered (default `v0.5.1`).
+repository's own includes are pinned to the `v0.5.2` release tag; the generated
+pipeline pins whatever `lib_ref` the operator answered (default `v0.5.2`).
 Never pin a branch: a branch moves under you, and the one this repository was
 built against was deleted when it merged.
 
