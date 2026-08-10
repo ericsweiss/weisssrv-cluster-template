@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""Cut a GitLab release from the conventional commits since the last version tag.
+"""Cut a release from the conventional commits since the last version tag.
 
 Decides the bump (feat -> minor, fix/perf/refactor -> patch, `!` or a BREAKING
 CHANGE trailer -> major), renders notes grouped by type, and creates the tag and
-the Release in ONE Releases API call — that endpoint creates the tag from `ref`
-when `tag_name` does not exist yet, which is the only tag-write a CI_JOB_TOKEN
-can perform (the Tags API is read-only for job tokens).
+the Release in ONE Releases API call — both forges create the tag from the ref
+when `tag_name` does not exist yet, which on GitLab is the only tag-write a
+CI_JOB_TOKEN can perform (the Tags API is read-only for job tokens).
+
+Two backends, selected with `--platform`; only the two API calls differ.
+  gitlab (default)  POST $CI_API_V4_URL/projects/:id/releases, `JOB-TOKEN:`
+  github            POST $GITHUB_API_URL/repos/:owner/:repo/releases,
+                    `Authorization: Bearer` + the versioned Accept header
+Everything above them — parsing, the bump decision, the notes — is forge-neutral.
 
 No releasable commit -> no release, exit 0. Re-running on an already-released
 commit is therefore a no-op — EXCEPT when the last version tag carries no
-Release (a run that died between the two halves of that one call): that
+Release (a run that died between the two halves of that one call, or, on
+GitHub, a tag pushed by hand or a Release deleted out from under its tag): that
 half-finished state is detected wherever the orphan tag sits, and the missing
 Release is backfilled from the tag's own commit range before any new tag is cut.
 
@@ -17,13 +24,16 @@ Stdlib only. The decision path is `plan_release(tags, log_output, ...)`: it take
 raw `git` output and returns the plan, so it is testable without a repo or a
 server.
 
-Usage (see ci/release/semantic-release.yml):
+Usage (see ci/release/semantic-release.yml and
+ci/release/github-release-workflow.example.yml):
   scripts/semantic-release.py --dry-run
   scripts/semantic-release.py --output release.json
+  scripts/semantic-release.py --platform github --output release.json
 """
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -268,6 +278,94 @@ def plan_existing_tag(
     return Plan(True, bump_level(commits), earlier, tag, version, render_notes(commits, compare_url), commits)
 
 
+# Every way a forge call can fail. Only HTTPError carries a status and a body;
+# a DNS failure, connection reset, timeout or non-JSON response arrives as one
+# of the others with neither, so a handler that reaches for `exc.code` raises
+# AttributeError from inside itself and loses the record it exists to write.
+# URLError and timeouts are already OSError subclasses — named anyway, because
+# the point of this tuple is to be read as the list of what can go wrong.
+#
+# The last two are NOT OSError subclasses and are easy to miss:
+#   UnicodeDecodeError   json.loads() on a non-UTF-8 body raises this, NOT
+#                        JSONDecodeError — verified, they are disjoint here.
+#   http.client.HTTPException  a TRUNCATED response surfaces as IncompleteRead,
+#                        whose base is HTTPException (BadStatusLine and friends
+#                        share it). Nothing in the OSError family covers it.
+# Both are exactly the flaky-network shapes this tuple exists for, so leaving
+# them out would drop the failure artifact on the failures hardest to reproduce.
+API_ERRORS = (
+    urllib.error.HTTPError,
+    urllib.error.URLError,
+    OSError,
+    json.JSONDecodeError,
+    UnicodeDecodeError,
+    http.client.HTTPException,
+)
+
+
+def describe_api_error(exc: BaseException) -> str:
+    """One line naming a failed forge call, whatever shape the failure took.
+
+    Must never raise. An HTTPError body is stream-backed, so `read()` can fail
+    on its own — a reset or a truncated response mid-read — and a throw from
+    HERE lands inside the handler that called it, skipping the write_plan below
+    and losing the artifact. That is the exact failure this helper exists to
+    prevent, so the status is kept and the unreadable body is reported as such.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            detail = exc.read().decode(errors="replace")
+        except Exception as body_exc:  # noqa: BLE001 - a diagnostic must not throw
+            detail = "<body unreadable: %s: %s>" % (type(body_exc).__name__, body_exc)
+        return "HTTP %s: %s" % (exc.code, detail)
+    return "%s: %s" % (type(exc).__name__, exc)
+
+
+PLATFORMS = ("gitlab", "github")
+
+# GitHub wants the media type and the API version on every call; GitLab needs
+# neither. Pinning the version keeps a future default flip from changing the
+# response shape under a vendored copy nobody is watching.
+GITHUB_HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+}
+
+# The env each CI injects, in the same four roles. `token` is the env var the
+# job is expected to put the token in — GitLab's is set by
+# ci/release/semantic-release.yml, GitHub's is the built-in name that
+# `env: GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}` conventionally fills.
+ENV_BY_PLATFORM = {
+    "gitlab": {
+        "api_url": "CI_API_V4_URL",
+        "project": "CI_PROJECT_ID",
+        "ref": "CI_COMMIT_SHA",
+        "token": "RELEASE_TOKEN",
+    },
+    "github": {
+        "api_url": "GITHUB_API_URL",
+        "project": "GITHUB_REPOSITORY",
+        "ref": "GITHUB_SHA",
+        "token": "GITHUB_TOKEN",
+    },
+}
+
+
+def _json_call(
+    url: str, headers: Dict[str, str], payload: Optional[dict], opener: Callable
+) -> dict:
+    """POST (or GET when payload is None) `url` with `headers`; return the JSON body."""
+    data = json.dumps(payload).encode() if payload is not None else None
+    request = urllib.request.Request(url, data=data, method="POST" if data else "GET")
+    for name, value in headers.items():
+        request.add_header(name, value)
+    if data:
+        request.add_header("Content-Type", "application/json")
+    with opener(request, timeout=60) as response:
+        body = response.read().decode()
+    return json.loads(body) if body else {}
+
+
 def api_request(
     url: str,
     token: str,
@@ -276,21 +374,54 @@ def api_request(
     opener: Callable = urllib.request.urlopen,
 ) -> dict:
     """POST (or GET when payload is None) a GitLab API call and return the JSON body."""
-    data = json.dumps(payload).encode() if payload is not None else None
-    request = urllib.request.Request(url, data=data, method="POST" if data else "GET")
-    request.add_header(token_header, token)
-    if data:
-        request.add_header("Content-Type", "application/json")
-    with opener(request, timeout=60) as response:
-        body = response.read().decode()
-    return json.loads(body) if body else {}
+    return _json_call(url, {token_header: token}, payload, opener)
 
 
-def _releases_url(api_url: str, project_id: str) -> str:
-    return "%s/projects/%s/releases" % (
-        api_url.rstrip("/"),
-        urllib.parse.quote(str(project_id), safe=""),
-    )
+def github_api_request(
+    url: str,
+    token: str,
+    token_header: str = "",
+    payload: Optional[dict] = None,
+    opener: Callable = urllib.request.urlopen,
+) -> dict:
+    """The same call against GitHub: bearer auth plus the versioned Accept header.
+
+    `token_header` is accepted and ignored — GitHub's auth header is fixed — so
+    the two requesters stay interchangeable at the one seam that picks between
+    them, and neither the callers nor their test doubles change arity.
+    """
+    headers = {"Authorization": "Bearer %s" % token}
+    headers.update(GITHUB_HEADERS)
+    return _json_call(url, headers, payload, opener)
+
+
+def _requester(platform: str) -> Callable:
+    """The api_request variant for `platform`, resolved by name at call time."""
+    return github_api_request if platform == "github" else api_request
+
+
+def _releases_url(api_url: str, project_id: str, platform: str = "gitlab") -> str:
+    """The Releases collection URL.
+
+    GitLab addresses a project by numeric id or fully URL-encoded path, so a
+    path-style id's separator becomes `%2F`; GitHub's `:owner/:repo` is TWO path
+    segments and that slash has to survive.
+    """
+    base = api_url.rstrip("/")
+    if platform == "github":
+        return "%s/repos/%s/releases" % (base, urllib.parse.quote(str(project_id), safe="/"))
+    return "%s/projects/%s/releases" % (base, urllib.parse.quote(str(project_id), safe=""))
+
+
+def _release_by_tag_url(
+    api_url: str, project_id: str, tag: str, platform: str = "gitlab"
+) -> str:
+    """URL of the Release attached to `tag` — GitHub nests it under `/tags/`."""
+    releases = _releases_url(api_url, project_id, platform)
+    quoted = urllib.parse.quote(str(tag), safe="")
+    if platform == "github":
+        return "%s/tags/%s" % (releases, quoted)
+    return "%s/%s" % (releases, quoted)
 
 
 def get_release(
@@ -299,16 +430,32 @@ def get_release(
     token: str,
     tag: str,
     token_header: str = "JOB-TOKEN",
-    request: Callable = api_request,
+    request: Optional[Callable] = None,
+    platform: str = "gitlab",
 ) -> Optional[dict]:
-    """The Release for `tag`, or None when the tag carries none (HTTP 404)."""
-    url = "%s/%s" % (_releases_url(api_url, project_id), urllib.parse.quote(str(tag), safe=""))
+    """The Release for `tag`, or None when the tag carries none (HTTP 404).
+
+    Both forges answer 404 for a tag that exists with no Release, so the
+    crash-recovery probe reads the same on either. GitHub documents its
+    releases/tags endpoint as returning the PUBLISHED release, so a draft someone
+    left behind should read as "missing" here and the backfill below should fail
+    loudly against that tag rather than quietly publishing a second Release.
+
+    The explicit draft check below does not assume that documented behaviour: if
+    the endpoint never returns a draft it is a no-op, and if it ever does (an
+    authenticated token with push access is the case usually cited) a draft would
+    otherwise be mistaken for a published release and skip recovery entirely.
+    """
+    url = _release_by_tag_url(api_url, project_id, tag, platform)
     try:
-        return request(url, token, token_header, None)
+        release = (request or _requester(platform))(url, token, token_header, None)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None
         raise
+    if platform == "github" and isinstance(release, dict) and release.get("draft"):
+        return None
+    return release
 
 
 def create_release(
@@ -318,18 +465,51 @@ def create_release(
     plan: Plan,
     ref: str,
     token_header: str = "JOB-TOKEN",
-    request: Callable = api_request,
+    request: Optional[Callable] = None,
+    platform: str = "gitlab",
 ) -> dict:
-    """Create the tag (from `ref`) and the GitLab Release in one call."""
-    url = _releases_url(api_url, project_id)
-    payload = {
-        "tag_name": plan.tag,
-        "ref": ref,
-        "name": plan.tag,
-        "tag_message": "%s\n\n%s" % (plan.tag, plan.notes),
-        "description": plan.notes,
-    }
-    return request(url, token, token_header, payload)
+    """Create the tag (from `ref`) and the Release in one call.
+
+    Both forges create `plan.tag` from the ref when it does not exist yet and
+    ignore the ref when it does (GitHub documents `target_commitish` as "unused
+    if the Git tag already exists"), which is what lets the crash-recovery
+    backfill be a plain create against the orphan tag. The tags themselves
+    differ: GitLab's is ANNOTATED and carries `tag_message`, while GitHub's
+    Releases API only writes a lightweight ref — there the notes live in the
+    Release body alone.
+    """
+    url = _releases_url(api_url, project_id, platform)
+    if platform == "github":
+        payload = {
+            "tag_name": plan.tag,
+            "target_commitish": ref,
+            "name": plan.tag,
+            "body": plan.notes,
+        }
+    else:
+        payload = {
+            "tag_name": plan.tag,
+            "ref": ref,
+            "name": plan.tag,
+            "tag_message": "%s\n\n%s" % (plan.tag, plan.notes),
+            "description": plan.notes,
+        }
+    return (request or _requester(platform))(url, token, token_header, payload)
+
+
+def compare_url_template(platform: str, project_id: str = "") -> Optional[str]:
+    """`{previous}`/`{tag}` template for the notes' compare link, read from CI env.
+
+    None when the env does not name the project's web URL (a local run); the
+    notes then simply carry no compare link.
+    """
+    if platform == "github":
+        server = os.environ.get("GITHUB_SERVER_URL", "")
+        if not (server and project_id):
+            return None
+        return "%s/%s/compare/{previous}...{tag}" % (server.rstrip("/"), project_id)
+    project_url = os.environ.get("CI_PROJECT_URL", "")
+    return project_url + "/-/compare/{previous}...{tag}" if project_url else None
 
 
 def git(args: Sequence[str], repo_dir: str = ".") -> str:
@@ -393,19 +573,56 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Let a breaking change cut 1.0.0 from a 0.x version (default: bump MINOR).",
     )
     parser.add_argument(
-        "--ref", default=os.environ.get("CI_COMMIT_SHA", ""), help="Commit the tag is created from."
+        "--platform",
+        default="gitlab",
+        choices=list(PLATFORMS),
+        help="Forge whose Releases API is called (default: gitlab).",
     )
-    parser.add_argument("--api-url", default=os.environ.get("CI_API_V4_URL", ""))
-    parser.add_argument("--project-id", default=os.environ.get("CI_PROJECT_ID", ""))
-    parser.add_argument("--token-env", default="RELEASE_TOKEN")
-    parser.add_argument("--token-header", default="JOB-TOKEN", choices=["JOB-TOKEN", "PRIVATE-TOKEN"])
+    parser.add_argument(
+        "--ref",
+        default="",
+        help="Commit the tag is created from (default: $CI_COMMIT_SHA / $GITHUB_SHA).",
+    )
+    parser.add_argument(
+        "--api-url", default="", help="API base (default: $CI_API_V4_URL / $GITHUB_API_URL)."
+    )
+    parser.add_argument(
+        "--project-id",
+        default="",
+        help="GitLab project id or path, or GitHub owner/repo "
+        "(default: $CI_PROJECT_ID / $GITHUB_REPOSITORY).",
+    )
+    parser.add_argument(
+        "--token-env",
+        default="",
+        help="Env var holding the token (default: RELEASE_TOKEN / GITHUB_TOKEN).",
+    )
+    parser.add_argument(
+        "--token-header",
+        default="JOB-TOKEN",
+        choices=["JOB-TOKEN", "PRIVATE-TOKEN"],
+        help="GitLab only — GitHub always sends `Authorization: Bearer`.",
+    )
     parser.add_argument("--output", default="", help="Write the plan as JSON to this path.")
     parser.add_argument("--dry-run", action="store_true", help="Print the plan; create nothing.")
     args = parser.parse_args(argv)
 
-    project_url = os.environ.get("CI_PROJECT_URL", "")
-    compare_template = project_url + "/-/compare/{previous}...{tag}" if project_url else None
-    tags = git(["tag", "--list"], args.repo_dir).split()
+    # Each forge names the same four facts differently; a flag always wins.
+    env = ENV_BY_PLATFORM[args.platform]
+    api_url = args.api_url or os.environ.get(env["api_url"], "")
+    project_id = args.project_id or os.environ.get(env["project"], "")
+    token_env = args.token_env or env["token"]
+    compare_template = compare_url_template(args.platform, project_id)
+    # `--merged HEAD` is load-bearing: the newest tag chosen here fixes BOTH the
+    # next version and the commit range that becomes the notes. A bare
+    # `--list` returns every tag in the repo, so a higher version cut on an
+    # unrelated branch (a maintenance line, an abandoned spike, an upstream tag
+    # in a fork) silently rebases this release onto a commit that is not an
+    # ancestor — wrong version, and a log range spanning history that never
+    # shipped here. Restricting to tags reachable from HEAD keeps the choice on
+    # this branch's own line. CI sets GIT_DEPTH: 0, so reachability is real
+    # rather than an artefact of a shallow clone.
+    tags = git(["tag", "--list", "--merged", "HEAD"], args.repo_dir).split()
     previous = latest_version_tag(tags, args.tag_prefix)
     # A shallow clone can lack the previous tag's commit; the job sets GIT_DEPTH: 0.
     log_range = "%s..HEAD" % previous if previous else "HEAD"
@@ -418,32 +635,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.major_on_zero,
     )
 
-    token = os.environ.get(args.token_env, "")
-    have_api = bool(token and args.api_url and args.project_id)
+    token = os.environ.get(token_env, "")
+    have_api = bool(token and api_url and project_id)
     # Only the two paths that talk to the API need HEAD.
     ref = (
-        (args.ref or git(["rev-parse", "HEAD"], args.repo_dir).strip())
+        (args.ref or os.environ.get(env["ref"], "")
+         or git(["rev-parse", "HEAD"], args.repo_dir).strip())
         if have_api and not args.dry_run
         else ""
     )
 
-    # Crash recovery: the Releases API creates the TAG before the Release, so a
-    # run that died in between leaves the tag with no Release — and every later
-    # run then computes an empty range and reports "nothing to release", green
-    # forever. The orphan is looked up WHEREVER it sits, not just while it is
-    # still on HEAD: gating on that lost the tag permanently the moment one more
-    # commit landed on the release branch, which is the common case.
+    # Crash recovery: on GitLab the Releases API creates the TAG before the
+    # Release, so a run that died in between leaves the tag with no Release. On
+    # GitHub the two are one request, but the same state arrives by ordinary
+    # routes — a `vX.Y.Z` pushed by hand, or a Release deleted while its tag
+    # stayed. Either way every later run computes an empty range and reports
+    # "nothing to release", green forever. The orphan is looked up WHEREVER it
+    # sits, not just while it is still on HEAD: gating on that lost the tag
+    # permanently the moment one more commit landed on the release branch,
+    # which is the common case.
     recovery = None
     recovery_check = ""
     if previous and have_api and not args.dry_run:
         try:
-            existing = get_release(args.api_url, args.project_id, token, previous, args.token_header)
-        except (
-            urllib.error.HTTPError,
-            urllib.error.URLError,
-            OSError,
-            json.JSONDecodeError,
-        ) as exc:
+            existing = get_release(
+                api_url, project_id, token, previous, args.token_header, platform=args.platform
+            )
+        except API_ERRORS as exc:
             # The probe is a REPAIR check, not a precondition for the release it
             # precedes: a 429/502/timeout/garbled body here must not cost a
             # healthy release that the POST below would have created.
@@ -484,7 +702,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not have_api:
         write_plan(args.output, plan, released=False, error="missing token / api url / project id")
         print(
-            "ERROR: need $%s, $CI_API_V4_URL and $CI_PROJECT_ID to create the release." % args.token_env,
+            "ERROR: need $%s, $%s and $%s to create the release."
+            % (token_env, env["api_url"], env["project"]),
             file=sys.stderr,
         )
         return 1
@@ -500,21 +719,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # ignores `ref`; pass the tag itself as the truthful value.
         try:
             create_release(
-                args.api_url, args.project_id, token, recovery, recovery.tag, args.token_header
+                api_url,
+                project_id,
+                token,
+                recovery,
+                recovery.tag,
+                args.token_header,
+                platform=args.platform,
             )
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")
+        except API_ERRORS as exc:
+            detail = describe_api_error(exc)
             write_plan(
                 args.output,
                 plan,
                 released=False,
-                error="backfill of %s failed: HTTP %s: %s" % (recovery.tag, exc.code, detail),
+                error="backfill of %s failed: %s" % (recovery.tag, detail),
                 recovery_check=recovery_check,
             )
             print(
-                "ERROR: backfilling the missing Release for %s failed (HTTP %s): %s — the new "
+                "ERROR: backfilling the missing Release for %s failed (%s) — the new "
                 "tag %s was NOT cut. Fix or delete %s, then re-run."
-                % (recovery.tag, exc.code, detail, plan.tag, recovery.tag),
+                % (recovery.tag, detail, plan.tag, recovery.tag),
                 file=sys.stderr,
             )
             return 1
@@ -523,19 +748,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         release = create_release(
-            args.api_url, args.project_id, token, plan, ref, args.token_header
+            api_url, project_id, token, plan, ref, args.token_header, platform=args.platform
         )
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")
+    except API_ERRORS as exc:
+        detail = describe_api_error(exc)
         write_plan(
             args.output,
             plan,
             released=False,
-            error="HTTP %s: %s" % (exc.code, detail),
+            error=detail,
             recovered=recovered_tag,
             recovery_check=recovery_check,
         )
-        print("ERROR: release creation failed (HTTP %s): %s" % (exc.code, detail), file=sys.stderr)
+        print("ERROR: release creation failed (%s)" % detail, file=sys.stderr)
         return 1
     write_plan(
         args.output,
@@ -544,7 +769,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         recovered=recovered_tag,
         recovery_check=recovery_check,
     )
-    print("Created release %s" % release.get("_links", {}).get("self", plan.tag))
+    # GitLab answers with `_links.self`, GitHub with `html_url`; neither is
+    # load-bearing, so fall through to the tag when the body carries no link.
+    print(
+        "Created release %s"
+        % (release.get("_links", {}).get("self") or release.get("html_url") or plan.tag)
+    )
     return 0
 
 
