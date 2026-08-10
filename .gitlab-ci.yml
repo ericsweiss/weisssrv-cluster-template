@@ -172,6 +172,17 @@ render-validate:
   image: python:3.13
   tags: []
   needs: []
+  # Every library-generated job carries this; the one local job here was the
+  # exception, and the likeliest to need it — it requests the largest limits in
+  # the pipeline, so on the quota-capped shared runner it is the first to be
+  # refused at POD-CREATION time when several pipelines overlap. That arrives as
+  # a system failure rather than a test failure, which the retry turns into
+  # throttling instead of a red pipeline that says nothing about the render.
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - scheduler_failure
   variables:
     # The collection is cloned rather than installed from the pinned ref, so the
     # gate does not depend on anonymous access to the library project.
