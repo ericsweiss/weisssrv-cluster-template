@@ -115,6 +115,39 @@ spec:
       ingress:
         enabled: false
 
+      # The chart's ClusterRole + ClusterRoleBinding are replaced by the
+      # configmaps-only pair in grafana-rbac.yaml, which carries the rationale.
+      # NOT `useExistingClusterRole` — that keeps the chart's fixed-name binding
+      # and only rewrites its roleRef, which the RBAC API forbids.
+      rbac:
+        create: false
+
+      # The Grafana container itself gets NO ServiceAccount token; only the two
+      # sidecars talk to the apiserver, and they get it back through the
+      # projected volume below plus their extraMounts.
+      # extraContainerVolumes, NOT extraVolumes: the latter's template
+      # understands only claim/hostPath/csi/configMap/emptyDir and would render
+      # a projected volume silently as an emptyDir.
+      automountServiceAccountToken: false
+      extraContainerVolumes:
+        - name: sidecar-kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+
       # The built-in admin account EXISTS but authenticates nothing while the
       # two switches below are set — see the break-glass note there. Its
       # password is an ESO-managed random value, never the chart default
@@ -231,6 +264,10 @@ spec:
       # something restarted the pod. initDatasources adds the sidecar as an
       # init container so every datasource file exists before Grafana starts —
       # the chart documents it as the required companion to skipReload.
+      #
+      # `resource: configmap` (the chart default is `both`): with `secrets` gone
+      # from the SA's ClusterRole, a sidecar watching Secrets logs Forbidden
+      # every cycle. Every dashboard and datasource here is a ConfigMap.
       sidecar:
         dashboards:
           enabled: true
@@ -239,11 +276,21 @@ spec:
           searchNamespace: ALL
           folderAnnotation: grafana_folder
           skipReload: true
+          resource: configmap
+          extraMounts:
+            - name: sidecar-kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
         datasources:
           # Fixed UID so dashboard JSON can reference "prometheus".
           uid: prometheus
           skipReload: true
           initDatasources: true
+          resource: configmap
+          extraMounts:
+            - name: sidecar-kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
 
       additionalDataSources:
         - name: Loki
@@ -535,12 +582,10 @@ spec:
     # upstream etcd alert rules — quorum loss, leader flapping, DB-size growth,
     # fsync latency — which are gated on kubeEtcd.enabled.
     #
-    # endpoints is the one site value here that cannot be an ordinary
-    # substitution: Helm needs a real YAML list, not a string. ${cluster_etcd_endpoints}
-    # is therefore stored in cluster-config as a JSON FLOW SEQUENCE, which parses
-    # as a list once Flux substitutes it inline. Keep it in step with the server
-    # addresses in the inventory — stale entries show up as etcd targets that are
-    # permanently down (loud), never as silence.
+    # endpoints is a JSON flow sequence rather than an ordinary substitution
+    # (Helm needs a real list where Flux substitutes text); the key's own comment
+    # in infrastructure/sources/cluster-config.yaml carries the reasoning and the
+    # roster to keep in step with the inventory.
     kubeEtcd:
       enabled: true
       endpoints: ${cluster_etcd_endpoints}
@@ -951,18 +996,12 @@ spec:
               # false) — and a permanently-firing alert is one nobody reads,
               # including the day it means something.
               #
-              # The gate is a metric NAME, not a boolean, and that is forced:
-              # Flux substitutes TEXT, so `${...}` is only valid PromQL inside a
-              # quoted string, and these rules are linted pre-substitution by
-              # `scripts/lint-prometheus-config.sh`. So:
-              #   tier OFF (default) — ${cluster_offsite_backup_probe_metric} is
-              #     `up`, which always has series, so absent() is never true and
-              #     the arm is inert.
-              #   tier ON — set the key to
-              #     `restic_offsite_last_success_timestamp_seconds` in the same
-              #     change that flips `restic_offsite_enabled`. absent() then
-              #     means what it should: the unit was never installed, was
-              #     removed, or the storage host is unreachable.
+              # ${cluster_offsite_backup_probe_metric} is the gate. It holds a
+              # metric NAME rather than a boolean, and ships pointed at one that
+              # always has series so the arm is inert until the tier is enabled;
+              # the key's own comment in
+              # infrastructure/sources/cluster-config.yaml says why and what to
+              # set it to.
               - alert: OffsiteBackupStale
                 expr: >-
                   (time() - restic_offsite_last_success_timestamp_seconds > 180000)

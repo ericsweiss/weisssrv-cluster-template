@@ -1,0 +1,17 @@
+---
+# Exporters for targets outside the cluster: the hosts the in-cluster
+# node-exporter DaemonSet cannot see, plus the two services the Ansible layer
+# installs on them. Each is a selectorless headless Service + a hand-written
+# EndpointSlice addressed from cluster-config.
+#
+# Per-app exporters (SNMP, hypervisor, sidecars) ship with the app module that
+# needs them, not here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - blackbox-exporter.yaml
+  - node-exporter-host.yaml
+  - unbound-exporter.yaml
+{%- if storage_backend | default('zfs') == 'zfs' %}
+  - zfs-exporter.yaml
+{%- endif %}

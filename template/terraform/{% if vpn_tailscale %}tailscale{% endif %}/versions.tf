@@ -1,5 +1,7 @@
 terraform {
-  required_version = ">= 1.5, < 2.0"
+  # Floor matches the CI image (hashicorp/terraform:1.15), as in the sibling
+  # modules — state written by a newer minor is unreadable by an older binary.
+  required_version = ">= 1.15, < 2.0"
 
   # Its own state name — never shared with another module (see the terraform:*
   # tasks and .gitlab-ci.yml).
@@ -8,9 +10,10 @@ terraform {
   required_providers {
     tailscale = {
       source = "tailscale/tailscale"
-      # Pre-1.0: a minor bump can carry breaking changes, so the minor is pinned
-      # and the committed lockfile pins the exact build.
-      version = "~> 0.29"
+      # Pre-1.0: a minor bump can carry breaking changes, so the PATCH line is
+      # pinned (a two-part `~>` would only pin the major) and the committed
+      # lockfile pins the exact build.
+      version = "~> 0.29.0"
     }
   }
 }

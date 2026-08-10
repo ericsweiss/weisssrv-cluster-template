@@ -214,77 +214,25 @@ nas_storage_backup_artifact_apps:
 # restic_offsite_freshness_max_age_h. Enable them in order, and only after you
 # have tested a RESTORE — not just a backup.
 
-# Cluster-wide vzdump target and jobs (storage.cfg is clustered, so this runs
-# from the NAS only). Empty = unmanaged. A complete pair, ready to uncomment
-# once /mnt/tank/proxmox exists as a dataset and is exported to the hosts:
-#
-#   proxmox_backup_storage:
-#     - id: tank-proxmox
-#       type: nfs
-#       server: {{ nas_host }}
-#       export: /tank-proxmox
-#       path: /mnt/pve/tank-proxmox
-#       content: "backup,vztmpl,iso"
-#       options: "vers=4.2,xprtsec=tls"
-#   proxmox_backup_vzdump_jobs:
-#     - id: backup-daily            # MUST match the live jobs.cfg id, or a
-#       storage: tank-proxmox       # second job is created alongside it
-#       schedule: "03:30"
-#       mode: snapshot
-#       compress: zstd
-#       all: true
-#       # k3s nodes are IaC-rebuildable cattle whose data is all on zvols;
-#       # restoring a stale server image can corrupt etcd quorum. Exclude them.
-#       exclude: []
-#       # KiB/s per node. An `all` job fires on EVERY node at once against this
-#       # one target — the per-node cap is what bounds the aggregate write.
-#       bwlimit: 61440
-#       prune_backups: "keep-daily=7,keep-weekly=4,keep-monthly=6"
-#       enabled: true
-#       # Publishes vzdump_backup_last_run_success; node_exporter_host deploys
-#       # the hook to every Proxmox host.
-#       script: /usr/local/bin/vzdump-metrics-hook.sh
+# Cluster-wide vzdump target and jobs. storage.cfg is clustered, so this runs
+# from the NAS only; empty leaves both unmanaged. Filling them in needs an NFS
+# target that already exists and is exported to the hosts — the worked pair,
+# including the per-node bandwidth cap an `all` job needs, is in
+# docs/RUNBOOKS.md "Backups and restore".
 proxmox_backup_storage: []
 proxmox_backup_vzdump_jobs: []
 
 # Nightly ZFS replication to a detachable archive pool. OFF by default: the
 # control script rewrites the destination pool's root properties (including
 # mountpoint=none) and destroys its own snapshots there, so it must never run
-# against a pool this site did not nominate. Enabling requires the pool to exist
-# and to be listed in nas_storage_zfs_pools above; the role asserts both keys:
-#
-#   nas_storage_archive_backup_enabled: true
-#   nas_storage_archive_backup_pool: archive
-#   # Every ROOT entry must be a filesystem, not a zvol (zvol children ride
-#   # along). Basenames are the restore labels and must be unique.
-#   nas_storage_archive_backup_sources:
-#     - ssd/appdata      # every app's live data, incl. the three zvols
-#     - tank/backups     # the logical dumps + etcd snapshot copies
-#     - tank/share
-#   # The dataset receiving cluster-wide vzdump writes over NFS, snapshotted
-#   # only once those writes quiesce so a half-written .vma is never captured.
-#   nas_storage_archive_backup_vzdump_target: ""
+# against a pool this site did not nominate. The role asserts the pool exists
+# and is listed in nas_storage_zfs_pools above; the keys to set are in
+# docs/RUNBOOKS.md "Backups and restore".
 nas_storage_archive_backup_enabled: false
 
 # Offsite backup (restic over rclone). Off until the archive tier above runs and
-# you have tested a RESTORE, not just a backup. Enabling requires
-# restic_offsite_repo, restic_offsite_cache_dir, restic_offsite_repo_password and
-# the rclone remote credentials; the role asserts all of them:
-#
-#   restic_offsite_enabled: true
-#   restic_offsite_repo: "rclone:<remote>:<bucket>/<path>"
-#   # MUST sit on an encrypted dataset: the cache holds the repo tree — file
-#   # PATHS — in plaintext even though the data blobs are client-encrypted.
-#   restic_offsite_cache_dir: /mnt/ssd/restic-cache
-#   # {name, mountpoint} per file-walkable dataset. A dataset with zvol children
-#   # (ssd/appdata) shows those as EMPTY dirs in the walk — that is why every
-#   # zvol-backed app dumps logically into tank/backups/apps instead.
-#   restic_offsite_sources:
-#     - {name: backups, mountpoint: /mnt/tank/backups}
-#     - {name: appdata, mountpoint: /mnt/ssd/appdata}
-#
-# NOTE when you enable this: flip cluster_offsite_backup_probe_metric to
-# restic_offsite_last_success_timestamp_seconds in the same change. That key
-# gates OffsiteBackupStale's absent() arm, which ships pointed at a metric
-# that always exists so the alert stays inert until the tier actually runs.
+# you have tested a RESTORE, not just a backup. The role asserts every required
+# key, so a half-configured enable fails the deploy; the full set, and the
+# cluster_offsite_backup_probe_metric flip that must land in the same change,
+# are in docs/RUNBOOKS.md "Backups and restore".
 restic_offsite_enabled: false

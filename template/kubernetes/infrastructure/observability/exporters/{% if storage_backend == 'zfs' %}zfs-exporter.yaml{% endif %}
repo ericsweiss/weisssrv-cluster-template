@@ -1,0 +1,61 @@
+---
+# ZFS pool metrics — remote scrape of zfs_exporter (:9134), which the storage
+# playbook installs on the NAS node. The binary runs on the host, not in the
+# cluster, so this is the same shape as node-exporter-host.yaml: a selectorless
+# headless Service plus a hand-written EndpointSlice addressed from cluster-config.
+#
+# This ships the SCRAPE, not alerts: `zfs_exporter`'s series (`zfs_pool_health`,
+# per-dataset used/available) are available to dashboards and to rules you add,
+# but no shipped rule selects them. The pool-integrity rules a cluster wants are
+# built on the node_exporter_host zpool textfile collector instead — see
+# ../README.md.
+apiVersion: v1
+kind: Service
+metadata:
+  name: zfs-exporter
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: zfs-exporter
+    app.kubernetes.io/part-of: observability
+spec:
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 9134
+      targetPort: 9134
+
+---
+# discovery.k8s.io/v1, not the deprecated core/v1 Endpoints. Nothing controls
+# this slice but this file, so conditions.ready is set explicitly per address.
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: zfs-exporter
+  namespace: observability
+  labels:
+    kubernetes.io/service-name: zfs-exporter
+addressType: IPv4
+ports:
+  - name: metrics
+    port: 9134
+    protocol: TCP
+endpoints: ${cluster_zfs_exporter_addresses}
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: zfs-exporter
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: zfs-exporter
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zfs-exporter
+  endpoints:
+    # 60s: a remote LAN scrape of metrics (pool capacity, scrub age, ARC) that
+    # move on the order of minutes.
+    - port: metrics
+      interval: 60s

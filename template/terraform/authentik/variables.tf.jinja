@@ -17,10 +17,14 @@ variable "authentik_token" {
 
 # One variable per OIDC application, injected by the terraform:authentik-* tasks
 # from the SAME secret-store item the application itself reads, so Terraform and
-# the app can never disagree about the value. Never defaulted to a literal.
+# the app can never disagree about the value.
+#
+# No default, deliberately: a missing TF_VAR_ fails the plan instead of letting
+# authentik mint a secret that exists only in Terraform state, which plans clean
+# and breaks the login. Declare an application's secret variable without a
+# default whenever the application keeps its own copy.
 variable "oauth2_client_secret_grafana" {
   description = "Grafana OIDC client secret (1Password item 'Grafana SSO', field 'oidc-client-secret')"
   type        = string
   sensitive   = true
-  default     = null
 }

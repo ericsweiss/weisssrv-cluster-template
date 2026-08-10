@@ -38,7 +38,7 @@ from --policy-config (YAML/JSON, both keys optional):
 Limitation: a CPU limit baked into a third-party chart's subchart defaults that
 is NOT overridden in `.spec.values` is invisible here (the corpus is kustomize-
 only, no `helm template`). validate-helm-values.py renders the value-heavy
-releases via `helm template` and reuses _cpu_limit_violations to catch those.
+releases via `helm template` and reuses cpu_limit_violations to catch those.
 
 Usage (on the accumulated full corpus):
   kustomize build <path> | envsubst >> corpus
@@ -142,7 +142,7 @@ POD_SPEC_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job",
 def load_policy(path) -> Policy:
     """Read a --policy-config file and return it. Mutates nothing.
 
-    SHARED: validate-helm-values.py imports this (and `_cpu_limit_violations`)
+    SHARED: validate-helm-values.py imports this (and `cpu_limit_violations`)
     so the kustomize-side and helm-rendered-side checks honor one allowlist.
     """
     with open(path) as f:
@@ -202,7 +202,7 @@ def _find_values_cpu_limits(node, path: str = "") -> list[str]:
     return hits
 
 
-def _cpu_limit_violations(docs: list[dict], allowlist: set[str] | None = None) -> list[str]:
+def cpu_limit_violations(docs: list[dict], allowlist: set[str] | None = None) -> list[str]:
     """Flag any pod-spec container or HelmRelease values that set a CPU limit."""
     allowed = allowlist or set()
     out: list[str] = []
@@ -331,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
     cpu_violations = (
-        _cpu_limit_violations(docs, policy.cpu_limit_allowlist)
+        cpu_limit_violations(docs, policy.cpu_limit_allowlist)
         if args.require_chart_native_vpas else []
     )
 

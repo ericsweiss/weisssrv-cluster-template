@@ -173,6 +173,33 @@ def test_no_unrendered_jinja_statements(cluster):
     assert not leftovers, "unrendered Jinja survived the render:\n  " + "\n  ".join(leftovers)
 
 
+def test_no_answer_survives_as_an_unrendered_expression(cluster):
+    """`{{ <question> }}` in the output is a copier answer that was never
+    substituted — most often a line written inside a `{% raw %}` block, which
+    Taskfile.yml.jinja needs because go-task owns `{{ }}` as well.
+
+    The failure is invisible to the scan above (that one looks for `{%`, and
+    skips Taskfile.yml precisely because `{{ }}` is go-task's) yet fatal: go-task
+    parses the leftover as a function call and every task in the file dies. Only
+    `ansible/` is exempt, where the same names are real Ansible variables.
+    """
+    config = yaml.safe_load((REPO_ROOT / "copier.yml").read_text())
+    names = sorted(k for k in config if not k.startswith("_"))
+    leak = re.compile(r"\{\{-?\s*(" + "|".join(names) + r")\s*[|}-]")
+    root = cluster.path
+    offenders = [
+        f"{path.relative_to(root)}:{lineno} {match.group(1)}"
+        for path, text in _text_files(root)
+        if path.relative_to(root).parts[0] != "ansible"
+        for lineno, line in enumerate(text.splitlines(), 1)
+        for match in [leak.search(line)]
+        if match
+    ]
+    assert not offenders, (
+        "copier answers left unsubstituted in the render:\n  " + "\n  ".join(offenders)
+    )
+
+
 # --------------------------------------------------------------------------
 # No reference-cluster values
 # --------------------------------------------------------------------------
@@ -198,9 +225,12 @@ def test_the_two_fixtures_answer_differently(answers, answers_b):
     key that drifts back into agreement silently disarms the leak check below."""
     assert set(answers) == set(answers_b), "the two fixtures answer different question sets"
     shared = {k for k, v in answers.items() if answers_b[k] == v}
-    # The library pin and its URL/project path are the same upstream on purpose.
+    # The library pin and its URL/project path are the same upstream on purpose,
+    # and the four backend seams have one implemented value each — a fixture
+    # answering anything else is rejected by the question's own validator.
     assert shared <= {"lib_url", "lib_ref", "lib_project", "git_backend", "secrets_backend",
-                      "dns_backend", "k3s_pod_cidr", "k3s_service_cidr"}, (
+                      "storage_backend", "dns_backend", "k3s_pod_cidr",
+                      "k3s_service_cidr"}, (
         "answers that must differ between the fixtures now coincide: "
         + ", ".join(sorted(shared))
     )
@@ -741,11 +771,11 @@ def test_readme_answer_table_only_claims_what_ships(rendered, rendered_b):
 
 
 def test_runnable_quickstarts_pin_no_template_tag():
-    """This repository has no tags. A quickstart block that passes a literal
-    `--vcs-ref vX.Y.Z` therefore fails at clone time, before the first question
-    — and the two blocks in README.md are presented as runnable, which is the
-    whole point of a quickstart. docs/SETUP.md already says so; the README kept
-    its copies.
+    """A quickstart block is presented as runnable, and an unpinned VCS source
+    already resolves to the latest release tag — so a literal `--vcs-ref vX.Y.Z`
+    buys nothing and goes stale on the next release, leaving a copy-pasteable
+    command that pins a superseded template. The docs use a `<template-tag>`
+    placeholder instead.
     """
     for path, text in _template_docs():
         for lineno, line in enumerate(text.splitlines(), 1):
@@ -753,8 +783,8 @@ def test_runnable_quickstarts_pin_no_template_tag():
                 ref = m.group(1)
                 assert not re.fullmatch(r"v\d+\.\d+\.\d+", ref), (
                     f"{path}:{lineno} pins --vcs-ref {ref}, a literal template "
-                    "release. This repository cuts no tags yet, so the block "
-                    "fails at clone time; use a `<template-tag>` placeholder."
+                    "release that this MR will outlive; use a `<template-tag>` "
+                    "placeholder, or omit the flag for the latest release."
                 )
 
 

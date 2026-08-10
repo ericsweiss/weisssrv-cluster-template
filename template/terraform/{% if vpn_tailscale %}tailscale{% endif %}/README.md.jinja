@@ -68,10 +68,14 @@ marked approved.
 
 **Break-glass.** A tailnet Admin can always edit Access controls in the admin
 console from a browser, without being on the tailnet — that is the recovery path
-if an apply locks you out. The policy also carries a commented root-SSH rule for
-the case where the `{{ admin_user }}` account breaks on every host at once. Any
+if an apply locks you out. If the `{{ admin_user }}` account breaks on every host
+at once, add `"root"` to the `ssh` rule's `users` list (in the console for
+immediate effect, then in `policy.hujson` so the two agree). Any
 console edit shows up as drift in the next `terraform plan`; reconcile it back
-into `policy.hujson` rather than leaving the two diverged.
+into `policy.hujson` rather than leaving the two diverged. The scheduled
+`tailscale-drift-plan` CI job is what surfaces one nobody remembered to
+reconcile — it plans read-only and never applies, so it is advisory
+(`allow_failure: true`), not a gate.
 
 ## Staged rollout
 
@@ -96,8 +100,9 @@ why the resolver is phase B:
 
 - **Phase A** — apply with `split_dns = {}` (the ACL alone).
 - **Phase B** — once `kubectl -n tailnet-dns get svc` shows a `100.x` address,
-  import the console-created entry and then uncomment the map in
-  `split_dns.tf`.
+  uncomment the map entry in `split_dns.tf`, *then* `terraform import` the
+  console-created entry, then plan. `terraform import` needs the address to
+  exist in configuration, so the map has to come first.
 
 The input is required rather than gated behind a boolean on purpose: a
 defaulted-off flag makes every plan that forgets to set it compute a destroy of
@@ -112,6 +117,10 @@ blocks cannot take variables — so unlike the DNS module's per-record flag ther
 is no consumer-side switch. Destroying the resource must not revert the tailnet
 to the default allow-all policy: that is a silent security regression, not a
 rollback.
+
+The guard covers the ACL only. Split-DNS entries carry none, so dropping a key
+from `split_dns` plans a destroy that silently ends tailnet resolution for that
+domain — the review of the plan is the whole control.
 
 To stop managing the ACL, drop it from state and then delete the module block:
 

@@ -278,21 +278,12 @@ def plan_existing_tag(
     return Plan(True, bump_level(commits), earlier, tag, version, render_notes(commits, compare_url), commits)
 
 
-# Every way a forge call can fail. Only HTTPError carries a status and a body;
-# a DNS failure, connection reset, timeout or non-JSON response arrives as one
-# of the others with neither, so a handler that reaches for `exc.code` raises
-# AttributeError from inside itself and loses the record it exists to write.
-# URLError and timeouts are already OSError subclasses — named anyway, because
-# the point of this tuple is to be read as the list of what can go wrong.
-#
-# The last two are NOT OSError subclasses and are easy to miss:
-#   UnicodeDecodeError   json.loads() on a non-UTF-8 body raises this, NOT
-#                        JSONDecodeError — verified, they are disjoint here.
-#   http.client.HTTPException  a TRUNCATED response surfaces as IncompleteRead,
-#                        whose base is HTTPException (BadStatusLine and friends
-#                        share it). Nothing in the OSError family covers it.
-# Both are exactly the flaky-network shapes this tuple exists for, so leaving
-# them out would drop the failure artifact on the failures hardest to reproduce.
+# Every way a forge call can fail. Only HTTPError carries a status and a body,
+# so a handler reaching for `exc.code` must not see the others.
+#   UnicodeDecodeError:        non-UTF-8 body (json.loads raises this, not
+#                              JSONDecodeError).
+#   http.client.HTTPException: truncated response (IncompleteRead and friends);
+#                              not an OSError subclass.
 API_ERRORS = (
     urllib.error.HTTPError,
     urllib.error.URLError,
@@ -613,15 +604,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     project_id = args.project_id or os.environ.get(env["project"], "")
     token_env = args.token_env or env["token"]
     compare_template = compare_url_template(args.platform, project_id)
-    # `--merged HEAD` is load-bearing: the newest tag chosen here fixes BOTH the
-    # next version and the commit range that becomes the notes. A bare
-    # `--list` returns every tag in the repo, so a higher version cut on an
-    # unrelated branch (a maintenance line, an abandoned spike, an upstream tag
-    # in a fork) silently rebases this release onto a commit that is not an
-    # ancestor — wrong version, and a log range spanning history that never
-    # shipped here. Restricting to tags reachable from HEAD keeps the choice on
-    # this branch's own line. CI sets GIT_DEPTH: 0, so reachability is real
-    # rather than an artefact of a shallow clone.
+    # `--merged HEAD` is load-bearing: the newest tag fixes both the next
+    # version and the commit range the notes come from, so a higher tag cut on
+    # an unrelated branch must not be considered. CI sets GIT_DEPTH: 0, so
+    # reachability is real rather than an artefact of a shallow clone.
     tags = git(["tag", "--list", "--merged", "HEAD"], args.repo_dir).split()
     previous = latest_version_tag(tags, args.tag_prefix)
     # A shallow clone can lack the previous tag's commit; the job sets GIT_DEPTH: 0.
@@ -645,15 +631,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else ""
     )
 
-    # Crash recovery: on GitLab the Releases API creates the TAG before the
-    # Release, so a run that died in between leaves the tag with no Release. On
-    # GitHub the two are one request, but the same state arrives by ordinary
-    # routes — a `vX.Y.Z` pushed by hand, or a Release deleted while its tag
-    # stayed. Either way every later run computes an empty range and reports
-    # "nothing to release", green forever. The orphan is looked up WHEREVER it
-    # sits, not just while it is still on HEAD: gating on that lost the tag
-    # permanently the moment one more commit landed on the release branch,
-    # which is the common case.
+    # Crash recovery for a tag that exists with no Release (GitLab creates the
+    # tag first; a hand-pushed tag or a deleted Release reaches the same state).
+    # Left alone, every later run computes an empty range and reports "nothing
+    # to release" forever. The orphan tag is looked up wherever it sits, not
+    # only while it is still on HEAD.
     recovery = None
     recovery_check = ""
     if previous and have_api and not args.dry_run:
@@ -779,10 +761,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 def run_cli(argv: Optional[Sequence[str]] = None) -> int:
-    """main() with each failure mode reduced to one actionable line.
-
-    Mirrors version-bump-mr.py: a shallow clone (`fatal: bad revision`), an
-    unreachable API and a non-JSON body all surface as a message, not a traceback.
+    """main() with each failure mode reduced to one actionable line: a shallow
+    clone, an unreachable API and a non-JSON body surface as a message rather
+    than a traceback. The forge is not named — both platforms reach here.
     """
     try:
         return main(argv)
@@ -793,7 +774,7 @@ def run_cli(argv: Optional[Sequence[str]] = None) -> int:
         )
     except urllib.error.HTTPError as exc:
         print(
-            "ERROR: GitLab API call failed (HTTP %s): %s"
+            "ERROR: Releases API call failed (HTTP %s): %s"
             % (exc.code, exc.read().decode(errors="replace")),
             file=sys.stderr,
         )
@@ -801,7 +782,7 @@ def run_cli(argv: Optional[Sequence[str]] = None) -> int:
         # URLError covers DNS/connection failures; socket timeouts arrive as OSError.
         print("ERROR: %s: %s" % (type(exc).__name__, exc), file=sys.stderr)
     except json.JSONDecodeError as exc:
-        print("ERROR: GitLab returned a non-JSON body: %s" % exc, file=sys.stderr)
+        print("ERROR: the Releases API returned a non-JSON body: %s" % exc, file=sys.stderr)
     return 1
 
 

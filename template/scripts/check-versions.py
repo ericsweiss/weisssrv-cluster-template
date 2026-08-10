@@ -31,6 +31,7 @@ Environment:
   CHECK_VERSIONS_CONFIG - config path (overridden by --config)
 """
 
+import argparse
 import functools
 import gzip
 import http.client
@@ -73,12 +74,8 @@ GITHUB_TOKEN = os.environ.get("GH_API_TOKEN", "") or os.environ.get("GITHUB_TOKE
 # Request timeout in seconds
 REQUEST_TIMEOUT = 15
 
-# Bounded retry for transient network failures. The checker does dozens of
-# sequential external fetches (GitHub, Docker Hub, LSIO, Helm, apt); without a
-# retry a single flaky endpoint (DNS blip, connection reset, upstream 5xx) makes
-# the whole CI version check fail intermittently. We retry only on transient
-# failures (URLError, socket.timeout, HTTP 5xx) — never on 4xx (including a 403
-# rate-limit, which is surfaced as-is so it isn't masked as a transient blip).
+# Bounded retry on transient failures only (URLError, socket.timeout, HTTP 5xx)
+# — never on 4xx, so a 403 rate-limit is surfaced rather than masked as a blip.
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF = 0.5  # seconds; multiplied by attempt number for linear backoff
 
@@ -635,13 +632,9 @@ def debian_version_compare(a: str, b: str) -> int:
       0.5.0~rc1-1 < 0.5.0-1 (tilde is pre-release)
       0.4.6-1ubuntu1 > 0.4.6-1 (revision tail)
     """
-    # Split epoch. Per debian-policy §5.6.12 the epoch is "a single
-    # (generally small) unsigned integer". Anything else with a `:` in it
-    # is malformed and we raise rather than silently dropping back to
-    # epoch=0 (which would otherwise hide upstream metadata bugs as
-    # "version unchanged" reports). The `:` itself is reserved as the
-    # epoch separator so there's no legitimate non-epoch case to fall
-    # back to.
+    # Split the epoch (debian-policy §5.6.12: an unsigned integer). A
+    # non-integer epoch is malformed and raises — falling back to epoch=0
+    # would report a real change as "version unchanged".
     def split(v: str) -> tuple[int, str, str]:
         if ":" in v:
             ep_s, rest = v.split(":", 1)
@@ -841,11 +834,9 @@ def _dockerhub_best_tag(
         url += f"&name={name_filter}"
     elif version_prefix:
         url += f"&name={version_prefix}"
-    # Bounded pagination: high-churn repos (the *arr apps push develop/nightly
-    # tags daily, 3 arch variants each) can bury a monthly stable tag beyond the
-    # first page even with a name filter — observed 2026-07-19 when Prowlarr's
-    # stable scrolled off and the check errored. Callers with that exposure pass
-    # max_pages > 1; the default keeps every other caller at one request.
+    # Bounded pagination: a high-churn repo can bury a stable tag past page one
+    # even with a name filter, so such callers pass max_pages > 1. The default
+    # keeps every other caller at one request.
     results = []
     pages = 0
     while url and pages < max_pages:
@@ -1072,12 +1063,9 @@ def fetch_helm_version(svc: dict) -> str:
             if entry_key_indent is None and stripped.startswith("- "):
                 entry_key_indent = key_indent
 
-            # Capture the chart's own "version:" — a direct child key of the
-            # entry (at entry_key_indent). Match on the exact key so
-            # "appVersion:" is excluded and arbitrary post-colon whitespace
-            # (YAML permits it) doesn't drop the line. Restricting to the entry
-            # key indent skips deeper "version:" lines under a dependencies:/
-            # maintainers: sub-block, which would otherwise be collected.
+            # The chart's own "version:" is a direct child of the entry, so
+            # match the exact key at entry_key_indent — excluding "appVersion:"
+            # and any deeper "version:" under dependencies:/maintainers:.
             if key == "version" and (entry_key_indent is None or key_indent == entry_key_indent):
                 ver = stripped.split(":", 1)[1].strip().strip('"').strip("'")
                 if not re.search(r"(alpha|beta|rc|dev|snapshot)", ver, re.IGNORECASE):
@@ -1277,8 +1265,11 @@ def read_current_versions() -> dict[str, str]:
                 in_helm = False
                 # Fall through to check this line as a regular entry
 
+        # Only column-0 keys are pins; an indented `*_version:` belongs to some
+        # other mapping and must not be read (or later rewritten) as top level.
+        at_top_level = not line[:1].isspace()
         _key = stripped.split(":")[0].strip()
-        if not in_helm and ":" in stripped and ("_version" in _key or _key in extra_keys):
+        if not in_helm and at_top_level and ":" in stripped and ("_version" in _key or _key in extra_keys):
             key, _, val = stripped.partition(":")
             key = key.strip()
             val = val.strip().strip('"').strip("'")
@@ -1358,7 +1349,9 @@ def update_version_in_file(var_name: str, new_version: str) -> bool:
                 break
     else:
         for i, line in enumerate(lines):
-            if line.strip().startswith(f"{var_name}:"):
+            # Column-0 anchor: an indented key of the same name belongs to
+            # another mapping and rewriting it would de-nest it.
+            if line.startswith(f"{var_name}:"):
                 # Preserve the comment portion
                 comment = ""
                 if "#" in line:
@@ -1385,7 +1378,8 @@ def update_version_in_file(var_name: str, new_version: str) -> bool:
                 else:
                     new_val = new_version
 
-                prefix = f"{var_name}: {new_val}"
+                indent = len(line) - len(line.lstrip())
+                prefix = " " * indent + f"{var_name}: {new_val}"
                 # Pad to align comment (rough alignment)
                 if comment:
                     lines[i] = f"{prefix}  {comment}"
@@ -1553,6 +1547,20 @@ def check_all(
 # Output formatting
 # ---------------------------------------------------------------------------
 
+# The categories check_service() knows how to resolve. Also the --category
+# choices; a registry entry outside this map renders under "Other".
+CATEGORY_LABELS = {
+    "github": "GitHub Releases",
+    "dockerhub": "Container Images (Docker Hub)",
+    "ghcr": "Container Images (GHCR)",
+    "lsio": "Container Images (LinuxServer.io)",
+    "helm": "Helm Charts",
+    "gitlab": "GitLab (packages.gitlab.com)",
+    "plex": "Plex Media Server",
+    "apt_repo": "APT Repositories (upstream)",
+    "manual": "Manual / APT Managed",
+}
+
 # ANSI colors
 GREEN = "\033[32m"
 RED = "\033[31m"
@@ -1584,24 +1592,19 @@ def format_table(results: list[ServiceVersion]) -> str:
     lines.append(c(DIM, f"Checked: {time.strftime('%Y-%m-%d %H:%M:%S')}"))
     lines.append("")
 
-    # Group by category
-    categories = {
-        "github": "GitHub Releases",
-        "dockerhub": "Container Images (Docker Hub)",
-        "ghcr": "Container Images (GHCR)",
-        "lsio": "Container Images (LinuxServer.io)",
-        "helm": "Helm Charts",
-        "gitlab": "GitLab (packages.gitlab.com)",
-        "plex": "Plex Media Server",
-        "apt_repo": "APT Repositories (upstream)",
-        "manual": "Manual / APT Managed",
-    }
+    categories = CATEGORY_LABELS
 
-    updates_available = 0
-    errors = 0
+    # Counted over every result, not only the printed ones, so an unrecognised
+    # category cannot skew the summary.
+    updates_available = sum(1 for r in results if r.update_available and not r.held and not r.error)
+    errors = sum(1 for r in results if r.error)
 
-    for cat_key, cat_name in categories.items():
-        cat_results = [r for r in results if r.category == cat_key]
+    groups = [(k, n, [r for r in results if r.category == k]) for k, n in categories.items()]
+    other = [r for r in results if r.category not in categories]
+    if other:
+        groups.append(("other", "Other (unrecognised category)", other))
+
+    for _cat_key, cat_name, cat_results in groups:
         if not cat_results:
             continue
 
@@ -1624,12 +1627,10 @@ def format_table(results: list[ServiceVersion]) -> str:
             if r.error:
                 status = c(RED, "ERROR")
                 latest_str = "?"
-                errors += 1
             elif r.update_available and r.held:
                 status = c(DIM, "HELD")
             elif r.update_available:
                 status = c(YELLOW, "UPDATE AVAILABLE")
-                updates_available += 1
             elif r.current_version == "latest":
                 status = c(DIM, "tracking latest")
             else:
@@ -1752,58 +1753,166 @@ def get_deploy_command(result: ServiceVersion) -> str:
     return DEFAULT_DEPLOY_COMMAND
 
 
-def print_usage():
-    """Print usage information."""
-    print("""Usage: check-versions.py [OPTIONS]
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser. --category is validated against CATEGORY_LABELS."""
+    parser = argparse.ArgumentParser(
+        prog="check-versions.py",
+        description="Compare pinned versions against their upstream releases.",
+        epilog=(
+            "Environment:\n"
+            "  GITHUB_TOKEN           GitHub token for higher API rate limits\n"
+            "  CHECK_VERSIONS_CONFIG  Consumer config path\n"
+            "  NO_COLOR               Disable coloured output"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--service", metavar="NAME", type=str.lower,
+                        help="Check services matching NAME only")
+    parser.add_argument("--category", metavar="CAT", type=str.lower,
+                        choices=sorted(CATEGORY_LABELS),
+                        help="Check one category only (%s)"
+                             % ", ".join(sorted(CATEGORY_LABELS)))
+    parser.add_argument("--json", action="store_true", dest="json_output",
+                        help="Output as JSON")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Skip the cache, force fresh lookups")
+    parser.add_argument("--clear-cache", action="store_true",
+                        help="Clear the version cache and exit")
+    parser.add_argument("--update", metavar="NAME", type=str.lower,
+                        help="Update one service's pin in the vars file")
+    parser.add_argument("--update-all", action="store_true",
+                        help="Update every outdated pin in the vars file")
+    parser.add_argument("--list", action="store_true", dest="list_services",
+                        help="List all tracked services and exit")
+    parser.add_argument("--check-coverage", action="store_true",
+                        help="Fail if a *_version pin has no registry entry")
+    parser.add_argument("--config", metavar="PATH",
+                        help="Consumer config (default: $CHECK_VERSIONS_CONFIG, "
+                             "then scripts/version-registry.{py,json})")
+    parser.add_argument("--repo-root", metavar="DIR",
+                        help="Root every config path resolves against")
+    return parser
 
-Options:
-  --help                Show this help message
-  --service NAME        Check a specific service only
-  --category CAT        Check a category only (github, dockerhub, ghcr, lsio, helm, gitlab, plex, apt_repo, manual)
-  --json                Output as JSON
-  --no-cache            Skip cache, force fresh lookups
-  --clear-cache         Clear the version cache
-  --update NAME         Update a specific service's pin in the vars file
-  --update-all          Update every outdated pin in the vars file
-  --list                List all tracked services
-  --check-coverage      Fail if a *_version pin has no registry entry
-  --config PATH         Consumer config (default: $CHECK_VERSIONS_CONFIG, then
-                        scripts/version-registry.{py,json})
-  --repo-root DIR       Root every config path resolves against
 
-Environment:
-  GITHUB_TOKEN          GitHub personal access token for higher API rate limits
-  CHECK_VERSIONS_CONFIG Consumer config path
-  NO_COLOR              Disable colored output""")
+def _run_update(service_name: str) -> None:
+    """--update: check one service live and write its pin. Always exits."""
+    matched = [
+        s for s in SERVICE_REGISTRY
+        if s["name"].lower() == service_name
+        or s["var_name"].lower() == service_name
+        or s["var_name"].replace("_version", "").lower() == service_name
+    ]
+    if not matched:
+        print(f"Error: Unknown service '{service_name}'")
+        print("Run with --list to see available services")
+        sys.exit(1)
+
+    svc_def = matched[0]
+    current_versions = read_current_versions()
+    result = check_service(svc_def, current_versions, use_cache=False)
+
+    if result.error:
+        print(f"Error checking {result.name}: {result.error}")
+        sys.exit(1)
+
+    if not result.update_available:
+        print(f"{result.name} is already at the latest version ({result.current_version})")
+        sys.exit(0)
+
+    if result.held:
+        print(f"{result.name} is held back: {result.notes or 'documented hold'}")
+        print(f"Not updating (would write {result.latest_version} into {VARS_FILE.name}).")
+        print("Remove the 'held' flag in SERVICE_REGISTRY to override.")
+        sys.exit(0)
+
+    print(f"Updating {result.name}: {result.current_version} -> {result.latest_version}")
+    if update_version_in_file(result.var_name, result.latest_version):
+        print(f"Updated {result.var_name} in {VARS_FILE.name}")
+        print("\nNext steps:")
+        print(f"  1. Review the change: git diff {VARS_FILE}")
+        print(f"  2. Deploy the update: {get_deploy_command(result)}")
+        sys.exit(0)
+
+    # No write means the pin was renamed or the file format changed. Fail
+    # loudly so CI / the Taskfile cannot read it as success.
+    print(f"ERROR: Could not find {result.var_name} in {VARS_FILE.name}", file=sys.stderr)
+    sys.exit(1)
 
 
-def _flag_value(args: list[str], flag: str) -> Optional[str]:
-    if flag not in args:
-        return None
-    idx = args.index(flag)
-    if idx + 1 >= len(args):
-        print(f"ERROR: {flag} requires a value", file=sys.stderr)
-        sys.exit(2)
-    return args[idx + 1]
+def _run_update_all() -> None:
+    """--update-all: write every actionable pin. Always exits."""
+    results = check_all(use_cache=False)
+    updated = []
+    write_failed = []
+    errored = [r for r in results if r.error]
+    held_skipped = [r for r in results if r.update_available and r.held and not r.error]
+    for r in results:
+        if r.update_available and not r.error and not r.held:
+            print(f"Updating {r.name}: {r.current_version} -> {r.latest_version}")
+            if update_version_in_file(r.var_name, r.latest_version):
+                updated.append(r)
+            else:
+                print(f"  ERROR: Could not find {r.var_name} in {VARS_FILE.name}")
+                write_failed.append(r)
+
+    # Failures print before the success list so a long update run cannot bury
+    # them.
+    if write_failed:
+        print(f"\nERROR: {len(write_failed)} service(s) could not be updated in {VARS_FILE.name}:")
+        for r in write_failed:
+            print(f"  - {r.var_name}")
+
+    if errored:
+        print(f"\nWARNING: {len(errored)} service(s) had errors and were NOT checked:")
+        for r in errored:
+            print(f"  - {r.name}: {r.error}")
+
+    if held_skipped:
+        print(f"\nNOTE: {len(held_skipped)} update(s) intentionally held back (not written):")
+        for r in held_skipped:
+            print(f"  - {r.name}: {r.current_version} -> {r.latest_version} "
+                  f"({r.notes or 'documented hold'})")
+
+    if updated:
+        print(f"\nUpdated {len(updated)} services in {VARS_FILE.name}")
+
+        deploy_commands = {}
+        for r in updated:
+            deploy_commands.setdefault(get_deploy_command(r), []).append(r.name)
+
+        print("\nNext steps:")
+        print("  1. Review changes:")
+        print(f"     git diff {VARS_FILE}")
+        print("\n  2. Deploy updates (in this order):")
+        for cmd, services in deploy_commands.items():
+            print(f"     {cmd}")
+            for svc in services:
+                print(f"       # Updates: {svc}")
+
+        print("\n  3. Verify deployments:")
+        print("     task k3s:status")
+        print("     task infra:verify")
+
+        print("\n  4. Commit changes:")
+        print("     git add -A && git commit -m 'Update service versions'")
+    elif not errored:
+        print("\nAll services are up to date!")
+
+    # 2 — something errored or could not be written; 0 — everything succeeded,
+    # whether or not anything was updated.
+    sys.exit(2 if (errored or write_failed) else 0)
 
 
 def main():
-    args = sys.argv[1:]
+    args = build_parser().parse_args()
 
-    if "--help" in args or "-h" in args:
-        print_usage()
-        sys.exit(0)
-
-    repo_root = _flag_value(args, "--repo-root")
+    repo_root = Path(args.repo_root) if args.repo_root else None
     load_config(
-        resolve_config_path(
-            _flag_value(args, "--config"),
-            Path(repo_root) if repo_root else REPO_ROOT,
-        ),
-        Path(repo_root) if repo_root else None,
+        resolve_config_path(args.config, repo_root or REPO_ROOT),
+        repo_root,
     )
 
-    if "--check-coverage" in args:
+    if args.check_coverage:
         missing = missing_registry_entries()
         if missing:
             print(
@@ -1817,7 +1926,7 @@ def main():
         print(f"All {len(SERVICE_REGISTRY)} tracked pins have a registry entry.")
         sys.exit(0)
 
-    if "--clear-cache" in args:
+    if args.clear_cache:
         if CACHE_DIR.exists():
             for f in CACHE_DIR.iterdir():
                 f.unlink()
@@ -1826,7 +1935,7 @@ def main():
             print("No cache to clear")
         sys.exit(0)
 
-    if "--list" in args:
+    if args.list_services:
         print("\nTracked services:\n")
         for svc in SERVICE_REGISTRY:
             cat = svc["category"]
@@ -1835,151 +1944,15 @@ def main():
         print()
         sys.exit(0)
 
-    use_cache = "--no-cache" not in args
-    output_json = "--json" in args
-    service_filter = None
-    category_filter = None
+    if args.update:
+        _run_update(args.update)
 
-    # Parse arguments
-    value_flags = ("--service", "--category", "--update", "--config", "--repo-root")
-    i = 0
-    while i < len(args):
-        if args[i] in value_flags and i + 1 >= len(args):
-            print(f"Error: {args[i]} requires an argument", file=sys.stderr)
-            sys.exit(2)
-        if args[i] == "--service" and i + 1 < len(args):
-            service_filter = args[i + 1].lower()
-            i += 2
-        elif args[i] == "--category" and i + 1 < len(args):
-            category_filter = args[i + 1].lower()
-            i += 2
-        elif args[i] == "--update" and i + 1 < len(args):
-            service_name = args[i + 1].lower()
-            # Find the service
-            matched = [
-                s for s in SERVICE_REGISTRY
-                if s["name"].lower() == service_name
-                or s["var_name"].lower() == service_name
-                or s["var_name"].replace("_version", "").lower() == service_name
-            ]
-            if not matched:
-                print(f"Error: Unknown service '{service_name}'")
-                print("Run with --list to see available services")
-                sys.exit(1)
+    if args.update_all:
+        _run_update_all()
 
-            svc_def = matched[0]
-            current_versions = read_current_versions()
-            result = check_service(svc_def, current_versions, use_cache=False)
-
-            if result.error:
-                print(f"Error checking {result.name}: {result.error}")
-                sys.exit(1)
-
-            if not result.update_available:
-                print(f"{result.name} is already at the latest version ({result.current_version})")
-                sys.exit(0)
-
-            if result.held:
-                print(f"{result.name} is held back: {result.notes or 'documented hold'}")
-                print(f"Not updating (would write {result.latest_version} into {VARS_FILE.name}).")
-                print("Remove the 'held' flag in SERVICE_REGISTRY to override.")
-                sys.exit(0)
-
-            print(f"Updating {result.name}: {result.current_version} -> {result.latest_version}")
-            if update_version_in_file(result.var_name, result.latest_version):
-                print(f"Updated {result.var_name} in {VARS_FILE.name}")
-                print("\nNext steps:")
-                print(f"  1. Review the change: git diff {VARS_FILE}")
-                print(f"  2. Deploy the update: {get_deploy_command(result)}")
-                sys.exit(0)
-            else:
-                # The file didn't change — var_name may have been renamed or
-                # the file format changed. Fail loudly so CI / Taskfile can
-                # catch it instead of silently reporting success.
-                print(f"ERROR: Could not find {result.var_name} in {VARS_FILE.name}", file=sys.stderr)
-                sys.exit(1)
-
-        elif args[i] == "--update-all":
-            results = check_all(use_cache=False)
-            updated = []
-            write_failed = []
-            errored = [r for r in results if r.error]
-            held_skipped = [r for r in results if r.update_available and r.held and not r.error]
-            for r in results:
-                if r.update_available and not r.error and not r.held:
-                    print(f"Updating {r.name}: {r.current_version} -> {r.latest_version}")
-                    if update_version_in_file(r.var_name, r.latest_version):
-                        updated.append(r)
-                    else:
-                        print(f"  ERROR: Could not find {r.var_name} in {VARS_FILE.name}")
-                        write_failed.append(r)
-
-            # Surface errors FIRST — an operator looking at a long successful
-            # update list could easily miss that 5 other services failed their
-            # version check. Previous behavior silently swallowed errors.
-            if write_failed:
-                print(f"\nERROR: {len(write_failed)} service(s) could not be updated in {VARS_FILE.name}:")
-                for r in write_failed:
-                    print(f"  - {r.var_name}")
-
-            if errored:
-                print(f"\nWARNING: {len(errored)} service(s) had errors and were NOT checked:")
-                for r in errored:
-                    print(f"  - {r.name}: {r.error}")
-
-            if held_skipped:
-                print(f"\nNOTE: {len(held_skipped)} update(s) intentionally held back (not written):")
-                for r in held_skipped:
-                    print(f"  - {r.name}: {r.current_version} -> {r.latest_version} "
-                          f"({r.notes or 'documented hold'})")
-
-            if updated:
-                print(f"\nUpdated {len(updated)} services in {VARS_FILE.name}")
-
-                # Group updates by deployment command
-                deploy_commands = {}
-                for r in updated:
-                    cmd = get_deploy_command(r)
-                    if cmd not in deploy_commands:
-                        deploy_commands[cmd] = []
-                    deploy_commands[cmd].append(r.name)
-
-                print("\nNext steps:")
-                print("  1. Review changes:")
-                print(f"     git diff {VARS_FILE}")
-                print("\n  2. Deploy updates (in this order):")
-
-                # Show deployment commands with the services they update
-                for cmd, services in deploy_commands.items():
-                    print(f"     {cmd}")
-                    for svc in services:
-                        print(f"       # Updates: {svc}")
-
-                print("\n  3. Verify deployments:")
-                print("     task k3s:status")
-                print("     task infra:verify")
-
-                print("\n  4. Commit changes:")
-                print("     git add -A && git commit -m 'Update service versions'")
-            else:
-                if not errored:
-                    print("\nAll services are up to date!")
-            # Exit code convention:
-            #   2 — at least one service errored or couldn't be written
-            #   0 — all checks succeeded (whether or not we updated anything)
-            sys.exit(2 if (errored or write_failed) else 0)
-        elif args[i] in ("--json", "--no-cache"):
-            # Boolean flags already consumed by the `in args` checks above.
-            i += 1
-        elif args[i] in ("--config", "--repo-root"):
-            # Value flags already consumed by _flag_value() before load_config().
-            i += 2
-        else:
-            # Reject unknown flags loudly: a typo'd --category/--service would
-            # otherwise silently run the full unfiltered check.
-            print(f"Error: unknown argument '{args[i]}'", file=sys.stderr)
-            print("Run with --help for usage", file=sys.stderr)
-            sys.exit(2)
+    use_cache = not args.no_cache
+    service_filter = args.service
+    category_filter = args.category
 
     # Filter services
     services = SERVICE_REGISTRY
@@ -1998,7 +1971,7 @@ def main():
     results = check_all(services=services, category_filter=category_filter, use_cache=use_cache)
 
     # Output
-    if output_json:
+    if args.json_output:
         print(format_json(results))
     else:
         print(format_table(results))

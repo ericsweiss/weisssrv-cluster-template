@@ -43,12 +43,46 @@ Two consequences worth stating outright:
   [VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md)
   first: a library MAJOR reaching a generated cluster through a template MINOR
   is exactly the surprise this table exists to prevent, so a `lib_ref` default
-  bump that crosses a library MAJOR is a template MAJOR.
+  bump that crosses a library MAJOR is a template MAJOR. Every place the answer
+  lands in a generated repository — CI includes, the collection `version:`, the
+  Terraform module `?ref=`, the Taskfile's `LIB_REF` — is enumerated per
+  consumer in the library's
+  [docs/CONSUMERS.yml](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/CONSUMERS.yml).
 
 While the template is **0.x**, a breaking change bumps MINOR rather than cutting
 1.0.0 (semver's pre-1.0 allowance, and the release job's `major_on_zero` input
 stays `false`). The release notes still lead with a **Breaking changes**
 section — read it before running `copier update`.
+
+## Which library release a template release was validated against
+
+`lib_ref` is an answer, so a generated cluster can pin any library tag it likes —
+but exactly **one** pair per template release is ever proved to work, and that is
+the pair `tests/answers-weisssrv-shaped.yml` holds. `render-validate` renders the
+template with that fixture and runs the real toolchain over the output against a
+checkout of the library at that ref, so the fixture is the record of what was
+tested, not a preference.
+
+| Template release | Rendered and validated against |
+|---|---|
+| `v0.1.0` | weisssrv-lib `v0.2.0` |
+| `v0.2.0` | weisssrv-lib `v0.5.2` |
+| `main` (unreleased) | weisssrv-lib `v0.6.0` |
+
+Rules that keep the table meaningful:
+
+- The `lib_ref` **default** in `copier.yml`, the fixture's `lib_ref`, and this
+  repository's own `include:` refs move together, in one MR. They are compared
+  by the test suite, so a partial bump fails rather than shipping a default the
+  pipeline never rendered against.
+- Add the row in that same MR, labelled `main` until the tag exists, then
+  relabel it when the release is cut. The release notes are generated from
+  commit subjects and carry no pin, so this table is the only place the pair is
+  written down.
+- **Other pairs are untested, not unsupported.** A cluster on an older template
+  release answering a newer `lib_ref` is a combination nothing here exercised; the
+  library's own [VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md)
+  is what says whether that bump is allowed to break it.
 
 ## How a consumer pins a version
 

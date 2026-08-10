@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import difflib
 import ipaddress
+import json
 import os
 import re
 import shlex
@@ -74,6 +76,117 @@ def check_yamllint(render: Path) -> None:
     if result.returncode:
         raise Failure("yamllint:\n" + result.stdout + result.stderr)
     print(f"  yamllint ok ({' '.join(targets)})")
+
+
+def _strip_hujson(text: str) -> str:
+    """HuJSON -> JSON: drop `//` comments and trailing commas.
+
+    String-aware, so a `//` inside a quoted value survives.
+    """
+    out, in_string, escaped, i = [], False, False, 0
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if text.startswith("//", i):
+            i = text.find("\n", i)
+            if i == -1:
+                break
+            continue
+        out.append(ch)
+        i += 1
+    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+
+
+def check_terraform(render: Path) -> None:
+    """Canonical formatting, and the tailnet policy still parses.
+
+    `terraform fmt -check` is the cheapest gate that catches a Jinja bug landing
+    as invalid HCL: five of the Terraform files are templates. It needs no
+    network and no credentials.
+    """
+    tf = render / "terraform"
+    if not tf.is_dir():
+        raise Failure("the render has no terraform/")
+    _need("terraform")
+    result = _run(["terraform", "fmt", "-check", "-recursive", "terraform/"], cwd=render)
+    if result.returncode:
+        raise Failure(
+            "terraform fmt -check reported unformatted files (the rendered HCL "
+            "is not canonical, or a template emitted broken syntax):\n"
+            + result.stdout
+            + result.stderr
+        )
+    policies = sorted(tf.glob("*/policy.hujson"))
+    for policy in policies:
+        try:
+            json.loads(_strip_hujson(policy.read_text()))
+        except json.JSONDecodeError as exc:
+            raise Failure(f"{policy.relative_to(render)} is not valid HuJSON: {exc}") from exc
+    modules = len(list(tf.glob("*/versions.tf")))
+    print(f"  terraform fmt ok ({modules} modules, {len(policies)} policy documents)")
+
+
+_MODULE_SOURCE = re.compile(r'"git::[^"]*//terraform/modules/([A-Za-z0-9_-]+)\?ref=[^"]*"')
+
+
+def check_terraform_validate(render: Path, lib_path: Path | None) -> None:
+    """`terraform validate` per module, against the library checkout.
+
+    The shipped sources are `git::…?ref=<tag>`, which would validate the
+    RELEASED module rather than the one under review — so each source is
+    rewritten to the local checkout in a throwaway copy. `-backend=false` skips
+    state and credentials; the provider itself still comes from the registry.
+
+    `-lockfile=readonly` is what CI's plan and apply pass, so a root pin the
+    committed `.terraform.lock.hcl` no longer satisfies has to fail here rather
+    than at deploy time.
+    """
+    _need("terraform")
+    modules = sorted(p.parent for p in (render / "terraform").glob("*/versions.tf"))
+    if not modules:
+        raise Failure("no Terraform modules in the render")
+    work = Path(tempfile.mkdtemp(prefix="tf-validate-"))
+    problems = []
+    try:
+        for module in modules:
+            target = work / module.name
+            shutil.copytree(module, target)
+            for tf_file in target.glob("*.tf"):
+                text = tf_file.read_text()
+                rewritten = _MODULE_SOURCE.sub(
+                    lambda m: f'"{lib_path}/terraform/modules/{m.group(1)}"', text
+                )
+                if rewritten != text:
+                    tf_file.write_text(rewritten)
+            init = _run(
+                ["terraform", "init", "-backend=false", "-input=false", "-lockfile=readonly"],
+                cwd=target,
+            )
+            if init.returncode:
+                problems.append(f"{module.name}: init failed\n{init.stdout}{init.stderr}")
+                continue
+            validate = _run(["terraform", "validate"], cwd=target)
+            if validate.returncode:
+                problems.append(f"{module.name}:\n{validate.stdout}{validate.stderr}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if problems:
+        raise Failure("terraform validate:\n" + "\n\n".join(problems))
+    print(f"  terraform validate ok ({', '.join(m.name for m in modules)})")
 
 
 def _flux_lint_inputs(render: Path) -> dict:
@@ -791,6 +904,74 @@ def _lan_cidr(render: Path) -> str | None:
     return None
 
 
+def check_version_coverage(render: Path) -> None:
+    """Every pin in the rendered vars file has a version-registry entry.
+
+    Offline (it compares two local files) and run here rather than only in the
+    generated cluster's own pipeline, because the pins and the registry are BOTH
+    template output: an entry added to one .jinja and not the other produces a
+    cluster whose weekly bump bot silently never reports that pin.
+    """
+    checker = render / "scripts" / "check-versions.py"
+    if not checker.is_file():
+        raise Failure(f"{checker} is missing from the render")
+    result = _run([sys.executable, str(checker), "--check-coverage"], cwd=render)
+    if result.returncode:
+        raise Failure(result.stdout + result.stderr)
+    print("  version coverage ok (every pin has a registry entry)")
+
+
+def check_versions_configmap(render: Path) -> None:
+    """The rendered cluster-versions ConfigMap matches the rendered vars file.
+
+    Both are template output from separate .jinja files, so a pin bumped in one
+    and not the other renders a cluster that fails its own `task lint:repo-sync`
+    on the first run. Nothing else here catches it: check_flux substitutes FROM
+    the ConfigMap, so a stale value is a valid render.
+    """
+    generator = render / "scripts" / "generate-versions-configmap.py"
+    shipped = render / "kubernetes" / "infrastructure" / "sources" / "versions-configmap.yaml"
+    if not generator.is_file():
+        raise Failure(f"{generator} is missing from the render")
+    if not shipped.is_file():
+        raise Failure(f"{shipped} is missing from the render")
+    with tempfile.TemporaryDirectory() as tmp:
+        regenerated = Path(tmp) / "versions-configmap.yaml"
+        result = _run(
+            [
+                sys.executable,
+                str(generator),
+                "--vars-file",
+                "ansible/inventories/prod/group_vars/all.yml",
+                "--output",
+                str(regenerated),
+                "--nested-key",
+                "helm_chart_versions",
+                "--regen-command",
+                "task flux:sync-versions",
+            ],
+            cwd=render,
+        )
+        if result.returncode:
+            raise Failure(result.stdout + result.stderr)
+        want = regenerated.read_text()
+    have = shipped.read_text()
+    if have != want:
+        diff = "".join(
+            difflib.unified_diff(
+                have.splitlines(keepends=True),
+                want.splitlines(keepends=True),
+                fromfile="rendered versions-configmap.yaml",
+                tofile="regenerated from all.yml",
+            )
+        )
+        raise Failure(
+            "versions-configmap.yaml.jinja and all.yml.jinja disagree — bump both "
+            f"in the same change:\n{diff}"
+        )
+    print("  versions configmap ok (in sync with the rendered all.yml)")
+
+
 def check_ansible(render: Path, lib_path: Path | None, workdir: Path) -> None:
     _need("ansible-playbook")
     ansible_dir = render / "ansible"
@@ -866,8 +1047,9 @@ def main() -> int:
         "--skip",
         default="",
         help=(
-            "Comma-separated: yamllint,flux,inventory-addresses,vendored,"
-            "role-opt-ins,role-inputs,ansible"
+            "Comma-separated: yamllint,terraform,flux,inventory-addresses,"
+            "version-coverage,versions-configmap,vendored,role-opt-ins,"
+            "role-inputs,terraform-validate,ansible"
         ),
     )
     args = parser.parse_args()
@@ -879,8 +1061,11 @@ def main() -> int:
         print(f"validating {render}")
         checks = (
             ("yamllint", check_yamllint),
+            ("terraform", check_terraform),
             ("flux", check_flux),
             ("inventory-addresses", check_inventory_addresses),
+            ("version-coverage", check_version_coverage),
+            ("versions-configmap", check_versions_configmap),
         )
         failed = []
         for name, fn in checks:
@@ -895,6 +1080,7 @@ def main() -> int:
             ("vendored", check_vendored),
             ("role-opt-ins", check_role_opt_ins),
             ("role-inputs", check_required_role_inputs),
+            ("terraform-validate", check_terraform_validate),
         ):
             if name in skip:
                 print(f"  {name} skipped")

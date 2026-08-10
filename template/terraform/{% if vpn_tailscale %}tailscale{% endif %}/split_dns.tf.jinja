@@ -7,13 +7,19 @@
 #
 # The map is a required module input with no default precisely so that an unset
 # value is an error rather than a silently planned destroy of live Split-DNS.
+#
+# There is no destroy guard on these entries (unlike the ACL resource): removing
+# a key plans a destroy that takes the domain out of tailnet resolution, and
+# nothing refuses it. Treat a destroy in a Split-DNS plan as a stop sign.
 locals {
   split_dns = {}
 
-  # Once the in-cluster resolver is up, adopt the console entry first and then
-  # switch this on in one applied step:
+  # Adopting the console-created entry, in this order — `terraform import`
+  # requires the address to exist in configuration, so the map comes first:
   #
-  #   terraform import 'module.tailnet.tailscale_dns_split_nameservers.this["{{ internal_domain }}"]' {{ internal_domain }}
+  #   1. Uncomment the entry below.
+  #   2. terraform import 'module.tailnet.tailscale_dns_split_nameservers.this["{{ internal_domain }}"]' {{ internal_domain }}
+  #   3. Plan. It must be clean before you apply.
   #
   # split_dns = {
   #   "{{ internal_domain }}" = { device_hostname = "ts-dns" }

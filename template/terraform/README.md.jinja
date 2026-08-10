@@ -50,6 +50,28 @@ that repository is private, give git a credential for it (a credential helper or
 `~/.netrc` entry) or switch the sources to `git::ssh://`. This is also why
 `task terraform:validate` needs network access.
 
+In CI the credential is the pipeline's own job token: every Terraform job sets
+`GIT_CONFIG_*` so that `https://{{ git_host }}/` is rewritten to a
+`gitlab-ci-token:${CI_JOB_TOKEN}@` URL for the duration of the job. That token
+only works against the instance that issued it, and only if the library project
+allows this project in its job-token allowlist (or is public). Without one of
+those, the first Terraform pipeline fails at `init` with a git authentication
+error, not a Terraform one.
+
+## Plan, apply, drift
+
+| Job | When | What it does |
+|---|---|---|
+| `terraform-plan` | MRs and `main`, on `terraform/{{ dns_backend }}/**` | Plans, saves `tfplan`, publishes the MR widget report |
+| `deploy-terraform` | manual on `main` | Applies **that saved plan**, not a fresh one |
+{% if vpn_tailscale %}| `tailscale-drift-plan` | schedule, and `main` on tailscale changes | Read-only plan, advisory |
+{% endif %}| `authentik-drift-plan` | schedule, and `main` on authentik changes | Read-only plan, advisory |
+
+The drift plans exist because both supervised modules are applied by hand: a
+console hot-fix would otherwise sit undetected until someone happened to run a
+plan. They exit 2 on a non-empty diff and are `allow_failure: true`, so drift
+shows as a warning rather than a broken pipeline.
+
 ## Backend seams
 
 Only the backends the answers offer are implemented. Where a replacement would

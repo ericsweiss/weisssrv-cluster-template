@@ -28,7 +28,7 @@ Useful flags:
 
 | Flag | Why |
 |---|---|
-| `--vcs-ref <template-tag>` | pin a template release instead of `main`; `git ls-remote --tags <template-url>` lists what exists |
+| `--vcs-ref <template-tag>` | pin an older template release, or `HEAD` for unreleased work; `git ls-remote --tags <template-url>` lists what exists |
 | `--data cluster_name=homelab` | answer one question from the command line |
 | `--data-file answers.yml --defaults` | fully non-interactive; copy `tests/answers-weisssrv-shaped.yml` for the shape |
 | `--pretend` | show what would be written, write nothing |
@@ -41,15 +41,18 @@ before handing off to copier. The console script is `weisssrv-new-project`;
 source and the destination:
 
 ```bash
-pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@v0.5.2#subdirectory=cli'
+pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@v0.6.0#subdirectory=cli'
 weisssrv-new-project new-cluster \
   https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
 ```
 
 Both blocks above are runnable as written, which is why neither passes
-`--vcs-ref`: they take the template's default branch. Add the flag from the
-table only with a tag that exists — a ref the template has not cut yet fails at
-clone time, before a single question is asked.
+`--vcs-ref`: copier resolves an unpinned VCS source to the template's **latest
+release tag**, falling back to the branch tip only if the template has cut none.
+Add the flag from the table to pin an older release, and only with a tag that
+exists — a ref the template has not cut fails at clone time, before a single
+question is asked. Whichever ref is used is recorded as `_commit` in
+`.copier-answers.yml` and is what the next `copier update` diffs from.
 
 The library marks `new-cluster` **EXPERIMENTAL** and reserves the right to
 change its flags. Plain `copier copy` is the stable path; use the wrapper only
@@ -168,16 +171,26 @@ allows nothing.
 
 ## 3. Install the collection, then run the gates
 
-The Ansible roles are not vendored: the playbooks address `weisssrv.infra.<role>`
-by FQCN and the collection is fetched at the pinned `lib_ref`. Install it
-**first** — without it every playbook, and `task lint`'s `ansible:lint` step,
-fails with `the role 'weisssrv.infra.<name>' was not found`:
+The Ansible roles are not vendored: there is no `ansible/roles/` in the
+generated tree at all. The playbooks address the collection's 40 roles as
+`weisssrv.infra.<role>` by FQCN, and `ansible/requirements.yml` fetches the
+collection at the pinned `lib_ref`. Install it **first** — without it every
+playbook, and `task lint`'s `ansible:lint` step, fails with
+`the role 'weisssrv.infra.<name>' was not found`:
 
 ```bash
 task ansible:install-collections   # ansible-galaxy, from ansible/requirements.yml
 ```
 
 Re-run it whenever `lib_ref` changes.
+
+That is also where the inventory you just wrote is *documented*: each role's
+`README.md` in the collection defines the variables it takes, the collection
+README lists the inventory-wide ones every role aliases, and `MIGRATING.md` is
+the map of what a `lib_ref` bump renames or newly asserts. Read it before a
+bump, not after — a variable this collection renamed does not raise
+`AnsibleUndefinedVariable`, it quietly falls back to the role's default on a
+green play.
 
 ```bash
 task lint          # yamllint, shellcheck, doc-links, taskfile-smoke,
@@ -191,11 +204,8 @@ tool-completeness check: each sub-task names the missing binary in its
 precondition message. Fix everything it reports before touching a host — most
 first-run failures are inventory typos it catches for free.
 
-One expected exception on a repository you have not yet run `task hosts:sync`
-against: **`lint:repo-sync` fails, and that is the design** — `scripts/hosts.env`
-ships as a placeholder, and a placeholder is by definition out of sync with the
-inventory you just filled in. It tells you so and names the fix (§ 2). Run
-`task hosts:sync`, commit the result, and re-run `task lint`.
+One expected exception, if you skipped the two sync commands in § 2:
+**`lint:repo-sync` fails, and that is the design.** It names the command to run.
 
 `task lint:prometheus-config` is **not** part of `task lint` (it needs
 `promtool` and `amtool`). Run it separately if you edit alert rules.
@@ -467,6 +477,16 @@ Once the platform is Ready:
    ```
    These three tasks are the **zone module only** (`terraform/cloudflare`): the
    public DNS records.
+
+   The apex record is applied with a **placeholder address** (`apex_seed_ip`,
+   a TEST-NET-1 address) and its content is owned from then on by the in-cluster
+   `cloudflare-ddns` CronJob. Until that job's first run the apex resolves to
+   the placeholder while the Terraform plan is clean, so verify the job exists
+   and force one run rather than waiting on its schedule:
+   ```bash
+   kubectl -n cloudflare-ddns create job --from=cronjob/cloudflare-ddns ddns-first-run
+   dig +short <external_domain> @1.1.1.1     # your public address, not 192.0.2.1
+   ```
 2. **Terraform (tailnet)** — only with `vpn_tailscale`. The ACL policy is its
    own module with its own state, and its apply is supervised — it overwrites
    the live policy in one shot and a bad one severs tailnet and SSH access to
@@ -590,9 +610,28 @@ Once the platform is Ready:
    > ```
    The runners themselves are in-cluster workloads, so this step necessarily
    comes after the platform is up.
-6. **Encryption** — if your pools are encrypted, `task zfs:encrypt` now that
+6. **Protect the default branch.** Flux reconciles `kubernetes/` from it and the
+   deploy jobs run Ansible against your hosts from it, so an unprotected default
+   branch means a direct push is an unreviewed deploy. In **Settings >
+   Repository > Protected branches**, on `main`:
+
+   | Setting | Value |
+   |---|---|
+   | Allowed to merge | Maintainers |
+   | Allowed to push and merge | No one — the merge-request path is the only one |
+   | Allowed to force push | No |
+
+   Do this **after** phase 6b, not before: `flux bootstrap` commits the
+   controller manifests to this branch itself, and it is the one operation that
+   needs to push directly. If you ever re-bootstrap, lift the protection for
+   that push and put it back.
+
+   The generated pipeline agrees with this shape already — the deploy jobs are
+   default-branch-only, and `deploy-ansible-k3s` and `deploy-terraform` are
+   manual on top of that.
+7. **Encryption** — if your pools are encrypted, `task zfs:encrypt` now that
    1Password Connect answers inside the cluster.
-7. **Backups** — offsite backup ships **disabled**
+8. **Backups** — offsite backup ships **disabled**
    (`restic_offsite_enabled: false`). Turning it on means filling in the repo,
    cache dir and rclone remote in `group_vars/nas.yml`, adding the credentials
    to the vault and the matching `op://` references to the `storage:deploy`

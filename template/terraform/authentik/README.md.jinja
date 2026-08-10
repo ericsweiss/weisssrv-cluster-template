@@ -13,6 +13,7 @@ only configures the objects inside it, so the server must be up and reachable at
 
 ```bash
 task terraform:authentik-init
+task terraform:authentik-import   # only when adopting or rebuilding state
 task terraform:authentik-plan     # review object by object
 task terraform:authentik-apply    # refuses -auto-approve on purpose
 ```
@@ -34,6 +35,61 @@ application before you walk away.
    learn it.
 3. Add the `applications` entry, a group, and a `policy_bindings` entry. **An
    application with no binding is open to every authenticated user.**
+
+## Adoption and recovery
+
+Objects created in the authentik UI are brought under management with `import`
+blocks in `imports.tf`, then `terraform plan` until it is clean. The module's
+resource addresses are stable and keyed by their `sso.tf` map key:
+
+```hcl
+import {
+  to = module.sso.authentik_application.this["grafana"]
+  id = "grafana"                          # the slug
+}
+
+import {
+  to = module.sso.authentik_provider_oauth2.this["grafana"]
+  id = "12"                               # the provider pk
+}
+
+import {
+  to = module.sso.authentik_group.this["grafana-users"]
+  id = "018f0000-0000-0000-0000-000000000000"   # the group uuid
+}
+
+import {
+  to = module.sso.authentik_policy_binding.this["grafana"]
+  id = "018f0000-0000-0000-0000-000000000000"   # the binding uuid
+}
+```
+
+Delete a block once its object is in state — a kept block is harmless but noisy.
+
+**Losing this state is not a re-apply.** Group names are not unique server-side
+while application slugs are, so an apply against a live server with empty state
+silently duplicates every group and then hard-fails on the applications. The
+recovery path is re-import, which only works if the address↔id table is current:
+
+```bash
+task terraform:authentik-import   # runs ./import.sh: imports, skips what is in state
+task terraform:authentik-plan     # must be clean before any apply
+```
+
+Keep `import.sh` complete. After every apply that creates objects, read the ids
+back out (`terraform output application_ids policy_binding_ids group_ids`) and
+update the table — a list written once at adoption time is not a recovery path.
+
+## Known limitation: custom property mappings
+
+`oauth2_providers[*].scope_mappings` resolves each name through the *managed*
+(blueprint-provided) scope mappings only, so a scope a blueprint does not ship
+cannot be referenced. The common case is an application that refuses a login
+whose ID token lacks a claim authentik does not emit by default (Mealie wants a
+true `email_verified`). Until the library module grows a `custom_scope_mappings`
+input, the mapping has to be created in the UI, which the drift plan will then
+report — record it in the repo's runbook so the drift is not mistaken for an
+unreviewed edit.
 
 ## Security defaults worth knowing
 

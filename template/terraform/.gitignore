@@ -1,0 +1,24 @@
+# Terraform-local ignores, next to the code they protect. The repo root's
+# .gitignore covers state, .terraform/ and plan files; these are the patterns
+# that only matter here.
+
+# Variable files — secret-bearing. The root glob misses the .json form.
+*.tfvars
+*.tfvars.json
+
+# Crash logs (they embed the request that crashed, provider config included)
+crash.log
+crash.*.log
+
+# Override files: local, unreviewed config that silently wins over the checked-in
+# HCL. Never commit one.
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# CLI configuration (credentials blocks, mirror config)
+.terraformrc
+terraform.rc
+
+# .terraform.lock.hcl is COMMITTED — it pins the exact provider builds.

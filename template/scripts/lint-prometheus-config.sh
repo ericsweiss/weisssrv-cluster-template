@@ -49,12 +49,9 @@ if ! compgen -G "${RULE_TESTS_DIR}/*.test.yaml" >/dev/null; then
 fi
 
 echo "=== Running promtool alert unit tests ==="
-# Behavioral tests for the load-bearing alerts (firing/labels/timing). The
-# extracted rules keep their annotations for `promtool check rules` above; the
-# unit tests run against an annotation-stripped copy so they assert alert logic,
-# not churn-prone description prose. rule_files in the *.test.yaml resolve
-# relative to the test file's dir, so the tests and any supplementary
-# *.rules.yaml are copied alongside the stripped rules.
+# The unit tests run against an annotation-stripped copy, so they assert alert
+# logic rather than description prose. `rule_files` in a *.test.yaml resolves
+# relative to that file, hence the copy into one directory.
 tests_dir="$work/rule-tests"
 mkdir -p "$tests_dir"
 cp "${RULE_TESTS_DIR}"/*.yaml "$tests_dir"/

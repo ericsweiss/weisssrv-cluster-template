@@ -1,0 +1,58 @@
+---
+# Recursive-resolver metrics — remote scrape of unbound_exporter (:9167), which
+# the DNS playbook installs on every resolver. The binaries run on the LXCs, not
+# in the cluster, so this is the same shape as node-exporter-host.yaml: a
+# selectorless headless Service plus a hand-written EndpointSlice addressed from
+# cluster-config.
+#
+# ONE Service for every resolver, not one per host: Prometheus derives
+# instance=<ip>:9167 from the address, so the resolvers stay distinguishable in
+# every query while the roster stays a single cluster-config key.
+apiVersion: v1
+kind: Service
+metadata:
+  name: unbound-exporter
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: unbound-exporter
+    app.kubernetes.io/part-of: observability
+spec:
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 9167
+      targetPort: 9167
+
+---
+# discovery.k8s.io/v1, not the deprecated core/v1 Endpoints. Nothing controls
+# this slice but this file, so conditions.ready is set explicitly per address.
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: unbound-exporter
+  namespace: observability
+  labels:
+    kubernetes.io/service-name: unbound-exporter
+addressType: IPv4
+ports:
+  - name: metrics
+    port: 9167
+    protocol: TCP
+endpoints: ${cluster_unbound_exporter_addresses}
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: unbound-exporter
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: unbound-exporter
+spec:
+  jobLabel: app.kubernetes.io/name
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: unbound-exporter
+  endpoints:
+    - port: metrics
+      interval: 60s

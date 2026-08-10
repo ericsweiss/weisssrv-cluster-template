@@ -72,9 +72,11 @@ data:
 
   # Scrape targets for the HOST node-exporters (port 9101, the `node_exporter_host`
   # role) — the machines the in-cluster DaemonSet cannot see. Consumed by
-  # observability/exporters/node-exporter-host.yaml as an `Endpoints` address
-  # list, so this is the same JSON FLOW SEQUENCE trick as cluster_etcd_endpoints:
-  # a real YAML list is required where Flux only substitutes text.
+  # observability/exporters/node-exporter-host.yaml as the `endpoints:` list of a
+  # hand-written EndpointSlice, so this is the same JSON FLOW SEQUENCE trick as
+  # cluster_etcd_endpoints: a real YAML list is required where Flux only
+  # substitutes text. `conditions.ready` is explicit — a slice with no controller
+  # behind it has nobody to fill it in, and Prometheus skips a not-ready address.
   #
   # Seeded from the starter inventory's roster, which is exactly the set the
   # playbooks deploy the role onto:
@@ -93,7 +95,20 @@ data:
   # DaemonSet already scrapes them on 9100, and listing them here would produce
   # two series per agent under different jobs. Add an app VM to this list when it
   # grows a textfile collector worth alerting on.
-  cluster_node_exporter_host_addresses: '[{% for host in pve_hosts %}{"ip": "{{ lan_prefix }}.{{ 11 + loop.index0 }}"}, {% endfor %}{% for addr in resolvers %}{"ip": "{{ addr }}"}, {% endfor %}{"ip": "{{ lan_prefix }}.23"}{% for j in range(1, n_srv + 1) %}, {"ip": "{{ lan_prefix }}.{{ 30 + j }}"}{% endfor %}]'
+  cluster_node_exporter_host_addresses: '[{% for host in pve_hosts %}{"addresses": ["{{ lan_prefix }}.{{ 11 + loop.index0 }}"], "conditions": {"ready": true}}, {% endfor %}{% for addr in resolvers %}{"addresses": ["{{ addr }}"], "conditions": {"ready": true}}, {% endfor %}{"addresses": ["{{ lan_prefix }}.23"], "conditions": {"ready": true}}{% for j in range(1, n_srv + 1) %}, {"addresses": ["{{ lan_prefix }}.{{ 30 + j }}"], "conditions": {"ready": true}}{% endfor %}]'
+{%- if storage_backend | default('zfs') == 'zfs' %}
+
+  # Scrape targets for zfs_exporter (port 9134, the `zfs_exporter` role), which
+  # the storage playbook installs on the NAS node. Same EndpointSlice flow
+  # sequence as the roster above. Extend it if you run ZFS on more than the NAS.
+  cluster_zfs_exporter_addresses: '[{"addresses": ["{{ lan_prefix }}.11"], "conditions": {"ready": true}}]'
+{%- endif %}
+
+  # Scrape targets for unbound_exporter (port 9167, the `unbound_exporter` role),
+  # one per resolver the DNS playbook builds. Prometheus derives
+  # instance=<ip>:9167 per address, so the two resolvers stay distinguishable
+  # from a single Service.
+  cluster_unbound_exporter_addresses: '[{% for addr in resolvers %}{"addresses": ["{{ addr }}"], "conditions": {"ready": true}}{{ ", " if not loop.last }}{% endfor %}]'
 
   # Gate for OffsiteBackupStale's absent() arm. It holds a METRIC NAME rather
   # than a boolean because Flux substitutes text: `${...}` is only valid PromQL

@@ -1,56 +1,14 @@
 #!/usr/bin/env bash
 # Verify every changed Ansible role, playbook and inventory file matches at
-# least one deploy-* job's `changes:` list in .gitlab-ci.yml. Fires in MR CI; a
-# failure means an Ansible asset was modified but no deploy job will pick the
-# change up — a silent no-op deploy unless the operator either (a) adds the path
-# to the relevant deploy-* rule, or (b) acknowledges the asset is intentionally
-# outside CI deploy by listing it in the coverage config.
+# least one deploy-* job's `changes:` list in the CI file. A failure means an
+# Ansible asset was modified but no deploy job will pick it up: either wire the
+# path into a deploy-* rule, or list it (with a rationale) in the coverage
+# config, which is where every consumer-specific path lives.
 #
-# The unmapped gate exists because deploy-trigger mappings can lag the change
-# surface: a role can be refactored, a playbook renamed, or an inventory path
-# added without anyone updating the deploy-* job's `changes:` list, and the
-# rollout would then silently no-op. This forces an explicit acknowledgment in
-# the same MR — either wire the asset into a deploy job, or list it (with a
-# rationale) in the config.
-#
-# Usage: check-deploy-coverage.sh [BASE_REF]
-#
-# CONFIG (default scripts/deploy-coverage.conf, override with
-# $DEPLOY_COVERAGE_CONFIG; absent = every list empty):
-#
-#     [settings]
-#     roles_dir = ansible/roles
-#     playbooks_dir = ansible/playbooks
-#     inventory_dir = ansible/inventories/prod
-#     ci_file = .gitlab-ci.yml
-#     job_prefix = deploy-
-#     job_stage = deploy
-#
-#     [roles]
-#     k3s   # node lifecycle; manual via `task k3s:deploy`
-#
-#     [playbooks]
-#     site.yml   # broad fan-out playbook; each deploy job lists its own triggers
-#
-#     [inventory]
-#     hosts.yml  # affects every deploy; operator picks which jobs to re-run
-#
-# Every entry MUST carry a trailing `# rationale` and this script ENFORCES that
-# (an entry without one is a config error, not a silent exemption) — the
-# unmapped lists are only honest if each entry says why it isn't wired to a
-# deploy job and which workflow deploys it instead. Prefer wiring the path into
-# a deploy-* job's `changes:` list over adding an entry.
-#
-# Implementation note: deploy-path mappings are extracted by parsing the CI file
-# as YAML (python3 + PyYAML) and walking only jobs whose name starts with
-# `job_prefix` AND whose `stage:` is `job_stage`. That scope is deliberate: a
-# global `grep -oE 'ansible/roles/foo/**'` would match the path inside a
-# lint/test job's rules and report "mapped" even though no deploy job will fire —
-# false confidence. The walker assumes each deploy job declares its stage
-# LITERALLY (a stage inherited only via `extends:` is not resolved, which drops
-# that job's paths from coverage credit — a loud false failure on the next
-# matching edit, not a silent pass). `changes:` is accepted in both GitLab forms:
-# the plain list and the `changes: {paths: [...]}` mapping.
+# Usage:  check-deploy-coverage.sh [BASE_REF]
+# Config: $DEPLOY_COVERAGE_CONFIG (default scripts/deploy-coverage.conf);
+#         format and defaults in examples/deploy-coverage.example.conf,
+#         contract in docs/SCRIPTS.md. Absent config = every list empty.
 
 set -euo pipefail
 
@@ -125,16 +83,9 @@ ROLES_ERE=$(ere "$ROLES_DIR")
 PLAYBOOKS_ERE=$(ere "$PLAYBOOKS_DIR")
 INVENTORY_ERE=$(ere "$INVENTORY_DIR")
 
-# Resolve the diff base in priority order:
-#   1. MR pipeline: GitLab provides CI_MERGE_REQUEST_DIFF_BASE_SHA (the
-#      target branch tip at MR open).
-#   2. Local invocation: positional $1 wins.
-#   3. Branch pipeline: CI_COMMIT_BEFORE_SHA = parent of the pushed
-#      commit. GitLab sets this to all-zeros on the first push to a
-#      brand-new branch — treat that as "fall through" since diff
-#      against a null SHA is meaningless.
-#   4. Last resort: origin/main. This works locally and in any CI
-#      checkout where `origin` is the git remote.
+# Diff base, in priority order: CI_MERGE_REQUEST_DIFF_BASE_SHA, then $1, then
+# CI_COMMIT_BEFORE_SHA (all-zeros on a brand-new branch means "no base"), then
+# origin/main.
 BASE_REF="${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}"
 [ -z "$BASE_REF" ] && BASE_REF="${1:-}"
 if [ -z "$BASE_REF" ]; then
@@ -145,10 +96,7 @@ if [ -z "$BASE_REF" ]; then
     fi
 fi
 
-# Hard-fail on a bad ref instead of silently treating "no diff" as
-# "everything covered". An invalid BASE_REF used to swallow into
-# `git diff … 2>/dev/null` returning empty, which made the script
-# exit 0 with "skipped" and gave CI/cron a false-clear signal.
+# An unresolvable BASE_REF is an error, never an empty change set.
 if ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
     {
         echo "ERROR: BASE_REF '$BASE_REF' is not a valid git ref or commit."
@@ -158,11 +106,8 @@ if ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
     exit 2
 fi
 
-# Reject unrelated histories. `git diff "$BASE_REF"...HEAD` returns an
-# empty diff if BASE_REF and HEAD share no common ancestor (e.g. a
-# shallow clone that doesn't reach the MR base, or BASE_REF pointing at
-# a sibling repo's tip). Without this guard the script reports "no
-# changes — skipped", giving CI a false-clear signal on every commit.
+# Unrelated histories produce an empty three-dot diff, which would read as
+# "nothing changed"; require a common ancestor instead.
 if ! git merge-base --is-ancestor "$BASE_REF" HEAD 2>/dev/null \
    && ! git merge-base "$BASE_REF" HEAD >/dev/null 2>&1; then
     {
@@ -173,16 +118,9 @@ if ! git merge-base --is-ancestor "$BASE_REF" HEAD 2>/dev/null \
     exit 2
 fi
 
-# Cache the diff once. The `|| true` at the end of each pipe handles the
-# legitimate "nothing changed in this category" case (grep exits 1 on
-# no matches, which under `set -e + pipefail` would otherwise abort).
-# Real git diff failures already short-circuited at the rev-parse check.
-#
-# --diff-filter=d EXCLUDES deletions: a removed role/playbook/inventory file
-# has no deploy-coverage obligation (there's nothing left to roll out), so it
-# must not be flagged as "changed but unmapped" — that would force the operator
-# to re-add a just-deleted asset to an intentionally-unmapped list. Renames
-# still surface via their added (non-deleted) path.
+# One diff for every extraction below; `|| true` on each pipe covers the
+# "nothing in this category" case. --diff-filter=d drops deletions: a removed
+# asset has nothing left to roll out. Renames surface via their added path.
 DIFF_FILES=$(git diff --name-only --diff-filter=d "$BASE_REF"...HEAD)
 
 # Extract changed roles (path component after <roles_dir>/).
@@ -215,34 +153,47 @@ CHANGED_INVENTORY_PATHS=$(
         || true
 )
 
+# Read into arrays line by line: a path containing whitespace must stay one
+# entry. (A read loop rather than mapfile, which needs bash 4.)
+to_array() {
+    local line
+    ARRAY_OUT=()
+    while IFS= read -r line; do
+        if [ -n "$line" ]; then
+            ARRAY_OUT+=("$line")
+        fi
+    done <<< "$1"
+    return 0
+}
+to_array "$CHANGED_ROLES";           CHANGED_ROLES_LIST=(${ARRAY_OUT[@]+"${ARRAY_OUT[@]}"})
+to_array "$CHANGED_PLAYBOOKS";       CHANGED_PLAYBOOKS_LIST=(${ARRAY_OUT[@]+"${ARRAY_OUT[@]}"})
+to_array "$CHANGED_INVENTORY_PATHS"; CHANGED_INVENTORY_LIST=(${ARRAY_OUT[@]+"${ARRAY_OUT[@]}"})
+
 if [ -z "$CHANGED_ROLES" ] && [ -z "$CHANGED_PLAYBOOKS" ] && [ -z "$CHANGED_INVENTORY_PATHS" ]; then
     echo "No Ansible role/playbook/inventory changes in this diff; deploy coverage check skipped."
     exit 0
 fi
 
-# Extract every path string under `rules: -> changes:` from every deploy job.
-#
-# `!reference` and other custom YAML tags appear in rules: lists (e.g.
-# `- !reference [deploy-gitlab, rules]`). PyYAML's safe loader would refuse
-# those, so we register a multi-constructor that returns a sentinel for any tag —
-# the rule entry becomes a non-dict the walker skips, and the referenced job's
-# own `changes:` block is still collected independently.
+# Every path string under `rules: -> changes:` of every deploy job. Custom YAML
+# tags (`!reference`) resolve to None so the walker skips that rule entry; the
+# referenced job's own `changes:` block is collected independently.
 DEPLOY_PATHS=$(
     python3 - "$CI_FILE" "$JOB_PREFIX" "$JOB_STAGE" <<'PYEOF'
 import sys
 import yaml
 
 
-def _tag_passthrough(loader, tag_suffix, node):
-    return None
+class _CILoader(yaml.SafeLoader):
+    """SafeLoader that tolerates GitLab's custom tags. Subclassed so the
+    constructor is not registered on the global SafeLoader."""
 
 
 # Empty suffix on add_multi_constructor catches every '!<anything>' tag.
-yaml.SafeLoader.add_multi_constructor("!", _tag_passthrough)
+_CILoader.add_multi_constructor("!", lambda loader, suffix, node: None)
 
 ci_path, job_prefix, job_stage = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(ci_path) as f:
-    ci = yaml.safe_load(f)
+    ci = yaml.load(f, Loader=_CILoader)
 
 paths = set()
 for job_name, job in (ci or {}).items():
@@ -321,7 +272,7 @@ in_list() {
 }
 
 UNMAPPED_ROLES=()
-for role in $CHANGED_ROLES; do
+for role in ${CHANGED_ROLES_LIST[@]+"${CHANGED_ROLES_LIST[@]}"}; do
     if in_list "$role" ${INTENTIONALLY_UNMAPPED_ROLES[@]+"${INTENTIONALLY_UNMAPPED_ROLES[@]}"}; then
         continue
     fi
@@ -331,7 +282,7 @@ for role in $CHANGED_ROLES; do
 done
 
 UNMAPPED_PLAYBOOKS=()
-for pb in $CHANGED_PLAYBOOKS; do
+for pb in ${CHANGED_PLAYBOOKS_LIST[@]+"${CHANGED_PLAYBOOKS_LIST[@]}"}; do
     if in_list "$pb" ${INTENTIONALLY_UNMAPPED_PLAYBOOKS[@]+"${INTENTIONALLY_UNMAPPED_PLAYBOOKS[@]}"}; then
         continue
     fi
@@ -341,7 +292,7 @@ for pb in $CHANGED_PLAYBOOKS; do
 done
 
 UNMAPPED_INVENTORY_PATHS=()
-for inv in $CHANGED_INVENTORY_PATHS; do
+for inv in ${CHANGED_INVENTORY_LIST[@]+"${CHANGED_INVENTORY_LIST[@]}"}; do
     if in_list "$inv" ${INTENTIONALLY_UNMAPPED_INVENTORY_PATHS[@]+"${INTENTIONALLY_UNMAPPED_INVENTORY_PATHS[@]}"}; then
         continue
     fi

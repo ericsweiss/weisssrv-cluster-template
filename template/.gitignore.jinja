@@ -10,11 +10,6 @@ kubeconfig
 *.kubeconfig
 .kube/
 
-# Generated state snapshots. These are large and regenerate on demand
-# (`task collect-state`); committing them makes every snapshot a diff.
-CLUSTER_STATUS.txt
-cluster-state-*.txt
-
 # Terraform state / plans. The provider lockfile IS committed — it belongs to
 # the root module and pins what CI validates against.
 .terraform/

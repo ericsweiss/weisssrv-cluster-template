@@ -367,6 +367,9 @@ tasks:
   # === Flux =============================================================
   flux:install-cli:
     desc: Install the flux CLI (Homebrew)
+    preconditions:
+      - sh: command -v brew
+        msg: "Homebrew not installed. Install flux another way: https://fluxcd.io/flux/installation/"
     cmds:
       - |
         if ! command -v flux >/dev/null 2>&1; then
@@ -923,6 +926,16 @@ tasks:
     cmds:
       - op run -- terraform plan {{.CLI_ARGS}}
 
+  terraform:authentik-import:
+    desc: "Adopt UI-created SSO objects into state (idempotent; read-only against authentik)"
+    dir: "{{.TERRAFORM_DIR}}/authentik"
+    env: *tf_authentik_env
+    preconditions: *tf_preconditions
+    cmds:
+      # Only writes Terraform state. Required after a state loss: an apply with
+      # empty state duplicates every group instead of adopting it.
+      - op run -- ./import.sh
+
   terraform:authentik-apply:
     desc: "SUPERVISED: apply SSO changes — a misconfiguration locks every user out of every app"
     dir: "{{.TERRAFORM_DIR}}/authentik"
@@ -976,6 +989,7 @@ tasks:
       - task: lint:shellcheck
       - task: lint:doc-links
       - task: lint:taskfile-smoke
+      - task: lint:lib-pins
       - task: lint:version-coverage
       - task: lint:repo-sync
       - task: ansible:lint
@@ -999,7 +1013,7 @@ tasks:
       - sh: command -v shellcheck
         msg: "shellcheck not installed (brew install shellcheck)"
     cmds:
-      - shellcheck --severity=warning --exclude=SC1091,SC2034 scripts/*.sh
+      - shellcheck --severity=warning --exclude=SC1091,SC2034 scripts/*.sh terraform/*/*.sh
 
   lint:doc-links:
     desc: Resolve relative Markdown cross-links offline
@@ -1012,6 +1026,14 @@ tasks:
       - task --list >/dev/null
       - bash scripts/check-taskfile.sh
 
+  lint:lib-pins:
+    desc: Assert every weisssrv-lib include pins variables.WEISSSRV_LIB_REF
+    # `include:` is resolved before job variables exist, so the ref is a literal
+    # on every entry. This is what keeps the copies equal to the single source
+    # and rejects a branch ref. `--fix` rewrites them after a bump.
+    cmds:
+{% endraw %}      - python3 scripts/check-lib-pins.py --project {{ lib_project }}
+{% raw %}
   lint:version-coverage:
     desc: Assert every pin in all.yml has a scripts/version-registry.py entry
     # Offline and instant: it reads the two local files and compares key sets,

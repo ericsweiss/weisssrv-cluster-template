@@ -31,7 +31,9 @@ here is a regression — put it in `cluster-config` instead.
 | `cluster_alert_email` | `ops@example.com` | Alertmanager critical receiver |
 | `cluster_api_vip` | `10.0.0.161` | blackbox API-VIP probe |
 | `cluster_etcd_endpoints` | `'["10.0.0.31", "10.0.0.32", "10.0.0.33"]'` | `kubeEtcd` scrape targets — a JSON flow sequence, see below |
-| `cluster_node_exporter_host_addresses` | `'[{"ip": "10.0.0.11"}, …]'` | `exporters/node-exporter-host.yaml` `Endpoints` roster — also a flow sequence |
+| `cluster_node_exporter_host_addresses` | `'[{"addresses": ["10.0.0.11"], "conditions": {"ready": true}}, …]'` | `exporters/node-exporter-host.yaml` EndpointSlice roster — also a flow sequence |
+| `cluster_unbound_exporter_addresses` | `'[{"addresses": ["10.0.0.21"], "conditions": {"ready": true}}, …]'` | `exporters/unbound-exporter.yaml` roster, one entry per resolver |
+| `cluster_zfs_exporter_addresses` | `'[{"addresses": ["10.0.0.11"], "conditions": {"ready": true}}]'` | `exporters/zfs-exporter.yaml` roster (ZFS storage backend only) |
 | `cluster_offsite_backup_probe_metric` | `up` | gates `OffsiteBackupStale`'s `absent()` arm — see `platform.backups` |
 | `cluster_runbook_base_url` | `https://git.example.com/ops/cluster/-/blob/main/docs` | every alert's `runbook_url` (see below) |
 | `cluster_node_exporter_job_regex` | `node-exporter\|node-exporter-host` | node/storage alert job scoping — see below |
@@ -112,6 +114,24 @@ The address roster itself lives with `cluster_node_exporter_host_addresses` in
 as the etcd endpoints), annotated host by host. The k3s **agents** are
 deliberately excluded: the in-cluster DaemonSet already covers them on `:9100`,
 and listing them would double every agent's series under two jobs.
+
+### The other two host exporters
+
+`exporters/unbound-exporter.yaml` (`:9167`, every resolver) and
+`exporters/zfs-exporter.yaml` (`:9134`, the storage node, ZFS backend only) have
+the same shape and take their rosters from `cluster_unbound_exporter_addresses`
+and `cluster_zfs_exporter_addresses`. Both ship the **scrape only** — their
+series are there for dashboards and for rules you add, and no shipped rule
+selects them.
+
+Pool integrity is deliberately not built on `zfs_exporter`: the
+`zfs_pool_status_*` series that a `ZFSPoolNotOnline` / `ZFSPoolDeviceErrors` /
+`ZFSPoolSpace*` set wants come from the `node_exporter_host` zpool textfile
+collector, which covers **every** host with a pool rather than only the storage
+node. That collector is already running — it follows `node_exporter_host_proxmox`,
+which `group_vars/proxmox.yml` sets true — so the series are being scraped and
+only the rules are missing: add them under `platform-storage:` in
+`kube-prometheus-stack/release.yaml` (group `platform.storage`).
 
 ## Dashboards
 
