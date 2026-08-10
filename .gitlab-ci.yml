@@ -34,6 +34,12 @@ workflow:
 
 variables:
   LIB_PROJECT: "eric/weisssrv-lib"
+  # Single source for the library pin. `include:` CANNOT read this — it is
+  # resolved before job variables exist — so each entry below repeats the tag as
+  # a literal and scripts/check-lib-pins.py (vendored from the library) fails the
+  # pipeline if they drift from it or pin a branch. Bump here, then
+  # `scripts/check-lib-pins.py --fix`.
+  WEISSSRV_LIB_REF: "v0.5.0"
   COPIER_VERSION: "9.17.0"
   PYYAML_VERSION: "6.0.2"
   YAMLLINT_VERSION: "1.38.0"
@@ -48,7 +54,7 @@ include:
   # Jinja sources, not documents. The render-validate job below yamllints the
   # rendered tree, which is where template/ actually gets covered.
   - project: eric/weisssrv-lib
-    ref: v0.2.0
+    ref: v0.5.0
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: []
@@ -62,7 +68,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.2.0
+    ref: v0.5.0
     file: /ci/lint/python-lint.yml
     inputs:
       tags: []
@@ -81,7 +87,7 @@ include:
   # The shell the template ships is static (no .jinja suffix), so it can be
   # checked in place rather than only after a render.
   - project: eric/weisssrv-lib
-    ref: v0.2.0
+    ref: v0.5.0
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: []
@@ -94,7 +100,7 @@ include:
   # copier.yml schema checks + the full render invariants. Everything in the
   # repository feeds the render, hence the catch-all `changes`.
   - project: eric/weisssrv-lib
-    ref: v0.2.0
+    ref: v0.5.0
     file: /ci/test/python-tests.yml
     inputs:
       tags: []
@@ -106,44 +112,32 @@ include:
         - "**/*"
 
   - project: eric/weisssrv-lib
-    ref: v0.2.0
+    ref: v0.5.0
     file: /ci/security/secret-detection.yml
     inputs:
       tags: []
 
   - project: eric/weisssrv-lib
-    ref: v0.2.0
+    ref: v0.5.0
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []
-      # ROOT CAUSE, established 2026-08-08: the 45m death with no output was
-      # `xhigh`, not diff size. v0.2.0 defaults reasoning_effort to xhigh, and
-      # measured on weisssrv-lib!4 that took 40.7m/44.6m/74.5m to SUCCEED and
-      # twice failed outright emitting nothing — on a 56k-token diff, so size was
-      # never the variable. At `high` the same reviews complete in ~7m. v0.3.0
-      # made `high` the library default; this repo still pins v0.2.0, so it is
-      # set explicitly here rather than by bumping seven includes on a green MR.
-      reasoning_effort: "high"
-      # The token cap and `commands: review` that used to sit here were sized
-      # against that wrong diagnosis, and were a concession to the 327-file
-      # initial import (!1) rather than a standing configuration. Both are gone
-      # now that MRs here are ordinary, so this repo gets the same `review
-      # improve` pass as the other three. Until this change, "the reviewer found
-      # nothing" meant strictly less here than elsewhere — no per-line
-      # suggestions were ever requested — which is the kind of asymmetry that
-      # makes a green pipeline unreadable across repos.
+      # These three are STATED rather than inherited, even though all three now
+      # equal the library defaults. They are interlocked, and the arithmetic is
+      # the point: the job must outlast ai_timeout x len(commands) — 2 x 1200s
+      # = 40m — plus image pull and clone. Inheriting them would hide that
+      # relationship, so a later change to one default could silently invalidate
+      # another. Written out, the sum has to be redone deliberately.
       #
-      # ai_timeout is NOT left to the v0.2.0 default of 600s. That is per CALL,
-      # and `improve` is the expensive one (1478s measured at xhigh on a 52k
-      # diff); 600s would cut it off, and behind allow_failure the amputation
-      # reads as a clean pipeline. 1200s matches what the library adopted as its
-      # own default in v0.3.0.
+      # reasoning_effort is `high`, not `xhigh`: measured on weisssrv-lib!4,
+      # xhigh took 40.7m/44.6m/74.5m to SUCCEED and twice failed outright
+      # emitting nothing, on a 56k-token diff — so size was never the variable.
+      # At `high` the same reviews complete in ~7m.
+      reasoning_effort: "high"
+      # ai_timeout is per CALL, and `improve` is the expensive one (1478s
+      # measured at xhigh on a 52k diff). The old 600s would cut it off, and
+      # behind allow_failure the amputation reads as a clean pipeline.
       ai_timeout: "1200"
-      # Stated rather than inherited, because the value is only correct in
-      # relation to the two above it: the job must outlast ai_timeout x
-      # len(commands) — 2 x 1200s = 40m — plus image pull and clone. It happens
-      # to equal the v0.2.0 default, but inheriting it would hide the arithmetic
-      # that has to be redone whenever either input moves.
       timeout: "45m"
       needs:
         - job: yaml-lint
@@ -168,7 +162,7 @@ include:
   # the tag is 0.x a `feat!:` bumps MINOR, and calling a template 1.0.0 is a
   # deliberate act (flip the input for that release).
   - project: eric/weisssrv-lib
-    ref: v0.2.0
+    ref: v0.5.0
     file: /ci/release/semantic-release.yml
     inputs:
       tags: []

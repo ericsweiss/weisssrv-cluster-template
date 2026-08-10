@@ -80,7 +80,7 @@ open docs/PRE-SETUP.md
 
 # 2. Install copier (any of these)
 pipx install copier
-pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@v0.2.0#subdirectory=cli'
+pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@v0.5.0#subdirectory=cli'
 
 # 3. Generate
 copier copy https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
@@ -141,7 +141,7 @@ checks live there. Summary:
 | `vpn_tailscale` | `false` | Overlay VPN: host role, operator, ACL module |
 | `tailnet_dns_suffix` | *(none — asked)* | Asked only with `vpn_tailscale`; MagicDNS suffix, rejected if left at the `CHANGEME` placeholder |
 | `gpu` | `none` | `nvidia` adds VFIO prep, driver + container toolkit, device plugin; GPU telemetry is a documented add-on, **not shipped** (`kubernetes/infrastructure/observability/README.md`) |
-| `lib_url` / `lib_ref` | upstream URL / `v0.2.0` | weisssrv-lib source and pin for collection, CI includes, TF modules |
+| `lib_url` / `lib_ref` | upstream URL / `v0.5.0` | weisssrv-lib source and pin for collection, CI includes, TF modules |
 | `lib_project` | path part of `lib_url` | GitLab project path for `include: project:` (instance-local) |
 | `ci_runner_tag` / `ci_cpu_selector` | `infrastructure` / `<internal_domain>/cpu=modern` | Runner tag and the secret-detection CPU pin |
 | `enable_semantic_release` | `false` | Adds the release stage to the generated pipeline |

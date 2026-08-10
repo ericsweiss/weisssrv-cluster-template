@@ -140,19 +140,19 @@ include:
   # extra_validation is the parity the library documents: the kustomize corpus
   # never renders a chart, so `.spec.values` is otherwise unvalidated, and an
   # HPA/VPA pair fighting over the same workload has no other gate.
-  # ON BUMPING lib_ref PAST v0.2.0: add `require_cluster_root: false` below.
-  # From v0.3.0 that input defaults to TRUE (so a bootstrapped cluster that loses
-  # its flux-system content fails instead of silently skipping), and this repo has
-  # no gotk-components.yaml / gotk-sync.yaml until `flux bootstrap` runs — so
-  # without the explicit false the very first pipeline of a freshly generated
-  # cluster fails on a root it cannot build yet. The job prints that hint on
-  # failure; this note is here so it never has to.
+  # require_cluster_root is FALSE here because a freshly generated cluster has no
+  # gotk-components.yaml / gotk-sync.yaml until `flux bootstrap` runs, and the
+  # input defaults to true — which would fail the very first pipeline on a root
+  # it cannot build yet. Flip it to true (or drop the line) once bootstrapped:
+  # from then on it is the gate that fails a cluster which has LOST its
+  # flux-system content, instead of silently skipping the build.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/validate/flux-lint.yml
     inputs:
       tags: ["{{ runner_tag }}"]
       substitute: true
+      require_cluster_root: false
       cluster_dir: "{{ cluster_dir }}"
       versions_configmap: "{{ versions_cm }}"
       flux_render_script: "scripts/flux-env.sh"
@@ -178,7 +178,7 @@ include:
         - "scripts/check-doc-links.py"
         - ".gitlab-ci.yml"
 
-  # Findings BLOCK (the library's v0.2.0 default). The paired allowlists ship
+  # Findings BLOCK (the library default). The paired allowlists ship
   # with the repo — .gitleaks.toml and .gitlab/secret-detection-ruleset.toml —
   # so the `op://` references and the published supply-chain sha256 pins this
   # tree is full of do not fail the job. Amend .gitleaks.toml (with a rationale)
@@ -209,6 +209,33 @@ include:
           optional: true
         - job: secret_detection
           optional: true
+
+  # The READ-ONLY half of the version pair: reports what is available and changes
+  # nothing, so an MR author sees pin drift while they are already looking at the
+  # diff. The bot below is the other half, acting on drift when nobody is looking.
+  # A repo wants both — this one needs no token and no schedule.
+  #
+  # The report is written even when the checker exits 1 ("updates available"),
+  # because the redirect creates the file before the exit code exists. The -s
+  # guard covers the other case: a checker that dies mid-run leaves an EMPTY
+  # report, which uploads as a perfectly valid-looking artifact saying nothing is
+  # available. That is the wrong answer delivered quietly, so it exits non-zero
+  # instead — visible as a warning, since this job is soft-fail everywhere.
+  - project: {{ lib_project }}
+    ref: {{ lib_ref }}
+    file: /ci/maintenance/version-check.yml
+    inputs:
+      tags: ["{{ runner_tag }}"]
+      setup_command: "pip install --user --quiet pyyaml==$PYYAML_VERSION"
+      check_command: >-
+        python3 scripts/check-versions.py --json > "$REPORT_PATH"; RC=$?;
+        [ -s "$REPORT_PATH" ] ||
+        { echo "check-versions wrote no report (rc=$RC)"; exit 2; };
+        exit "$RC"
+      changes:
+        - "ansible/inventories/prod/group_vars/all.yml"
+        - "kubernetes/**/*"
+        - ".gitlab-ci.yml"
 
   # Weekly pin refresh. Runs ONLY from a pipeline schedule (or a manual web run)
   # and needs $VERSION_BUMP_BOT_TOKEN — see docs/ci-pipeline.md for both.

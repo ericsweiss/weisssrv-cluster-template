@@ -600,10 +600,10 @@ lib_ref:
     sources. Use a RELEASE TAG (vX.Y.Z) — the library's include contract is
     explicit that a branch is never a valid pin, and a branch deleted after
     merge takes every include, module source and collection install with it.
-  default: "v0.2.0"
+  default: "v0.5.0"
   validator: >-
     {% if not (lib_ref | regex_search('^[A-Za-z0-9][A-Za-z0-9._/-]*$')) %}
-    lib_ref must be a git ref — normally a release tag such as v0.2.0.
+    lib_ref must be a git ref — normally a release tag such as v0.5.0.
     {% endif %}
 
 lib_project:
