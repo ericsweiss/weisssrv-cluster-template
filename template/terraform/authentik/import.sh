@@ -27,11 +27,18 @@ cd "$(dirname "$0")"
 # The addresses are module-qualified because the resources live in the library
 # module, keyed by their sso.tf map key.
 IMPORTS='
-module.sso.authentik_provider_oauth2.this["grafana"]|12
-module.sso.authentik_group.this["grafana-users"]|00000000-0000-0000-0000-000000000000
+module.sso.authentik_provider_oauth2.this["grafana"]|REPLACE_WITH_PROVIDER_PK
+module.sso.authentik_group.this["grafana-users"]|REPLACE_WITH_GROUP_UUID
 module.sso.authentik_application.this["grafana"]|grafana
-module.sso.authentik_policy_binding.this["grafana"]|00000000-0000-0000-0000-000000000000
+module.sso.authentik_policy_binding.this["grafana"]|REPLACE_WITH_BINDING_UUID
 '
+
+# Refuse to run with the placeholder ids still in place — a fabricated numeric
+# id can partially bind a real, unrelated Authentik object into state.
+if printf '%s\n' "${IMPORTS}" | grep -q 'REPLACE_WITH_'; then
+  echo "import.sh: replace the REPLACE_WITH_* ids with the real pk/uuid values first" >&2
+  exit 2
+fi
 
 STATE="$(terraform state list 2>/dev/null || true)"
 imported=0
