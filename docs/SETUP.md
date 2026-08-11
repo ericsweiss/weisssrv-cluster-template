@@ -193,8 +193,8 @@ bump, not after — a variable this collection renamed does not raise
 green play.
 
 ```bash
-task lint          # yamllint, shellcheck, doc-links, taskfile-smoke,
-                   # version-coverage, repo-sync, ansible-lint,
+task lint          # yamllint, shellcheck, ruff, doc-links, taskfile-smoke,
+                   # lib-pins, version-coverage, repo-sync, ansible-lint,
                    # terraform fmt-check + validate, flux:lint
 task ansible:ping  # every host in the inventory answers
 ```

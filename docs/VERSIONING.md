@@ -146,7 +146,7 @@ the whole reason a moved path is MAJOR here.
 After any update, before committing:
 
 ```bash
-task lint          # yamllint + ansible-lint
+task lint          # yamllint + shellcheck + ruff + ansible-lint
 task flux:lint     # kustomize build + kubeconform, if kubernetes/ moved
 ```
 

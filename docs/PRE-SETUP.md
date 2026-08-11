@@ -583,17 +583,18 @@ brew install --cask 1password-cli
 brew install kubernetes-cli fluxcd/tap/flux
 # the gates task lint runs that the list above does not cover:
 brew install kustomize kubeconform gettext shellcheck
-pip install ansible-lint yamllint pyyaml
+pip install ansible-lint yamllint pyyaml ruff
 
 # Debian/Ubuntu: pipx install copier; apt install kubectl-equivalents, shellcheck,
-#   gettext-base; pip install ansible-lint yamllint pyyaml; the rest from each
+#   gettext-base; pip install ansible-lint yamllint pyyaml ruff; the rest from each
 #   project's instructions
 ```
 
 `gettext` is for `envsubst`, which `flux:lint` uses to expand `${cluster_...}`
 placeholders before schema validation; `kustomize` and `kubeconform` are the
 other two halves of that gate. `ansible-lint` and `yamllint` are the lint stage's
-first two steps.
+first two steps, and `ruff` is `lint:ruff` — the same check the CI python-lint
+job runs over `scripts/` and `tests/`.
 
 Not required for `task lint`, but required by the gate you run after touching
 alert rules (`task lint:prometheus-config`): **`promtool`** and **`amtool`**,
@@ -663,6 +664,6 @@ Library and tooling
 - [ ] `lib_project` decided — the library exists on the GitLab instance your
       pipelines run on, or you plan to vendor the CI templates
 - [ ] Workstation tooling from § 9 installed, including the `task lint` gates
-      (kustomize, kubeconform, gettext, shellcheck, yamllint, ansible-lint)
+      (kustomize, kubeconform, gettext, shellcheck, yamllint, ansible-lint, ruff)
 
 Then continue with [SETUP.md](SETUP.md).

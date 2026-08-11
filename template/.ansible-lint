@@ -21,8 +21,22 @@ exclude_paths:
   # auto-installs it when `offline: false` and it is missing). Without this,
   # `task lint` run before `task ansible:install-collections` reports the
   # LIBRARY's line lengths as failures in a repository that does not own them.
+  # .ansible-home/ is the CI job's ANSIBLE_HOME (weisssrv-lib
+  # /ci/lint/ansible-lint.yml sets ANSIBLE_HOME=$CI_PROJECT_DIR/.ansible-home
+  # and installs the collection into its collections/ subtree), so it lands
+  # INSIDE the project directory ansible-lint walks; the other two cover a
+  # local install at the repository root or under ansible/.
+  - .ansible-home/
   - ansible_collections/
   - ansible/ansible_collections/
+
+# No skip_list on purpose. weisssrv carries `var-naming[no-role-prefix]` for its
+# global vars, but that tag only fires from inside a role (role vars/defaults, a
+# `roles:` or include_role `vars:` block, or set_fact/register within a role) —
+# and a generated cluster owns no roles: every role it runs comes from the
+# weisssrv.infra collection, which is excluded above. Verified by running
+# ansible-lint over a render with the rule active: 0 failures in 32 files. Add
+# the skip only if this repository grows an `ansible/roles/` tree of its own.
 
 # Let ansible-lint resolve the collection dependencies it needs to check FQCNs.
 offline: false

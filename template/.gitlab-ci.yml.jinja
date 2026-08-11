@@ -114,6 +114,12 @@ include:
   # tests/ holds the cluster invariants (substitution coverage, no site literals
   # in the Kubernetes tree) and the library-pin gate. apt_packages is cleared and
   # the FULL python image used so the job stays runnable on a non-root runner.
+  #
+  # `changes:` must name every file the suite READS, not just the ones it lives
+  # next to: test_lib_pins.py reads ansible/requirements.yml, Taskfile.yml and
+  # terraform/*/*.tf to prove they pin the same library ref as this file's
+  # `ref:`. Without those three entries an MR that bumps only a pin — the exact
+  # change the gate exists for — never starts the job that would catch it.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/test/python-tests.yml
@@ -126,6 +132,9 @@ include:
         - "tests/**/*"
         - "kubernetes/**/*"
         - "scripts/**/*.py"
+        - "ansible/requirements.yml"
+        - "Taskfile.yml"
+        - "terraform/**/*.tf"
         - ".gitlab-ci.yml"
 
   - project: {{ lib_project }}

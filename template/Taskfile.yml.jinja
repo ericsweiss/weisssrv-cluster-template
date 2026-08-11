@@ -987,6 +987,7 @@ tasks:
     cmds:
       - task: lint:yamllint
       - task: lint:shellcheck
+      - task: lint:ruff
       - task: lint:doc-links
       - task: lint:taskfile-smoke
       - task: lint:lib-pins
@@ -1014,6 +1015,17 @@ tasks:
         msg: "shellcheck not installed (brew install shellcheck)"
     cmds:
       - shellcheck --severity=warning --exclude=SC1091,SC2034 scripts/*.sh terraform/*/*.sh
+
+  lint:ruff:
+    desc: Ruff over scripts/ and tests/ (mirrors the CI python-lint job)
+    preconditions:
+      - sh: command -v ruff
+        msg: "ruff not installed (pipx install ruff)"
+    cmds:
+      # Same argv as the CI python-lint include: targets `scripts tests`, and no
+      # --config, so ruff's own discovery finds ruff.toml at the repository root
+      # (the library's shared profile, vendored here) exactly as it does in CI.
+      - ruff check --no-cache --output-format concise scripts tests
 
   lint:doc-links:
     desc: Resolve relative Markdown cross-links offline
