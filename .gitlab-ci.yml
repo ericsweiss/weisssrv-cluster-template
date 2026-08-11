@@ -48,6 +48,10 @@ variables:
   KUBECONFORM_SHA256: "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73"
   KUSTOMIZE_VERSION: "5.4.3"
   KUSTOMIZE_SHA256: "3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7"
+  # Same 1.15 line as the library's terraform-validate image; render-validate
+  # needs the binary alongside python/ansible, so it is fetched, not imaged.
+  TERRAFORM_VERSION: "1.15.8"
+  TERRAFORM_SHA256: "d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d"
 
 include:
   # Only genuine YAML: files under template/ that carry the .jinja suffix are
@@ -248,7 +252,12 @@ render-validate:
         "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
         "$KUSTOMIZE_SHA256"
       tar xzf /tmp/kustomize.tar.gz -C "$CI_PROJECT_DIR/.bin" kustomize
-      kubeconform -v && kustomize version
+      fetch_verified terraform.zip \
+        "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
+        "$TERRAFORM_SHA256"
+      python -c "import zipfile,sys; zipfile.ZipFile('/tmp/terraform.zip').extract('terraform', sys.argv[1])" "$CI_PROJECT_DIR/.bin"
+      chmod +x "$CI_PROJECT_DIR/.bin/terraform"
+      kubeconform -v && kustomize version && terraform version
     - |
       set -eo pipefail
       # The ref under test is the fixture's, so the gate and the generated
