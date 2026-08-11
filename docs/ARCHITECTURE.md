@@ -48,10 +48,13 @@ Consequences worth internalising:
 | Applications | Flux | one directory per application under `kubernetes/apps/` |
 | External state | Terraform | public DNS zone, tailnet ACL, SSO objects |
 
-No Ansible role is vendored into a generated cluster. Playbooks address
-`weisssrv.infra.<role>` by fully-qualified name, and `ansible/requirements.yml`
-pins the collection at `lib_ref` — so a platform upgrade is a one-line, reviewable
-bump, and a role fix benefits every cluster generated from the template.
+No Ansible role is vendored into a generated cluster. Playbooks address the
+collection's 40 roles as `weisssrv.infra.<role>` by fully-qualified name, and
+`ansible/requirements.yml` pins the collection at `lib_ref` — so a platform
+upgrade is a one-line, reviewable bump, and a role fix benefits every cluster
+generated from the template. Site data is an **input** to those roles rather
+than a default: a value with no safe generic default is asserted by name at role
+entry, so a missed rename fails the play instead of rendering an empty string.
 
 ---
 
@@ -394,17 +397,44 @@ implementation has to satisfy.
 | SSO | Authentik | one application namespace, forward-auth middleware, Terraform object inventory | an OIDC/forward-auth provider and a declarative object model |
 | GPU | NVIDIA (optional) | VFIO host prep, node driver, device plugin, telemetry (operator-added) | passthrough prep, a device plugin, a scheduling label |
 | Virtualization | Proxmox VE | `proxmox_*` roles, guest definitions in the inventory | guest lifecycle, HA, backup, firewall primitives |
-| Storage | ZFS + NFS + zvols | storage role, static PVs, encryption units | pools or their equivalent, a PV mechanism, an at-rest encryption story |
+| Storage (`storage_backend`) | ZFS + NFS + zvols | storage role, static PVs, encryption units, the pool scrape | pools or their equivalent, a PV mechanism, an at-rest encryption story |
 
-The first six are genuine seams: swapping one is a bounded change. The last two
-are **assumptions** — Proxmox and ZFS are woven through the inventory model, the
-guest lifecycle and the storage layer, and replacing either is a fork, not a
-configuration change. If that is a problem, this template is the wrong starting
-point, and it is better to know now.
+The first six are genuine seams: swapping one is a bounded change to a named set
+of files. The last two are **structural** — Proxmox and ZFS run through the
+inventory model, the guest lifecycle and the storage layer, so an alternative is
+a second role family and a second storage playbook rather than a different value
+in an existing one. `storage_backend` exists to mark where that boundary runs
+(and to gate the ZFS-only pool scrape); virtualization has no
+equivalent answer because nothing in the generated tree would be left to
+select. If either is a problem, this template is the wrong starting point, and
+it is better to know now.
 
-`copier.yml` exposes each seam as a choice with exactly the values that are
-implemented; anything else fails during generation rather than producing a
-repository that cannot reconcile.
+`copier.yml` exposes every selectable seam as an enumeration carrying exactly the
+values that are implemented; anything else fails during generation rather than
+producing a repository that cannot reconcile. They are enumerations rather than
+free text on purpose — the *shape* of a second implementation is decided, only
+the implementation is missing, so adding one is a new choice value plus the
+files behind it.
+
+### What a different backend swaps
+
+The role-side half of every seam is contracted in the library's
+[docs/EXTENSIBILITY.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/EXTENSIBILITY.md):
+which variables exist so an alternative can be selected without a fork, which
+roles *are* a backend (and so get a sibling role family instead of a flag), and
+the rules a contributed alternative follows — role-prefixed variables, a default
+that reproduces today's behaviour byte-for-byte, molecule coverage, a MIGRATING
+entry only when a consumer must act. Three worked cases, cluster side:
+
+| Wanted instead | Library side | This template's side |
+|---|---|---|
+| Ceph rather than ZFS+NFS | omit `weisssrv.infra.nas_storage` and the `zfs_*` roles from the plays and run a `ceph_*` family beside them — the collection is a flat FQCN namespace, so both families can be installed at once | `group_vars/nas.yml` and the storage playbook become that family's; the static `PersistentVolume`s stop being NFS; `vm_additional_disks` (zvol passthrough) has no analogue and its consumers move to PVs |
+| GitHub rather than self-hosted GitLab | the `ci/` templates are GitLab YAML and are not included; the scripts they call are forge-neutral and get vendored into workflows, and `semantic-release.py --platform github` covers the release path | `.gitlab-ci.yml` is replaced by workflows, the Flux source becomes a GitHub `GitRepository`, and the in-cluster runner manifests become whatever executes the jobs |
+| A secrets store that is not 1Password | nothing to change for host-side roles — they take **values**, resolved by the caller before Ansible starts; the one exception is `zfs_encryption`, whose boot-time fetch is behind `zfs_encryption_key_command` | the `op://` references in `group_vars`, `Taskfile.yml` and the deploy jobs become the new tool's, `infrastructure/configs` gets that provider's `ClusterSecretStore`, and the two hand-made bootstrap Secrets become whatever it needs |
+
+None of these ships today. What each one has is a written boundary — the files
+it touches and the contract its replacement satisfies — which is the difference
+between a fork and a contribution.
 
 ---
 
@@ -453,6 +483,7 @@ restating it:
 | CI template inputs | [docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md) |
 | What a `lib_ref` bump can break | [docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md) |
 | The upstream of the vendored `scripts/` copies | [docs/SCRIPTS.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/SCRIPTS.md) |
+| The seam contract behind § Backend seams | [docs/EXTENSIBILITY.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/EXTENSIBILITY.md) |
 
 Filling in the inventory — the step [SETUP.md](SETUP.md) § 2 calls the one part
 no template can generate — is done against those role READMEs. Reaching them

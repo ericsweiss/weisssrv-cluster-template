@@ -62,13 +62,10 @@ _hpa_spec = importlib.util.spec_from_file_location("check_hpa_vpa_invariant", _H
 _hpa = importlib.util.module_from_spec(_hpa_spec)
 _hpa_spec.loader.exec_module(_hpa)
 
-# The traefik chart's servicemonitor.yaml hard-fails templating unless the
-# prometheus-operator API is present in .Capabilities.APIVersions (the cluster
-# installs it via kube-prometheus-stack). Declare it so `helm template` of a
-# serviceMonitor-enabled release succeeds offline. Charts commonly gate on the
-# kind-qualified form (.Capabilities.APIVersions.Has
-# "monitoring.coreos.com/v1/ServiceMonitor"), so declare the kind-qualified CRDs
-# the cluster actually has, not just the bare group/version.
+# Charts gate on .Capabilities.APIVersions, commonly in the kind-qualified form
+# (".../v1/ServiceMonitor"), so declare both the group/version and the
+# kind-qualified CRDs the cluster has — otherwise offline `helm template` of a
+# serviceMonitor-enabled release fails.
 # Kubernetes version for capability-gated rendering, shared by `helm template`
 # (--kube-version) and kubeconform (-kubernetes-version) so version-gated chart
 # templates render the way both tools see them. Derived at runtime from
@@ -218,14 +215,12 @@ def validate_release(rel: dict, versions: dict, repo_root: str, run_kubeconform:
             print("stderr:", proc.stderr.strip())
             return False
 
-        # No-CPU-limits policy on the CHART-RENDERED pods — the gap
-        # check-hpa-vpa-invariant.py can't see: it scans only the HelmRelease
-        # `.spec.values`, never the chart's default pod specs, so a chart default
-        # could introduce a CPU limit unnoticed. Reuse that script's scanner +
-        # the allowlist main() loaded so the two checks stay identical. Runs before
-        # the optional kubeconform so the policy holds for `task flux:lint` too.
+        # No-CPU-limits policy on the CHART-RENDERED pods: check-hpa-vpa-
+        # invariant.py scans only the HelmRelease `.spec.values`, so a chart
+        # default would slip past it. Same scanner and allowlist, so the two
+        # checks cannot disagree.
         rendered_docs = [d for d in yaml.safe_load_all(proc.stdout) if isinstance(d, dict)]
-        cpu_viol = _hpa._cpu_limit_violations(rendered_docs, cpu_limit_allowlist)
+        cpu_viol = _hpa.cpu_limit_violations(rendered_docs, cpu_limit_allowlist)
         if cpu_viol:
             print(
                 f"ERROR [{rel['name']}]: chart-rendered pods set a CPU limit "

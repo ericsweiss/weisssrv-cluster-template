@@ -27,6 +27,8 @@ _exclude:
   - "~*"
   - "*.py[co]"
   - "__pycache__"
+  - ".pytest_cache"
+  - ".ruff_cache"
   - ".git"
   - ".DS_Store"
   - ".svn"
@@ -83,7 +85,7 @@ internal_domain:
     addresses). Also used as the Kubernetes node-label namespace.
   placeholder: "lan.example.com"
   validator: >-
-    {% if not (internal_domain | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
+    {% if not (internal_domain | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$')) %}
     internal_domain must be a lowercase fully-qualified domain, e.g. lan.example.com
     {% endif %}
 
@@ -95,7 +97,7 @@ external_domain:
     certificate and one ingress route per zone, and identical zones collide.
   placeholder: "example.com"
   validator: >-
-    {% if not (external_domain | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
+    {% if not (external_domain | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$')) %}
     external_domain must be a lowercase fully-qualified domain, e.g. example.com
     {% elif external_domain == internal_domain %}
     external_domain must differ from internal_domain. Use a subdomain for the
@@ -113,7 +115,7 @@ lan_cidr:
     NFS export allowlists and NetworkPolicy egress rules are derived from it.
   placeholder: "192.168.1.0/24"
   validator: >-
-    {% if not (lan_cidr | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(8|1[0-9]|2[0-9]|3[0-2])$')) %}
+    {% if not (lan_cidr | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(8|1[0-9]|2[0-9]|3[0-2])$')) %}
     lan_cidr must be an IPv4 network in CIDR form with a /8-/32 prefix,
     e.g. 192.168.1.0/24
     {% endif %}
@@ -126,7 +128,7 @@ lan_prefix:
     LAN is not a /24.
   default: "{{ lan_cidr.split('/')[0].rsplit('.', 1)[0] }}"
   validator: >-
-    {% if not (lan_prefix | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){2}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    {% if not (lan_prefix | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){2}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
     lan_prefix must be three octets with no trailing dot, e.g. 192.168.0
     {% endif %}
 
@@ -147,11 +149,17 @@ lan_gateway:
     `task infra:deploy` stops. Usually the LAN's .1.
   default: "{{ lan_prefix }}.1"
   validator: >-
-    {% if not (lan_gateway | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    {% if not (lan_gateway | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
     lan_gateway must be an IPv4 address, e.g. {{ lan_prefix }}.1
-    {% elif not lan_gateway.startswith(lan_prefix + '.') %}
-    lan_gateway must sit inside lan_prefix ({{ lan_prefix }}.x) — every guest is
+    {% else %}
+    {% set _n = lan_cidr.split('/') %}
+    {% set _b = 2 ** (32 - (_n[1] | int)) %}
+    {% set _l = _n[0].split('.') | map('int') | list %}
+    {% set _a = lan_gateway.split('.') | map('int') | list %}
+    {% if (_a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3]) // _b != (_l[0] * 16777216 + _l[1] * 65536 + _l[2] * 256 + _l[3]) // _b %}
+    lan_gateway must sit inside lan_cidr ({{ lan_cidr }}) — every guest is
     created on the flat LAN and routes through it directly.
+    {% endif %}
     {% endif %}
 
 k3s_api_vip:
@@ -161,14 +169,20 @@ k3s_api_vip:
     outside the DHCP pool, and on the LAN — nothing assigns it statically.
   placeholder: "{{ lan_prefix }}.161"
   validator: >-
-    {% if not (k3s_api_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    {% if not (k3s_api_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
     k3s_api_vip must be an IPv4 address, e.g. {{ lan_prefix }}.161
-    {% elif not k3s_api_vip.startswith(lan_prefix + '.') %}
-    k3s_api_vip must sit inside lan_prefix ({{ lan_prefix }}.x) — kube-vip
-    advertises it with ARP on the LAN segment.
+    {% else %}
+    {% set _n = lan_cidr.split('/') %}
+    {% set _b = 2 ** (32 - (_n[1] | int)) %}
+    {% set _l = _n[0].split('.') | map('int') | list %}
+    {% set _a = k3s_api_vip.split('.') | map('int') | list %}
+    {% if (_a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3]) // _b != (_l[0] * 16777216 + _l[1] * 65536 + _l[2] * 256 + _l[3]) // _b %}
+    k3s_api_vip must sit inside lan_cidr ({{ lan_cidr }}) — kube-vip advertises
+    it with ARP on the LAN segment.
     {% elif k3s_api_vip == lan_gateway %}
     k3s_api_vip must differ from lan_gateway ({{ lan_gateway }}) — kube-vip
     would ARP-advertise your router's address and fight it for the LAN.
+    {% endif %}
     {% endif %}
 
 metallb_public_vip:
@@ -178,14 +192,20 @@ metallb_public_vip:
     your router port-forwards 80/443 to).
   placeholder: "{{ lan_prefix }}.100"
   validator: >-
-    {% if not (metallb_public_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    {% if not (metallb_public_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
     metallb_public_vip must be an IPv4 address, e.g. {{ lan_prefix }}.100
-    {% elif not metallb_public_vip.startswith(lan_prefix + '.') %}
-    metallb_public_vip must sit inside lan_prefix ({{ lan_prefix }}.x).
+    {% else %}
+    {% set _n = lan_cidr.split('/') %}
+    {% set _b = 2 ** (32 - (_n[1] | int)) %}
+    {% set _l = _n[0].split('.') | map('int') | list %}
+    {% set _a = metallb_public_vip.split('.') | map('int') | list %}
+    {% if (_a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3]) // _b != (_l[0] * 16777216 + _l[1] * 65536 + _l[2] * 256 + _l[3]) // _b %}
+    metallb_public_vip must sit inside lan_cidr ({{ lan_cidr }}).
     {% elif metallb_public_vip in [k3s_api_vip, lan_gateway] %}
     metallb_public_vip must differ from k3s_api_vip ({{ k3s_api_vip }}) and from
     lan_gateway ({{ lan_gateway }}) — MetalLB answers ARP for it, so sharing
     either address takes the API or the router off the LAN.
+    {% endif %}
     {% endif %}
 
 metallb_internal_vip:
@@ -195,14 +215,20 @@ metallb_internal_vip:
     *.{{ internal_domain }} here.
   placeholder: "{{ lan_prefix }}.101"
   validator: >-
-    {% if not (metallb_internal_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    {% if not (metallb_internal_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
     metallb_internal_vip must be an IPv4 address, e.g. {{ lan_prefix }}.101
-    {% elif not metallb_internal_vip.startswith(lan_prefix + '.') %}
-    metallb_internal_vip must sit inside lan_prefix ({{ lan_prefix }}.x).
+    {% else %}
+    {% set _n = lan_cidr.split('/') %}
+    {% set _b = 2 ** (32 - (_n[1] | int)) %}
+    {% set _l = _n[0].split('.') | map('int') | list %}
+    {% set _a = metallb_internal_vip.split('.') | map('int') | list %}
+    {% if (_a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3]) // _b != (_l[0] * 16777216 + _l[1] * 65536 + _l[2] * 256 + _l[3]) // _b %}
+    metallb_internal_vip must sit inside lan_cidr ({{ lan_cidr }}).
     {% elif metallb_internal_vip in [k3s_api_vip, metallb_public_vip, lan_gateway] %}
     metallb_internal_vip must differ from k3s_api_vip ({{ k3s_api_vip }}),
     metallb_public_vip ({{ metallb_public_vip }}) and lan_gateway
     ({{ lan_gateway }}) — MetalLB answers ARP for it.
+    {% endif %}
     {% endif %}
 
 k3s_pod_cidr:
@@ -213,8 +239,20 @@ k3s_pod_cidr:
     nodes already carry.
   default: "10.42.0.0/16"
   validator: >-
-    {% if not (k3s_pod_cidr | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(8|1[0-9]|2[0-9]|3[0-2])$')) %}
+    {% if not (k3s_pod_cidr | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(8|1[0-9]|2[0-9]|3[0-2])$')) %}
     k3s_pod_cidr must be an IPv4 network in CIDR form, e.g. 10.42.0.0/16
+    {% else %}
+    {% set _p = k3s_pod_cidr.split('/') %}
+    {% set _n = lan_cidr.split('/') %}
+    {% set _b = 2 ** (32 - ([_p[1] | int, _n[1] | int] | min)) %}
+    {% set _pa = _p[0].split('.') | map('int') | list %}
+    {% set _la = _n[0].split('.') | map('int') | list %}
+    {% if (_pa[0] * 16777216 + _pa[1] * 65536 + _pa[2] * 256 + _pa[3]) // _b == (_la[0] * 16777216 + _la[1] * 65536 + _la[2] * 256 + _la[3]) // _b %}
+    k3s_pod_cidr ({{ k3s_pod_cidr }}) overlaps lan_cidr ({{ lan_cidr }}). Pod
+    addresses would collide with real LAN hosts, and every NetworkPolicy that
+    excepts the LAN would also except pod traffic. Pick a range outside the LAN —
+    the k3s default 10.42.0.0/16 unless the LAN is inside 10/8.
+    {% endif %}
     {% endif %}
 
 k3s_service_cidr:
@@ -224,10 +262,30 @@ k3s_service_cidr:
     or the LAN.
   default: "10.43.0.0/16"
   validator: >-
-    {% if not (k3s_service_cidr | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(8|1[0-9]|2[0-9]|3[0-2])$')) %}
+    {% if not (k3s_service_cidr | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(8|1[0-9]|2[0-9]|3[0-2])$')) %}
     k3s_service_cidr must be an IPv4 network in CIDR form, e.g. 10.43.0.0/16
-    {% elif k3s_service_cidr == k3s_pod_cidr %}
-    k3s_service_cidr must differ from k3s_pod_cidr.
+    {% else %}
+    {% set _s = k3s_service_cidr.split('/') %}
+    {% set _p = k3s_pod_cidr.split('/') %}
+    {% set _n = lan_cidr.split('/') %}
+    {% set _sa = _s[0].split('.') | map('int') | list %}
+    {% set _pa = _p[0].split('.') | map('int') | list %}
+    {% set _la = _n[0].split('.') | map('int') | list %}
+    {% set _si = _sa[0] * 16777216 + _sa[1] * 65536 + _sa[2] * 256 + _sa[3] %}
+    {% set _pi = _pa[0] * 16777216 + _pa[1] * 65536 + _pa[2] * 256 + _pa[3] %}
+    {% set _li = _la[0] * 16777216 + _la[1] * 65536 + _la[2] * 256 + _la[3] %}
+    {% set _bp = 2 ** (32 - ([_s[1] | int, _p[1] | int] | min)) %}
+    {% set _bl = 2 ** (32 - ([_s[1] | int, _n[1] | int] | min)) %}
+    {% if _si // _bp == _pi // _bp %}
+    k3s_service_cidr ({{ k3s_service_cidr }}) overlaps k3s_pod_cidr
+    ({{ k3s_pod_cidr }}). k3s allocates ClusterIPs and pod IPs from these two
+    ranges independently, so an overlap hands the same address out twice.
+    {% elif _si // _bl == _li // _bl %}
+    k3s_service_cidr ({{ k3s_service_cidr }}) overlaps lan_cidr ({{ lan_cidr }}).
+    A ClusterIP inside the LAN shadows the real host holding that address for
+    every pod in the cluster. Use the k3s default 10.43.0.0/16 unless the LAN is
+    inside 10/8.
+    {% endif %}
     {% endif %}
 
 upstream_dns_servers:
@@ -268,7 +326,7 @@ upstream_dns_servers:
     {% set ns.taken = ns.taken + [a ~ ' is in the .41-.49 k3s agent band (vmids 141+)'] %}
     {% endif %}
     {% endfor %}
-    {% if not (upstream_dns_servers | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])( ((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))*$')) %}
+    {% if not (upstream_dns_servers | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])( ((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))*$')) %}
     upstream_dns_servers must be one or more IPv4 addresses separated by single
     spaces, e.g. "{{ lan_prefix }}.21 {{ lan_prefix }}.22"
     {% elif _addrs | unique | list | length != _addrs | length %}
@@ -312,7 +370,7 @@ admin_email:
     address used when requesting certificates.
   placeholder: "you@example.com"
   validator: >-
-    {% if not (admin_email | regex_search('^[^@\s]+@[^@\s]+\.[^@\s]{2,}$')) %}
+    {% if not (admin_email | regex_search('^[^@\\s]+@[^@\\s]+\\.[^@\\s]{2,}$')) %}
     admin_email must be an email address.
     {% endif %}
 
@@ -323,7 +381,7 @@ alert_email:
     admin_email when pages should reach a different inbox; defaults to it.
   default: "{{ admin_email }}"
   validator: >-
-    {% if not (alert_email | regex_search('^[^@\s]+@[^@\s]+\.[^@\s]{2,}$')) %}
+    {% if not (alert_email | regex_search('^[^@\\s]+@[^@\\s]+\\.[^@\\s]{2,}$')) %}
     alert_email must be an email address.
     {% endif %}
 
@@ -338,22 +396,27 @@ timezone:
     {% endif %}
 
 # --------------------------------------------------------------------------
-# Backends
+# Backends — the four seam axes
 #
-# Each choice list carries every backend the generated tree has a seam for.
-# Choices that are not implemented fail here rather than producing a repo that
-# looks complete and does not reconcile. docs/ARCHITECTURE.md "Backend seams"
-# records what a new implementation has to provide.
+# git_backend (forge), secrets_backend, storage_backend and dns_backend are
+# enums, one implemented value each. A choice with no implementation fails here
+# rather than producing a repo that looks complete and never reconciles, and
+# adding an implementation is additive: a value on the choice list, a branch in
+# the validator, and the conditional paths under template/.
+#
+# docs/ARCHITECTURE.md "Backend seams" records what a new implementation has to
+# provide on the Kubernetes side; the library's seam contract for the Ansible
+# and CI halves is weisssrv-lib docs/EXTENSIBILITY.md.
 # --------------------------------------------------------------------------
 
 git_backend:
   type: str
   help: >-
-    Where THIS CLUSTER'S repository lives — the one Flux bootstraps into and
-    this pipeline runs in. It does not constrain where tenant (application)
-    repositories live: Flux clones those over HTTPS or SSH from any host, so a
-    GitHub-hosted tenant on a GitLab-hosted cluster is a supported, ordinary
-    setup (kubernetes/clusters/<name>/tenants/README.md).
+    FORGE seam. Where THIS CLUSTER'S repository lives — the one Flux bootstraps
+    into and this pipeline runs in. It does not constrain where tenant
+    (application) repositories live: Flux clones those over HTTPS or SSH from any
+    host, so a GitHub-hosted tenant on a GitLab-hosted cluster is a supported,
+    ordinary setup (kubernetes/clusters/<name>/tenants/README.md).
   default: gitlab_selfhosted
   choices:
     Self-hosted GitLab: gitlab_selfhosted
@@ -365,7 +428,8 @@ git_backend:
     bootstraps and reconciles, because the generated pipeline and the Flux
     bootstrap task are GitLab-shaped. This says nothing about tenant repos:
     those may live on GitHub or anywhere else Flux can clone from, whatever you
-    answer here. See docs/ARCHITECTURE.md "Backend seams".
+    answer here. See docs/ARCHITECTURE.md "Backend seams" and weisssrv-lib
+    docs/EXTENSIBILITY.md "Forge portability".
     {% endif %}
 
 git_host:
@@ -376,7 +440,7 @@ git_host:
   default: "{% if git_backend == 'github' %}github.com{% endif %}"
   placeholder: "git.example.com"
   validator: >-
-    {% if not (git_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
+    {% if not (git_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$')) %}
     git_host must be a bare hostname such as git.example.com — no https://,
     no trailing path.
     {% endif %}
@@ -403,11 +467,43 @@ git_namespace:
 secrets_backend:
   type: str
   help: >-
-    Source of every credential. Host tooling reads it at run time; in-cluster
-    workloads reach it through External Secrets Operator.
+    SECRETS seam. Source of every credential. Host tooling reads it at run time
+    (`op run --` resolving op:// references); in-cluster workloads reach it
+    through External Secrets Operator's 1Password Connect provider. A second
+    backend needs a ClusterSecretStore under
+    kubernetes/infrastructure/configs/, its controller under controllers/, and a
+    host-side resolver for the Ansible layer — weisssrv-lib
+    docs/EXTENSIBILITY.md records that the collection's roles take secret
+    VALUES, never references, so nothing there has to change.
   default: onepassword
   choices:
     1Password (CLI + Connect): onepassword
+  validator: >-
+    {% if secrets_backend != 'onepassword' %}
+    secrets_backend '{{ secrets_backend }}' is not implemented — only
+    'onepassword' generates the ClusterSecretStore, the Connect controller and
+    the op:// references the deploy jobs resolve. See docs/ARCHITECTURE.md
+    "Backend seams".
+    {% endif %}
+
+storage_backend:
+  type: str
+  help: >-
+    STORAGE seam. What the NAS node serves its datasets and PVs from. 'zfs' is
+    the shipped family: the nas_storage / zfs_encryption / zfs_exporter roles
+    and the zvol-backed guest disks. An alternative is a SIBLING role family
+    rather than a flag — weisssrv-lib docs/EXTENSIBILITY.md "Side-by-side role
+    families" is the contract, and this answer is what selects the ZFS-only
+    manifests (the pool scrape) under kubernetes/.
+  default: zfs
+  choices:
+    ZFS on the NAS node: zfs
+  validator: >-
+    {% if storage_backend != 'zfs' %}
+    storage_backend '{{ storage_backend }}' is not implemented — only 'zfs'
+    generates a cluster whose storage playbook, guest disks and pool scrape
+    exist. See docs/ARCHITECTURE.md "Backend seams".
+    {% endif %}
 
 onepassword_vault:
   type: str
@@ -425,11 +521,18 @@ onepassword_vault:
 dns_backend:
   type: str
   help: >-
-    Authoritative DNS for external_domain. Drives the Terraform zone module,
-    external-dns and the ACME DNS-01 solver.
+    DNS seam. Authoritative DNS for external_domain. Drives the Terraform zone
+    module, external-dns and the ACME DNS-01 solver — a second backend needs all
+    three, plus the matching credential item. See docs/ARCHITECTURE.md
+    "Backend seams".
   default: cloudflare
   choices:
     Cloudflare: cloudflare
+  validator: >-
+    {% if dns_backend != 'cloudflare' %}
+    dns_backend '{{ dns_backend }}' is not implemented — only 'cloudflare' ships
+    a Terraform zone module, an external-dns provider and a DNS-01 solver.
+    {% endif %}
 
 # --------------------------------------------------------------------------
 # Starter host roster
@@ -463,7 +566,7 @@ nas_host:
     this answer renames the host on both sides at once.
   default: "pve-nas-01.{{ internal_domain }}"
   validator: >-
-    {% if not (nas_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
+    {% if not (nas_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$')) %}
     nas_host must be a fully-qualified lowercase hostname, e.g.
     pve-nas-01.{{ internal_domain }}
     {% elif not nas_host.endswith('.' ~ internal_domain) %}
@@ -488,7 +591,7 @@ smtp_host:
     sides at once.
   default: "smtp-relay.{{ internal_domain }}"
   validator: >-
-    {% if not (smtp_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$')) %}
+    {% if not (smtp_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$')) %}
     smtp_host must be a fully-qualified lowercase hostname, e.g.
     smtp-relay.{{ internal_domain }}
     {% elif not smtp_host.endswith('.' ~ internal_domain) %}
@@ -551,7 +654,7 @@ tailnet_dns_suffix:
     already answered that you have a tailnet, so you can name it.
   placeholder: "tail1a2b3c.ts.net"
   validator: >-
-    {% if not (tailnet_dns_suffix | regex_search('^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+ts\.net$')) %}
+    {% if not (tailnet_dns_suffix | regex_search('^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\\.)+ts\\.net$')) %}
     tailnet_dns_suffix must be a MagicDNS name ending in .ts.net, e.g.
     tail1a2b3c.ts.net
     {% elif tailnet_dns_suffix.startswith('CHANGEME') %}
@@ -587,7 +690,7 @@ lib_url:
     if you do not consume the upstream library.
   default: "https://git.ericsweiss.com/eric/weisssrv-lib.git"
   validator: >-
-    {% if not (lib_url | regex_search('^https?://[^\s]+\.git$')) %}
+    {% if not (lib_url | regex_search('^https?://[^\\s]+\\.git$')) %}
     lib_url must be an http(s) clone URL ending in .git, e.g.
     https://git.example.com/group/weisssrv-lib.git
     {% endif %}
@@ -600,10 +703,13 @@ lib_ref:
     sources. Use a RELEASE TAG (vX.Y.Z) — the library's include contract is
     explicit that a branch is never a valid pin, and a branch deleted after
     merge takes every include, module source and collection install with it.
-  default: "v0.5.2"
+  default: "v0.6.0"
   validator: >-
-    {% if not (lib_ref | regex_search('^[A-Za-z0-9][A-Za-z0-9._/-]*$')) %}
-    lib_ref must be a git ref — normally a release tag such as v0.5.2.
+    {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
+    lib_ref must be a release TAG of the form vX.Y.Z (e.g. v0.6.0). A branch is
+    never a valid pin: the generated repo's scripts/check-lib-pins.py enforces
+    the same shape on every `include:` entry, so a branch answered here fails
+    the very first pipeline.
     {% endif %}
 
 lib_project:
@@ -648,7 +754,7 @@ ci_cpu_selector:
     pipeline; see kubernetes/README.md's node-label contract.
   default: "{{ internal_domain }}/cpu=modern"
   validator: >-
-    {% if not (ci_cpu_selector | regex_search('^[^\s=]+=[^\s=]+$')) %}
+    {% if not (ci_cpu_selector | regex_search('^[^\\s=]+=[^\\s=]+$')) %}
     ci_cpu_selector must be a single label=value pair, e.g.
     {{ internal_domain }}/cpu=modern
     {% endif %}

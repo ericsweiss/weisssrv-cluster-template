@@ -185,16 +185,27 @@ version bump in the other direction plus the same task.
 ### The platform library
 
 Bumping `lib_ref` upgrades the Ansible collection, the CI templates and the
-Terraform modules together. Read the library's changelog first
-([weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib), and
-`ansible_collections/weisssrv/infra/MIGRATING.md` for role-level breaking
-changes), then:
+Terraform modules together — three pin surfaces, one answer. Read the library's
+release notes first ([weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib),
+and `ansible_collections/weisssrv/infra/MIGRATING.md` for role variable renames
+and newly asserted inputs), then change the ref in every place it is written:
+each `ref:` in `.gitlab-ci.yml`, the `version:` in `ansible/requirements.yml`,
+the `?ref=` on each Terraform module source, and `LIB_REF` in `Taskfile.yml`.
 
 ```bash
-task ansible:install-collections    # re-installs at the new ref
+task ansible:install-collections    # re-installs the collection at the new ref
 task lib:sync                       # refresh .weisssrv-lib, the vendored scripts' source
+task terraform:init                 # re-fetch the module source, per module
+{% if vpn_tailscale %}task terraform:tailscale-init
+{% endif %}task terraform:authentik-init
 task lint
 ```
+
+Each Terraform module caches its module source in its own `.terraform/`, so
+every one of them needs re-initialising after a ref bump —
+`task lint`'s `terraform:validate` uses a separate cache and will not refresh
+the real one. Then plan each module before merging: a module bump can change a
+resource's shape, and the first plan after the bump is where that shows up.
 
 ### The template itself
 
@@ -233,6 +244,54 @@ never to four, and verify `kubectl get nodes -l node-role.kubernetes.io/etcd`
 before and after. Server addresses also feed
 `cluster_apiserver_egress_cidr` in `cluster-config` — that key is a hand-edited
 CIDR, not derived, so widen or re-narrow it in the same change.
+
+---
+
+## Making a guest highly available
+
+Proxmox HA moves a guest to another node when its own fails, which is only safe
+once the guest's storage is replicated to (or shared with) every node its rules
+allow. All three keys live in `group_vars/proxmox.yml` and are empty by default;
+`playbooks/proxmox-ha.yml` applies them.
+
+```yaml
+proxmox_ha_resources:
+  - id: ct:121              # vm:<id> or ct:<id>
+    state: started
+    max_restart: 2
+    max_relocate: 2
+proxmox_ha_rules:
+  - id: affinity-dns-01
+    type: node-affinity
+    resources: ct:121
+    nodes: "pve-node-01:2,pve-node-02:1"   # <node>:<priority>
+    strict: false
+proxmox_ha_replication_jobs:
+  - id: "121-0"
+    target: pve-node-02
+    schedule: "*/15"
+```
+
+Add the replication job before the resource: a guest that fails over to a node
+holding no copy of its disk does not start there.
+
+---
+
+## Per-host log-shipping alerts
+
+`kubernetes/infrastructure/observability/loki/host-log-staleness.yaml` ships the
+cluster-wide arm only — no journald line from ANY host. LogQL cannot group by
+label and alert on absence, so per-host coverage is one rule per host, which is
+site data. Generate them from the inventory alongside `scripts/hosts.env`:
+
+```yaml
+- alert: HostLogShippingStale
+  expr: absent_over_time({job="journal", host="<name>"}[45m])
+  for: 15m
+  labels: {severity: warning, component: logging, host: <name>, instance: <name>}
+  annotations:
+    summary: "No journald logs from <name> in 45m (host log shipping stopped)"
+```
 
 ---
 
@@ -423,6 +482,81 @@ means setting `restic_offsite_enabled: true`, filling in `restic_offsite_repo`,
 and adding the matching `op://` references to the `storage:deploy` task's `env:`
 block. The role asserts all of them, so a half-configured enable fails the
 deploy rather than backing up nothing quietly.
+
+### Enabling hypervisor guest backups (tier 2)
+
+`storage.cfg` is clustered, so both keys are set once, in
+`group_vars/nas.yml`, and apply to every node. The NFS dataset must exist and be
+exported to the hosts first.
+
+```yaml
+proxmox_backup_storage:
+  - id: tank-proxmox
+    type: nfs
+    server: {{ nas_host }}
+    export: /tank-proxmox
+    path: /mnt/pve/tank-proxmox
+    content: "backup,vztmpl,iso"
+    options: "vers=4.2,xprtsec=tls"
+proxmox_backup_vzdump_jobs:
+  - id: backup-daily            # must match the live jobs.cfg id, or a second
+    storage: tank-proxmox       # job is created alongside it
+    schedule: "03:30"
+    mode: snapshot
+    compress: zstd
+    all: true
+    # k3s nodes are rebuildable from the inventory and keep their data on zvols;
+    # restoring a stale server image can corrupt etcd quorum. Exclude them here.
+    exclude: []
+    # KiB/s PER NODE. An `all` job fires on every node at once against this one
+    # target, so the per-node cap is what bounds the aggregate write.
+    bwlimit: 61440
+    prune_backups: "keep-daily=7,keep-weekly=4,keep-monthly=6"
+    enabled: true
+    # Publishes vzdump_backup_last_run_success; node_exporter_host deploys the
+    # hook to every Proxmox host.
+    script: /usr/local/bin/vzdump-metrics-hook.sh
+```
+
+### Enabling archive replication (tier 3)
+
+The pool must already exist and be listed in `nas_storage_zfs_pools`; the role
+asserts both. Every `sources` entry must be a filesystem, not a zvol — zvol
+children ride along — and the basenames are the restore labels, so they must be
+unique.
+
+```yaml
+nas_storage_archive_backup_enabled: true
+nas_storage_archive_backup_pool: archive
+nas_storage_archive_backup_sources:
+  - ssd/appdata      # every app's live data, including the zvols
+  - tank/backups     # the logical dumps + etcd snapshot copies
+  - tank/share
+# The dataset receiving cluster-wide vzdump writes over NFS. Snapshotted only
+# once those writes quiesce, so a half-written .vma is never captured.
+nas_storage_archive_backup_vzdump_target: ""
+```
+
+### Enabling offsite (tier 4)
+
+```yaml
+restic_offsite_enabled: true
+restic_offsite_repo: "rclone:<remote>:<bucket>/<path>"
+# MUST sit on an encrypted dataset: the cache holds the repository tree — file
+# PATHS — in plaintext even though the data blobs are client-encrypted.
+restic_offsite_cache_dir: /mnt/ssd/restic-cache
+# {name, mountpoint} per file-walkable dataset. A dataset with zvol children
+# (ssd/appdata) shows those as EMPTY directories in the walk, which is why every
+# zvol-backed app dumps logically into tank/backups/apps instead.
+restic_offsite_sources:
+  - {name: backups, mountpoint: /mnt/tank/backups}
+  - {name: appdata, mountpoint: /mnt/ssd/appdata}
+```
+
+In the **same change**, flip `cluster_offsite_backup_probe_metric` in
+`cluster-config` to `restic_offsite_last_success_timestamp_seconds`. That key
+gates `OffsiteBackupStale`'s `absent()` arm, and it ships pointed at a metric
+that always exists so the alert stays inert until this tier actually runs.
 
 Put the cache directory on an **encrypted** dataset: it holds the repository
 tree — file paths — in plaintext even though the data blobs are client-encrypted.

@@ -49,24 +49,9 @@ nic_tuning_ip_forward: true
 {%- endif %}
 
 # Proxmox HA (playbooks/proxmox-ha.yml). Opt-in and empty by default: HA moves
-# guests between nodes on failure, which is only safe once the guest's storage
-# is replicated to (or shared with) every node its rules allow. Shape:
-#
-#   proxmox_ha_resources:
-#     - id: ct:121              # vm:<id> or ct:<id>
-#       state: started
-#       max_restart: 2
-#       max_relocate: 2
-#   proxmox_ha_rules:
-#     - id: affinity-dns-01
-#       type: node-affinity
-#       resources: ct:121
-#       nodes: "pve-node-01:2,pve-node-02:1"   # <node>:<priority>
-#       strict: false
-#   proxmox_ha_replication_jobs:
-#     - id: "121-0"
-#       target: pve-node-02
-#       schedule: "*/15"
+# guests between nodes on failure, which is only safe once the guest's storage is
+# replicated to (or shared with) every node its rules allow. The worked shape for
+# all three keys is in docs/RUNBOOKS.md "Making a guest highly available".
 proxmox_ha_resources: []
 proxmox_ha_rules: []
 proxmox_ha_replication_jobs: []

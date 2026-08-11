@@ -6,4 +6,5 @@ resources:
   - grafana-storage.yaml
   - externalsecret.yaml
   - alertmanager-config.yaml
+  - grafana-rbac.yaml
   - release.yaml

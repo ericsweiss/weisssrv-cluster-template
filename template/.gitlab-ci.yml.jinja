@@ -19,6 +19,7 @@ stages:
   - test
   - security
   - ai-review
+  - gate
   - deploy
   - maintenance
 {%- if enable_semantic_release | default(false) %}
@@ -35,6 +36,15 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 variables:
+  # Single source for the library pin. `include:` CANNOT read this — GitLab
+  # resolves includes before job variables exist — so every entry below repeats
+  # the tag as a literal and scripts/check-lib-pins.py (vendored from the
+  # library, run by tests/test_lib_pins.py) fails the pipeline if one drifts or
+  # pins a branch. Bump here, then `scripts/check-lib-pins.py --fix`.
+  WEISSSRV_LIB_REF: "{{ lib_ref }}"
+  # The project half of the same pin, so the gate checks the includes this
+  # cluster actually resolves (a fork or mirror answers lib_project).
+  LIB_PROJECT: "{{ lib_project }}"
   ANSIBLE_VERSION: "11.6.0"
   PYYAML_VERSION: "6.0.2"
 
@@ -67,6 +77,9 @@ include:
       targets: "ansible/"
       collections_path: ""
       galaxy_requirements: "ansible/requirements.yml"
+      # Full image, not slim: galaxy installs the collection from a git+ URL,
+      # which needs the git executable.
+      image: python:3.13
       changes:
         - "ansible/**/*"
         - ".ansible-lint"
@@ -78,10 +91,13 @@ include:
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: ["{{ runner_tag }}"]
-      direct_globs: "scripts/*.sh"
+      # terraform/*/*.sh is the SSO import helper, which is a real script and
+      # not covered by the scripts/ glob.
+      direct_globs: "scripts/*.sh terraform/*/*.sh"
       find_dir: ""
       changes:
         - "scripts/**/*.sh"
+        - "terraform/**/*.sh"
         - ".gitlab-ci.yml"
 
   - project: {{ lib_project }}
@@ -99,8 +115,18 @@ include:
         - ".gitlab-ci.yml"
 
   # tests/ holds the cluster invariants (substitution coverage, no site literals
-  # in the Kubernetes tree). apt_packages is cleared and the FULL python image
-  # used so the job stays runnable on a non-root runner.
+  # in the Kubernetes tree) and the library-pin gate. apt_packages is cleared and
+  # the FULL python image used so the job stays runnable on a non-root runner.
+  #
+  # `changes:` must name every file the suite READS, not just the ones it lives
+  # next to: test_lib_pins.py reads ansible/requirements.yml, Taskfile.yml and
+  # terraform/*/*.tf to prove they pin the same library ref as this file's
+  # `ref:`. Without those three entries an MR that bumps only a pin — the exact
+  # change the gate exists for — never starts the job that would catch it.
+  # test_cluster_invariants.py reads two more by the same rule:
+  # ansible/inventories/prod/hosts.yml (the address-consistency asserts) and
+  # .copier-answers.yml (the site-values-not-in-the-k8s-tree assert, which
+  # sources the literals to hunt for from the answers file).
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/test/python-tests.yml
@@ -113,6 +139,11 @@ include:
         - "tests/**/*"
         - "kubernetes/**/*"
         - "scripts/**/*.py"
+        - "ansible/requirements.yml"
+        - "ansible/inventories/prod/hosts.yml"
+        - ".copier-answers.yml"
+        - "Taskfile.yml"
+        - "terraform/**/*.tf"
         - ".gitlab-ci.yml"
 
   - project: {{ lib_project }}
@@ -422,9 +453,80 @@ deploy-coverage:
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 # ==============================================================================
+# GATE STAGE — the single dependency every deploy job carries.
+#
+# Stage order alone does NOT gate a deploy job that declares `needs:`. GitLab's
+# `optional: true` semantics (https://docs.gitlab.com/ci/yaml/#needsoptional):
+#
+#   - needed job NOT created (rules excluded it): the dependency is DROPPED
+#   - needed job created and succeeds:            dependency satisfied
+#   - needed job created and fails:               the dependent job is BLOCKED
+#
+# A job whose every `needs:` entry was dropped ends up with an EMPTY needs set,
+# and GitLab starts an empty-needs job immediately — before its own stage, and
+# regardless of whether the lint/validate/test stages later fail. That is why
+# each deploy job needs THIS job non-optionally instead of naming lint jobs
+# directly: this one always exists on a main pipeline, so the needs set is never
+# empty and stage order is never bypassed.
+#
+# Path-filtered jobs are listed optional (they may not exist in a given
+# pipeline); secret_detection has no path filter and always runs on main, which
+# is what keeps this gate's own needs set non-empty. The drift plans and
+# pr-agent-review are deliberately absent: they are `allow_failure: true`, so
+# they could never block anything.
+validation-gate:
+  stage: gate
+  image: alpine:3.23
+  tags: ["{{ runner_tag }}"]
+  # A newer commit must not auto-cancel this gate mid-run: the first pipeline's
+  # not-yet-started deploy jobs all need it, and would be orphaned.
+  interruptible: false
+  needs:
+    # Path-filtered (may not exist in this pipeline)
+    - job: yaml-lint
+      optional: true
+    - job: ansible-lint
+      optional: true
+    - job: shellcheck
+      optional: true
+    - job: python-lint
+      optional: true
+    - job: python-tests
+      optional: true
+    - job: flux-lint
+      optional: true
+    - job: docs-link-check
+      optional: true
+    - job: terraform-fmt
+      optional: true
+    - job: terraform-validate
+      optional: true
+    - job: terraform-plan
+      optional: true
+    - job: version-coverage
+      optional: true
+    - job: repo-sync
+      optional: true
+    - job: deploy-coverage
+      optional: true
+    # Always created on a main pipeline (no path filter)
+    - job: secret_detection
+  script:
+    - echo "All applicable checks passed - deploy jobs may proceed"
+  # These rules MUST stay a superset of every deploy job's: a deploy job needing
+  # a gate that was not created fails pipeline CREATION. Deploy jobs are
+  # main-only and skip schedules, so this is that set without the token clause
+  # (the gate itself needs no credentials).
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ==============================================================================
 # Deploy — starter set. One job per playbook, gated to main + a changes list, so
-# a merge deploys exactly what it touched. Adding a playbook means adding a job:
-# the pattern is documented in docs/ci-pipeline.md.
+# a merge deploys exactly what it touched. Every job needs validation-gate
+# (non-optional). Adding a playbook means adding a job: the pattern is
+# documented in docs/ci-pipeline.md.
 # ==============================================================================
 .deploy-base:
   extends: [.install-1password, .dep-cache]
@@ -477,6 +579,8 @@ deploy-ansible-base:
   stage: deploy
   extends: .deploy-base
   resource_group: deploy-ansible-base
+  needs:
+    - job: validation-gate
   variables:
     ROOT_EMAIL_ALIAS: "op://{{ onepassword_vault }}/Email Config/root_alias"
     SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
@@ -520,6 +624,9 @@ deploy-ansible-dns:
   extends: .deploy-base
   resource_group: deploy-ansible-dns
   needs:
+    - job: validation-gate
+    # Ordering only: base is not created for a DNS-only change, so this must
+    # stay optional — validation-gate above is what actually gates the deploy.
     - job: deploy-ansible-base
       optional: true
   variables:
@@ -552,6 +659,8 @@ deploy-ansible-storage:
   extends: .deploy-base
   resource_group: deploy-ansible-storage
   needs:
+    - job: validation-gate
+    # Ordering only — see deploy-ansible-dns.
     - job: deploy-ansible-base
       optional: true
   variables:
@@ -579,6 +688,8 @@ deploy-ansible-mail:
   extends: .deploy-base
   resource_group: deploy-ansible-mail
   needs:
+    - job: validation-gate
+    # Ordering only — see deploy-ansible-dns.
     - job: deploy-ansible-base
       optional: true
   variables:
@@ -609,6 +720,8 @@ deploy-ansible-k3s:
   stage: deploy
   extends: .deploy-base
   resource_group: deploy-ansible-k3s
+  needs:
+    - job: validation-gate
   variables:
     ROOT_EMAIL_ALIAS: "op://{{ onepassword_vault }}/Email Config/root_alias"
     SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
@@ -637,12 +750,39 @@ deploy-ansible-k3s:
       when: manual
       allow_failure: false
 
-deploy-terraform:
-  stage: deploy
-  extends: .terraform-http-backend
-  # Same reasoning as .deploy-base: .install-1password-alpine installs a package
-  # and this job holds a live API token, so it belongs on the privileged runner.
+# Every Terraform module sources the library over `git::https://`, so `init`
+# needs a git credential. GIT_CONFIG_* is the env form of `git config --global`,
+# which keeps this a variables-only fragment the library's own terraform-validate
+# job can extend without its script being rewritten.
+#
+# Scoped to {{ git_host }} — this pipeline's OWN instance — on purpose:
+# CI_JOB_TOKEN is only valid where it was issued, so rewriting any other host's
+# URLs would send the token off-instance for nothing. It reaches
+# {{ lib_project }} only if that project's job-token allowlist includes this one,
+# or it is public. A library hosted elsewhere needs its own credential (a netrc
+# entry or a deploy token) instead; mirroring it here is the simpler answer, and
+# the `include:` block already requires that.
+.terraform-git-credential:
   tags: ["{{ runner_tag }}"]
+  variables:
+    GIT_CONFIG_COUNT: "1"
+    GIT_CONFIG_KEY_0: "url.https://gitlab-ci-token:${CI_JOB_TOKEN}@{{ git_host }}/.insteadOf"
+    GIT_CONFIG_VALUE_0: "https://{{ git_host }}/"
+
+# Keys-only override of the library's terraform-validate job: it runs
+# `terraform init -backend=false`, which still fetches the modules. The tag
+# repeats what the include's `tags` input already passes.
+terraform-validate:
+  extends: .terraform-git-credential
+  tags: ["{{ runner_tag }}"]
+
+# Pre-merge preview of the zone change, and the plan deploy-terraform applies.
+terraform-plan:
+  stage: validate
+  extends: [.terraform-http-backend, .terraform-git-credential]
+  needs: []
+  tags: ["{{ runner_tag }}"]
+  # A cancelled plan leaves deploy-terraform with no artifact to apply.
   interruptible: false
   image:
     name: hashicorp/terraform:1.15
@@ -657,7 +797,75 @@ deploy-terraform:
     - |
       export TF_VAR_cloudflare_api_token=$(op read "op://{{ onepassword_vault }}/Cloudflare Terraform Token/credential")
       export TF_VAR_cloudflare_account_id=$(op read "op://{{ onepassword_vault }}/Cloudflare Terraform Token/username")
-      terraform apply -auto-approve -lock-timeout=120s
+      terraform plan -input=false -no-color -lock-timeout=120s -out=tfplan
+    # Change counts for the merge request's Terraform widget.
+    - |
+      terraform show -json tfplan | jq -r '
+        ([.resource_changes[]?.change.actions?]|flatten)|
+        {"create":(map(select(.=="create"))|length),
+         "update":(map(select(.=="update"))|length),
+         "delete":(map(select(.=="delete"))|length)}
+      ' > tfplan.json
+  artifacts:
+    # The binary plan embeds rendered resource attributes, including anything a
+    # provider does not mark sensitive; restrict download to developer+.
+    # deploy-terraform still gets it through needs:artifacts, which `access`
+    # does not gate.
+    access: developer
+    paths:
+      - terraform/{{ dns_backend }}/tfplan
+    reports:
+      terraform: terraform/{{ dns_backend }}/tfplan.json
+    # A day, not an hour: deploy-terraform is a manual job in a later stage and
+    # the plan must still exist when someone presses it.
+    expire_in: 1 day
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    # This is the only job that reads the secret store on a merge-request ref.
+    # It earns that because it is the only pre-merge view of a change an
+    # operator then applies from main. Marking OP_SERVICE_ACCOUNT_TOKEN
+    # protected removes the plan from merge requests; a tokenless pipeline gets
+    # no plan at all, which is a skip, not a clean plan.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $OP_SERVICE_ACCOUNT_TOKEN'
+      changes:
+        - "terraform/{{ dns_backend }}/**/*"
+    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+      changes:
+        - "terraform/{{ dns_backend }}/**/*"
+
+deploy-terraform:
+  stage: deploy
+  extends: [.terraform-http-backend, .terraform-git-credential]
+  # Same reasoning as .deploy-base: .install-1password-alpine installs a package
+  # and this job holds a live API token, so it belongs on the privileged runner.
+  tags: ["{{ runner_tag }}"]
+  interruptible: false
+  image:
+    name: hashicorp/terraform:1.15
+    entrypoint: [""]
+  # validation-gate first, so the lint/validate/test stages gate the apply;
+  # terraform-plan second, to fetch the saved plan. Both needs are NON-optional:
+  # terraform-plan carries the same rules as this job, so the plan always exists
+  # when this one is offered, and an optional entry here could be dropped and
+  # leave the apply reaching for an artifact that is not there.
+  needs:
+    - job: validation-gate
+    - job: terraform-plan
+      artifacts: true
+  before_script:
+    - !reference [.install-1password-alpine, before_script]
+  script:
+    - cd terraform/{{ dns_backend }}
+    # -lockfile=readonly: provider hashes are committed; CI rewriting them would
+    # mask supply-chain drift.
+    - terraform init -lockfile=readonly
+    # Applies the SAVED plan, so what ships is what the merge request showed.
+    # A fresh apply-time plan could delete a record nobody reviewed.
+    - |
+      export TF_VAR_cloudflare_api_token=$(op read "op://{{ onepassword_vault }}/Cloudflare Terraform Token/credential")
+      export TF_VAR_cloudflare_account_id=$(op read "op://{{ onepassword_vault }}/Cloudflare Terraform Token/username")
+      terraform apply -auto-approve -lock-timeout=120s tfplan
   environment:
     name: production/{{ dns_backend }}
   rules:
@@ -668,3 +876,78 @@ deploy-terraform:
         - "terraform/{{ dns_backend }}/**/*"
       when: manual
       allow_failure: false
+{% if vpn_tailscale %}
+# Read-only drift plan for the tailnet ACL. It never applies — that stays
+# supervised (terraform/tailscale/README.md) — so a console hot-fix would
+# otherwise sit undetected until someone happened to plan. Exit-code and state
+# handling as in authentik-drift-plan below.
+tailscale-drift-plan:
+  stage: validate
+  extends: [.terraform-http-backend, .terraform-git-credential]
+  needs: []
+  tags: ["{{ runner_tag }}"]
+  image:
+    name: hashicorp/terraform:1.15
+    entrypoint: [""]
+  variables:
+    TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/tailscale"
+    TF_HTTP_LOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/tailscale/lock"
+    TF_HTTP_UNLOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/tailscale/lock"
+  before_script:
+    - !reference [.install-1password-alpine, before_script]
+  script:
+    - cd terraform/tailscale
+    - terraform init -lockfile=readonly
+    - |
+      export TF_VAR_tailscale_oauth_client_id=$(op read "op://{{ onepassword_vault }}/Tailscale OAuth/client id")
+      export TF_VAR_tailscale_oauth_client_secret=$(op read "op://{{ onepassword_vault }}/Tailscale OAuth/credential")
+      terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
+  allow_failure: true
+  rules:
+    # The schedule is the real detector: no changes: filter, so it catches an
+    # admin-console edit made when nothing in-repo moved.
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $OP_SERVICE_ACCOUNT_TOKEN'
+    # Post-merge, before the supervised apply. No merge_request_event rule:
+    # this materializes vault secrets into a job running an unmerged branch's
+    # own code, and an advisory signal does not justify that.
+    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+      changes:
+        - "terraform/tailscale/**/*"
+{% endif %}
+# Read-only drift plan for the SSO objects. The apply is `task
+# terraform:authentik-apply`, which refuses to run non-interactively, so this
+# job is the only thing that notices an admin-UI edit. -detailed-exitcode exits
+# 2 on a non-empty diff (a plain plan exits 0), which is what makes
+# allow_failure render drift as a warning rather than a pass. Own state name,
+# so the three TF_HTTP_*ADDRESS vars are overridden.
+#
+# Add a TF_VAR_ line here for every client-secret variable you add — a missing
+# one fails the plan, which is the intended behaviour, not drift.
+authentik-drift-plan:
+  stage: validate
+  extends: [.terraform-http-backend, .terraform-git-credential]
+  needs: []
+  tags: ["{{ runner_tag }}"]
+  image:
+    name: hashicorp/terraform:1.15
+    entrypoint: [""]
+  variables:
+    TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/authentik"
+    TF_HTTP_LOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/authentik/lock"
+    TF_HTTP_UNLOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/authentik/lock"
+  before_script:
+    - !reference [.install-1password-alpine, before_script]
+  script:
+    - cd terraform/authentik
+    - terraform init -lockfile=readonly
+    - |
+      export TF_VAR_authentik_token=$(op read "op://{{ onepassword_vault }}/Authentik Terraform Token/credential")
+      export TF_VAR_oauth2_client_secret_grafana=$(op read "op://{{ onepassword_vault }}/Grafana SSO/oidc-client-secret")
+      terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $OP_SERVICE_ACCOUNT_TOKEN'
+    # No merge_request_event rule: this job reads every OIDC client secret.
+    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+      changes:
+        - "terraform/authentik/**/*"

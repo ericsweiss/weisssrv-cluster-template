@@ -9,6 +9,8 @@
 # runs). Anchored so nothing under template/ can match by accident.
 /.render/
 /render/
+# The version checker's upstream-response cache, written inside a render.
+.version-cache/
 
 # Python
 __pycache__/

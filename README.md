@@ -53,6 +53,13 @@ weisssrv-app-template ..... one application deployed onto such a cluster
 Kubernetes manifests live **here**, not in the library: a generated cluster is
 self-contained, with no remote kustomize bases to break.
 
+The app template is **not** parameterized the way this one is: its docs, CI
+variables and runner tags name the reference cluster. Onboarding a tenant onto a
+cluster you generated means swapping those site values by hand — the cluster
+side of the contract (the `Kustomization.spec.path`, the namespace labels, the
+`ClusterSecretStore` name) is documented in the generated
+`kubernetes/clusters/<cluster_name>/tenants/README.md`.
+
 ### Where the platform is documented
 
 This repository documents *assembling a cluster*. The pieces it assembles are
@@ -67,6 +74,7 @@ link there rather than restating it:
 | CI template inputs | [docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md) |
 | What a `lib_ref` bump can break | [docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md) |
 | The vendored scripts' upstream | [docs/SCRIPTS.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/SCRIPTS.md) |
+| The seams a non-reference consumer swaps | [docs/EXTENSIBILITY.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/EXTENSIBILITY.md) |
 
 The inventory that [docs/SETUP.md](docs/SETUP.md) § 2 calls "the one part no
 template can generate" is filled in against those role READMEs — they define
@@ -80,7 +88,7 @@ open docs/PRE-SETUP.md
 
 # 2. Install copier (any of these)
 pipx install copier
-pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@v0.5.2#subdirectory=cli'
+pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@v0.6.0#subdirectory=cli'
 
 # 3. Generate
 copier copy https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
@@ -90,11 +98,13 @@ copier copy https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/
 weisssrv-new-project new-cluster \
   https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
 
-# Both generation blocks above are runnable as written, which is why neither
-# pins a template ref: they take the default branch. To pin a release, add
-# `--vcs-ref <template-tag>` — but only a tag this repository has actually cut
-# (`git ls-remote --tags <template-url>`); a ref that does not exist fails at
-# clone time, before the first question.
+# Both generation blocks above are runnable as written because neither pins a
+# template ref: copier resolves an unpinned VCS source to the template's LATEST
+# RELEASE TAG, and falls back to the branch tip only if the template has cut
+# none. To pin an older release add `--vcs-ref <template-tag>`, and to generate
+# from unreleased work add `--vcs-ref HEAD`. A tag that does not exist
+# (`git ls-remote --tags <template-url>` lists what does) fails at clone time,
+# before the first question.
 
 # 4. Bring it up
 cd ~/src/mycluster
@@ -134,6 +144,7 @@ checks live there. Summary:
 | `timezone` | `UTC` | IANA name |
 | `git_backend` / `git_host` / `git_namespace` | `gitlab_selfhosted` | Where Flux reads from and CI runs. The repository is `git_namespace/cluster_name` — there is no separate repo-name answer |
 | `secrets_backend` / `onepassword_vault` | `onepassword` | Credential source for hosts and cluster |
+| `storage_backend` | `zfs` | What the NAS node serves datasets and PVs from; also selects the ZFS-only pool scrape |
 | `dns_backend` | `cloudflare` | Zone module, external-dns, ACME DNS-01 |
 | `compute_node_count` | `2` | Compute hosts in the starter inventory (plus the NAS node) |
 | `nas_host` / `smtp_host` | derived from `internal_domain` | NFS server (mounted by name) and SMTP relay; both must stay under `internal_domain` — the wildcard certificate covers that zone only |
@@ -141,7 +152,7 @@ checks live there. Summary:
 | `vpn_tailscale` | `false` | Overlay VPN: host role, operator, ACL module |
 | `tailnet_dns_suffix` | *(none — asked)* | Asked only with `vpn_tailscale`; MagicDNS suffix, rejected if left at the `CHANGEME` placeholder |
 | `gpu` | `none` | `nvidia` adds VFIO prep, driver + container toolkit, device plugin; GPU telemetry is a documented add-on, **not shipped** (`kubernetes/infrastructure/observability/README.md`) |
-| `lib_url` / `lib_ref` | upstream URL / `v0.5.2` | weisssrv-lib source and pin for collection, CI includes, TF modules |
+| `lib_url` / `lib_ref` | upstream URL / `v0.6.0` | weisssrv-lib source and pin for collection, CI includes, TF modules |
 | `lib_project` | path part of `lib_url` | GitLab project path for `include: project:` (instance-local) |
 | `ci_runner_tag` / `ci_cpu_selector` | `infrastructure` / `<internal_domain>/cpu=modern` | Runner tag and the secret-detection CPU pin |
 | `enable_semantic_release` | `false` | Adds the release stage to the generated pipeline |
@@ -164,20 +175,24 @@ someone else's addresses by accident.
 │   └── apps/                       one directory per application
 ├── scripts/                        verification, generators, version registry
 ├── docs/                           RUNBOOKS.md (what the alerts link to) + ci-pipeline.md
+├── .claude/skills/                 the cluster-development agent skill; CLAUDE.md
+│                                   and AGENTS.md at the root point at it
 ├── Taskfile.yml                    every operation, grouped by namespace
 └── .gitlab-ci.yml                  lint / validate / deploy, from the library templates
 ```
 
-No Ansible roles ship in the generated tree — playbooks address
-`weisssrv.infra.<role>` by FQCN, so a platform upgrade is a one-line bump of
-`lib_ref`. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+No Ansible roles ship in the generated tree — playbooks address the collection's
+40 roles as `weisssrv.infra.<role>` by FQCN, so a platform upgrade is a one-line
+bump of `lib_ref`. The variables those roles take are documented in the library
+(role READMEs for the per-role surface, `MIGRATING.md` for what a bump renames).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Backends
 
 | Seam | Implemented | Where it plugs in |
 |---|---|---|
 | Virtualization | Proxmox VE | `proxmox_*` roles, `vm_additional_disks` in the inventory |
-| Storage | ZFS on the NAS node, NFS + zvol passthrough | `nas_storage`, `zvol_mount`, static PVs |
+| Storage (`storage_backend`) | ZFS on the NAS node, NFS + zvol passthrough | `nas_storage`, `zvol_mount`, static PVs, the pool scrape |
 | Git / CI | Self-hosted GitLab | `.gitlab-ci.yml`, Flux `GitRepository`, runners |
 | Secrets | 1Password (CLI + Connect) | `op://` refs, `ClusterSecretStore`, ExternalSecrets |
 | DNS | Cloudflare | Terraform zone module, external-dns, ACME DNS-01 |
@@ -185,10 +200,17 @@ No Ansible roles ship in the generated tree — playbooks address
 | Overlay VPN | Tailscale (`vpn_tailscale`) | host role, operator, ACL module |
 | SSO | Authentik | `apps/authentik`, `terraform/authentik` |
 
-Unimplemented choices fail during generation with a message naming what is
-missing, rather than producing a repository that will not reconcile.
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) records what a new backend has to
-provide.
+Where a seam is selectable it is a copier question that accepts only the values
+that are implemented, so an unimplemented choice fails during generation with a
+message naming what is missing rather than producing a repository that will not
+reconcile. Virtualization has no such question: nothing in the generated tree
+would be left to select.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § Backend seams records what a new
+backend has to provide on the cluster side, and the library's
+[docs/EXTENSIBILITY.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/EXTENSIBILITY.md)
+is the contract on the role side — the named variables whose default is today's
+behaviour, and the rule that a second backend is a sibling role family, never a
+fork.
 
 ## Documentation
 
@@ -242,6 +264,10 @@ Conventions:
   domains and addresses the reference repository accumulated.
 - Ansible roles are never vendored here. If a role needs a change, it changes in
   weisssrv-lib and the template bumps `lib_ref`.
+- Every library tag written literally in this repository's docs is the `lib_ref`
+  default in `copier.yml`. Bump them together; the test suite compares them.
+- A `task <name>` in any document must be a task the generated `Taskfile.yml`
+  defines — the render tests resolve every reference against it.
 
 ## License
 

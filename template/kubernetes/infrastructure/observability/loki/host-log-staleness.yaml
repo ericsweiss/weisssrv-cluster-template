@@ -4,18 +4,10 @@
 # {job="journal", host="<inventory_hostname>"}; job="journal" distinguishes it
 # from the in-cluster Alloy DaemonSet, which ships container logs.
 #
-# The rule below is the CLUSTER-WIDE arm: no journald line from ANY host in 45m
-# means the whole host-log path is broken. A per-host arm needs one rule per
-# host (LogQL has no "group by label and alert on absence"), which is site data —
-# generate it from the inventory alongside hosts.env if you want per-host
-# coverage, following this shape:
-#
-#   - alert: HostLogShippingStale
-#     expr: absent_over_time({job="journal", host="<name>"}[45m])
-#     for: 15m
-#     labels: { severity: warning, component: logging, host: <name>, instance: <name> }
-#     annotations:
-#       summary: "No journald logs from <name> in 45m (host log shipping stopped)"
+# This is the CLUSTER-WIDE arm: no journald line from ANY host in 45m means the
+# whole host-log path is broken. Per-host coverage needs one rule per host —
+# LogQL cannot group by label and alert on absence — which is site data;
+# docs/RUNBOOKS.md "Per-host log-shipping alerts" has the rule shape.
 #
 # for:15m on top of the [45m] window is ~1h of silence before paging —
 # deliberately conservative, because the host-side collector's WAL backfills

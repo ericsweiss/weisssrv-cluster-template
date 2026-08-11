@@ -23,10 +23,11 @@ sources are unaffected — they fetch over https from `{{ lib_url_ }}`.
 | Stage | Jobs | Source |
 |---|---|---|
 | `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `flux-lint` | library |
-| `validate` | `terraform-validate` | library |
+| `validate` | `terraform-validate` (library); `terraform-plan`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan` (this repo) | mixed |
 | `test` | `python-tests` (the cluster invariants in `tests/`) | library |
 | `security` | `secret_detection` | library |
 | `ai-review` | `pr-agent-review` | library |
+| `gate` | `validation-gate` | this repo |
 | `deploy` | `deploy-ansible-base`, `deploy-ansible-k3s`, `deploy-terraform` | this repo |
 | `maintenance` | `version-bump-bot` | library, scheduled |
 
@@ -68,13 +69,20 @@ creation; a runner that sets no regex ignores it.
 
 ### CI/CD variables
 
-| Variable | Used by | Notes |
-|---|---|---|
-| `OP_SERVICE_ACCOUNT_TOKEN` | every deploy job | Masked. Also the rule gate: with no token the deploy jobs are not created, so a fork's pipeline is green rather than broken. |
-| `OPENAI__KEY` | `pr-agent-review` | Masked. Gates job creation together with the PAT. |
-| `GITLAB__PERSONAL_ACCESS_TOKEN` | `pr-agent-review` | Masked, `api` scope — the account the review comments post as. |
-| `VERSION_BUMP_BOT_TOKEN` | `version-bump-bot` | Masked PAT with `api` + `write_repository`. A job token cannot push, and the Merge requests API is read-only for it. |
-| `GITHUB_TOKEN` | `version-bump-bot` | Optional, masked. Raises the GitHub API rate limit the version checker runs into once more than a handful of pins are tracked. |
+**Masked and Protected are different controls.** Masked only hides a value in
+job logs. **Protected** is what stops a feature branch from reading it at all:
+without it, anyone who can open a merge request can print the whole-vault token
+by adding a line to `.gitlab-ci.yml` in that MR. Set Protected on every
+credential that could move state, and protect `main` (SETUP.md) so the setting
+means something.
+
+| Variable | Used by | Protected | Notes |
+|---|---|---|---|
+| `OP_SERVICE_ACCOUNT_TOKEN` | every deploy job | **Yes** | Masked. Also the rule gate: with no token the deploy jobs are not created, so a fork's pipeline is green rather than broken. Protected also removes `terraform-plan` from merge requests — see the trade-off under "Deploy jobs". |
+| `VERSION_BUMP_BOT_TOKEN` | `version-bump-bot` | **Yes** | Masked PAT with `api` + `write_repository`. A job token cannot push, and the Merge requests API is read-only for it. The job runs only from a schedule or a web run, both of which are protected refs. |
+| `OPENAI__KEY` | `pr-agent-review` | No | Masked. The reviewer runs ON merge requests, so a protected variable would disable it. Scope the key to a spend limit instead. |
+| `GITLAB__PERSONAL_ACCESS_TOKEN` | `pr-agent-review` | No | Masked, `api` scope — the account the review comments post as. Same reason as above; give it the least privilege that can comment. |
+| `GITHUB_TOKEN` | `version-bump-bot` | **Yes** | Optional, masked. Raises the GitHub API rate limit the version checker runs into once more than a handful of pins are tracked. Read-only, no scopes needed. |
 
 ### {{ onepassword_vault }} vault items
 
@@ -87,7 +95,10 @@ The deploy jobs read these at job time with `op`:
 | `SMTP Relay Auth` → `username`, `password` | `deploy-ansible-k3s` |
 | `K3s Cluster Token` / `K3s Agent Token` → `credential` | `deploy-ansible-k3s` |
 | `Loki Push Auth` → `username`, `password` | `deploy-ansible-k3s` |
-| `Cloudflare Terraform Token` → `credential`, `username` | `deploy-terraform` |
+| `Cloudflare Terraform Token` → `credential`, `username` | `terraform-plan`, `deploy-terraform` |
+{% if vpn_tailscale %}| `Tailscale OAuth` → `client id`, `credential` | `tailscale-drift-plan` |
+{% endif %}| `Authentik Terraform Token` → `credential` | `authentik-drift-plan` |
+| `<App> SSO` → the OIDC client secret | `authentik-drift-plan`, one per application |
 
 Each deploy job's `op://` variables mirror the `env:` of the matching Taskfile
 task, and that correspondence is load-bearing: `op run` resolves **every**
@@ -110,6 +121,54 @@ They are `interruptible: false` (a new pipeline must never cancel a running
 deploy) and retry twice on `runner_system_failure` only — an evicted runner pod
 is environmental and the playbooks are idempotent.
 
+### The validation gate
+
+Every deploy job carries `needs: [validation-gate]`, non-optionally. That single
+job in the `gate` stage lists every lint/validate/test/security job as an
+**optional** need, plus `secret_detection`, which has no path filter and so
+always exists on a `main` pipeline.
+
+The indirection is not decoration. A job that declares `needs:` is no longer
+ordered by stage, and GitLab **drops** an `optional: true` entry whose job the
+rules excluded — so a deploy job whose only needs were optional lint jobs ends
+up with an empty needs set and starts immediately, before those jobs run and
+regardless of whether they later fail. Pointing every deploy at one job that
+always exists is what keeps the needs set non-empty and the stage order real.
+
+`validation-gate` must therefore be created for every pipeline that creates a
+deploy job: its rules are the deploy rules minus the `$OP_SERVICE_ACCOUNT_TOKEN`
+clause (it needs no credentials). A deploy job needing a gate that was not
+created fails pipeline **creation**, so keep the two in step when you change
+either set of rules.
+
+The drift plans and `pr-agent-review` are deliberately not listed: they are
+`allow_failure: true`, and an allow-failure job counts as successful for a
+`needs:`, so listing them would gate nothing.
+
+`deploy-terraform` applies the plan `terraform-plan` saved earlier in the same
+pipeline, not a fresh one, so what ships is what the merge request's Terraform
+widget showed. `terraform-plan` is the only job that reads the secret store on a
+merge-request ref; marking `OP_SERVICE_ACCOUNT_TOKEN` protected removes the plan
+from merge requests, and a pipeline with no token produces no plan at all —
+that is a skip, not a clean plan.
+
+### Drift plans
+
+The {% if vpn_tailscale %}tailnet ACL and the {% endif %}SSO objects are applied by
+hand (`task terraform:*-apply` refuses `-auto-approve`), so nothing would
+otherwise notice an admin-console edit. The drift jobs re-plan read-only on a
+schedule and post-merge, exit 2 on a non-empty diff, and are
+`allow_failure: true` — drift shows as a warning, never a blocked pipeline. They
+carry no merge-request rule: that would materialise vault secrets into a job
+running an unmerged branch's own code.
+
+The branch name is written **literally** as `main`: GitLab does not expand
+variables inside a quoted `rules:if`, so `$CI_DEFAULT_BRANCH` would be compared
+as text and match nothing. If your default branch is not `main`, change these
+rules and pass the library templates' `default_branch` input to match —
+otherwise the deploy jobs, and the library's own default-branch-only jobs,
+silently stop running.
+
 ### Adding one
 
 Add a job per playbook, following `deploy-ansible-base`:
@@ -119,6 +178,8 @@ deploy-ansible-storage:
   stage: deploy
   extends: .deploy-base
   resource_group: deploy-ansible-storage      # serialize runs of THIS job
+  needs:
+    - job: validation-gate                    # NOT optional — see above
   script:
     - cd ansible
     - op run -- ansible-playbook -i inventories/prod playbooks/storage.yml
@@ -167,10 +228,15 @@ embedded in the MR description rather than committed.
 ## Bumping the library
 
 Change every `ref:` in `.gitlab-ci.yml`, the `version:` in
-`ansible/requirements.yml` and the `?ref=` on each Terraform module source to
-the new tag, in one MR, and record it in `.copier-answers.yml` by re-running
-`copier update`. There is no dependency bot for it — a library bump can change
-job behaviour and role interfaces, so it is deliberate.
+`ansible/requirements.yml`, the `?ref=` on each Terraform module source and
+`LIB_REF` in `Taskfile.yml` to the new tag, in one MR, and record it in
+`.copier-answers.yml` by re-running `copier update`. All four are gated:
+`scripts/check-lib-pins.py` (and `--fix`) covers the `include:` entries, and
+`tests/test_lib_pins.py` covers the other three — a stale `version:` in
+`requirements.yml` is the one that keeps the pipeline green while every deploy
+job installs the OLD role code. There is no dependency bot for it — a library bump can change job behaviour and role interfaces, so it is
+deliberate. `docs/RUNBOOKS.md` § The platform library is the full procedure,
+including the re-initialisation each Terraform module needs afterwards.
 
 ## Backend seams
 

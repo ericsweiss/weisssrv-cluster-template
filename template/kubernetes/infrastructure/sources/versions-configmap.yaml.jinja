@@ -6,7 +6,7 @@ apiVersion: v1
 data:
   adguard_home_version: 0.107.78
   adguard_sync_version: 0.9.2
-  alloy_host_version: 1.18.0-1
+  alloy_host_version: 1.18.1-1
   authentik_version: 2026.5.6
 {%- if vpn_tailscale %}
   coredns_tailnet_version: 1.14.6
@@ -14,27 +14,27 @@ data:
 {%- if git_backend == 'gitlab_selfhosted' %}
   gitlab_runner_helm_version: 0.91.0
 {%- endif %}
-  helm_chart_versions_alloy: 1.11.0
-  helm_chart_versions_cert_manager: v1.21.0
+  helm_chart_versions_alloy: 1.11.1
+  helm_chart_versions_cert_manager: v1.21.1
   helm_chart_versions_external_dns: 1.21.1
-  helm_chart_versions_external_secrets: 2.8.0
-  helm_chart_versions_kube_prometheus_stack: 87.19.1
+  helm_chart_versions_external_secrets: 2.9.0
+  helm_chart_versions_kube_prometheus_stack: 88.2.0
   helm_chart_versions_kured: 6.1.0
-  helm_chart_versions_loki: 18.5.4
+  helm_chart_versions_loki: 18.7.6
   helm_chart_versions_metallb: 0.15.3
 {%- if gpu == 'nvidia' %}
   helm_chart_versions_nvidia_device_plugin: 0.19.3
 {%- endif %}
   helm_chart_versions_onepassword_connect: 2.4.1
-  helm_chart_versions_prometheus_blackbox_exporter: 11.15.1
-  helm_chart_versions_prometheus_operator_crds: 30.0.1
-  helm_chart_versions_reloader: 2.2.14
+  helm_chart_versions_prometheus_blackbox_exporter: 11.17.1
+  helm_chart_versions_prometheus_operator_crds: 31.0.0
+  helm_chart_versions_reloader: 2.2.16
 {%- if vpn_tailscale %}
   helm_chart_versions_tailscale_operator: 1.98.9
 {%- endif %}
-  helm_chart_versions_traefik: 41.0.2
-  helm_chart_versions_vpa: 4.12.3
-  k3s_version: v1.36.2+k3s1
+  helm_chart_versions_traefik: 41.2.0
+  helm_chart_versions_vpa: 4.12.5
+  k3s_version: v1.36.3+k3s1
 {%- if gpu == 'nvidia' %}
   nvidia_container_toolkit_version: 1.19.1-1
   nvidia_cuda_keyring_version: 1.1-1

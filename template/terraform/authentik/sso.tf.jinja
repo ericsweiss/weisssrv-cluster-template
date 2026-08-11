@@ -21,6 +21,9 @@ locals {
   # with no entry gets a server-generated secret that exists only in state,
   # which the application itself then cannot know — pass one for every app that
   # keeps its own copy of the secret.
+  #
+  # The null filter is for genuinely optional providers only: an app whose
+  # secret variable is required (no default) can never be null here.
   oauth2_client_secrets = {
     for key, secret in {
       grafana = var.oauth2_client_secret_grafana
@@ -28,17 +31,11 @@ locals {
   }
 
   # Forward-auth for applications with no OIDC support. The outpost gates the
-  # request and can inject a basic-auth pair from the user's attributes.
+  # request and can inject a basic-auth pair from the user's attributes. An
+  # entry is `{ name, external_host }` plus the optional basic-auth attributes;
+  # `external_host` must be EXACTLY the hostname of the IngressRoute carrying
+  # the forward-auth middleware. Full attribute set: the module's variables.tf.
   proxy_providers = {}
-  # proxy_providers = {
-  #   adguard = {
-  #     name                          = "AdGuard Home"
-  #     external_host                 = "https://dns.{{ internal_domain }}"
-  #     basic_auth_enabled            = true
-  #     basic_auth_username_attribute = "adguard_user"
-  #     basic_auth_password_attribute = "adguard_password"
-  #   }
-  # }
 
   saml_providers = {}
 
@@ -71,10 +68,9 @@ locals {
   # managing it means importing the object authentik created itself, and going
   # back to null later DESTROYS it (detach with `terraform state rm` instead).
   #
-  # The list is ORDERED: the API preserves insertion order, so reordering it is
-  # a permanent diff.
+  # Once managed it is `{ proxy_provider_keys = [...] }`, and the list is
+  # ORDERED: the API preserves insertion order, so reordering it is a permanent
+  # diff — append new providers at the end. A proxy provider missing from the
+  # list serves 404 from the outpost.
   embedded_outpost = null
-  # embedded_outpost = {
-  #   proxy_provider_keys = ["adguard"]
-  # }
 }

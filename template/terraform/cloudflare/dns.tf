@@ -18,6 +18,11 @@ locals {
   dns_records = {
     # The public entry point. Protected because deleting it is a full outage,
     # and external-content because the DDNS CronJob owns the address.
+    #
+    # A fresh apply publishes apex_seed_ip (TEST-NET-1) until the CronJob's next
+    # run, so the site is dark with a clean plan. Trigger the first run yourself:
+    #
+    #   kubectl -n cloudflare-ddns create job --from=cronjob/cloudflare-ddns ddns-seed
     apex = {
       name                       = var.external_domain
       type                       = "A"
@@ -30,9 +35,14 @@ locals {
     }
 
     # Certificate issuance policy. Losing the CAA set lets ANY CA issue for the
-    # domain, so every entry is protected. Add a tag pair per CA you use — if
-    # the zone is behind a proxy whose edge certificates come from the provider's
-    # partner CAs, those CAs need entries too or edge renewal breaks.
+    # domain, so every entry is protected. Add a tag pair per CA you use.
+    #
+    # The apex is proxied, so Cloudflare's edge certificate is issued by one of
+    # its Universal SSL partner CAs, not by the CA the cluster uses — both sets
+    # need entries or edge renewal fails. Google Trust Services (pki.goog) and
+    # SSL.com are the two Universal SSL issues today; Cloudflare auto-injects
+    # records for its other partner CAs outside this config. Drop the four
+    # partner entries only if every record here is DNS-only.
     caa_issue_letsencrypt = {
       name        = "@"
       type        = "CAA"
@@ -47,6 +57,34 @@ locals {
       comment     = "Restrict wildcard issuance to Let's Encrypt"
       protected   = true
     }
+    caa_issue_pki_goog = {
+      name        = "@"
+      type        = "CAA"
+      record_data = { flags = 0, tag = "issue", value = "pki.goog" }
+      comment     = "Cloudflare Universal SSL partner CA (Google Trust Services)"
+      protected   = true
+    }
+    caa_issuewild_pki_goog = {
+      name        = "@"
+      type        = "CAA"
+      record_data = { flags = 0, tag = "issuewild", value = "pki.goog" }
+      comment     = "Cloudflare Universal SSL partner CA wildcard (Google Trust Services)"
+      protected   = true
+    }
+    caa_issue_ssl_com = {
+      name        = "@"
+      type        = "CAA"
+      record_data = { flags = 0, tag = "issue", value = "ssl.com" }
+      comment     = "Cloudflare Universal SSL partner CA (SSL.com)"
+      protected   = true
+    }
+    caa_issuewild_ssl_com = {
+      name        = "@"
+      type        = "CAA"
+      record_data = { flags = 0, tag = "issuewild", value = "ssl.com" }
+      comment     = "Cloudflare Universal SSL partner CA wildcard (SSL.com)"
+      protected   = true
+    }
     caa_iodef = {
       name        = "@"
       type        = "CAA"
@@ -55,31 +93,33 @@ locals {
       protected   = true
     }
 
-    # Mail policy for a domain that sends no mail. Replace both if you add a
-    # sender, and add the DKIM record its provider gives you.
+    # Mail policy for a domain that sends no mail: hard fail, since nothing
+    # legitimate can be rejected. Protected because silently dropping a
+    # `p=reject` DMARC record is a security regression a plan should refuse.
+    #
+    # The SMTP relay this repo deploys sends as the INTERNAL domain (system mail
+    # and alerts). Point any sender at this zone and both records must change
+    # first — start at `v=spf1 ~all` / `p=none`, read the aggregate reports, and
+    # tighten back once alignment is clean. Add the DKIM record the sender's
+    # provider gives you at the same time.
     spf = {
-      name    = "@"
-      type    = "TXT"
-      content = "v=spf1 -all"
-      comment = "No host sends mail as this domain"
+      name      = "@"
+      type      = "TXT"
+      content   = "v=spf1 -all"
+      comment   = "No host sends mail as this domain"
+      protected = true
     }
     dmarc = {
-      name    = "_dmarc"
-      type    = "TXT"
-      content = "v=DMARC1; p=reject; rua=mailto:${var.contact_email}"
-      comment = "Reject anything failing SPF/DKIM alignment"
+      name      = "_dmarc"
+      type      = "TXT"
+      content   = "v=DMARC1; p=reject; rua=mailto:${var.contact_email}"
+      comment   = "Reject anything failing SPF/DKIM alignment"
+      protected = true
     }
 
-    # A hostname that must bypass the proxy — large uploads and non-HTTP
-    # protocols break behind it. Point it at your WAN address and port-forward.
-    #
-    # upload = {
-    #   name                       = "upload"
-    #   type                       = "A"
-    #   content                    = var.apex_seed_ip
-    #   proxied                    = false
-    #   comment                    = "DNS-only: proxy caps request bodies"
-    #   content_managed_externally = true
-    # }
+    # A hostname that must bypass the proxy (large uploads, UDP, a non-HTTP
+    # port) is an A record with `proxied = false` and
+    # `content_managed_externally = true`, port-forwarded on the router. The
+    # module README has the full attribute set.
   }
 }

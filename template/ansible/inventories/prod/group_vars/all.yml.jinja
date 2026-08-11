@@ -188,9 +188,9 @@ maintenance_ci_executor_pod_prefix: "runner-"
 # Host-side pins consumed by weisssrv.infra roles (no role default — required).
 adguard_home_version: "0.107.78"
 adguard_sync_version: "0.9.2"
-alloy_host_version: "1.18.0-1"    # apt package version, not the chart version
+alloy_host_version: "1.18.1-1"    # apt package version, not the chart version
 
-k3s_version: "v1.36.2+k3s1"
+k3s_version: "v1.36.3+k3s1"
 # sha256 of install.sh at that tag, verified before the root-run installer
 # executes (install.sh checks the k3s binary, not itself). Recompute on every
 # k3s_version bump:
@@ -211,22 +211,22 @@ nvidia_cuda_keyring_sha256: "d0d4ef986a44400f9db33c600ef33a985175e7cc63d805a10e1
 
 # Platform Helm charts reconciled by Flux (kubernetes/infrastructure/).
 helm_chart_versions:
-  cert_manager: "v1.21.0"
+  cert_manager: "v1.21.1"
   external_dns: "1.21.1"
-  external_secrets: "2.8.0"
+  external_secrets: "2.9.0"
   metallb: "0.15.3"
-  traefik: "41.0.2"
+  traefik: "41.2.0"
   # Owns the monitoring.coreos.com CRDs in the dedicated crds stage; bump in
   # lockstep with kube_prometheus_stack so the CRDs match the operator.
-  prometheus_operator_crds: "30.0.1"
-  kube_prometheus_stack: "87.19.1"
-  loki: "18.5.4"
-  alloy: "1.11.0"
-  prometheus_blackbox_exporter: "11.15.1"
+  prometheus_operator_crds: "31.0.0"
+  kube_prometheus_stack: "88.2.0"
+  loki: "18.7.6"
+  alloy: "1.11.1"
+  prometheus_blackbox_exporter: "11.17.1"
   onepassword_connect: "2.4.1"
-  vpa: "4.12.3"
+  vpa: "4.12.5"
   kured: "6.1.0"
-  reloader: "2.2.14"
+  reloader: "2.2.16"
 {%- if vpn_tailscale %}
   tailscale_operator: "1.98.9"
 {%- endif %}

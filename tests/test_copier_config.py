@@ -42,6 +42,7 @@ REQUIRED_QUESTIONS = {
     "git_namespace",
     "secrets_backend",
     "onepassword_vault",
+    "storage_backend",
     "dns_backend",
     "compute_node_count",
     "nas_host",
@@ -99,22 +100,39 @@ def test_site_identity_has_no_literal_default(name):
     )
 
 
-@pytest.mark.parametrize("name", ["git_backend", "secrets_backend", "dns_backend"])
+@pytest.mark.parametrize(
+    "name", ["git_backend", "secrets_backend", "storage_backend", "dns_backend"]
+)
 def test_backend_questions_are_enumerated(name):
     assert QUESTIONS[name].get("choices"), f"{name} must be a choice list, not free text"
 
 
-def test_unimplemented_backend_choices_fail_at_copy_time():
+# The one implemented value of each backend seam. Adding an implementation means
+# adding its value here in the same change as the choice and the validator branch.
+IMPLEMENTED_BACKENDS = {
+    "git_backend": "gitlab_selfhosted",
+    "secrets_backend": "onepassword",
+    "storage_backend": "zfs",
+    "dns_backend": "cloudflare",
+}
+
+
+@pytest.mark.parametrize("name", sorted(IMPLEMENTED_BACKENDS))
+def test_unimplemented_backend_choices_fail_at_copy_time(name):
     """A choice with no implementation must stop the render, not produce a repo
-    that looks complete and never reconciles."""
-    choices = QUESTIONS["git_backend"]["choices"]
-    values = set(choices.values()) if isinstance(choices, dict) else set(choices)
-    if values == {"gitlab_selfhosted"}:
-        pytest.skip("no unimplemented git_backend choice is offered")
-    validator = QUESTIONS["git_backend"].get("validator", "")
-    assert "gitlab_selfhosted" in validator, (
-        "git_backend offers a choice beyond gitlab_selfhosted but no validator rejects it"
+    that looks complete and never reconciles. The validator is what enforces it:
+    `--data` bypasses the choice list, and a choice list is not a contract with
+    the tree anyway."""
+    implemented = IMPLEMENTED_BACKENDS[name]
+    assert QUESTIONS[name].get("default") == implemented
+    validator = QUESTIONS[name].get("validator", "")
+    assert implemented in validator, (
+        f"{name} has no validator rejecting anything but {implemented!r} — an "
+        "unimplemented answer would render a repo that never reconciles"
     )
+    rejected = _validator_message(name, **{name: "no-such-backend"})
+    assert rejected, f"{name} accepted an unimplemented value"
+    assert not _validator_message(name, **{name: implemented})
 
 
 class _AnyFilter(dict):
@@ -388,6 +406,51 @@ def test_upstream_dns_servers_rejects_a_repeated_address():
     assert _dns_message("192.168.0.21 192.168.0.21"), "the same address twice was accepted"
 
 
+# Overlap is decided by integer prefix arithmetic in Jinja, not by string
+# comparison, so a mask-boundary case is the only thing that proves it works.
+@pytest.mark.parametrize(
+    "pod,lan,rejected",
+    [
+        ("10.42.0.0/16", "192.168.0.0/24", False),   # the shipped default
+        ("10.42.0.0/16", "10.42.5.0/24", True),      # LAN inside the pod range
+        ("10.42.0.0/16", "10.0.0.0/8", True),        # pod range inside a 10/8 LAN
+        ("10.42.0.0/16", "10.43.0.0/16", False),     # adjacent, not overlapping
+        ("notacidr", "192.168.0.0/24", True),        # shape rejected before the math
+    ],
+)
+def test_pod_cidr_must_not_overlap_the_lan(pod, lan, rejected):
+    message = _validator_message("k3s_pod_cidr", k3s_pod_cidr=pod, lan_cidr=lan)
+    assert bool(message) is rejected, f"pod {pod} vs LAN {lan}: {message or 'accepted'}"
+
+
+@pytest.mark.parametrize(
+    "service,rejected",
+    [
+        ("10.43.0.0/16", False),   # the shipped default
+        ("10.42.128.0/17", True),  # inside the pod range
+        ("192.168.0.0/24", True),  # the LAN itself
+        ("10.42.0.0/15", True),    # supernet swallowing the pod range
+    ],
+)
+def test_service_cidr_must_not_overlap_the_pod_range_or_the_lan(service, rejected):
+    message = _validator_message(
+        "k3s_service_cidr",
+        k3s_service_cidr=service,
+        k3s_pod_cidr="10.42.0.0/16",
+        lan_cidr="192.168.0.0/24",
+    )
+    assert bool(message) is rejected, f"service {service}: {message or 'accepted'}"
+
+
+@pytest.mark.parametrize("name", ["k3s_api_vip", "metallb_public_vip", "metallb_internal_vip"])
+def test_vips_are_tested_against_the_whole_lan_cidr_not_a_prefix(name):
+    """A /16 LAN has 256 usable third octets; membership is a mask test, so a VIP
+    outside `lan_prefix`'s /24 is legal and must be accepted."""
+    context = {"lan_cidr": "172.20.0.0/16", "lan_prefix": "172.20.0"}
+    assert not _validator_message(name, **{name: "172.20.9.161"}, **context)
+    assert _validator_message(name, **{name: "10.1.1.161"}, **context)
+
+
 @pytest.mark.parametrize("name", ["nas_host", "smtp_host"])
 def test_service_fqdns_must_sit_under_the_internal_domain(name):
     """The internal wildcard covers `*.<internal_domain>` and nothing else, and
@@ -422,4 +485,66 @@ def test_tailnet_dns_suffix_has_no_default():
     assert "default" not in QUESTIONS["tailnet_dns_suffix"], (
         "tailnet_dns_suffix carries a default again — use `placeholder:`, which "
         "copier shows as a hint and never accepts as an answer"
+    )
+
+
+# --------------------------------------------------------------------------
+# The library pin — one value, three places
+# --------------------------------------------------------------------------
+
+
+def test_lib_ref_default_matches_the_validated_fixture():
+    """render-validate clones the library at the FIXTURE's `lib_ref` and gates
+    both script trees with it. A default that differs from the fixture ships a
+    template release whose advertised pin was never the one exercised."""
+    fixture = yaml.safe_load((REPO_ROOT / "tests" / "answers-weisssrv-shaped.yml").read_text())
+    assert QUESTIONS["lib_ref"]["default"] == fixture["lib_ref"]
+
+
+def test_lib_ref_validator_takes_release_tags_only():
+    """The include contract forbids a branch pin: a branch deleted after merge
+    takes every include, module source and collection install with it."""
+    assert not _validator_message("lib_ref", lib_ref=QUESTIONS["lib_ref"]["default"])
+    for rejected in ("main", "chore/some-branch", "0.6.0", "v0.6", "v0.6.0-rc1"):
+        assert _validator_message("lib_ref", lib_ref=rejected), (
+            f"lib_ref accepted {rejected!r}, which is not a release tag"
+        )
+
+
+_TAG_LITERAL = re.compile(r"\bv\d+\.\d+\.\d+\b")
+
+
+def _is_historical(path: Path, line: str) -> bool:
+    """Lines that record what a PAST release pinned, not what to pin now.
+
+    Two shapes: a row of docs/VERSIONING.md's template-release/library-release
+    table, and the `_commit:` marker in a `.copier-answers.yml` example. Both
+    name superseded tags on purpose.
+
+    Table rows are exempt only in VERSIONING.md — exempting every `|` line would
+    also exempt README.md's answer table, where the `lib_ref` default is exactly
+    the literal this test exists to keep current.
+    """
+    stripped = line.strip()
+    if stripped.startswith("_commit:"):
+        return True
+    return stripped.startswith("|") and path.name == "VERSIONING.md"
+
+
+def test_docs_quote_only_the_current_library_tag():
+    """The docs name the library tag as a literal in several places. Nothing else
+    ties them to the answer default, so a bump that misses one leaves a
+    copy-pasteable command pinned to a superseded release."""
+    want = QUESTIONS["lib_ref"]["default"]
+    stale = []
+    for path in [REPO_ROOT / "README.md", *sorted((REPO_ROOT / "docs").glob("*.md"))]:
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if _is_historical(path, line):
+                continue
+            for tag in _TAG_LITERAL.findall(line):
+                if tag != want:
+                    stale.append(f"{path.relative_to(REPO_ROOT)}:{lineno} {tag}")
+    assert not stale, (
+        f"docs quote a library tag other than copier.yml's lib_ref default ({want}):\n  "
+        + "\n  ".join(stale)
     )

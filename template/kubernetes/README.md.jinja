@@ -66,7 +66,7 @@ failing.
 | `cluster_k3s_api_vip` (alias `cluster_api_vip`) | kube-apiserver VIP |
 | `cluster_apiserver_egress_cidr` | What pod egress policies allow on 6443 |
 | `cluster_etcd_endpoints` | etcd scrape targets for `kubeEtcd` — a **JSON flow sequence**, because Helm needs a real list where Flux substitutes text |
-| `cluster_node_exporter_host_addresses` | `Endpoints` roster for the host node-exporters (`:9101`) — also a flow sequence |
+| `cluster_node_exporter_host_addresses` | EndpointSlice roster for the host node-exporters (`:9101`) — also a flow sequence |
 | `cluster_offsite_backup_probe_metric` | gates `OffsiteBackupStale`'s `absent()` arm; `up` until the offsite tier is enabled |
 | `cluster_metallb_public_vip` / `cluster_metallb_internal_vip` | Ingress VIPs |
 | `cluster_issuer` / `cluster_acme_email` | cert-manager ClusterIssuer name + ACME contact |

@@ -20,6 +20,13 @@ timeout_cmd() {
     elif command -v gtimeout >/dev/null 2>&1; then
         gtimeout "$seconds" "$@"
     else
+        # Warn once per shell: losing the wall-clock backstop silently turns a
+        # bounded probe into an indefinite hang, with nothing to tell the
+        # operator it happened.
+        if [ -z "${_SHELL_LIB_TIMEOUT_WARNED:-}" ]; then
+            echo "warning: neither timeout(1) nor gtimeout(1) found — probes run UNBOUNDED (macOS: brew install coreutils)" >&2
+            _SHELL_LIB_TIMEOUT_WARNED=1
+        fi
         "$@"
     fi
 }
@@ -27,9 +34,14 @@ timeout_cmd() {
 # SSH reachability probe: short-timeout, keepalive-bounded ssh under a
 # wall-clock backstop. ConnectTimeout=2 bounds the TCP connect; ServerAlive*
 # trips a dead post-connect channel; timeout_cmd is the backstop for a host that
-# connects then stalls (PAM/sssd, disk-stuck remote shell). Shared by
-# find-reachable-host.sh and find-pve-host-for-vm.sh. Pass the target and remote
-# command as args, e.g. `ssh_probe "$host" "true"`.
+# connects then stalls (PAM/sssd, disk-stuck remote shell). Pass the target and
+# remote command as args, e.g. `ssh_probe "$host" "true"`.
+#
+# Callers are deliberately NOT enumerated here: this file is vendored verbatim
+# into the consumer repos, where it is also sourced by scripts that do not exist
+# in this library (weisssrv's collect-state.sh among them), so any list written
+# here is wrong in at least one copy. Find them with
+# `grep -rl shell-lib.sh scripts/`.
 ssh_probe() {
     timeout_cmd 6 ssh -o ConnectTimeout=2 -o BatchMode=yes \
         -o ServerAliveInterval=2 -o ServerAliveCountMax=2 "$@"

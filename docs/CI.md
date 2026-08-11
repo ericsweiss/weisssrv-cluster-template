@@ -19,7 +19,7 @@ Structural tests can only prove that files exist and match each other. The
 hard-coded from the reference cluster renders byte-identically to a correct
 substitution in the shaped fixture and is only visible in a second, unlike one.
 
-`tests/validate_render.py` runs seven checks over a render:
+`tests/validate_render.py` runs these checks over a render:
 
 | Check | What it proves | Needs |
 |---|---|---|
@@ -43,7 +43,7 @@ instead of in someone's homelab.
 
 ```bash
 python3 -m pytest tests -q                      # structure + copier schema
-python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib          # all seven checks
+python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib          # every check above
 python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
   --answers tests/answers-unlike.yml            # the contrast fixture
 python3 tests/render_cluster.py --out /tmp/x    # just render, and keep it
@@ -62,8 +62,8 @@ validator. Any missing tool is reported by name. `--skip` takes any of
 
 `--lib-path` points at a weisssrv-lib checkout — the directory that *contains*
 `ansible_collections/`. Use it to exercise an unmerged library change, to avoid
-the network, and — as the table above says — to run three of the seven checks at
-all. Without it the collection is installed from the git ref in the render's
+the network, and — as the table above says — to run the three library-reading
+checks at all. Without it the collection is installed from the git ref in the render's
 `requirements.yml`. The library's galaxy dependencies (`ansible.posix`,
 `community.general`) are installed either way, with the operator's own
 `~/.ansible/collections` as the offline fallback.
@@ -103,10 +103,12 @@ its own gate cannot be generated.
 ## Library pin
 
 Every `include:` in both pipelines points at `eric/weisssrv-lib`. This
-repository's own includes are pinned to the `v0.5.2` release tag; the generated
-pipeline pins whatever `lib_ref` the operator answered (default `v0.5.2`).
-Never pin a branch: a branch moves under you, and the one this repository was
-built against was deleted when it merged.
+repository's own includes are pinned to the `v0.6.0` release tag; the generated
+pipeline pins whatever `lib_ref` the operator answered (default `v0.6.0`).
+Never pin a branch: it moves under every consumer at once, and it disappears
+when it merges — which takes every include, module source and collection install
+with it. `scripts/check-lib-pins.py` fails the pipeline on a branch pin or on an
+include that drifts from `variables.WEISSSRV_LIB_REF`.
 
 `render-validate` clones the library with `CI_JOB_TOKEN`, so the job does not
 depend on anonymous access — the library project must list this project on its

@@ -25,7 +25,8 @@ repository afterwards.
 | Making Flux act now | — | — |
 | Deploying an Ansible change | — | — |
 | Upgrades (versions, host packages, k3s nodes, the library) | — | — |
-| Adding a node / adding an application | — | — |
+| Adding a node | — | — |
+| Adding an application | — | — |
 | Rotating a secret | — | — |
 | Certificates | `#certificates` | the certificate-expiry alerts |
 | Suspending, rolling back, breaking glass | — | — |

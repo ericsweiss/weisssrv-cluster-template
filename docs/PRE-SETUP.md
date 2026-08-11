@@ -29,9 +29,13 @@ two or more compute nodes. Fewer nodes work, with caveats noted below.
   putting two of them on the same host defeats it. The shipped default is
   `compute_node_count: 2`, which reaches three hosts by placing **one etcd
   member on the storage node** — so budget that node for a 2 vCPU / 6 GB server
-  VM plus a 4 vCPU / 8 GB agent on top of its ZFS ARC. Answer
-  `compute_node_count: 3` instead if you would rather keep the storage node out
-  of the control plane.
+  VM plus a 4 vCPU / 8 GB agent on top of its ZFS ARC.
+
+  The storage node carries `k3s-srv-01` at **every** `compute_node_count`: the
+  generator walks the host list starting at the storage node, so raising the
+  answer adds compute hosts and agents rather than moving server 01 off the NAS.
+  If you want it elsewhere, re-point that host's `proxmox_host` in the generated
+  `hosts.yml` — a one-line edit, and the roster is yours to edit anyway.
 - **One storage node.** It owns the ZFS pools, the NFS exports every stateful
   workload mounts, and the zvols passed through to application VMs. It is the
   one node whose loss stops the cluster.
@@ -43,6 +47,11 @@ two or more compute nodes. Fewer nodes work, with caveats noted below.
 - A UPS is not required by the template and is strongly recommended by physics.
 
 ### Storage layout
+
+`storage_backend: zfs` is the implemented choice, and it is structural rather
+than a flag: the storage playbook, the guest disks and the pool scrape are all
+ZFS. See [ARCHITECTURE.md](ARCHITECTURE.md) § Backend seams for what a
+different one would have to bring.
 
 Create the ZFS pools **by hand, before Ansible runs**. Nothing in the generated
 repository creates or destroys a pool — that is deliberate; Ansible only sets
@@ -390,7 +399,11 @@ token above, and each pool's passphrase item is named by your own
 ## 5. Git host
 
 `git_backend: gitlab_selfhosted` is the implemented choice. GitHub is a declared
-seam; copier will refuse it until it exists.
+seam; copier will refuse it until it exists. What such a consumer would have to
+build — the library ships GitLab CI YAML, forge-neutral scripts and a
+`--platform github` release path — is mapped in the library's
+[docs/EXTENSIBILITY.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/EXTENSIBILITY.md)
+§ Forge portability.
 
 You need, before generating:
 
@@ -457,11 +470,18 @@ git ls-remote <lib_url> 'refs/tags/<lib_ref>*'   # must print a SHA
 ```
 
 Role variables, the CI templates' inputs and what a `lib_ref` bump can break are
-documented in the library, not here — see
-[the collection README](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/README.md),
-[docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md)
-and
-[docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md).
+documented in the library, not here. The generated tree carries **no**
+`ansible/roles/` at all — every play addresses `weisssrv.infra.<role>`, so the
+inventory you write in SETUP § 2 is written against these:
+
+| What | Where in weisssrv-lib |
+|---|---|
+| Per-role variables and behaviour | [role READMEs](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) |
+| The inventory-wide variables every role aliases | [collection README](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/README.md) |
+| Variable renames and newly asserted inputs across refs | [MIGRATING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/MIGRATING.md) |
+| CI template inputs | [docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md) |
+| What a `lib_ref` bump can break | [docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md) |
+| Which roles are a backend rather than a seam | [docs/EXTENSIBILITY.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/EXTENSIBILITY.md) |
 
 ---
 
@@ -563,17 +583,18 @@ brew install --cask 1password-cli
 brew install kubernetes-cli fluxcd/tap/flux
 # the gates task lint runs that the list above does not cover:
 brew install kustomize kubeconform gettext shellcheck
-pip install ansible-lint yamllint pyyaml
+pip install ansible-lint yamllint pyyaml ruff
 
 # Debian/Ubuntu: pipx install copier; apt install kubectl-equivalents, shellcheck,
-#   gettext-base; pip install ansible-lint yamllint pyyaml; the rest from each
+#   gettext-base; pip install ansible-lint yamllint pyyaml ruff; the rest from each
 #   project's instructions
 ```
 
 `gettext` is for `envsubst`, which `flux:lint` uses to expand `${cluster_...}`
 placeholders before schema validation; `kustomize` and `kubeconform` are the
 other two halves of that gate. `ansible-lint` and `yamllint` are the lint stage's
-first two steps.
+first two steps, and `ruff` is `lint:ruff` — the same check the CI python-lint
+job runs over `scripts/` and `tests/`.
 
 Not required for `task lint`, but required by the gate you run after touching
 alert rules (`task lint:prometheus-config`): **`promtool`** and **`amtool`**,
@@ -583,9 +604,9 @@ which ship in the Prometheus and Alertmanager release tarballs.
 `task ansible:install-collections`, which is the first command to run after
 generating (SETUP § 3).
 
-Versions the generated repository expects: Task 3.x, Ansible core 2.18+,
-Terraform ≥ 1.5 and < 2.0 (what every generated `versions.tf` declares),
-`op` 2.x, Python 3.11+, copier 9+.
+Versions the generated repository expects: Task 3.x, Ansible core 2.18+ (the
+collection's declared floor), Terraform 1.x within the range each generated
+`versions.tf` declares, `op` 2.x, Python 3.11+, copier 9+.
 
 ---
 
@@ -643,6 +664,6 @@ Library and tooling
 - [ ] `lib_project` decided — the library exists on the GitLab instance your
       pipelines run on, or you plan to vendor the CI templates
 - [ ] Workstation tooling from § 9 installed, including the `task lint` gates
-      (kustomize, kubeconform, gettext, shellcheck, yamllint, ansible-lint)
+      (kustomize, kubeconform, gettext, shellcheck, yamllint, ansible-lint, ruff)
 
 Then continue with [SETUP.md](SETUP.md).

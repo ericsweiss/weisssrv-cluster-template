@@ -44,7 +44,7 @@ def load_ci(path: Path) -> dict:
     return yaml.load(path.read_text(), Loader=CILoader)
 
 _IGNORED = shutil.ignore_patterns(
-    ".git", "__pycache__", "*.pyc", ".pytest_cache", ".render", ".bin"
+    ".git", "__pycache__", "*.pyc", ".pytest_cache", ".ruff_cache", ".render", ".bin"
 )
 
 

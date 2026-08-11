@@ -1,0 +1,13 @@
+# AGENTS.md — {{ cluster_name }}
+
+Instructions for any coding agent working in this repository.
+
+**Read [`.claude/skills/cluster-development/SKILL.md`](.claude/skills/cluster-development/SKILL.md)
+first.** It is tool-neutral Markdown and holds the whole contract: branch and
+merge request for every change, no secrets in git, Flux owns `kubernetes/`, no
+site literals in manifests, versions single-sourced, roles fetched from the
+library rather than vendored — plus the gates to run before proposing a merge.
+
+`README.md` is the top-level fact source, `docs/RUNBOOKS.md` the day-two
+procedures, `docs/ci-pipeline.md` the pipeline, and `task --list` the command
+set. Never cite a `task` name that is not in `task --list`.

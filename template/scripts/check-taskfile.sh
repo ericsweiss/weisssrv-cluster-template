@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Assert that every scripts/<name>.{sh,py} referenced by Taskfile.yml exists on
-# disk, plus the `dotenv:` target scripts/hosts.env. go-task compiles command
-# templates lazily and `task --list`/`--dry` never stat referenced files, so a
-# since-deleted/renamed script reference isn't caught by go-task itself — this
-# closes that gap for the taskfile-smoke CI job (which runs `task --list` for the
-# YAML/schema check, then this for the dangling-reference check).
+# Assert that every scripts/<name>.{sh,py} referenced by a Taskfile exists on
+# disk, plus each `dotenv:` target. go-task compiles command templates lazily
+# and never stats referenced files, so a renamed script is invisible to
+# `task --list` — this closes that gap for the taskfile-smoke CI job.
 #
 # Usage: scripts/check-taskfile.sh [Taskfile.yml]
+# Env:   CHECK_TASKFILE_DOTENV — space-separated dotenv targets to require when
+#        the Taskfile references them (default: scripts/hosts.env)
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$_SCRIPT_DIR/.." && pwd)"
 TASKFILE="${1:-$REPO_ROOT/Taskfile.yml}"
+DOTENV_TARGETS="${CHECK_TASKFILE_DOTENV:-scripts/hosts.env}"
 
 [ -f "$TASKFILE" ] || {
     echo "ERROR: Taskfile not found: $TASKFILE" >&2
@@ -20,27 +21,28 @@ TASKFILE="${1:-$REPO_ROOT/Taskfile.yml}"
 
 rc=0
 
-# Every scripts/<name>.(sh|py) mentioned in the Taskfile must exist. A while-read
-# over process substitution (NOT `grep | while`, whose subshell would drop rc)
-# keeps the loop in the current shell so rc survives.
+# A while-read over process substitution (NOT `grep | while`, whose subshell
+# would drop rc) keeps the loop in the current shell.
 while IFS= read -r ref; do
     [ -n "$ref" ] || continue
     if [ ! -f "$REPO_ROOT/$ref" ]; then
-        echo "ERROR: Taskfile.yml references missing $ref" >&2
+        echo "ERROR: $(basename "$TASKFILE") references missing $ref" >&2
         rc=1
     fi
 done < <(grep -oE 'scripts/[A-Za-z0-9_./-]+\.(sh|py)' "$TASKFILE" | sort -u)
 
-# The dotenv target must exist — go-task fails hard loading a missing dotenv
-# file. Match the bare path (not just same-line `dotenv:`) so the YAML
-# multi-line list form is caught too.
-if grep -qE '(^|[[:space:]"'"'"'-])scripts/hosts\.env([[:space:]"'"'"']|$)' "$TASKFILE" \
-    && [ ! -f "$REPO_ROOT/scripts/hosts.env" ]; then
-    echo "ERROR: Taskfile dotenv target scripts/hosts.env is missing" >&2
-    rc=1
-fi
+# go-task fails hard loading a missing dotenv file. Match the bare path (not
+# just a same-line `dotenv:`) so the YAML multi-line list form is caught too.
+for target in $DOTENV_TARGETS; do
+    target_ere="${target//./\\.}"
+    if grep -qE '(^|[[:space:]"'"'"'-])'"$target_ere"'([[:space:]"'"'"']|$)' "$TASKFILE" \
+        && [ ! -f "$REPO_ROOT/$target" ]; then
+        echo "ERROR: Taskfile dotenv target $target is missing" >&2
+        rc=1
+    fi
+done
 
 if [ "$rc" -eq 0 ]; then
-    echo "OK: all Taskfile-referenced scripts + scripts/hosts.env exist."
+    echo "OK: all Taskfile-referenced scripts + dotenv targets exist."
 fi
 exit "$rc"

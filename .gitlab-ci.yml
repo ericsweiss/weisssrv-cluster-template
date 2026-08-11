@@ -39,7 +39,7 @@ variables:
   # a literal and scripts/check-lib-pins.py (vendored from the library) fails the
   # pipeline if they drift from it or pin a branch. Bump here, then
   # `scripts/check-lib-pins.py --fix`.
-  WEISSSRV_LIB_REF: "v0.5.2"
+  WEISSSRV_LIB_REF: "v0.6.0"
   COPIER_VERSION: "9.17.0"
   PYYAML_VERSION: "6.0.2"
   YAMLLINT_VERSION: "1.38.0"
@@ -48,13 +48,17 @@ variables:
   KUBECONFORM_SHA256: "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73"
   KUSTOMIZE_VERSION: "5.4.3"
   KUSTOMIZE_SHA256: "3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7"
+  # Same 1.15 line as the library's terraform-validate image; render-validate
+  # needs the binary alongside python/ansible, so it is fetched, not imaged.
+  TERRAFORM_VERSION: "1.15.8"
+  TERRAFORM_SHA256: "d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d"
 
 include:
   # Only genuine YAML: files under template/ that carry the .jinja suffix are
   # Jinja sources, not documents. The render-validate job below yamllints the
   # rendered tree, which is where template/ actually gets covered.
   - project: eric/weisssrv-lib
-    ref: v0.5.2
+    ref: v0.6.0
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: []
@@ -68,7 +72,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.5.2
+    ref: v0.6.0
     file: /ci/lint/python-lint.yml
     inputs:
       tags: []
@@ -87,7 +91,7 @@ include:
   # The shell the template ships is static (no .jinja suffix), so it can be
   # checked in place rather than only after a render.
   - project: eric/weisssrv-lib
-    ref: v0.5.2
+    ref: v0.6.0
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: []
@@ -100,7 +104,7 @@ include:
   # copier.yml schema checks + the full render invariants. Everything in the
   # repository feeds the render, hence the catch-all `changes`.
   - project: eric/weisssrv-lib
-    ref: v0.5.2
+    ref: v0.6.0
     file: /ci/test/python-tests.yml
     inputs:
       tags: []
@@ -111,32 +115,63 @@ include:
       changes:
         - "**/*"
 
+  # Self-application: the template ships this gate into every generated cluster,
+  # and its own docs carry the same relative cross-links.
   - project: eric/weisssrv-lib
-    ref: v0.5.2
+    ref: v0.6.0
+    file: /ci/lint/docs-link-check.yml
+    inputs:
+      tags: []
+      changes:
+        - "docs/**/*"
+        - "README.md"
+        - "scripts/check-doc-links.py"
+        - ".gitlab-ci.yml"
+
+  # Pin drift in the SHIPPED defaults. The checker runs inside a render of this
+  # template — `template/…/all.yml.jinja` is Jinja, not a vars file, and the
+  # registry it reads is rendered from the same answers — so what the job reports
+  # is exactly what a freshly generated cluster would be pinned to. Soft-fail
+  # everywhere: rc 1 is "updates available".
+  - project: eric/weisssrv-lib
+    ref: v0.6.0
+    file: /ci/maintenance/version-check.yml
+    inputs:
+      tags: []
+      image: python:3.13
+      setup_command: >-
+        pip install --user --quiet "copier==$COPIER_VERSION" "pyyaml==$PYYAML_VERSION"
+      check_command: >-
+        python3 tests/render_cluster.py --out .render > /dev/null;
+        python3 .render/scripts/check-versions.py --json > "$REPORT_PATH"; RC=$?;
+        [ -s "$REPORT_PATH" ] ||
+        { echo "check-versions wrote no report (rc=$RC)"; exit 2; };
+        exit "$RC"
+      changes:
+        - "template/ansible/inventories/prod/group_vars/all.yml.jinja"
+        - "template/scripts/version-registry.py.jinja"
+        - "tests/answers-weisssrv-shaped.yml"
+        - ".gitlab-ci.yml"
+
+  - project: eric/weisssrv-lib
+    ref: v0.6.0
     file: /ci/security/secret-detection.yml
     inputs:
       tags: []
 
   - project: eric/weisssrv-lib
-    ref: v0.5.2
+    ref: v0.6.0
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []
-      # These three are STATED rather than inherited, even though all three now
-      # equal the library defaults. They are interlocked, and the arithmetic is
-      # the point: the job must outlast ai_timeout x len(commands) — 2 x 1200s
-      # = 40m — plus image pull and clone. Inheriting them would hide that
-      # relationship, so a later change to one default could silently invalidate
-      # another. Written out, the sum has to be redone deliberately.
-      #
-      # reasoning_effort is `high`, not `xhigh`: measured on weisssrv-lib!4,
-      # xhigh took 40.7m/44.6m/74.5m to SUCCEED and twice failed outright
-      # emitting nothing, on a 56k-token diff — so size was never the variable.
-      # At `high` the same reviews complete in ~7m.
+      # Stated rather than inherited even though all three equal the library
+      # defaults: they are interlocked. `timeout` must outlast
+      # ai_timeout x len(commands) — 2 x 1200s = 40m — plus image pull and
+      # clone, and ai_timeout is per CALL. Inheriting would hide that, so a
+      # later change to one default could silently invalidate another; written
+      # out, the sum has to be redone deliberately. `high` rather than `xhigh`
+      # because xhigh has run past this job's timeout on diffs this size.
       reasoning_effort: "high"
-      # ai_timeout is per CALL, and `improve` is the expensive one (1478s
-      # measured at xhigh on a 52k diff). The old 600s would cut it off, and
-      # behind allow_failure the amputation reads as a clean pipeline.
       ai_timeout: "1200"
       timeout: "45m"
       needs:
@@ -162,7 +197,7 @@ include:
   # the tag is 0.x a `feat!:` bumps MINOR, and calling a template 1.0.0 is a
   # deliberate act (flip the input for that release).
   - project: eric/weisssrv-lib
-    ref: v0.5.2
+    ref: v0.6.0
     file: /ci/release/semantic-release.yml
     inputs:
       tags: []
@@ -172,12 +207,11 @@ render-validate:
   image: python:3.13
   tags: []
   needs: []
-  # Every library-generated job carries this; the one local job here was the
-  # exception, and the likeliest to need it — it requests the largest limits in
-  # the pipeline, so on the quota-capped shared runner it is the first to be
-  # refused at POD-CREATION time when several pipelines overlap. That arrives as
-  # a system failure rather than a test failure, which the retry turns into
-  # throttling instead of a red pipeline that says nothing about the render.
+  # This job requests the largest limits in the pipeline, so on the quota-capped
+  # shared runner it is the first to be refused at POD-CREATION time when several
+  # pipelines overlap. That arrives as a system failure rather than a test
+  # failure, which the retry turns into throttling instead of a red pipeline that
+  # says nothing about the render.
   retry:
     max: 2
     when:
@@ -218,7 +252,12 @@ render-validate:
         "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
         "$KUSTOMIZE_SHA256"
       tar xzf /tmp/kustomize.tar.gz -C "$CI_PROJECT_DIR/.bin" kustomize
-      kubeconform -v && kustomize version
+      fetch_verified terraform.zip \
+        "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
+        "$TERRAFORM_SHA256"
+      python -c "import zipfile,sys; zipfile.ZipFile('/tmp/terraform.zip').extract('terraform', sys.argv[1])" "$CI_PROJECT_DIR/.bin"
+      chmod +x "$CI_PROJECT_DIR/.bin/terraform"
+      kubeconform -v && kustomize version && terraform version
     - |
       set -eo pipefail
       # The ref under test is the fixture's, so the gate and the generated
