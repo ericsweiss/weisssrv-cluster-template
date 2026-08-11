@@ -45,7 +45,14 @@ def _tracked_markdown(root: Path) -> list[Path]:
             check=True,
             text=True,
         ).stdout
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError) as exc:
+        # In a real checkout a failed enumeration must not silently shrink
+        # coverage to the narrow docs/ fallback (e.g. a slim CI image without
+        # git); only a genuinely non-git tree gets the fallback.
+        if (root / ".git").exists():
+            raise RuntimeError(
+                f"cannot enumerate tracked Markdown under {root}: {exc}"
+            ) from exc
         return []
     files = [root / p for p in out.split("\0") if p]
     return sorted(f for f in files if f.is_file())
