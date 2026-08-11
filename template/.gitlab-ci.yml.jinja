@@ -120,6 +120,10 @@ include:
   # terraform/*/*.tf to prove they pin the same library ref as this file's
   # `ref:`. Without those three entries an MR that bumps only a pin — the exact
   # change the gate exists for — never starts the job that would catch it.
+  # test_cluster_invariants.py reads two more by the same rule:
+  # ansible/inventories/prod/hosts.yml (the address-consistency asserts) and
+  # .copier-answers.yml (the site-values-not-in-the-k8s-tree assert, which
+  # sources the literals to hunt for from the answers file).
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/test/python-tests.yml
@@ -133,6 +137,8 @@ include:
         - "kubernetes/**/*"
         - "scripts/**/*.py"
         - "ansible/requirements.yml"
+        - "ansible/inventories/prod/hosts.yml"
+        - ".copier-answers.yml"
         - "Taskfile.yml"
         - "terraform/**/*.tf"
         - ".gitlab-ci.yml"
