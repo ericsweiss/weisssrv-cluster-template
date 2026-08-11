@@ -19,6 +19,7 @@ stages:
   - test
   - security
   - ai-review
+  - gate
   - deploy
   - maintenance
 {%- if enable_semantic_release | default(false) %}
@@ -434,9 +435,80 @@ deploy-coverage:
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 # ==============================================================================
+# GATE STAGE — the single dependency every deploy job carries.
+#
+# Stage order alone does NOT gate a deploy job that declares `needs:`. GitLab's
+# `optional: true` semantics (https://docs.gitlab.com/ci/yaml/#needsoptional):
+#
+#   - needed job NOT created (rules excluded it): the dependency is DROPPED
+#   - needed job created and succeeds:            dependency satisfied
+#   - needed job created and fails:               the dependent job is BLOCKED
+#
+# A job whose every `needs:` entry was dropped ends up with an EMPTY needs set,
+# and GitLab starts an empty-needs job immediately — before its own stage, and
+# regardless of whether the lint/validate/test stages later fail. That is why
+# each deploy job needs THIS job non-optionally instead of naming lint jobs
+# directly: this one always exists on a main pipeline, so the needs set is never
+# empty and stage order is never bypassed.
+#
+# Path-filtered jobs are listed optional (they may not exist in a given
+# pipeline); secret_detection has no path filter and always runs on main, which
+# is what keeps this gate's own needs set non-empty. The drift plans and
+# pr-agent-review are deliberately absent: they are `allow_failure: true`, so
+# they could never block anything.
+validation-gate:
+  stage: gate
+  image: alpine:3.23
+  tags: ["{{ runner_tag }}"]
+  # A newer commit must not auto-cancel this gate mid-run: the first pipeline's
+  # not-yet-started deploy jobs all need it, and would be orphaned.
+  interruptible: false
+  needs:
+    # Path-filtered (may not exist in this pipeline)
+    - job: yaml-lint
+      optional: true
+    - job: ansible-lint
+      optional: true
+    - job: shellcheck
+      optional: true
+    - job: python-lint
+      optional: true
+    - job: python-tests
+      optional: true
+    - job: flux-lint
+      optional: true
+    - job: docs-link-check
+      optional: true
+    - job: terraform-fmt
+      optional: true
+    - job: terraform-validate
+      optional: true
+    - job: terraform-plan
+      optional: true
+    - job: version-coverage
+      optional: true
+    - job: repo-sync
+      optional: true
+    - job: deploy-coverage
+      optional: true
+    # Always created on a main pipeline (no path filter)
+    - job: secret_detection
+  script:
+    - echo "All applicable checks passed - deploy jobs may proceed"
+  # These rules MUST stay a superset of every deploy job's: a deploy job needing
+  # a gate that was not created fails pipeline CREATION. Deploy jobs are
+  # main-only and skip schedules, so this is that set without the token clause
+  # (the gate itself needs no credentials).
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ==============================================================================
 # Deploy — starter set. One job per playbook, gated to main + a changes list, so
-# a merge deploys exactly what it touched. Adding a playbook means adding a job:
-# the pattern is documented in docs/ci-pipeline.md.
+# a merge deploys exactly what it touched. Every job needs validation-gate
+# (non-optional). Adding a playbook means adding a job: the pattern is
+# documented in docs/ci-pipeline.md.
 # ==============================================================================
 .deploy-base:
   extends: [.install-1password, .dep-cache]
@@ -489,6 +561,8 @@ deploy-ansible-base:
   stage: deploy
   extends: .deploy-base
   resource_group: deploy-ansible-base
+  needs:
+    - job: validation-gate
   variables:
     ROOT_EMAIL_ALIAS: "op://{{ onepassword_vault }}/Email Config/root_alias"
     SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
@@ -532,6 +606,9 @@ deploy-ansible-dns:
   extends: .deploy-base
   resource_group: deploy-ansible-dns
   needs:
+    - job: validation-gate
+    # Ordering only: base is not created for a DNS-only change, so this must
+    # stay optional — validation-gate above is what actually gates the deploy.
     - job: deploy-ansible-base
       optional: true
   variables:
@@ -564,6 +641,8 @@ deploy-ansible-storage:
   extends: .deploy-base
   resource_group: deploy-ansible-storage
   needs:
+    - job: validation-gate
+    # Ordering only — see deploy-ansible-dns.
     - job: deploy-ansible-base
       optional: true
   variables:
@@ -591,6 +670,8 @@ deploy-ansible-mail:
   extends: .deploy-base
   resource_group: deploy-ansible-mail
   needs:
+    - job: validation-gate
+    # Ordering only — see deploy-ansible-dns.
     - job: deploy-ansible-base
       optional: true
   variables:
@@ -621,6 +702,8 @@ deploy-ansible-k3s:
   stage: deploy
   extends: .deploy-base
   resource_group: deploy-ansible-k3s
+  needs:
+    - job: validation-gate
   variables:
     ROOT_EMAIL_ALIAS: "op://{{ onepassword_vault }}/Email Config/root_alias"
     SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
@@ -743,12 +826,15 @@ deploy-terraform:
   image:
     name: hashicorp/terraform:1.15
     entrypoint: [""]
-  # `dependencies:`, not `needs:` — this fetches terraform-plan's artifact while
-  # leaving the stage ordering intact, so the lint/validate/test stages still
-  # gate the apply. Both jobs carry the same rules, so the plan always exists
-  # when this one is offered.
-  dependencies:
-    - terraform-plan
+  # validation-gate first, so the lint/validate/test stages gate the apply;
+  # terraform-plan second, to fetch the saved plan. Both needs are NON-optional:
+  # terraform-plan carries the same rules as this job, so the plan always exists
+  # when this one is offered, and an optional entry here could be dropped and
+  # leave the apply reaching for an artifact that is not there.
+  needs:
+    - job: validation-gate
+    - job: terraform-plan
+      artifacts: true
   before_script:
     - !reference [.install-1password-alpine, before_script]
   script:

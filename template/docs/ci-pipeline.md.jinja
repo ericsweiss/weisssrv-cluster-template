@@ -27,6 +27,7 @@ sources are unaffected — they fetch over https from `{{ lib_url_ }}`.
 | `test` | `python-tests` (the cluster invariants in `tests/`) | library |
 | `security` | `secret_detection` | library |
 | `ai-review` | `pr-agent-review` | library |
+| `gate` | `validation-gate` | this repo |
 | `deploy` | `deploy-ansible-base`, `deploy-ansible-k3s`, `deploy-terraform` | this repo |
 | `maintenance` | `version-bump-bot` | library, scheduled |
 
@@ -120,6 +121,30 @@ They are `interruptible: false` (a new pipeline must never cancel a running
 deploy) and retry twice on `runner_system_failure` only — an evicted runner pod
 is environmental and the playbooks are idempotent.
 
+### The validation gate
+
+Every deploy job carries `needs: [validation-gate]`, non-optionally. That single
+job in the `gate` stage lists every lint/validate/test/security job as an
+**optional** need, plus `secret_detection`, which has no path filter and so
+always exists on a `main` pipeline.
+
+The indirection is not decoration. A job that declares `needs:` is no longer
+ordered by stage, and GitLab **drops** an `optional: true` entry whose job the
+rules excluded — so a deploy job whose only needs were optional lint jobs ends
+up with an empty needs set and starts immediately, before those jobs run and
+regardless of whether they later fail. Pointing every deploy at one job that
+always exists is what keeps the needs set non-empty and the stage order real.
+
+`validation-gate` must therefore be created for every pipeline that creates a
+deploy job: its rules are the deploy rules minus the `$OP_SERVICE_ACCOUNT_TOKEN`
+clause (it needs no credentials). A deploy job needing a gate that was not
+created fails pipeline **creation**, so keep the two in step when you change
+either set of rules.
+
+The drift plans and `pr-agent-review` are deliberately not listed: they are
+`allow_failure: true`, and an allow-failure job counts as successful for a
+`needs:`, so listing them would gate nothing.
+
 `deploy-terraform` applies the plan `terraform-plan` saved earlier in the same
 pipeline, not a fresh one, so what ships is what the merge request's Terraform
 widget showed. `terraform-plan` is the only job that reads the secret store on a
@@ -153,6 +178,8 @@ deploy-ansible-storage:
   stage: deploy
   extends: .deploy-base
   resource_group: deploy-ansible-storage      # serialize runs of THIS job
+  needs:
+    - job: validation-gate                    # NOT optional — see above
   script:
     - cd ansible
     - op run -- ansible-playbook -i inventories/prod playbooks/storage.yml
@@ -203,8 +230,11 @@ embedded in the MR description rather than committed.
 Change every `ref:` in `.gitlab-ci.yml`, the `version:` in
 `ansible/requirements.yml`, the `?ref=` on each Terraform module source and
 `LIB_REF` in `Taskfile.yml` to the new tag, in one MR, and record it in
-`.copier-answers.yml` by re-running `copier update`. There is no dependency bot
-for it — a library bump can change job behaviour and role interfaces, so it is
+`.copier-answers.yml` by re-running `copier update`. All four are gated:
+`scripts/check-lib-pins.py` (and `--fix`) covers the `include:` entries, and
+`tests/test_lib_pins.py` covers the other three — a stale `version:` in
+`requirements.yml` is the one that keeps the pipeline green while every deploy
+job installs the OLD role code. There is no dependency bot for it — a library bump can change job behaviour and role interfaces, so it is
 deliberate. `docs/RUNBOOKS.md` § The platform library is the full procedure,
 including the re-initialisation each Terraform module needs afterwards.
 
