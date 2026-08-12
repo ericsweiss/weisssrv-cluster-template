@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Assert every weisssrv-lib `include:` pin matches the repo's single source.
+"""Assert every weisssrv-lib pin matches the repo's single source.
+
+Covers two literals GitLab and Ansible-Galaxy both refuse to interpolate from a
+variable: the `include: ref:` entries in .gitlab-ci.yml, and the weisssrv-lib
+collection `version:` in the sibling ansible/requirements.yml (absent, and so a
+no-op, in a repo that does not install the collection). Both are synced from
+variables.WEISSSRV_LIB_REF; the include logic is described next, the collection
+logic near main().
 
 GitLab resolves `include:` at pipeline-CREATION time, before the `variables:`
 block of the same file exists, so `ref: $WEISSSRV_LIB_REF` does not work — the
@@ -328,6 +335,115 @@ def fix(path: Path, project: str = LIB_PROJECT, ref_var: str = REF_VAR) -> int:
     return changed
 
 
+# ---------------------------------------------------------------------------
+# Ansible collection pin. A consumer's sibling ansible/requirements.yml installs
+# the SAME library at the SAME tag, but as a Galaxy collection rather than a CI
+# include. Galaxy cannot reference variables.WEISSSRV_LIB_REF any more than
+# `include: ref:` can, so its `version:` literal is synced from the same single
+# source. A repo that does not install the collection (a tenant app scaffold)
+# has no requirements.yml, and all of this is a no-op there.
+
+_REQUIREMENTS_REL = Path("ansible") / "requirements.yml"
+
+
+def requirements_path(ci_file: Path) -> Path:
+    """The requirements.yml sibling of the CI file (it may not exist)."""
+    return ci_file.parent / _REQUIREMENTS_REL
+
+
+def _collection_version(text: str, project: str) -> tuple[int, str] | None:
+    """(0-based line of the `version:` KEY, its value) for the collection whose
+    `name` names `project`, read from the parsed node tree so a `version:` under
+    a DIFFERENT collection is never matched. None if the entry or its version is
+    absent. requirements.yml carries no GitLab `!reference`, so plain SafeLoader.
+    """
+    root = yaml.compose(text, Loader=yaml.SafeLoader)
+    if not isinstance(root, yaml.MappingNode):
+        return None
+    for top_key, top_val in root.value:
+        if not (isinstance(top_key, yaml.ScalarNode) and top_key.value == "collections"):
+            continue
+        if not isinstance(top_val, yaml.SequenceNode):
+            return None
+        for entry in top_val.value:
+            if not isinstance(entry, yaml.MappingNode):
+                continue
+            name = version = None
+            for key, value in entry.value:
+                if not (isinstance(key, yaml.ScalarNode) and isinstance(value, yaml.ScalarNode)):
+                    continue
+                if key.value == "name":
+                    name = value.value
+                elif key.value == "version":
+                    version = (key.start_mark.line, value.value)
+            if name and project in name and version is not None:
+                return version
+    return None
+
+
+def check_requirements(
+    ci_file: Path, want: str, project: str = LIB_PROJECT, ref_var: str = REF_VAR
+) -> list[str]:
+    """The collection pin in the sibling requirements.yml must equal the single
+    source. Empty when there is no requirements.yml or it does not install the
+    library."""
+    req = requirements_path(ci_file)
+    if not req.is_file():
+        return []
+    found = _collection_version(req.read_text(encoding="utf-8"), project)
+    if found is None:
+        # A requirements.yml that DOES install the library but carries no
+        # version: is a floating pin — the drift this exists to prevent.
+        if project in req.read_text(encoding="utf-8"):
+            return [f"{req}: the {project} collection is installed without a version: pin"]
+        return []
+    _, current = found
+    if current == want:
+        return []
+    return [
+        f"{req}: the {project} collection pins version {current!r}, "
+        f"but {ref_var} is {want!r}"
+    ]
+
+
+def fix_requirements(ci_file: Path, want: str, project: str = LIB_PROJECT) -> int:
+    """Rewrite the collection version in the sibling requirements.yml to `want`.
+    Returns 0 when absent, unpinned, or already correct. Mirrors fix(): a textual
+    rewrite of the exact node line, re-parsed and verified before writing."""
+    req = requirements_path(ci_file)
+    if not req.is_file():
+        return 0
+    text = req.read_text(encoding="utf-8")
+    found = _collection_version(text, project)
+    if found is None or found[1] == want:
+        return 0
+    line_no, _ = found
+    lines = text.splitlines(keepends=True)
+    line = lines[line_no]
+    m = re.match(
+        r"""^(\s*)version:[^\S\n]*"""
+        r"""("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|.*?)"""
+        r"""([^\S\n]+#.*|[^\S\n]*)$""",
+        line.rstrip("\n"),
+    )
+    if not m:
+        raise SystemExit(
+            f"{req}: could not rewrite the {project} collection version: line; "
+            "fix it by hand"
+        )
+    newline = "\n" if line.endswith("\n") else ""
+    lines[line_no] = f"{m.group(1)}version: {want}{m.group(3)}{newline}"
+    updated = "".join(lines)
+    landed = _collection_version(updated, project)
+    if landed is None or landed[1] != want:
+        raise SystemExit(
+            f"{req}: rewrite did not land cleanly (version parsed back as "
+            f"{(landed[1] if landed else None)!r}, wanted {want!r}); file left unchanged"
+        )
+    req.write_text(updated, encoding="utf-8")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -346,7 +462,9 @@ def main(argv: list[str] | None = None) -> int:
         help=f"variable holding the single source (default {REF_VAR})",
     )
     ap.add_argument(
-        "--fix", action="store_true", help="rewrite include refs to the ref-var"
+        "--fix",
+        action="store_true",
+        help="rewrite the include refs and the requirements.yml collection pin to the ref-var",
     )
     args = ap.parse_args(argv)
 
@@ -365,22 +483,36 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    # `want` is None when variables.<ref_var> is unset; check()/fix() report that
+    # for the includes, so the requirements checks stay silent (guarded on want)
+    # rather than adding a confusing "pins vX but ref is None" line.
+    want = declared_ref(load_ci(args.ci_file), args.ref_var)
+    req_problems = (
+        check_requirements(args.ci_file, want, args.project, args.ref_var)
+        if want
+        else []
+    )
     if args.fix:
         changed = fix(args.ci_file, args.project, args.ref_var)
+        # fix() has validated `want` is a release tag (or raised); sync the
+        # sibling collection pin from the same single source.
+        changed += fix_requirements(args.ci_file, want, args.project)
         # Verify the result rather than trusting the rewrite. --fix cannot
         # repair a branch ref in the variable, an absent include block, or an
         # entry whose `ref:` the line rewriter did not recognise — and exiting 0
         # on any of those would report success for a file still in violation.
-        problems = check(args.ci_file, args.project, args.ref_var)
+        problems = check(args.ci_file, args.project, args.ref_var) + check_requirements(
+            args.ci_file, want, args.project, args.ref_var
+        )
         if problems:
             print("check-lib-pins: FAILED after rewrite", file=sys.stderr)
             for problem in problems:
                 print(f"  {problem}", file=sys.stderr)
             return 1
-        print(f"check-lib-pins: rewrote {changed} ref(s) in {args.ci_file}")
+        print(f"check-lib-pins: rewrote {changed} pin(s) in {args.ci_file} + requirements.yml")
         return 0
 
-    problems = check(args.ci_file, args.project, args.ref_var)
+    problems = check(args.ci_file, args.project, args.ref_var) + req_problems
     if problems:
         print("check-lib-pins: FAILED", file=sys.stderr)
         for p in problems:
