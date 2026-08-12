@@ -284,7 +284,11 @@ def test_every_question_is_named_in_an_operator_doc():
 def test_answer_fixture_covers_every_question():
     fixture = yaml.safe_load((REPO_ROOT / "tests" / "answers-weisssrv-shaped.yml").read_text())
     conditional = {name for name, q in QUESTIONS.items() if "when" in q}
-    missing = set(QUESTIONS) - set(fixture) - conditional
+    # lib_ref is deliberately left unanswered: copier.yml's default is the single
+    # source of the library pin, and inheriting it makes render-validate exercise
+    # exactly the released tag — so there is no second literal to keep in step.
+    inherited = {"lib_ref"}
+    missing = set(QUESTIONS) - set(fixture) - conditional - inherited
     assert not missing, (
         f"tests/answers-weisssrv-shaped.yml does not answer {sorted(missing)} — "
         "the render test would silently exercise the default instead"
@@ -493,12 +497,16 @@ def test_tailnet_dns_suffix_has_no_default():
 # --------------------------------------------------------------------------
 
 
-def test_lib_ref_default_matches_the_validated_fixture():
-    """render-validate clones the library at the FIXTURE's `lib_ref` and gates
-    both script trees with it. A default that differs from the fixture ships a
-    template release whose advertised pin was never the one exercised."""
+def test_lib_ref_is_inherited_by_the_validated_fixture():
+    """The fixture must NOT answer lib_ref. render-validate clones the library at
+    whatever lib_ref the fixture resolves to; by leaving it unanswered the render
+    inherits copier.yml's default, so the pin it exercises IS the released one by
+    construction — no second literal that could advertise a tag never exercised."""
     fixture = yaml.safe_load((REPO_ROOT / "tests" / "answers-weisssrv-shaped.yml").read_text())
-    assert QUESTIONS["lib_ref"]["default"] == fixture["lib_ref"]
+    assert "lib_ref" not in fixture, (
+        "answers-weisssrv-shaped.yml should inherit lib_ref from copier.yml's "
+        "default (the single source), not restate it"
+    )
 
 
 def test_lib_ref_validator_takes_release_tags_only():

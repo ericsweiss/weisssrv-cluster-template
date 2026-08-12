@@ -41,7 +41,7 @@ before handing off to copier. The console script is `weisssrv-new-project`;
 source and the destination:
 
 ```bash
-pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@v0.6.0#subdirectory=cli'
+pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@vX.Y.Z#subdirectory=cli'  # vX.Y.Z = the release you'll answer for lib_ref (default in copier.yml)
 weisssrv-new-project new-cluster \
   https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
 ```

@@ -4,9 +4,11 @@ Exercises the drift, branch-ref and missing-include cases against synthetic CI
 files, plus the --project / --ref-var overrides a consumer needs when it pins a
 fork or names its variable differently.
 
-Plus a smoke check that this repository's REAL .gitlab-ci.yml passes — the one
-that fires when someone bumps the library pin, since `changes: ["**/*"]` puts
-every file in the python-tests trigger.
+CANONICAL SUITE. The library's own .gitlab-ci.yml uses `local:` includes rather
+than pinning itself, so there is no self-check here. A consumer that vendors
+check-lib-pins.py vendors this file too, and adds only its own smoke test
+asserting the real .gitlab-ci.yml passes — behavioural cases belong here, not in
+a consumer's copy.
 """
 
 from __future__ import annotations
@@ -809,6 +811,90 @@ def test_fix_succeeds_when_a_later_job_uses_an_alias(tmp_path: Path) -> None:
     assert clp.check(p) == []
 
 
-def test_real_repo_ci_file_passes() -> None:
-    """The live gate: fails the moment a real include drifts from the source."""
-    assert clp.check(REPO / ".gitlab-ci.yml") == []
+# ---------------------------------------------------------------------------
+# Ansible collection pin (sibling ansible/requirements.yml) — synced from the
+# SAME single source as the include refs.
+
+
+def _requirements(version: str | None = "v0.4.0") -> str:
+    """A requirements.yml installing the library collection plus an unrelated
+    Galaxy collection. version=None omits the library's `version:` (a floating
+    pin); the unrelated collection always carries its own version constraint."""
+    lines = [
+        "---",
+        "collections:",
+        "  - name: git+https://git.ericsweiss.com/eric/weisssrv-lib.git#/ansible_collections/weisssrv/infra",
+        "    type: git",
+    ]
+    if version is not None:
+        lines.append(f"    version: {version}")
+    lines += [
+        "  - name: ansible.posix",
+        '    version: ">=2.1.0,<3.0.0"',
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _write_requirements(tmp_path: Path, content: str) -> None:
+    req = tmp_path / "ansible" / "requirements.yml"
+    req.parent.mkdir(parents=True, exist_ok=True)
+    req.write_text(content)
+
+
+def test_requirements_matching_the_source_passes(tmp_path: Path) -> None:
+    ci = _write(tmp_path, _ci())
+    _write_requirements(tmp_path, _requirements("v0.4.0"))
+    assert clp.check_requirements(ci, "v0.4.0") == []
+
+
+def test_requirements_drift_is_reported(tmp_path: Path) -> None:
+    ci = _write(tmp_path, _ci())
+    _write_requirements(tmp_path, _requirements("v0.3.2"))
+    problems = clp.check_requirements(ci, "v0.4.0")
+    assert len(problems) == 1
+    assert "v0.3.2" in problems[0] and "v0.4.0" in problems[0]
+
+
+def test_no_requirements_file_is_a_noop(tmp_path: Path) -> None:
+    ci = _write(tmp_path, _ci())  # no ansible/requirements.yml written
+    assert clp.check_requirements(ci, "v0.4.0") == []
+    assert clp.fix_requirements(ci, "v0.4.0") == 0
+
+
+def test_requirements_installing_the_lib_without_a_version_is_reported(
+    tmp_path: Path,
+) -> None:
+    ci = _write(tmp_path, _ci())
+    _write_requirements(tmp_path, _requirements(None))
+    problems = clp.check_requirements(ci, "v0.4.0")
+    assert len(problems) == 1
+    assert "without a version" in problems[0]
+
+
+def test_fix_requirements_syncs_only_the_lib_collection_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    ci = _write(tmp_path, _ci())
+    _write_requirements(tmp_path, _requirements("v0.3.2"))
+    assert clp.fix_requirements(ci, "v0.4.0") == 1
+    assert clp.check_requirements(ci, "v0.4.0") == []
+    text = (tmp_path / "ansible" / "requirements.yml").read_text()
+    assert "version: v0.4.0" in text            # library synced
+    assert 'version: ">=2.1.0,<3.0.0"' in text  # unrelated collection untouched
+    assert clp.fix_requirements(ci, "v0.4.0") == 0  # nothing left to change
+
+
+def test_run_fix_syncs_both_the_includes_and_requirements(tmp_path: Path) -> None:
+    """The CLI path (_run --fix) syncs the include refs AND requirements.yml from
+    the one source, and re-verifies both before reporting success."""
+    import argparse
+
+    ci = _write(tmp_path, _ci(refs=("v0.4.0", "v0.3.2")))
+    _write_requirements(tmp_path, _requirements("v0.3.2"))
+    args = argparse.Namespace(
+        ci_file=ci, project=clp.LIB_PROJECT, ref_var=clp.REF_VAR, fix=True
+    )
+    assert clp._run(args) == 0
+    assert clp.check(ci) == []
+    assert clp.check_requirements(ci, "v0.4.0") == []

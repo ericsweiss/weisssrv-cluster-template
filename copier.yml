@@ -703,10 +703,10 @@ lib_ref:
     sources. Use a RELEASE TAG (vX.Y.Z) — the library's include contract is
     explicit that a branch is never a valid pin, and a branch deleted after
     merge takes every include, module source and collection install with it.
-  default: "v0.6.0"
+  default: "v0.6.2"
   validator: >-
     {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
-    lib_ref must be a release TAG of the form vX.Y.Z (e.g. v0.6.0). A branch is
+    lib_ref must be a release TAG of the form vX.Y.Z (e.g. v1.2.3). A branch is
     never a valid pin: the generated repo's scripts/check-lib-pins.py enforces
     the same shape on every `include:` entry, so a branch answered here fails
     the very first pipeline.

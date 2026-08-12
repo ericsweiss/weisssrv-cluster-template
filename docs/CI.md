@@ -103,8 +103,9 @@ its own gate cannot be generated.
 ## Library pin
 
 Every `include:` in both pipelines points at `eric/weisssrv-lib`. This
-repository's own includes are pinned to the `v0.6.0` release tag; the generated
-pipeline pins whatever `lib_ref` the operator answered (default `v0.6.0`).
+repository's own includes are pinned to the release tag `lib_ref` resolves to
+(its default lives in `copier.yml`); the generated pipeline pins whatever
+`lib_ref` the operator answered.
 Never pin a branch: it moves under every consumer at once, and it disappears
 when it merges — which takes every include, module source and collection install
 with it. `scripts/check-lib-pins.py` fails the pipeline on a branch pin or on an

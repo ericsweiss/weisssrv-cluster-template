@@ -67,7 +67,7 @@ tested, not a preference.
 |---|---|
 | `v0.1.0` | weisssrv-lib `v0.2.0` |
 | `v0.2.0` | weisssrv-lib `v0.5.2` |
-| `main` (unreleased) | weisssrv-lib `v0.6.0` |
+| `main` (unreleased) | weisssrv-lib `v0.6.2` |
 
 Rules that keep the table meaningful:
 

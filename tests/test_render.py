@@ -143,7 +143,9 @@ def test_render_produces_a_repository(cluster):
 def test_answers_file_records_the_fixture(cluster):
     recorded = yaml.safe_load((cluster.path / ".copier-answers.yml").read_text())
     assert recorded["cluster_name"] == cluster.answers["cluster_name"]
-    assert recorded["lib_ref"] == cluster.answers["lib_ref"]
+    # lib_ref is inherited from copier.yml's default (the fixture no longer answers
+    # it), so copier records the resolved default — `copier update` reproduces it.
+    assert recorded.get("lib_ref"), "the answers file must record the resolved lib_ref"
 
 
 def test_no_unrendered_jinja_statements(cluster):
@@ -355,12 +357,15 @@ def test_requirements_pin_the_collection_at_lib_ref(cluster):
     req = cluster.path / "ansible" / "requirements.yml"
     if not req.is_file():
         pytest.skip("no ansible/requirements.yml in the render")
+    # lib_ref is inherited from copier.yml's default; the tag copier resolved is
+    # recorded in the render's .copier-answers.yml.
+    want = yaml.safe_load((cluster.path / ".copier-answers.yml").read_text())["lib_ref"]
     doc = yaml.safe_load(req.read_text()) or {}
     entries = doc.get("collections") or []
     matches = [e for e in entries if isinstance(e, dict) and "weisssrv-lib" in str(e.get("name", ""))]
     assert matches, "requirements.yml does not install weisssrv.infra from weisssrv-lib"
-    assert all(str(e.get("version")) == cluster.answers["lib_ref"] for e in matches), (
-        f"the collection must be pinned at lib_ref ({cluster.answers['lib_ref']})"
+    assert all(str(e.get("version")) == want for e in matches), (
+        f"the collection must be pinned at lib_ref ({want})"
     )
 
 
@@ -391,9 +396,12 @@ def test_playbook_roles_are_fqcn(cluster):
 
 def test_generated_ci_pins_the_library(cluster):
     ci = _load_ci(cluster.path / ".gitlab-ci.yml")
+    # lib_ref is inherited from copier.yml's default; the tag copier resolved is
+    # recorded in the render's .copier-answers.yml.
+    want = yaml.safe_load((cluster.path / ".copier-answers.yml").read_text())["lib_ref"]
     includes = [inc for inc in ci.get("include", []) if isinstance(inc, dict) and "project" in inc]
     assert includes, "the generated pipeline includes no library templates"
-    assert all(str(inc["ref"]) == cluster.answers["lib_ref"] for inc in includes), (
+    assert all(str(inc["ref"]) == want for inc in includes), (
         "every library include must pin lib_ref"
     )
     files = {inc["file"] for inc in includes}

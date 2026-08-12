@@ -347,7 +347,8 @@ def check_vendored(render: Path, lib_path: Path | None) -> None:
       mis-cut the tag every generated cluster's `copier update` resolves to.
 
     Both comparisons use the checkout `--lib-path` points at, which CI clones at
-    the fixture's `lib_ref`. `_assert_one_lib_ref` below reports — instead of
+    copier.yml's `lib_ref` default (the single source the fixtures inherit).
+    `_assert_one_lib_ref` below reports — instead of
     comparing — when the template's own pipeline pins something else, so the
     repository's copies are never silently gated against a ref they were not
     taken from.
@@ -387,17 +388,19 @@ def check_vendored(render: Path, lib_path: Path | None) -> None:
 
 
 def _assert_one_lib_ref() -> list[str]:
-    """The template's own pipeline must pin the ref the fixtures do.
+    """The template's own pipeline must pin the ref the fixtures resolve to.
 
-    The render-validate job clones ONE library, at the `lib_ref` in
-    answers-weisssrv-shaped.yml, and gates both trees with it. If this
-    repository's own includes moved to a different tag, the byte-comparison
+    The render-validate job clones ONE library, at copier.yml's `lib_ref` default
+    (the single source the fixtures inherit), and gates both trees with it. If
+    this repository's own includes moved to a different tag, the byte-comparison
     above would still pass or fail — against the wrong ref — so the mismatch is
     reported rather than assumed away.
     """
     root = render_cluster.REPO_ROOT
-    fixture = yaml.safe_load((root / "tests" / "answers-weisssrv-shaped.yml").read_text())
-    expected = fixture["lib_ref"]
+    # The fixtures inherit lib_ref from copier.yml's default (the single source),
+    # so that default is the ref render-validate clones — and the one this
+    # template's own includes (if any) must match.
+    expected = yaml.safe_load((root / "copier.yml").read_text())["lib_ref"]["default"]
     ci = render_cluster.load_ci(root / ".gitlab-ci.yml")
     refs = {
         inc["ref"]
@@ -407,8 +410,8 @@ def _assert_one_lib_ref() -> list[str]:
     if refs - {expected}:
         return [
             "this template's own .gitlab-ci.yml pins library ref(s) "
-            f"{sorted(refs)} but tests/answers-weisssrv-shaped.yml answers "
-            f"lib_ref: {expected} — render-validate clones only the latter, so "
+            f"{sorted(refs)} but copier.yml's lib_ref default is {expected} — "
+            "render-validate clones only the latter, so "
             "the vendored-script comparison below would run against a ref the "
             "repository's own copies were never taken from"
         ]
