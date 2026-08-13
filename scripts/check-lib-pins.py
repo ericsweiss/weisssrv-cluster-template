@@ -86,8 +86,7 @@ def parse_ci(text: str) -> dict:
         raise yaml.YAMLError("the top-level CI document must be a mapping")
     variables = doc.get("variables")
     if variables is not None and not isinstance(variables, dict):
-        # Same hole one level down: `variables: invalid` cleared the check
-        # above and then reached `.get(ref_var)` on a string.
+        # A non-mapping `variables:` would reach .get(ref_var) on a scalar.
         raise yaml.YAMLError("`variables:` must be a mapping")
     return doc
 
@@ -98,10 +97,9 @@ def lib_includes(doc: dict, project: str = LIB_PROJECT) -> list[dict]:
     if isinstance(includes, dict):
         includes = [includes]        # a single entry, written unwrapped
     elif not isinstance(includes, list):
-        # `include:` may legitimately be one string (a local file), and when
-        # malformed can be any scalar. None of those carries a project pin —
-        # and iterating a non-iterable scalar raised TypeError, which reached
-        # the caller as a traceback instead of a reported problem.
+        # `include:` may legitimately be one string (a local file), or any
+        # scalar when malformed. None carries a project pin, and a scalar is
+        # not iterable.
         includes = []
     return [
         i for i in includes if isinstance(i, dict) and i.get("project") == project
@@ -122,8 +120,7 @@ def files_of(entry: dict) -> list[str]:
     f = entry.get("file")
     if isinstance(f, list):
         # `or [...]`: an EMPTY list must not collapse the caller's reporting
-        # loop to zero iterations — that would let a drifted pin pass the gate
-        # silently, which is the failure this whole script exists to prevent.
+        # loop to zero iterations, silently passing a drifted pin.
         return [str(x) for x in f] or ["<entry with an empty file: list>"]
     return [str(f)] if f else ["<entry with no file:>"]
 
@@ -269,10 +266,8 @@ def fix(path: Path, project: str = LIB_PROJECT, ref_var: str = REF_VAR) -> int:
     want = declared_ref(doc, ref_var)
     if not want:
         raise SystemExit(f"{path}: variables.{ref_var} is not set; nothing to sync")
-    # Validated BEFORE anything is written. Without this, pointing the variable
-    # at a branch made --fix propagate that branch to every include and only
-    # then report failure — leaving the file worse than it found it, which is
-    # the opposite of what a repair command should do on bad input.
+    # Validated BEFORE anything is written: a branch ref would otherwise be
+    # propagated to every include and only then reported.
     if not isinstance(want, str) or TAG_RE.fullmatch(want) is None:
         raise SystemExit(
             f"{path}: variables.{ref_var} must be a release tag (vX.Y.Z), got "
@@ -445,7 +440,9 @@ def fix_requirements(ci_file: Path, want: str, project: str = LIB_PROJECT) -> in
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument(
         "--ci-file",
         type=Path,

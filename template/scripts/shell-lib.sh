@@ -36,12 +36,6 @@ timeout_cmd() {
 # trips a dead post-connect channel; timeout_cmd is the backstop for a host that
 # connects then stalls (PAM/sssd, disk-stuck remote shell). Pass the target and
 # remote command as args, e.g. `ssh_probe "$host" "true"`.
-#
-# Callers are deliberately NOT enumerated here: this file is vendored verbatim
-# into the consumer repos, where it is also sourced by scripts that do not exist
-# in this library (weisssrv's collect-state.sh among them), so any list written
-# here is wrong in at least one copy. Find them with
-# `grep -rl shell-lib.sh scripts/`.
 ssh_probe() {
     timeout_cmd 6 ssh -o ConnectTimeout=2 -o BatchMode=yes \
         -o ServerAliveInterval=2 -o ServerAliveCountMax=2 "$@"

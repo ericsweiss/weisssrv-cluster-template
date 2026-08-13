@@ -148,25 +148,16 @@ spec:
                       fieldRef:
                         fieldPath: metadata.namespace
 
-      # The built-in admin account EXISTS but authenticates nothing while the
-      # two switches below are set — see the break-glass note there. Its
-      # password is an ESO-managed random value, never the chart default
-      # (`prom-operator`, which is public knowledge).
+      # The built-in admin account EXISTS but authenticates nothing while the two
+      # switches below are set. Its password is an ESO-managed random value,
+      # never the chart default (`prom-operator`, which is public knowledge).
       #
-      # ONE-SHOT. Grafana creates this account only while its user table is
-      # empty, so GF_SECURITY_ADMIN_PASSWORD is consumed exactly once, at the
-      # FIRST start against an empty grafana.db. `persistence.enabled: true`
-      # with the NFS-backed existingClaim means there is never a second first
-      # start, so editing the vault field afterwards changes nothing on its own
-      # and restarting the pod does not re-apply it. Rotating it is a vault edit
-      # PLUS, in the same change:
-      #
-      #   kubectl -n observability exec deploy/kube-prometheus-stack-grafana \
-      #     -c grafana -- grafana cli --homepath /usr/share/grafana \
-      #     admin reset-admin-password '<new>'
-      #
-      # Which is why `Grafana SSO` -> admin-password must hold its FINAL value
-      # before this stage first reconciles.
+      # ONE-SHOT. Grafana consumes GF_SECURITY_ADMIN_PASSWORD only at its FIRST
+      # start against an empty grafana.db, and persistence means there is never a
+      # second first start — so `Grafana SSO` -> admin-password must hold its
+      # FINAL value before this stage first reconciles. Rotating it afterwards is
+      # a vault edit plus `grafana cli admin reset-admin-password`; see
+      # ../README.md.
       admin:
         existingSecret: observability-secrets
         userKey: grafana-admin-user
@@ -176,40 +167,14 @@ spec:
         server:
           root_url: https://grafana.${cluster_internal_domain}
 
-        # SSO-ONLY, AND THAT MEANS BOTH OF THE SETTINGS BELOW. The chart's
-        # built-in `admin` account is a Grafana Admin: it can read every
-        # datasource, run arbitrary queries against Prometheus and Loki, edit
-        # dashboards and mint API tokens.
-        #
-        #   disable_login_form            removes the browser login form, but
-        #                                 ONLY the browser form — it does not
-        #                                 close the HTTP path.
-        #   auth.basic.enabled=false      closes that path. Without it, anyone
-        #                                 who can reach the ingress can still
-        #                                 `curl -u admin:<password> .../api/...`.
-        #
-        # Authorization then comes entirely from the OIDC role mapping below:
-        # the first member of the admin group to sign in becomes a Grafana
-        # Admin. Running WITHOUT an identity provider means deleting both of
-        # these AND the OIDC block, which leaves the admin account above as the
-        # only way in — it is already password-protected from the vault.
-        #
-        # security.disable_initial_admin_creation is deliberately NOT set.
-        # Grafana only ever creates the built-in admin when the user table is
-        # EMPTY, so suppressing it means the account can never be created again:
-        # after the first OIDC login the table is non-empty, and flipping the
-        # setting back re-opens the login form against a database with no admin
-        # in it (`grafana cli admin reset-admin-password` then fails with
-        # "Could not find user named admin"). The only way back in would be
-        # hand-editing grafana.db on the PV.
-        #
-        # BREAK-GLASS (identity provider down, nobody can sign in): set
-        # disable_login_form: false and auth.basic.enabled: true, reconcile, and
-        # sign in as `admin` with the vault's grafana-admin-password — which is
-        # the value that was in the vault at Grafana's FIRST start, not
-        # necessarily the one there now (see the one-shot note on
-        # grafana.admin above). Fix the IdP, then revert both. Do not leave that
-        # state committed.
+        # SSO-ONLY, AND BOTH SETTINGS ARE REQUIRED. disable_login_form removes
+        # the browser form; auth.basic.enabled=false closes the HTTP path —
+        # without it anyone who reaches the ingress can still
+        # `curl -u admin:<password> .../api/...`. Authorization comes from the
+        # OIDC role mapping below. Do NOT set
+        # security.disable_initial_admin_creation — it permanently prevents
+        # recreating the built-in admin. Break-glass and no-IdP procedures:
+        # ../README.md.
         auth:
           disable_login_form: true
         auth.basic:

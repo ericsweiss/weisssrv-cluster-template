@@ -19,9 +19,8 @@ spec:
   path: ./kubernetes/infrastructure/configs
   prune: true
   wait: true
-  # Both ConfigMaps come from infrastructure-sources, which must be Ready
-  # before this stage runs — optional:false so a missing one fails loudly
-  # instead of rendering empty versions/domains.
+  # optional:false — see infrastructure-sources.yaml for why only that stage
+  # tolerates a miss.
   postBuild:
     substituteFrom:
       - kind: ConfigMap

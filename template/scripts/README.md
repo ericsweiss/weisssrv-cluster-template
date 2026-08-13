@@ -16,9 +16,14 @@ the diff.
 | Script | Used by |
 |---|---|
 | `flux-render.sh` | `flux-env.sh` — extracts postBuild vars from one ConfigMap |
+| `flux-env.sh` | `task flux:lint` + the CI flux-lint job (`flux_render_script`) — merges the cluster's **two** substitution ConfigMaps behind one interface (see below) |
 | `kubeconform-skipped.py` | the CI flux-lint job — tracks kinds no schema validated |
-| `check-hpa-vpa-invariant.py` | the CI flux-lint job (`extra_validation`) — no HPA and a CPU-controlling VPA on one workload |
-| `validate-helm-values.py` | the CI flux-lint job (`extra_validation`) — `helm template` over the value-heavy releases |
+| `check-hpa-vpa-invariant.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — no HPA and a CPU-controlling VPA on one workload |
+| `check-scrape-netpol.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every scraped namespace admits Prometheus through its NetworkPolicies |
+| `check-secretstore-scope.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every ClusterSecretStore declares `conditions` and admits its consumers |
+| `check-pvc-storageclass.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every claim pins a `storageClassName` |
+| `check-netpol-except-parity.py` | `task lint:netpol-parity`, the CI netpol-parity job — public-egress except-lists match a canonical reserved-CIDR set |
+| `validate-helm-values.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — `helm template` over the value-heavy releases |
 | `check-deploy-coverage.sh` | the CI deploy-coverage job — every changed playbook/inventory path reaches a deploy job |
 | `generate-versions-configmap.py` | `task flux:sync-versions` and its CI drift gate |
 | `generate-hosts-env.py` | `task hosts:sync` and its CI drift gate |
@@ -39,17 +44,16 @@ under review. `task lib:sync` clones the library at the pinned ref into
 
 The copies here are **byte-identical** to the library's at the pinned ref, and
 nothing above is forked. That is what makes the refresh a mechanical `cp` and a
-diff review; a local edit that has to survive belongs in `flux-env.sh` (below)
-or, better, upstream in the library.
+diff review; the library's own gate compares them, so a local edit that has to
+survive belongs upstream in the library, not here.
 
-`flux-env.sh` is the one script written here rather than vendored: this cluster
-substitutes from **two** ConfigMaps (`cluster-versions` for pins,
-`cluster-config` for domains, VIPs and CIDRs) while the library's render helper
-takes one file per call. It merges them behind the same
-`export-versions` / `k8s-version` interface, so the local lint and the CI job
-see identical variables — which is why `task flux:lint` and the CI flux-lint
-job's `flux_render_script` input both point at THIS file, never at
-`flux-render.sh` directly. Extra ConfigMaps can also come from
+Note on `flux-env.sh`: this cluster substitutes from **two** ConfigMaps
+(`cluster-versions` for pins, `cluster-config` for domains, VIPs and CIDRs)
+while the library's render helper takes one file per call. `flux-env.sh` merges
+them behind the same `export-versions` / `k8s-version` interface, so the local
+lint and the CI job see identical variables — which is why `task flux:lint` and
+the CI flux-lint job's `flux_render_script` input both point at THIS file, never
+at `flux-render.sh` directly. Extra ConfigMaps can also come from
 `$FLUX_EXTRA_CONFIGMAPS`; `merged-configmap` emits the union as one document for
 the tools that accept a single ConfigMap path.
 
@@ -63,6 +67,7 @@ the tools that accept a single ConfigMap path.
 | `autoscaling-policy.yaml` | `check-hpa-vpa-invariant.py`, `validate-helm-values.py` | Chart-native HPA targets and the CPU-limit allowlist |
 | `helm-values-releases.yaml` | `validate-helm-values.py` | Which HelmReleases are worth a `helm template` round-trip |
 | `deploy-coverage.conf` | `check-deploy-coverage.sh` | Playbooks deliberately not wired to a deploy job, each with a rationale |
+| `netpol-except.yaml` | `check-netpol-except-parity.py` | Egress rules that deliberately carry no peers, each with a rationale |
 
 `hosts.env` ships empty: the host roster is the one thing the template cannot
 guess. Until you fill in `ansible/inventories/prod/hosts.yml` and run `task

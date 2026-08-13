@@ -39,14 +39,9 @@ spec:
       nodeSelector:
         ${cluster_node_label_domain}/general: "true"
       automountServiceAccountToken: false
-      # Uncomment when the upstream registry's name resolves publicly but is
-      # actually served by this cluster's internal ingress VIP — otherwise pods
-      # hairpin out to the WAN and back. Node-level /etc/hosts entries do NOT
-      # reach pods (they resolve via CoreDNS), so the pin is repeated here.
-      # hostAliases:
-      #   - ip: "${cluster_metallb_internal_vip}"
-      #     hostnames:
-      #       - registry.${cluster_git_host}
+      # An upstream whose name resolves publicly but is served by this cluster's
+      # internal VIP needs a pod-scoped `hostAliases` pin, or pods hairpin out to
+      # the WAN and back — the recipe is in README.md § Name resolution.
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

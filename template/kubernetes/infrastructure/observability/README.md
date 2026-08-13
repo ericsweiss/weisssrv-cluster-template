@@ -133,6 +133,26 @@ which `group_vars/proxmox.yml` sets true — so the series are being scraped and
 only the rules are missing: add them under `platform-storage:` in
 `kube-prometheus-stack/release.yaml` (group `platform.storage`).
 
+## Blackbox probe targets
+
+`exporters/blackbox-exporter.yaml` ships a starter target list: only endpoints
+this template guarantees exist, each composed from `cluster-config` so there are
+no literals to update when the domain changes. Add your own to that list, using
+one of the modules defined in the same file (`http_2xx`, `http_sso`,
+`dns_resolution`, `icmp_ping`, `tcp_connect`):
+
+```yaml
+        - name: dns-01
+          url: 10.0.0.150:53        # a site address; prefer a cluster-config key
+          module: dns_resolution
+        - name: public-ingress
+          url: https://www.${cluster_external_domain}
+          module: http_2xx
+```
+
+A target that is legitimately offline much of the time needs its own gated
+alert, not a bare `EndpointDown`.
+
 ## Dashboards
 
 `dashboards/` carries nine platform dashboards (cluster overview, Flux, alerts

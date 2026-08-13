@@ -77,8 +77,9 @@
 - name: Identify the CI executor pod
   ansible.builtin.set_fact:
     # In a Kubernetes executor the controller's HOSTNAME is the pod name.
-    # KUBERNETES_SERVICE_HOST is injected into every pod, so it proves we are
-    # in-cluster even if the pod naming ever changes — used to fail CLOSED.
+    # KUBERNETES_SERVICE_HOST is injected into every pod, so it establishes
+    # "in-cluster" independently of how pods are named. Detection failure below
+    # is treated as self-host: the check fails CLOSED.
     ci_executor_pod: "{{ lookup('env', 'HOSTNAME') | default('', true) }}"
     ci_in_k8s: "{{ (lookup('env', 'KUBERNETES_SERVICE_HOST') | default('', true)) | length > 0 }}"
     ci_executor_node_q: { stdout: '', rc: 1 }

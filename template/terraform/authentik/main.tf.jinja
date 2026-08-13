@@ -7,6 +7,7 @@ module "sso" {
   oauth2_client_secrets = local.oauth2_client_secrets
   proxy_providers       = local.proxy_providers
   saml_providers        = local.saml_providers
+  custom_scope_mappings = local.custom_scope_mappings
 
   groups                  = local.groups
   group_secret_attributes = local.group_secret_attributes

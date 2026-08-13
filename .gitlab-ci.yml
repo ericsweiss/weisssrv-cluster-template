@@ -1,24 +1,12 @@
 ---
-# CI for the template itself. The generic jobs come from the shared library, so
-# the template is linted by the same tooling it hands to a generated cluster.
+# CI for the template itself. Generic jobs come from the shared library, so the
+# template is linted by the tooling it hands to a generated cluster; every job is
+# TAG-LESS and non-root safe (pip --user, workspace-local tool downloads) so they
+# land on the shared runner.
 #
-# The gate that matters is `render-validate`: it renders this template with
-# BOTH answer fixtures — the reference-shaped one and the deliberately unlike
-# contrast one — and runs the REAL toolchain over each output: yamllint,
-# kustomize + kubeconform through the Flux substitution loop, the vendored-script
-# fidelity check, and `ansible-playbook --syntax-check` against the
-# weisssrv.infra collection. A template change that produces an invalid cluster
-# fails here rather than in someone's homelab, and a value copied from the
-# reference cluster fails on the contrast render rather than passing both.
-#
-# Every job is TAG-LESS and non-root safe (pip --user, workspace-local tool
-# downloads), so they land on the shared runner.
-#
-# `release` is LAST on purpose: the semantic-release job sets no `needs:`, so
-# stage ordering is what gates a tag on every gate above it having passed —
-# including `render-validate`. A template tag is what a generated cluster's
-# `copier update` resolves to, so it must never be cut from a tree that does not
-# render. See docs/VERSIONING.md.
+# `render-validate` (below) is the gate that matters. `release` is declared LAST
+# so stage ordering gates a tag on it — a template tag must never be cut from a
+# tree that does not render. See docs/VERSIONING.md.
 stages:
   - lint
   - test
@@ -39,7 +27,7 @@ variables:
   # a literal and scripts/check-lib-pins.py (vendored from the library) fails the
   # pipeline if they drift from it or pin a branch. Bump here, then
   # `scripts/check-lib-pins.py --fix`.
-  WEISSSRV_LIB_REF: "v0.6.2"
+  WEISSSRV_LIB_REF: "v0.7.2"
   COPIER_VERSION: "9.17.0"
   PYYAML_VERSION: "6.0.2"
   YAMLLINT_VERSION: "1.38.0"
@@ -58,7 +46,7 @@ include:
   # Jinja sources, not documents. The render-validate job below yamllints the
   # rendered tree, which is where template/ actually gets covered.
   - project: eric/weisssrv-lib
-    ref: v0.6.2
+    ref: v0.7.2
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: []
@@ -72,7 +60,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.6.2
+    ref: v0.7.2
     file: /ci/lint/python-lint.yml
     inputs:
       tags: []
@@ -91,7 +79,7 @@ include:
   # The shell the template ships is static (no .jinja suffix), so it can be
   # checked in place rather than only after a render.
   - project: eric/weisssrv-lib
-    ref: v0.6.2
+    ref: v0.7.2
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: []
@@ -104,7 +92,7 @@ include:
   # copier.yml schema checks + the full render invariants. Everything in the
   # repository feeds the render, hence the catch-all `changes`.
   - project: eric/weisssrv-lib
-    ref: v0.6.2
+    ref: v0.7.2
     file: /ci/test/python-tests.yml
     inputs:
       tags: []
@@ -118,7 +106,7 @@ include:
   # Self-application: the template ships this gate into every generated cluster,
   # and its own docs carry the same relative cross-links.
   - project: eric/weisssrv-lib
-    ref: v0.6.2
+    ref: v0.7.2
     file: /ci/lint/docs-link-check.yml
     inputs:
       tags: []
@@ -134,7 +122,7 @@ include:
   # is exactly what a freshly generated cluster would be pinned to. Soft-fail
   # everywhere: rc 1 is "updates available".
   - project: eric/weisssrv-lib
-    ref: v0.6.2
+    ref: v0.7.2
     file: /ci/maintenance/version-check.yml
     inputs:
       tags: []
@@ -154,13 +142,13 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.6.2
+    ref: v0.7.2
     file: /ci/security/secret-detection.yml
     inputs:
       tags: []
 
   - project: eric/weisssrv-lib
-    ref: v0.6.2
+    ref: v0.7.2
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []
@@ -183,21 +171,12 @@ include:
           optional: true
 
   # Cuts THIS template's tag from the conventional commits merged to main — the
-  # tag a generated cluster's `copier update` resolves to and records as
-  # `_commit` in .copier-answers.yml. Untagged, copier falls back to the
-  # template's HEAD, so every update pulls unreleased work; see
+  # tag a generated cluster's `copier update` resolves to. All inputs are the
+  # library defaults; `release` is declared LAST above so stage order gates the
+  # tag on every job here. Policy and the major_on_zero decision:
   # docs/VERSIONING.md.
-  #
-  # Everything else is the template's default: the job sets no `needs:` and
-  # `release` is declared LAST above, so stage ordering gates it on every job
-  # here passing; its rules are already main-only with schedules excluded, and
-  # `resource_group` serializes rapid merges. `script_path` defaults to the
-  # vendored scripts/semantic-release.py, which tests/validate_render.py holds
-  # byte-identical to the library at this ref. major_on_zero stays false: while
-  # the tag is 0.x a `feat!:` bumps MINOR, and calling a template 1.0.0 is a
-  # deliberate act (flip the input for that release).
   - project: eric/weisssrv-lib
-    ref: v0.6.2
+    ref: v0.7.2
     file: /ci/release/semantic-release.yml
     inputs:
       tags: []
@@ -273,7 +252,8 @@ render-validate:
     # shape, which makes it blind to a value hardcoded FROM that cluster — it
     # renders byte-identical to a correct substitution. answers-unlike.yml is
     # the contrast render: different LAN, domains, names, vault and runner tag,
-    # both optional modules OFF, 5 compute hosts, one resolver. Validating only
+    # both optional modules OFF, 4 compute hosts plus the NAS node, one resolver.
+    # Validating only
     # the shaped one leaves every `{% if not %}` branch and every site-identity
     # leak checked by nothing that runs the real toolchain.
     - python3 tests/validate_render.py --lib-path "$LIB_CHECKOUT"

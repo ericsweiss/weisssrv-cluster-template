@@ -194,15 +194,21 @@ green play.
 
 ```bash
 task lint          # yamllint, shellcheck, ruff, doc-links, taskfile-smoke,
-                   # lib-pins, version-coverage, repo-sync, ansible-lint,
-                   # terraform fmt-check + validate, flux:lint
+                   # lib-pins, version-coverage, repo-sync, netpol-parity,
+                   # invariants, ansible-lint, terraform fmt-check + validate,
+                   # flux:lint
 task ansible:ping  # every host in the inventory answers
 ```
 
-`task lint` is the local mirror of the CI lint stage, and doubles as the
-tool-completeness check: each sub-task names the missing binary in its
+`task lint` runs every job in the CI lint stage except `deploy-coverage` (which
+compares an MR's diff against the deploy jobs' `changes:` lists, so it needs a
+merge base rather than a working tree). It doubles as the tool-completeness
+check: each sub-task names the missing binary in its
 precondition message. Fix everything it reports before touching a host — most
-first-run failures are inventory typos it catches for free.
+first-run failures are inventory typos it catches for free. The typo half is
+`lint:invariants` (`tests/`), which is what re-checks the roster you re-addressed
+in § 2: duplicate addresses or vmids, an address outside `lan_cidr`, and a
+`${placeholder}` no ConfigMap resolves.
 
 One expected exception, if you skipped the two sync commands in § 2:
 **`lint:repo-sync` fails, and that is the design.** It names the command to run.

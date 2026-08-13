@@ -7,8 +7,7 @@ metadata:
     app.kubernetes.io/name: external-dns
     app.kubernetes.io/managed-by: flux
     ${cluster_node_label_domain}/dns-api-token: "true"
-    # Opts this namespace into the platform ClusterSecretStore, whose
-    # spec.conditions admit only namespaces carrying this label.
+    # ClusterSecretStore opt-in label (configs/cluster-secret-store.yaml).
     ${cluster_node_label_domain}/cluster-secrets: "true"
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/warn: restricted

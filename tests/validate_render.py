@@ -288,6 +288,76 @@ def check_flux(render: Path) -> None:
     print(f"  flux ok ({built} Kustomizations, k8s {k8s_version}, {len(values)} substitutions)")
 
 
+# The invariant gates the generated pipeline runs over its own manifests. Each
+# reads the WHOLE rendered corpus on stdin; `netpol-parity` is separate because
+# it reads the manifests on disk (it also covers kubernetes/clusters/*/, which
+# no Kustomization builds).
+_CORPUS_GATES = (
+    ("check-scrape-netpol.py", ()),
+    ("check-secretstore-scope.py", ()),
+    ("check-pvc-storageclass.py", ()),
+    (
+        "check-hpa-vpa-invariant.py",
+        ("--require-chart-native-vpas", "--policy-config", "scripts/autoscaling-policy.yaml"),
+    ),
+)
+
+
+def check_cluster_gates(render: Path) -> None:
+    """Run the shipped invariant gates over the shipped manifests.
+
+    The render suite asserts the pipeline WIRES these; this asserts the payload
+    they are wired over actually passes them. Without it a generated cluster's
+    very first pipeline can be red on manifests nobody edited, and the template
+    change that caused it went green.
+    """
+    _need("kustomize")
+    configmaps = _configmap_paths(render)
+    values = _substitutions(render, configmaps)
+
+    corpus: list[str] = []
+    for cluster_dir in sorted((render / "kubernetes" / "clusters").glob("*")):
+        for ks_file in sorted(cluster_dir.glob("*.yaml")):
+            if ks_file.stem == "kustomization":
+                continue
+            src = ((yaml.safe_load(ks_file.read_text()) or {}).get("spec") or {}).get("path", "")
+            if not src:
+                continue
+            build = _run(["kustomize", "build", src.lstrip("./")], cwd=render)
+            if build.returncode:
+                raise Failure(f"kustomize build {src}:\n{build.stderr}")
+            corpus.append(PLACEHOLDER.sub(lambda m: values.get(m.group(1), ""), build.stdout))
+    if not corpus:
+        raise Failure("no Kustomization rendered — the gates would examine nothing")
+    stream = "\n---\n".join(corpus)
+
+    failures = []
+    for script, extra in _CORPUS_GATES:
+        if not (render / "scripts" / script).is_file():
+            failures.append(f"{script} is wired into CI but not shipped")
+            continue
+        result = _run([sys.executable, f"scripts/{script}", *extra], input=stream, cwd=render)
+        if result.returncode:
+            failures.append(f"{script}:\n{result.stdout}{result.stderr}")
+
+    netpol = _run(
+        [
+            sys.executable,
+            "scripts/check-netpol-except-parity.py",
+            "--config",
+            "scripts/netpol-except.yaml",
+            "kubernetes/",
+        ],
+        cwd=render,
+    )
+    if netpol.returncode:
+        failures.append(f"check-netpol-except-parity.py:\n{netpol.stdout}{netpol.stderr}")
+
+    if failures:
+        raise Failure("\n".join(failures))
+    print(f"  cluster gates ok ({len(_CORPUS_GATES) + 1} invariants over {len(corpus)} builds)")
+
+
 _SITE_DATA_SUFFIXES = {".yml", ".yaml", ".env", ".conf", ".toml"}
 
 
@@ -346,6 +416,14 @@ def check_vendored(render: Path, lib_path: Path | None) -> None:
       release script the same way, and it is the one file here whose drift would
       mis-cut the tag every generated cluster's `copier update` resolves to.
 
+    Plus the library's own registry gate (`_check_registered_copies`). It reads
+    `template/scripts/` rather than the render, so the overlap with the first
+    comparison is deliberate — together they prove the copy is right BEFORE
+    copier touches it and unchanged AFTER. What only the registry can see is the
+    rest: the shared test suite under `tests/`, and the lint profiles this
+    repository deliberately forks, where the silent failure runs the other way
+    (the library moves and the fork never absorbs it).
+
     Both comparisons use the checkout `--lib-path` points at, which CI clones at
     copier.yml's `lib_ref` default (the single source the fixtures inherit).
     `_assert_one_lib_ref` below reports — instead of
@@ -365,6 +443,7 @@ def check_vendored(render: Path, lib_path: Path | None) -> None:
         local={"flux-env.sh"},
         site_data={"version-registry.py"},
     )
+    problems += _check_registered_copies(lib_path)
     own_scripts = render_cluster.REPO_ROOT / "scripts"
     own: list[str] = []
     if own_scripts.is_dir():
@@ -385,6 +464,47 @@ def check_vendored(render: Path, lib_path: Path | None) -> None:
         f"  vendored ok ({len(vendored)} render + {len(own)} template-repo scripts "
         "byte-identical to the library)"
     )
+
+
+CONSUMER = "weisssrv-cluster-template"
+
+
+def _check_registered_copies(lib_path: Path) -> list[str]:
+    """Run the library's own registry-driven gate over this repository.
+
+    The scripts/ comparison above walks DIRECTORIES, so it only ever sees copies
+    that live in a scripts/ tree. The registry
+    (weisssrv-lib/scripts/vendored-paths.yml) is the authority on every copy
+    relationship, including the ones no directory walk reaches: the canonical
+    check-lib-pins test suite under tests/, and the lint profiles this repository
+    deliberately FORKS — where the failure is silent in the other direction (the
+    library moves and the fork never absorbs it).
+
+    Declared in the library rather than here so a file it starts or stops
+    shipping reaches all three consumers' gates at the next bump.
+    """
+    checker = lib_path / "scripts" / "check-vendored-copies.py"
+    registry = lib_path / "scripts" / "vendored-paths.yml"
+    if not checker.is_file() or not registry.is_file():
+        return [
+            f"{lib_path} ships no scripts/check-vendored-copies.py + vendored-paths.yml "
+            "— the registry gate cannot run, and it must not silently skip"
+        ]
+    result = _run(
+        [
+            sys.executable,
+            str(checker),
+            "--consumer",
+            CONSUMER,
+            "--repo-root",
+            str(render_cluster.REPO_ROOT),
+            "--lib-path",
+            str(lib_path),
+        ]
+    )
+    if result.returncode:
+        return [f"registered copies (weisssrv-lib vendored-paths.yml):\n{result.stdout}{result.stderr}"]
+    return []
 
 
 def _assert_one_lib_ref() -> list[str]:
@@ -826,8 +946,8 @@ def _inventory_hosts(hosts_file: Path) -> dict[str, dict]:
 
 
 def check_inventory_addresses(render: Path) -> None:
-    """No two guests may share an address or a vmid, and every address must sit
-    inside the LAN.
+    """No two guests may share an address or a vmid, no guest may hold one of
+    the cluster's VIPs, and every address must sit inside the LAN.
 
     The copier answers are validated one at a time, never against the plan they
     compose into, and `hosts.yml` hardcodes every address and vmid except the
@@ -883,6 +1003,29 @@ def check_inventory_addresses(render: Path) -> None:
             if not inside:
                 problems.append(f"{name}'s ansible_host {addr} is outside lan_cidr {network}")
 
+    # The floating addresses are not inventory hosts, so the duplicate scan
+    # above cannot see them: kube-vip and MetalLB answer ARP for them, and a
+    # guest holding the same address is an ARP fight that names neither. The
+    # copier validators reject a VIP inside a composed band; this is the hand-
+    # edit route to the same collision.
+    vips = {
+        "cluster_k3s_api_vip": "the k3s API VIP",
+        "cluster_metallb_public_vip": "the public MetalLB VIP",
+        "cluster_metallb_internal_vip": "the internal MetalLB VIP",
+    }
+    config = _cluster_config(render)
+    claimed = {str(config[key]): label for key, label in vips.items() if config.get(key)}
+    missing = sorted(k for k in vips if not config.get(k))
+    if missing:
+        problems.append(
+            "cluster-config declares no " + ", ".join(missing) + " — those VIPs "
+            "are compared against nothing"
+        )
+    for name, host_vars in sorted(hosts.items()):
+        addr = str(host_vars.get("ansible_host") or "")
+        if addr in claimed:
+            problems.append(f"{name}'s ansible_host {addr} is {claimed[addr]}")
+
     if problems:
         raise Failure(
             f"{hosts_file.relative_to(render)}:\n  "
@@ -890,21 +1033,28 @@ def check_inventory_addresses(render: Path) -> None:
             + "\n  (pct and qm share one vmid namespace, and two guests on one "
             "address fail several phases after the answer that caused it)"
         )
-    print(f"  inventory addresses ok ({len(hosts)} hosts, unique vmid + address, all inside {cidr})")
+    print(
+        f"  inventory addresses ok ({len(hosts)} hosts, unique vmid + address, "
+        f"none on a VIP, all inside {cidr})"
+    )
+
+
+def _cluster_config(render: Path) -> dict:
+    """The cluster-config ConfigMap's data, the cluster's declared single source
+    for its site values — not the answers file, which a re-addressed inventory
+    outgrows."""
+    config = render / "kubernetes" / "infrastructure" / "sources" / "cluster-config.yaml"
+    if not config.is_file():
+        return {}
+    for doc in yaml.safe_load_all(config.read_text()):
+        if isinstance(doc, dict) and doc.get("kind") == "ConfigMap":
+            return doc.get("data") or {}
+    return {}
 
 
 def _lan_cidr(render: Path) -> str | None:
-    """The LAN, from the ConfigMap that is the cluster's declared single source
-    for it — not from the answers file, which a re-addressed inventory outgrows."""
-    config = render / "kubernetes" / "infrastructure" / "sources" / "cluster-config.yaml"
-    if not config.is_file():
-        return None
-    for doc in yaml.safe_load_all(config.read_text()):
-        if isinstance(doc, dict) and doc.get("kind") == "ConfigMap":
-            value = (doc.get("data") or {}).get("cluster_lan_cidr")
-            if value:
-                return str(value)
-    return None
+    value = _cluster_config(render).get("cluster_lan_cidr")
+    return str(value) if value else None
 
 
 def check_version_coverage(render: Path) -> None:
@@ -975,6 +1125,116 @@ def check_versions_configmap(render: Path) -> None:
     print("  versions configmap ok (in sync with the rendered all.yml)")
 
 
+_PIPELINE_KEYS = {"stages", "workflow", "variables", "include", "default"}
+
+
+def _image_name(image) -> str | None:
+    """The image reference, whether written as a string or a `name:` mapping."""
+    if isinstance(image, str):
+        return image
+    if isinstance(image, dict) and isinstance(image.get("name"), str):
+        return image["name"]
+    return None
+
+
+def _unpinned(image) -> str | None:
+    """Why this image is not pinned, or None when it is."""
+    name = _image_name(image)
+    if name is None:
+        return f"unreadable image reference {image!r}"
+    tag = name.rsplit("/", 1)[-1]
+    if ":" not in tag:
+        return f"{name} carries no tag, so it resolves to whatever :latest is today"
+    if tag.rsplit(":", 1)[-1] == "latest":
+        return f"{name} pins :latest, which is not a pin"
+    return None
+
+
+def check_ci_policy(render: Path) -> None:
+    """The generated pipeline's image and cancellation policy.
+
+    Both are defaults a job inherits by saying nothing, which is exactly why they
+    need a gate: no rendered job FAILS when they are missing.
+
+    * `default.image` — a job with no image runs on whatever the runner names as
+      its default. That is unreviewable, and the deploy fragment apt-installs, so
+      a non-Debian runner default breaks the deploy on its first line.
+    * `default.interruptible: true` plus `workflow.auto_cancel` — without the
+      pair, a superseded merge-request pipeline is never cancelled. Without the
+      `main` override back to `none`, the opposite failure: a second merge
+      cancels the first's jobs, skipping validation-gate and leaving the first
+      merge's deploys unmet and never run.
+    * anything that touches live infrastructure overrides `interruptible` back to
+      false, so it is never the job that gets cancelled.
+    """
+    ci = render_cluster.load_ci(render / ".gitlab-ci.yml")
+    problems: list[str] = []
+
+    default = ci.get("default") or {}
+    if not isinstance(default, dict) or "image" not in default:
+        problems.append("no top-level `default: image:` — every job's image is the runner's choice")
+    else:
+        why = _unpinned(default["image"])
+        if why:
+            problems.append(f"default image: {why}")
+    if default.get("interruptible") is not True:
+        problems.append("`default: interruptible: true` is missing — nothing is cancellable")
+
+    workflow = ci.get("workflow") or {}
+    if (workflow.get("auto_cancel") or {}).get("on_new_commit") != "interruptible":
+        problems.append(
+            "workflow.auto_cancel.on_new_commit is not `interruptible` — GitLab's "
+            "conservative default stops cancelling once any job has started"
+        )
+    main_rules = [
+        rule
+        for rule in workflow.get("rules") or []
+        if isinstance(rule, dict) and 'CI_COMMIT_BRANCH == "main"' in str(rule.get("if", ""))
+    ]
+    if not main_rules:
+        problems.append("workflow has no `main` rule to carry the auto_cancel override")
+    elif not any(
+        (rule.get("auto_cancel") or {}).get("on_new_commit") == "none" for rule in main_rules
+    ):
+        problems.append(
+            "the `main` workflow rule does not override auto_cancel to `none` — a "
+            "second merge would cancel the first's pipeline mid-deploy"
+        )
+
+    jobs = {
+        name: body
+        for name, body in ci.items()
+        if name not in _PIPELINE_KEYS and isinstance(body, dict)
+    }
+    for name, body in sorted(jobs.items()):
+        if "image" in body:
+            why = _unpinned(body["image"])
+            if why:
+                problems.append(f"{name}: {why}")
+    live = [
+        name
+        for name, body in sorted(jobs.items())
+        if body.get("stage") in {"deploy", "gate"} or name in {"terraform-plan"}
+    ]
+    for name in live:
+        body = jobs[name]
+        extends = body.get("extends")
+        extends = [extends] if isinstance(extends, str) else list(extends or [])
+        if body.get("interruptible") is False or ".deploy-base" in extends:
+            continue
+        problems.append(
+            f"{name} touches live infrastructure but is interruptible — set "
+            "`interruptible: false` or extend .deploy-base"
+        )
+
+    if problems:
+        raise Failure("\n".join(problems))
+    print(
+        f"  ci policy ok (pinned default image, auto_cancel split, {len(live)} "
+        "uninterruptible live-infrastructure jobs)"
+    )
+
+
 def check_ansible(render: Path, lib_path: Path | None, workdir: Path) -> None:
     _need("ansible-playbook")
     ansible_dir = render / "ansible"
@@ -1041,6 +1301,30 @@ def check_ansible(render: Path, lib_path: Path | None, workdir: Path) -> None:
 # --------------------------------------------------------------------------
 
 
+# The two check registries, module-level so the --skip help, docs/CI.md and the
+# test that holds them equal all read the same list.
+RENDER_CHECKS = (
+    ("yamllint", check_yamllint),
+    ("terraform", check_terraform),
+    ("flux", check_flux),
+    ("cluster-gates", check_cluster_gates),
+    ("ci-policy", check_ci_policy),
+    ("inventory-addresses", check_inventory_addresses),
+    ("version-coverage", check_version_coverage),
+    ("versions-configmap", check_versions_configmap),
+)
+
+# These take the library checkout as well, so they skip without --lib-path.
+LIB_CHECKS = (
+    ("vendored", check_vendored),
+    ("role-opt-ins", check_role_opt_ins),
+    ("role-inputs", check_required_role_inputs),
+    ("terraform-validate", check_terraform_validate),
+)
+
+CHECK_NAMES = tuple(name for name, _ in RENDER_CHECKS + LIB_CHECKS) + ("ansible",)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--render-dir", type=Path, help="Validate this render instead of a new one.")
@@ -1049,29 +1333,21 @@ def main() -> int:
     parser.add_argument(
         "--skip",
         default="",
-        help=(
-            "Comma-separated: yamllint,terraform,flux,inventory-addresses,"
-            "version-coverage,versions-configmap,vendored,role-opt-ins,"
-            "role-inputs,terraform-validate,ansible"
-        ),
+        help="Comma-separated: " + ",".join(CHECK_NAMES),
     )
     args = parser.parse_args()
 
     skip = {s.strip() for s in args.skip.split(",") if s.strip()}
+    unknown = skip - set(CHECK_NAMES)
+    if unknown:
+        # A typo'd name would otherwise skip nothing and report success.
+        parser.error(f"--skip names no such check: {', '.join(sorted(unknown))}")
     workdir = Path(tempfile.mkdtemp(prefix="validate-render-"))
     try:
         render = args.render_dir or render_cluster.render(workdir, answers=args.answers)
         print(f"validating {render}")
-        checks = (
-            ("yamllint", check_yamllint),
-            ("terraform", check_terraform),
-            ("flux", check_flux),
-            ("inventory-addresses", check_inventory_addresses),
-            ("version-coverage", check_version_coverage),
-            ("versions-configmap", check_versions_configmap),
-        )
         failed = []
-        for name, fn in checks:
+        for name, fn in RENDER_CHECKS:
             if name in skip:
                 print(f"  {name} skipped")
                 continue
@@ -1079,12 +1355,7 @@ def main() -> int:
                 fn(render)
             except Failure as exc:
                 failed.append(f"[{name}] {exc}")
-        for name, fn in (
-            ("vendored", check_vendored),
-            ("role-opt-ins", check_role_opt_ins),
-            ("role-inputs", check_required_role_inputs),
-            ("terraform-validate", check_terraform_validate),
-        ):
+        for name, fn in LIB_CHECKS:
             if name in skip:
                 print(f"  {name} skipped")
             elif not args.lib_path:

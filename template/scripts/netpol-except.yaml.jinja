@@ -1,0 +1,23 @@
+---
+# Site policy data for scripts/check-netpol-except-parity.py (--config).
+#
+# The canonical except-lists and fence networks are the library's built-ins —
+# declaring either key REPLACES the built-in set wholesale, so this file declares
+# neither and every `0.0.0.0/0` egress peer in kubernetes/ must match
+# `lan-fence` or `reserved-full` exactly, in order.
+#
+# unrestricted_egress_ok: the egress rules that deliberately carry NO peers, i.e.
+# allow egress everywhere. A rule not listed here that omits `to:` is the
+# accidental version of the same edit and fails the gate.
+unrestricted_egress_ok:
+  flux-system/allow-egress: >-
+    shipped verbatim inside the upstream gotk-components manifest `flux
+    bootstrap` writes; the controllers reach arbitrary git/OCI/Helm origins and
+    an edit here is reverted by the next `flux install` regeneration
+{%- if git_backend == 'gitlab_selfhosted' %}
+  gitlab-runner-privileged/infrastructure-jobs-egress: >-
+    infrastructure job pods deploy this cluster itself (ansible over SSH,
+    kubectl, secret fetches) — unrestricted egress is the point of the
+    privileged runner class, and the namespace's default-deny-egress makes every
+    pod WITHOUT the runner-class label fail closed
+{%- endif %}

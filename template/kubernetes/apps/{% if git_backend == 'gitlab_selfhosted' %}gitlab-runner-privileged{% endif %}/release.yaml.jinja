@@ -17,10 +17,7 @@
 # Verify right after registering, and again after ANY re-registration:
 #     GET /api/v4/runners/<id>   ->   "runner_type": "project_type"
 #
-# This is not hypothetical: in the system this template generalizes the docs
-# stated the rule while the live registration was `instance_type`, and another
-# project's pipeline was observed executing on it. Nothing enforced or checked
-# it. Full reasoning, and the tenant-build alternative, in README.md.
+# Full reasoning, and the tenant-build alternative, in README.md.
 # ===========================================================================
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease

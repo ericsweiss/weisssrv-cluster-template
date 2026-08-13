@@ -256,7 +256,9 @@ def validate_release(rel: dict, versions: dict, repo_root: str, run_kubeconform:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--kubeconform", action="store_true",
         help="also pipe rendered output through kubeconform",

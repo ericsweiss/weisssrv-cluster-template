@@ -1,0 +1,245 @@
+---
+# INTERACTIVE. Brings a NAS with EMPTY (or missing) datasets up to the layout
+# group_vars/nas.yml declares, then configures the storage services on top.
+# Use it for first NAS setup, disaster recovery, or after adding a pool —
+# `task storage:deploy` is the day-2 path and refuses to run against a NAS whose
+# declared datasets do not exist yet.
+#
+# ZFS POOLS ARE NEVER CREATED HERE. `zpool create` is destructive and pool
+# geometry is a hardware decision, so this playbook stops and tells you which
+# pools to create by hand (docs/RUNBOOKS.md "Storage bootstrap"). Datasets are
+# created only after you confirm the list; existing datasets are left alone and
+# no data is destroyed.
+#
+#   task disaster-recovery:storage-bootstrap
+
+- name: Detect existing storage
+  hosts: nas
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Read imported ZFS pools
+      ansible.builtin.command: zpool list -H -o name
+      register: existing_pools
+      changed_when: false
+      failed_when: false
+
+    - name: Read existing datasets in each declared pool
+      ansible.builtin.command: "zfs list -H -o name -r {{ item.name }}"
+      loop: "{{ nas_storage_zfs_pools }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: existing_datasets
+      changed_when: false
+      failed_when: false
+
+    - name: Index the datasets by pool
+      ansible.builtin.set_fact:
+        existing_dataset_map: >-
+          {{
+            existing_dataset_map | default({}) | combine({
+              item.item.name: item.stdout_lines | default([])
+            })
+          }}
+      loop: "{{ existing_datasets.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Determine which pools are missing
+      ansible.builtin.set_fact:
+        pools_to_create: >-
+          {{
+            nas_storage_zfs_pools | map(attribute='name') | list
+            | difference(existing_pools.stdout_lines | default([]))
+          }}
+
+    - name: Determine which datasets are missing
+      ansible.builtin.set_fact:
+        datasets_to_create: >-
+          {%- set result = [] -%}
+          {%- for pool in nas_storage_zfs_pools -%}
+            {%- for dataset in pool.datasets -%}
+              {%- if dataset.name not in (existing_dataset_map[pool.name] | default([])) -%}
+                {%- set _ = result.append(dataset.name) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {{ result }}
+
+    - name: Report what was found
+      ansible.builtin.debug:
+        msg:
+          - "Imported pools: {{ existing_pools.stdout_lines | default([]) | join(', ') | default('(none)', true) }}"
+          - "Pools to create BY HAND: {{ pools_to_create | join(', ') | default('(none)', true) }}"
+          - "Datasets this playbook would create: {{ datasets_to_create | join(', ') | default('(none)', true) }}"
+
+    # Fails rather than skipping: every later phase assumes the pools exist, and
+    # a "nothing to do" run would read as success.
+    - name: Stop if a declared pool does not exist
+      ansible.builtin.fail:
+        msg: |
+          Create these pools by hand first, then re-run:
+            {{ pools_to_create | join(', ') }}
+          Pool geometry (vdev layout, ashift, the by-id device paths) is a
+          hardware decision — docs/RUNBOOKS.md "Storage bootstrap" carries the
+          zpool create recipe and the pool-level properties to set.
+      when: pools_to_create | length > 0
+
+- name: Create missing datasets
+  hosts: nas
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Confirm dataset creation
+      ansible.builtin.pause:
+        prompt: |
+
+          These ZFS datasets will be CREATED with the properties declared in
+          group_vars/nas.yml. Existing datasets are skipped and no data is
+          destroyed:
+
+          {{ datasets_to_create | map('regex_replace', '^', '  - ') | join('\n') }}
+
+          Proceed? [yes/NO]
+      register: confirmation
+      when: datasets_to_create | length > 0
+
+    - name: Verify the confirmation
+      ansible.builtin.assert:
+        that:
+          - confirmation.user_input | lower == 'yes'
+        fail_msg: "Not confirmed — aborting."
+      when: datasets_to_create | length > 0
+
+    # An encrypted dataset carries `encryption:` but no keyformat/keylocation
+    # (the key arrives at boot from the secrets backend), and `zfs create -o
+    # encryption=...` without them fails. Those are created by hand — see
+    # docs/RUNBOOKS.md "Storage bootstrap".
+    - name: Create the missing datasets
+      ansible.builtin.command: >
+        zfs create
+        {% for prop, value in item.1.properties.items() %}
+        -o {{ prop }}={{ value }}
+        {% endfor %}
+        {{ item.1.name }}
+      loop: "{{ nas_storage_zfs_pools | subelements('datasets') }}"
+      loop_control:
+        label: "{{ item.1.name }}"
+      when:
+        - item.1.name in datasets_to_create
+        - "'encryption' not in item.1.properties"
+      changed_when: true
+
+    # Same loop/when shape as the create task: ansible-lint's mock templating
+    # rejects a standalone `vars:` subelements expression but accepts this form.
+    # A hard stop, not a notice: the plays below create export directories and
+    # configure services over whatever sits at the dataset's mountpoint, so
+    # continuing past a missing encrypted dataset writes data onto the parent
+    # (unencrypted) filesystem.
+    - name: Stop until encrypted datasets are created by hand
+      ansible.builtin.fail:
+        msg: >-
+          {{ item.1.name }} is encrypted and must be created with its
+          keyformat/keylocation per docs/RUNBOOKS.md before exports are
+          configured. Create it by hand, then re-run this playbook.
+      loop: "{{ nas_storage_zfs_pools | subelements('datasets') }}"
+      loop_control:
+        label: "{{ item.1.name }}"
+      when:
+        - item.1.name in datasets_to_create
+        - "'encryption' in item.1.properties"
+
+- name: Create export source directories
+  hosts: nas
+  become: true
+  gather_facts: false
+  tasks:
+    # Owns the directories below and the exports' anongid. The role creates it
+    # too, but only once it runs — which is after this play.
+    - name: Ensure the shared media group exists
+      ansible.builtin.group:
+        name: "{{ nas_storage_media_group | default('media') }}"
+        gid: "{{ nas_storage_media_gid | default(2000) }}"
+        state: present
+
+    # The nas_storage role creates /export and the bind TARGETS, but a bind
+    # source is a path inside a dataset it does not own; on a fresh pool it does
+    # not exist yet and the role's bind would fail. Ownership matches each
+    # export's squash so the first write lands with the right ids.
+    - name: Create the bind sources declared in nas_storage_exports
+      ansible.builtin.file:
+        path: "{{ item.bind_source }}"
+        state: directory
+        owner: "{{ item.owner | default('root') }}"
+        group: "{{ item.group | default('root') }}"
+        mode: "{{ item.mode | default('0755') }}"
+      loop: "{{ nas_storage_exports }}"
+      loop_control:
+        label: "{{ item.bind_source | default('N/A') }}"
+      when: item.bind_source is defined
+
+    # A mergerfs union mounts over its target and refuses to start on a missing
+    # branch; the role creates neither.
+    - name: Create the mergerfs branch directories
+      ansible.builtin.file:
+        path: "{{ item.1 }}"
+        state: directory
+        owner: "{{ admin_user }}"
+        group: "{{ nas_storage_media_group | default('media') }}"
+        mode: "02775"
+      loop: "{{ nas_storage_mergerfs_mounts | default([]) | subelements('sources') }}"
+      loop_control:
+        label: "{{ item.1 }}"
+
+    - name: Put the admin user in the shared media group
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        groups: "{{ nas_storage_media_group | default('media') }}"
+        append: true
+
+- name: Configure the storage services
+  hosts: nas
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Configure NFS
+      ansible.builtin.include_role:
+        name: weisssrv.infra.nas_storage
+        tasks_from: nfs.yml
+
+    - name: Configure mergerfs
+      ansible.builtin.include_role:
+        name: weisssrv.infra.nas_storage
+        tasks_from: mergerfs.yml
+      when: nas_storage_mergerfs_mounts | default([]) | length > 0
+
+    - name: Configure Samba
+      ansible.builtin.include_role:
+        name: weisssrv.infra.nas_storage
+        tasks_from: samba.yml
+      when: nas_storage_samba_shares | default([]) | length > 0
+
+- name: Verify the result
+  hosts: nas
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read mounted datasets
+      ansible.builtin.command: zfs list -H -o name,mounted
+      register: mounted_datasets
+      changed_when: false
+
+    - name: Read active NFS exports
+      ansible.builtin.command: showmount -e localhost
+      register: nfs_verification
+      changed_when: false
+      failed_when: false
+
+    - name: Report the result
+      ansible.builtin.debug:
+        msg:
+          - "Datasets:"
+          - "{{ mounted_datasets.stdout_lines | map('regex_replace', '^', '  ') | join('\n') }}"
+          - "NFS exports:"
+          - "{{ nfs_verification.stdout_lines | default(['  (showmount failed)']) | map('regex_replace', '^', '  ') | join('\n') }}"
+          - "Next: `task infra:verify`, then `zpool status` and the SMART checks."

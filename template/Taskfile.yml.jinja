@@ -1,3 +1,40 @@
+{#- SECRETS SEAM. Everything that knows WHICH secrets backend this cluster uses
+    is the two macros below: `secret_runner()` is the wrapper that resolves
+    references when a task runs, `secret_ref()` composes one reference. Every
+    call site emits their output, so a second backend is a branch here plus the
+    matching `secrets_backend` choice in copier.yml — not an edit across ~100
+    lines. The else-branches subscript an empty mapping to hand `mandatory` an
+    undefined value: an unimplemented backend then fails the RENDER, instead of
+    generating a repository whose deploy tasks resolve nothing.
+
+    .gitlab-ci.yml.jinja carries the pipeline half of the same seam. Here the
+    1Password branch emits the go-task `{{.OP_VAULT}}` variable rather than the
+    vault name, so the vault stays editable in the generated repo; the pipeline
+    has no equivalent variable and emits the name. Consequence for anything that
+    reads the Taskfile as TEXT — `task secrets:show` is the one that does — the
+    file holds the variable, so a pattern built from the resolved vault name
+    matches nothing.
+
+    Three things stay backend-specific by nature and are NOT routed through
+    these: the `op_preconditions` anchor (a CLI availability + login check), the
+    `op:check` / `secrets:show` tasks (they name the CLI and its reference
+    syntax outright), and the `eso:connect-*` bootstrap tasks (1Password
+    Connect's own server/token commands). A second backend replaces those
+    outright. -#}
+{%- macro secret_runner() -%}
+{%- if secrets_backend == 'onepassword' -%}
+op run --
+{%- else -%}
+{{ {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no host-side runner — add a branch to secret_runner() in Taskfile.yml.jinja') }}
+{%- endif -%}
+{%- endmacro -%}
+{%- macro secret_ref(item, field) -%}
+{%- if secrets_backend == 'onepassword' -%}
+op://{{ '{{.OP_VAULT}}' }}/{{ item }}/{{ field }}
+{%- else -%}
+{{ {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no reference syntax — add a branch to secret_ref() in Taskfile.yml.jinja') }}
+{%- endif -%}
+{%- endmacro -%}
 # https://taskfile.dev
 #
 # Two lifecycles live here. Ansible (`infra:*`, `dns:*`, `storage:*`, `k3s:*`)
@@ -5,10 +42,12 @@
 # by Flux from kubernetes/ on push, so the `flux:*` tasks are bootstrap,
 # validation and operational control — never deployment.
 #
-# Secrets are never values in this file: every `env:` entry is an op://
-# REFERENCE that `op run` resolves at execution time, and every item named below
-# must exist in the {{ onepassword_vault }} vault; the template's PRE-SETUP.md
-# lists them: https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/PRE-SETUP.md
+# Secrets are never values in this file: every `env:` entry is a REFERENCE into
+# the secrets backend ({{ secrets_backend }}), resolved at execution time by the
+# wrapper each deploy command runs under. Every item named below must exist in
+# the {{ onepassword_vault }} vault; the template's docs/PRE-SETUP.md lists them
+# (the template this repo came from is recorded as `_src_path` in
+# .copier-answers.yml).
 version: '3'
 
 # Host roster (PVE_HOSTS, K3S_SERVERS, …) generated from the inventory into
@@ -23,7 +62,9 @@ vars:
   CLUSTER_NAME: {{ cluster_name }}
   ADMIN_USER: {{ admin_user }}
   API_VIP: {{ k3s_api_vip }}
-  OP_VAULT: {{ onepassword_vault }}
+  # Quoted: a vault name may contain spaces, and this value is expanded into
+  # shell argv below as well as read as YAML here.
+  OP_VAULT: "{{ onepassword_vault }}"
   GIT_HOST: {{ git_host }}
   GIT_NAMESPACE: {{ git_namespace }}
   CLUSTER_DIR: kubernetes/clusters/{{ cluster_name }}
@@ -96,19 +137,19 @@ tasks:
     # Anchor shared with infra:check so dry-run and deploy can never disagree
     # about which secrets are injected.
     env: &infra_env
-      ROOT_EMAIL_ALIAS: op://{{.OP_VAULT}}/Email Config/root_alias
-      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
-      SMTP_RELAY_USER: op://{{.OP_VAULT}}/SMTP Relay Auth/username
-      SMTP_RELAY_PASSWORD: op://{{.OP_VAULT}}/SMTP Relay Auth/password
-      SMTP_UPSTREAM_USER: op://{{.OP_VAULT}}/SMTP Smarthost/username
-      SMTP_UPSTREAM_PASSWORD: op://{{.OP_VAULT}}/SMTP Smarthost/password
-      ADGUARD_ADMIN_PASSWORD: op://{{.OP_VAULT}}/AdGuard Home/password
-      SAMBA_NAS_PASSWORD: op://{{.OP_VAULT}}/Samba NAS User/password
-      ACME_SSH_PRIVATE_KEY: op://{{.OP_VAULT}}/Cert Distribution Key/private key
-      ACME_SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/Cert Distribution Key/public key
-      LOKI_PUSH_USER: op://{{.OP_VAULT}}/Loki Push Auth/username
-      LOKI_PUSH_PASSWORD: op://{{.OP_VAULT}}/Loki Push Auth/password
-{% endraw %}{% if vpn_tailscale %}      TAILSCALE_AUTH_KEY: op://{{ onepassword_vault }}/Tailscale Auth Key/credential
+      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
+      SMTP_RELAY_USER: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'username') }}{% raw %}
+      SMTP_RELAY_PASSWORD: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'password') }}{% raw %}
+      SMTP_UPSTREAM_USER: {% endraw %}{{ secret_ref('SMTP Smarthost', 'username') }}{% raw %}
+      SMTP_UPSTREAM_PASSWORD: {% endraw %}{{ secret_ref('SMTP Smarthost', 'password') }}{% raw %}
+      ADGUARD_ADMIN_PASSWORD: {% endraw %}{{ secret_ref('AdGuard Home', 'password') }}{% raw %}
+      SAMBA_NAS_PASSWORD: {% endraw %}{{ secret_ref('Samba NAS User', 'password') }}{% raw %}
+      ACME_SSH_PRIVATE_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'private key') }}{% raw %}
+      ACME_SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'public key') }}{% raw %}
+      LOKI_PUSH_USER: {% endraw %}{{ secret_ref('Loki Push Auth', 'username') }}{% raw %}
+      LOKI_PUSH_PASSWORD: {% endraw %}{{ secret_ref('Loki Push Auth', 'password') }}{% raw %}
+{% endraw %}{% if vpn_tailscale %}      TAILSCALE_AUTH_KEY: {{ secret_ref('Tailscale Auth Key', 'credential') }}
 {% endif %}{% raw %}    preconditions: &op_preconditions
       - sh: command -v ansible-playbook
         msg: "ansible-playbook not installed. pip install ansible, then: task ansible:install-collections"
@@ -117,7 +158,7 @@ tasks:
       - sh: op whoami 2>/dev/null
         msg: "1Password CLI not authenticated. Run: eval $(op signin)"
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/site.yml {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/site.yml {{.CLI_ARGS}}
 
   infra:check:
     desc: Check mode — show what infra:deploy would change
@@ -125,17 +166,17 @@ tasks:
     env: *infra_env
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/site.yml --check --diff {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/site.yml --check --diff {{.CLI_ARGS}}
 
   infra:base:
     desc: Deploy base host configuration only
     dir: "{{.ANSIBLE_DIR}}"
     env: &base_env
-      ROOT_EMAIL_ALIAS: op://{{.OP_VAULT}}/Email Config/root_alias
-      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
+      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/base.yml {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/base.yml {{.CLI_ARGS}}
 
   infra:base-first-run:
     desc: First base run on a host whose sudo still prompts (-K)
@@ -143,7 +184,7 @@ tasks:
     env: *base_env
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/base.yml -K {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/base.yml -K {{.CLI_ARGS}}
 
   infra:verify:
     desc: Run the post-deployment verification play
@@ -155,34 +196,34 @@ tasks:
     desc: Deploy the DNS stack (recursive resolver + filtering frontends)
     dir: "{{.ANSIBLE_DIR}}"
     env:
-      ROOT_EMAIL_ALIAS: op://{{.OP_VAULT}}/Email Config/root_alias
-      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
-      SMTP_RELAY_USER: op://{{.OP_VAULT}}/SMTP Relay Auth/username
-      SMTP_RELAY_PASSWORD: op://{{.OP_VAULT}}/SMTP Relay Auth/password
-      ADGUARD_ADMIN_PASSWORD: op://{{.OP_VAULT}}/AdGuard Home/password
-      ACME_SSH_PRIVATE_KEY: op://{{.OP_VAULT}}/Cert Distribution Key/private key
-      ACME_SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/Cert Distribution Key/public key
-      LOKI_PUSH_USER: op://{{.OP_VAULT}}/Loki Push Auth/username
-      LOKI_PUSH_PASSWORD: op://{{.OP_VAULT}}/Loki Push Auth/password
+      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
+      SMTP_RELAY_USER: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'username') }}{% raw %}
+      SMTP_RELAY_PASSWORD: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'password') }}{% raw %}
+      ADGUARD_ADMIN_PASSWORD: {% endraw %}{{ secret_ref('AdGuard Home', 'password') }}{% raw %}
+      ACME_SSH_PRIVATE_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'private key') }}{% raw %}
+      ACME_SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'public key') }}{% raw %}
+      LOKI_PUSH_USER: {% endraw %}{{ secret_ref('Loki Push Auth', 'username') }}{% raw %}
+      LOKI_PUSH_PASSWORD: {% endraw %}{{ secret_ref('Loki Push Auth', 'password') }}{% raw %}
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/dns.yml {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/dns.yml {{.CLI_ARGS}}
 
   mail:deploy:
     desc: Deploy the SMTP relay
     dir: "{{.ANSIBLE_DIR}}"
     env:
-      ROOT_EMAIL_ALIAS: op://{{.OP_VAULT}}/Email Config/root_alias
-      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
-      SMTP_RELAY_USER: op://{{.OP_VAULT}}/SMTP Relay Auth/username
-      SMTP_RELAY_PASSWORD: op://{{.OP_VAULT}}/SMTP Relay Auth/password
-      SMTP_UPSTREAM_USER: op://{{.OP_VAULT}}/SMTP Smarthost/username
-      SMTP_UPSTREAM_PASSWORD: op://{{.OP_VAULT}}/SMTP Smarthost/password
-      LOKI_PUSH_USER: op://{{.OP_VAULT}}/Loki Push Auth/username
-      LOKI_PUSH_PASSWORD: op://{{.OP_VAULT}}/Loki Push Auth/password
+      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
+      SMTP_RELAY_USER: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'username') }}{% raw %}
+      SMTP_RELAY_PASSWORD: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'password') }}{% raw %}
+      SMTP_UPSTREAM_USER: {% endraw %}{{ secret_ref('SMTP Smarthost', 'username') }}{% raw %}
+      SMTP_UPSTREAM_PASSWORD: {% endraw %}{{ secret_ref('SMTP Smarthost', 'password') }}{% raw %}
+      LOKI_PUSH_USER: {% endraw %}{{ secret_ref('Loki Push Auth', 'username') }}{% raw %}
+      LOKI_PUSH_PASSWORD: {% endraw %}{{ secret_ref('Loki Push Auth', 'password') }}{% raw %}
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/mail.yml {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/mail.yml {{.CLI_ARGS}}
 
   storage:deploy:
     desc: Deploy the NAS storage configuration (ZFS properties, NFS, SMB)
@@ -190,13 +231,13 @@ tasks:
     # Offsite backup (restic) is opt-in: enable it in the inventory and add
     # B2_KEY_ID / B2_APPLICATION_KEY / RESTIC_REPO_PASSWORD references here.
     env:
-      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
-      SAMBA_NAS_PASSWORD: op://{{.OP_VAULT}}/Samba NAS User/password
-      LOKI_PUSH_USER: op://{{.OP_VAULT}}/Loki Push Auth/username
-      LOKI_PUSH_PASSWORD: op://{{.OP_VAULT}}/Loki Push Auth/password
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
+      SAMBA_NAS_PASSWORD: {% endraw %}{{ secret_ref('Samba NAS User', 'password') }}{% raw %}
+      LOKI_PUSH_USER: {% endraw %}{{ secret_ref('Loki Push Auth', 'username') }}{% raw %}
+      LOKI_PUSH_PASSWORD: {% endraw %}{{ secret_ref('Loki Push Auth', 'password') }}{% raw %}
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/storage.yml {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/storage.yml {{.CLI_ARGS}}
 
   certs:show-host-keys:
     desc: "Print SSH host keys for the cert distribution targets (paste into group_vars/dns.yml -> _acme_certs_targets)"
@@ -208,21 +249,21 @@ tasks:
     desc: Deploy the ZFS-encryption mechanism and boot units on hosts with encrypted pools
     dir: "{{.ANSIBLE_DIR}}"
     env:
-      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
-      ZFS_ENCRYPTION_CONNECT_TOKEN: op://{{.OP_VAULT}}/1Password Connect/token
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
+      ZFS_ENCRYPTION_CONNECT_TOKEN: {% endraw %}{{ secret_ref('1Password Connect', 'token') }}{% raw %}
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/zfs-encryption.yml {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/zfs-encryption.yml {{.CLI_ARGS}}
 
   disaster-recovery:storage-bootstrap:
     desc: "INTERACTIVE: bootstrap storage from scratch (disaster recovery only)"
     dir: "{{.ANSIBLE_DIR}}"
     env:
-      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
-      SAMBA_NAS_PASSWORD: op://{{.OP_VAULT}}/Samba NAS User/password
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
+      SAMBA_NAS_PASSWORD: {% endraw %}{{ secret_ref('Samba NAS User', 'password') }}{% raw %}
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/bootstrap/storage-bootstrap.yml {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/bootstrap/storage-bootstrap.yml {{.CLI_ARGS}}
 
   # === Proxmox ==========================================================
   proxmox:configure-autostart:
@@ -283,28 +324,28 @@ tasks:
     desc: Provision the k3s VMs on Proxmox (creates guests only)
     dir: "{{.ANSIBLE_DIR}}"
     env:
-      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/k3s-provision-vms.yml {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/k3s-provision-vms.yml {{.CLI_ARGS}}
 
   k3s:deploy:
     desc: Deploy/refresh the k3s cluster (servers, agents, kube-vip)
     dir: "{{.ANSIBLE_DIR}}"
     env:
-      ROOT_EMAIL_ALIAS: op://{{.OP_VAULT}}/Email Config/root_alias
-      SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/SSH Key/public key
-      SMTP_RELAY_USER: op://{{.OP_VAULT}}/SMTP Relay Auth/username
-      SMTP_RELAY_PASSWORD: op://{{.OP_VAULT}}/SMTP Relay Auth/password
-      K3S_TOKEN: op://{{.OP_VAULT}}/K3s Cluster Token/credential
+      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
+      SMTP_RELAY_USER: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'username') }}{% raw %}
+      SMTP_RELAY_PASSWORD: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'password') }}{% raw %}
+      K3S_TOKEN: {% endraw %}{{ secret_ref('K3s Cluster Token', 'credential') }}{% raw %}
       # Agents join with the lower-privilege worker token, which the servers
       # advertise as agent-token.
-      K3S_AGENT_TOKEN: op://{{.OP_VAULT}}/K3s Agent Token/credential
-      LOKI_PUSH_USER: op://{{.OP_VAULT}}/Loki Push Auth/username
-      LOKI_PUSH_PASSWORD: op://{{.OP_VAULT}}/Loki Push Auth/password
+      K3S_AGENT_TOKEN: {% endraw %}{{ secret_ref('K3s Agent Token', 'credential') }}{% raw %}
+      LOKI_PUSH_USER: {% endraw %}{{ secret_ref('Loki Push Auth', 'username') }}{% raw %}
+      LOKI_PUSH_PASSWORD: {% endraw %}{{ secret_ref('Loki Push Auth', 'password') }}{% raw %}
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/k3s.yml {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/k3s.yml {{.CLI_ARGS}}
 
   k3s:kubeconfig:
     desc: Fetch the cluster kubeconfig into ~/.kube/config-k3s (rewritten to the API VIP)
@@ -387,7 +428,7 @@ tasks:
       - sh: kubectl cluster-info 2>/dev/null
         msg: "Cannot reach the cluster. Point KUBECONFIG at it first"
       - sh: test -f ./1password-credentials.json
-        msg: "./1password-credentials.json missing. Run: op connect server create {{.CLUSTER_NAME}}-connect --vaults {{.OP_VAULT}}"
+        msg: "./1password-credentials.json missing. Run: op connect server create {{.CLUSTER_NAME}}-connect --vaults '{{.OP_VAULT}}'"
     cmds:
       - |
         set -eo pipefail
@@ -395,7 +436,7 @@ tasks:
         # every other Secret is produced by External Secrets from this token.
         # The Connect token is minted here rather than read from the vault —
         # it is deliberately not stored as an item.
-        TOKEN="$(op connect token create {{.CLUSTER_NAME}}-eso --server {{.CLUSTER_NAME}}-connect --vaults {{.OP_VAULT}})"
+        TOKEN="$(op connect token create {{.CLUSTER_NAME}}-eso --server {{.CLUSTER_NAME}}-connect --vaults "{{.OP_VAULT}}")"
         [ -n "$TOKEN" ] || { echo "ERROR: op connect token create returned nothing"; exit 1; }
         TOKEN_FILE=$(mktemp)
         trap 'rm -f "$TOKEN_FILE"' EXIT
@@ -439,7 +480,7 @@ tasks:
         set -eo pipefail
         # Explicit read + emptiness check: a silent op failure would otherwise
         # run bootstrap with an empty token and fail with an opaque auth error.
-        GITLAB_TOKEN="$(op read 'op://{{.OP_VAULT}}/Git Access Token/credential')"
+        GITLAB_TOKEN="$(op read '{% endraw %}{{ secret_ref('Git Access Token', 'credential') }}{% raw %}')"
         [ -n "$GITLAB_TOKEN" ] || { echo "ERROR: empty token from 'Git Access Token'"; exit 1; }
         export GITLAB_TOKEN
         flux bootstrap gitlab \
@@ -608,7 +649,7 @@ tasks:
         kustomize build "{{.CLI_ARGS}}" | envsubst "$FLUX_ENVSUBST_VARS" | kubectl apply -f -
 
   flux:lint:
-    desc: Build every Flux Kustomization, substitute, and schema-validate the result
+    desc: Build every Flux Kustomization, substitute, schema-validate, and run the corpus gates
     preconditions:
       - sh: command -v kustomize
         msg: "kustomize not installed"
@@ -616,6 +657,8 @@ tasks:
         msg: "kubeconform not installed (brew install kubeconform)"
       - sh: command -v envsubst
         msg: "envsubst not installed (brew install gettext)"
+      - sh: command -v helm
+        msg: "helm not installed (brew install helm — schema-validates the value-heavy HelmReleases)"
       - sh: python3 -c "import yaml" 2>/dev/null
         msg: "PyYAML not installed (pip install pyyaml)"
     cmds:
@@ -629,6 +672,14 @@ tasks:
         eval "$VARS"
         K8S_VER=$(scripts/flux-env.sh k8s-version "{{.VERSIONS_CM}}")
         echo "kubeconform target: $K8S_VER"
+
+        # The corpus the invariant gates below read. They need every stage at
+        # once — an HPA in one namespace against a VPA in another, a
+        # ClusterSecretStore against its consumers — so each build is appended
+        # here rather than checked in isolation. Same file the CI flux-lint job
+        # passes to the same four scripts as "$RENDER_ALL".
+        RENDER_ALL=$(mktemp)
+        trap 'rm -f "$RENDER_ALL"' EXIT
 
         for ks in {{.CLUSTER_DIR}}/*.yaml; do
           [ -f "$ks" ] || continue
@@ -669,7 +720,9 @@ tasks:
           fi
           # printf, never echo: rendered dashboards carry literal \n inside
           # block scalars that echo would expand and corrupt.
-          if ! printf '%s\n' "$RAW" | envsubst "$FLUX_ENVSUBST_VARS" | kubeconform \
+          RENDERED=$(printf '%s\n' "$RAW" | envsubst "$FLUX_ENVSUBST_VARS")
+          printf '%s\n---\n' "$RENDERED" >> "$RENDER_ALL"
+          if ! printf '%s\n' "$RENDERED" | kubeconform \
               -strict -ignore-missing-schemas \
               -kubernetes-version "$K8S_VER" \
               -schema-location default \
@@ -678,6 +731,38 @@ tasks:
             FAILED=1
           fi
         done
+
+        # The four corpus gates the CI flux-lint job runs as extra_validation,
+        # in the same order over the same corpus — each covers a class
+        # kustomize/kubeconform structurally cannot see. Keep the two lists
+        # equal: a gate only here is one CI does not enforce, and a gate only
+        # there is a green `task lint` followed by a red pipeline.
+        echo "=== Checking HPA/VPA invariant ==="
+        python3 scripts/check-hpa-vpa-invariant.py --require-chart-native-vpas \
+          --policy-config scripts/autoscaling-policy.yaml < "$RENDER_ALL" || FAILED=1
+        echo "=== Checking scrape/NetworkPolicy invariant ==="
+        python3 scripts/check-scrape-netpol.py < "$RENDER_ALL" || FAILED=1
+        echo "=== Checking ClusterSecretStore scoping ==="
+        python3 scripts/check-secretstore-scope.py < "$RENDER_ALL" || FAILED=1
+        echo "=== Checking PVC storageClassName ==="
+        python3 scripts/check-pvc-storageclass.py < "$RENDER_ALL" || FAILED=1
+
+        # kustomize build emits a HelmRelease verbatim, so .spec.values — a
+        # free-form object in the CRD — reaches the cluster unvalidated. This
+        # renders the value-heavy charts with `helm template` instead. Needs
+        # network (helm repo add/update).
+        echo "=== Schema-validating HelmRelease values blocks (helm template) ==="
+        MERGED_CM=$(mktemp)
+        if scripts/flux-env.sh merged-configmap "{{.VERSIONS_CM}}" > "$MERGED_CM"; then
+          python3 scripts/validate-helm-values.py --kubeconform \
+            --releases scripts/helm-values-releases.yaml \
+            --versions-configmap "$MERGED_CM" \
+            --policy-config scripts/autoscaling-policy.yaml || FAILED=1
+        else
+          echo "ERROR: could not merge the substitution ConfigMaps"
+          FAILED=1
+        fi
+        rm -f "$MERGED_CM"
 
         # The root also pulls in flux-system/, whose gotk-components.yaml is
         # written by `flux bootstrap` — before that it does not exist, so a
@@ -724,16 +809,16 @@ tasks:
     dir: "{{.ANSIBLE_DIR}}"
     # Anchor shared by the update-full variants so they cannot drift on secrets.
     env: &maintenance_env
-      ROOT_EMAIL_ALIAS: op://{{.OP_VAULT}}/Email Config/root_alias
-      SMTP_RELAY_USER: op://{{.OP_VAULT}}/SMTP Relay Auth/username
-      SMTP_RELAY_PASSWORD: op://{{.OP_VAULT}}/SMTP Relay Auth/password
-      ADGUARD_ADMIN_PASSWORD: op://{{.OP_VAULT}}/AdGuard Home/password
-      ACME_SSH_PRIVATE_KEY: op://{{.OP_VAULT}}/Cert Distribution Key/private key
-      ACME_SSH_PUBLIC_KEY: op://{{.OP_VAULT}}/Cert Distribution Key/public key
-{% endraw %}{% if vpn_tailscale %}      TAILSCALE_AUTH_KEY: op://{{ onepassword_vault }}/Tailscale Auth Key/credential
+      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
+      SMTP_RELAY_USER: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'username') }}{% raw %}
+      SMTP_RELAY_PASSWORD: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'password') }}{% raw %}
+      ADGUARD_ADMIN_PASSWORD: {% endraw %}{{ secret_ref('AdGuard Home', 'password') }}{% raw %}
+      ACME_SSH_PRIVATE_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'private key') }}{% raw %}
+      ACME_SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'public key') }}{% raw %}
+{% endraw %}{% if vpn_tailscale %}      TAILSCALE_AUTH_KEY: {{ secret_ref('Tailscale Auth Key', 'credential') }}
 {% endif %}{% raw %}    preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-applications.yml {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-applications.yml {{.CLI_ARGS}}
 
   maintenance:update-full:
     desc: OS packages plus applications, rolling and interactive
@@ -741,7 +826,7 @@ tasks:
     env: *maintenance_env
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-full.yml {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-full.yml {{.CLI_ARGS}}
 
   maintenance:update-full-auto:
     desc: OS packages plus applications, rolling with automatic reboots
@@ -749,31 +834,31 @@ tasks:
     env: *maintenance_env
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-full.yml -e auto_reboot=true {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-full.yml -e auto_reboot=true {{.CLI_ARGS}}
 
   maintenance:update-k3s-nodes:
     desc: Rolling k3s binary upgrade (cordon, upgrade, restart, uncordon)
     dir: "{{.ANSIBLE_DIR}}"
     env:
-      K3S_TOKEN: op://{{.OP_VAULT}}/K3s Cluster Token/credential
-      K3S_AGENT_TOKEN: op://{{.OP_VAULT}}/K3s Agent Token/credential
+      K3S_TOKEN: {% endraw %}{{ secret_ref('K3s Cluster Token', 'credential') }}{% raw %}
+      K3S_AGENT_TOKEN: {% endraw %}{{ secret_ref('K3s Agent Token', 'credential') }}{% raw %}
     preconditions: *op_preconditions
     cmds:
-      - op run -- ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-k3s-nodes.yml {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-k3s-nodes.yml {{.CLI_ARGS}}
 
   maintenance:check-versions:
     desc: Report available updates for every tracked pin (scripts/version-registry.py)
     env: &version_env
-      GITHUB_TOKEN: op://{{.OP_VAULT}}/GitHub Token/credential
+      GITHUB_TOKEN: {% endraw %}{{ secret_ref('GitHub Token', 'credential') }}{% raw %}
     cmds:
       # Exit 1 means "updates available", which is information, not failure.
-      - op run -- python3 scripts/check-versions.py {{.CLI_ARGS}}; RC=$?; [ $RC -le 1 ] || exit $RC
+      - {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py {{.CLI_ARGS}}; RC=$?; [ $RC -le 1 ] || exit $RC
 
   maintenance:check-versions-json:
     desc: The same report as JSON
     env: *version_env
     cmds:
-      - op run -- python3 scripts/check-versions.py --json {{.CLI_ARGS}}; RC=$?; [ $RC -le 1 ] || exit $RC
+      - {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py --json {{.CLI_ARGS}}; RC=$?; [ $RC -le 1 ] || exit $RC
 
   maintenance:update-version:
     desc: "Bump one tracked pin and regenerate the ConfigMap (SERVICE=<name>)"
@@ -784,10 +869,10 @@ tasks:
       - |
         if [ -z "{{.SERVICE}}" ]; then
           echo "Usage: task maintenance:update-version SERVICE=<name>"
-          op run -- python3 scripts/check-versions.py --list
+          {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py --list
           exit 1
         fi
-        op run -- python3 scripts/check-versions.py --update "{{.SERVICE}}"
+        {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py --update "{{.SERVICE}}"
       - task: flux:sync-versions
       - echo "Pins updated. Commit all.yml + the versions ConfigMap and raise an MR."
 
@@ -795,7 +880,7 @@ tasks:
     desc: Bump every outdated tracked pin and regenerate the ConfigMap
     env: *version_env
     cmds:
-      - op run -- python3 scripts/check-versions.py --update-all
+      - {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py --update-all
       - task: flux:sync-versions
       - echo "Pins updated. Commit all.yml + the versions ConfigMap and raise an MR."
 
@@ -815,13 +900,13 @@ tasks:
     desc: Initialize the DNS zone module
     dir: "{{.TERRAFORM_DIR}}/cloudflare"
     env: &tf_dns_env
-      TF_VAR_cloudflare_api_token: op://{{.OP_VAULT}}/Cloudflare Terraform Token/credential
-      TF_VAR_cloudflare_account_id: op://{{.OP_VAULT}}/Cloudflare Terraform Token/username
+      TF_VAR_cloudflare_api_token: {% endraw %}{{ secret_ref('Cloudflare Terraform Token', 'credential') }}{% raw %}
+      TF_VAR_cloudflare_account_id: {% endraw %}{{ secret_ref('Cloudflare Terraform Token', 'username') }}{% raw %}
       TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/cloudflare"
       TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/cloudflare/lock"
       TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/cloudflare/lock"
       TF_HTTP_USERNAME: "terraform"
-      TF_HTTP_PASSWORD: op://{{.OP_VAULT}}/Git Terraform State Token/credential
+      TF_HTTP_PASSWORD: {% endraw %}{{ secret_ref('Git Terraform State Token', 'credential') }}{% raw %}
       TF_HTTP_LOCK_METHOD: "POST"
       TF_HTTP_UNLOCK_METHOD: "DELETE"
     preconditions: &tf_preconditions
@@ -832,7 +917,7 @@ tasks:
       - sh: op whoami 2>/dev/null
         msg: "1Password CLI not authenticated. Run: eval $(op signin)"
     cmds:
-      - op run -- terraform init {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform init {{.CLI_ARGS}}
 
   terraform:plan:
     desc: Plan DNS zone changes
@@ -840,7 +925,7 @@ tasks:
     env: *tf_dns_env
     preconditions: *tf_preconditions
     cmds:
-      - op run -- terraform plan {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
 
   terraform:apply:
     desc: Apply DNS zone changes
@@ -848,25 +933,25 @@ tasks:
     env: *tf_dns_env
     preconditions: *tf_preconditions
     cmds:
-      - op run -- terraform apply {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
 {% endraw %}{% if vpn_tailscale %}{% raw %}
   # --- Tailnet ACL (own state name; SUPERVISED apply) ---
   terraform:tailscale-init:
     desc: Initialize the tailnet ACL module
     dir: "{{.TERRAFORM_DIR}}/tailscale"
     env: &tf_tailscale_env
-      TF_VAR_tailscale_oauth_client_id: op://{{.OP_VAULT}}/Tailscale OAuth/client id
-      TF_VAR_tailscale_oauth_client_secret: op://{{.OP_VAULT}}/Tailscale OAuth/credential
+      TF_VAR_tailscale_oauth_client_id: {% endraw %}{{ secret_ref('Tailscale OAuth', 'client id') }}{% raw %}
+      TF_VAR_tailscale_oauth_client_secret: {% endraw %}{{ secret_ref('Tailscale OAuth', 'credential') }}{% raw %}
       TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/tailscale"
       TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/tailscale/lock"
       TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/tailscale/lock"
       TF_HTTP_USERNAME: "terraform"
-      TF_HTTP_PASSWORD: op://{{.OP_VAULT}}/Git Terraform State Token/credential
+      TF_HTTP_PASSWORD: {% endraw %}{{ secret_ref('Git Terraform State Token', 'credential') }}{% raw %}
       TF_HTTP_LOCK_METHOD: "POST"
       TF_HTTP_UNLOCK_METHOD: "DELETE"
     preconditions: *tf_preconditions
     cmds:
-      - op run -- terraform init {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform init {{.CLI_ARGS}}
 
   terraform:tailscale-plan:
     desc: Plan tailnet ACL changes (diff against the live policy)
@@ -874,7 +959,7 @@ tasks:
     env: *tf_tailscale_env
     preconditions: *tf_preconditions
     cmds:
-      - op run -- terraform plan {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
 
   terraform:tailscale-apply:
     desc: "SUPERVISED: apply the tailnet ACL — it overwrites the live policy; read terraform/tailscale/README.md first"
@@ -891,7 +976,7 @@ tasks:
             exit 1
             ;;
         esac
-        op run -- terraform apply {{.CLI_ARGS}}
+        {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
 {% endraw %}{% endif %}{% raw %}
   # --- SSO objects (own state name; SUPERVISED apply) ---
   terraform:authentik-init:
@@ -900,23 +985,23 @@ tasks:
     # The anchor is shared by authentik-plan and authentik-apply, so all three
     # tasks see the same credentials.
     env: &tf_authentik_env
-      TF_VAR_authentik_token: op://{{.OP_VAULT}}/Authentik Terraform Token/credential
+      TF_VAR_authentik_token: {% endraw %}{{ secret_ref('Authentik Terraform Token', 'credential') }}{% raw %}
       # Grafana's OIDC client secret is SUPPLIED to Authentik, not minted by it:
       # the same vault field the Grafana ExternalSecret reads. Without this the
       # provider generates a secret that exists only in Terraform state, so the
       # value in the cluster and the value in Authentik diverge the first time
       # either is rebuilt — and the login cannot be reproduced or rotated.
-      TF_VAR_oauth2_client_secret_grafana: op://{{.OP_VAULT}}/Grafana SSO/oidc-client-secret
+      TF_VAR_oauth2_client_secret_grafana: {% endraw %}{{ secret_ref('Grafana SSO', 'oidc-client-secret') }}{% raw %}
       TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/authentik"
       TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/authentik/lock"
       TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/authentik/lock"
       TF_HTTP_USERNAME: "terraform"
-      TF_HTTP_PASSWORD: op://{{.OP_VAULT}}/Git Terraform State Token/credential
+      TF_HTTP_PASSWORD: {% endraw %}{{ secret_ref('Git Terraform State Token', 'credential') }}{% raw %}
       TF_HTTP_LOCK_METHOD: "POST"
       TF_HTTP_UNLOCK_METHOD: "DELETE"
     preconditions: *tf_preconditions
     cmds:
-      - op run -- terraform init {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform init {{.CLI_ARGS}}
 
   terraform:authentik-plan:
     desc: Plan SSO changes (read-only diff against the live objects)
@@ -924,7 +1009,7 @@ tasks:
     env: *tf_authentik_env
     preconditions: *tf_preconditions
     cmds:
-      - op run -- terraform plan {{.CLI_ARGS}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
 
   terraform:authentik-import:
     desc: "Adopt UI-created SSO objects into state (idempotent; read-only against authentik)"
@@ -934,7 +1019,7 @@ tasks:
     cmds:
       # Only writes Terraform state. Required after a state loss: an apply with
       # empty state duplicates every group instead of adopting it.
-      - op run -- ./import.sh
+      - {% endraw %}{{ secret_runner() }}{% raw %} ./import.sh
 
   terraform:authentik-apply:
     desc: "SUPERVISED: apply SSO changes — a misconfiguration locks every user out of every app"
@@ -949,7 +1034,7 @@ tasks:
             exit 1
             ;;
         esac
-        op run -- terraform apply {{.CLI_ARGS}}
+        {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
 
   terraform:fmt:
     desc: Format every Terraform module
@@ -983,7 +1068,11 @@ tasks:
 
   # === Lint =============================================================
   lint:
-    desc: Run every local gate (no credentials required) — mirrors the CI lint stage
+    # deploy-coverage is the one lint-stage job with no counterpart here: it
+    # compares the MR's diff against the deploy jobs' `changes:` lists, so it
+    # needs a merge base rather than a working tree. Everything else in that
+    # stage runs below.
+    desc: Run every local gate (no credentials required) — mirrors the CI lint stage except deploy-coverage
     cmds:
       - task: lint:yamllint
       - task: lint:shellcheck
@@ -993,6 +1082,8 @@ tasks:
       - task: lint:lib-pins
       - task: lint:version-coverage
       - task: lint:repo-sync
+      - task: lint:netpol-parity
+      - task: lint:invariants
       - task: ansible:lint
       - task: terraform:fmt-check
       - task: terraform:validate
@@ -1046,28 +1137,44 @@ tasks:
     cmds:
 {% endraw %}      - python3 scripts/check-lib-pins.py --project {{ lib_project }}
 {% raw %}
+  lint:netpol-parity:
+    desc: Assert every NetworkPolicy reserved-CIDR except-list matches the canonical set
+    # Reads the manifests on disk, not the rendered corpus, so it also covers
+    # kubernetes/clusters/*/flux-system/ — which no Kustomization builds and
+    # flux:lint therefore never sees. Mirrors the CI netpol-parity job.
+    preconditions:
+      - sh: python3 -c "import yaml" 2>/dev/null
+        msg: "PyYAML not installed (pip install pyyaml)"
+    cmds:
+      - python3 scripts/check-netpol-except-parity.py --config scripts/netpol-except.yaml kubernetes/
+
+  lint:invariants:
+    desc: Assert the inventory and Flux wiring hold together (tests/)
+    # The inventory is hand-edited, so duplicate addresses and vmids, an address
+    # outside lan_cidr and a ${placeholder} with no ConfigMap entry are all one
+    # typo away — and every one of them survives yamllint and flux:lint. This is
+    # the gate that catches them before a deploy rather than after a push.
+    preconditions:
+      - sh: python3 -c "import pytest" 2>/dev/null
+        msg: "pytest not installed (pip install pytest pyyaml)"
+    cmds:
+      - python3 -m pytest tests -q
+
   lint:version-coverage:
     desc: Assert every pin in all.yml has a scripts/version-registry.py entry
-    # Offline and instant: it reads the two local files and compares key sets,
-    # which is why it belongs in `lint` rather than with the network-bound
-    # maintenance:check-versions. Without it a pin added to all.yml is simply
-    # absent from the checker's world, so the weekly version-bump-bot stays
-    # green while never once reporting that pin as outdated — the failure is
-    # invisible in exactly the place (identity provider, resolver, GPU driver)
-    # where staleness is a security problem.
+    # Offline and instant: it compares two local files' key sets, hence `lint`
+    # rather than the network-bound maintenance:check-versions. A pin missing
+    # from the registry is never reported as outdated, so the weekly bump stays
+    # green while silently skipping it.
     cmds:
       - python3 scripts/check-versions.py --check-coverage
 
   lint:repo-sync:
     desc: Assert every generated file still matches the source it is generated from
-    # Two files in this repository are OUTPUTS: scripts/hosts.env (from the
+    # Regenerate-and-diff the two OUTPUT files: scripts/hosts.env (from the
     # inventory) and the cluster-versions ConfigMap (from group_vars/all.yml).
-    # Nothing else ever compares them again — flux-lint substitutes FROM the
-    # ConfigMap, so it passes on a stale value, and maintenance:check-versions
-    # reads all.yml, so it reports the pin as current. A hand-edit or a forgotten
-    # `task flux:sync-versions` is therefore invisible everywhere except here.
-    #
-    # Regenerates into a temp file and diffs, so the workspace is never touched.
+    # Nothing else compares them against their source — see the repo-sync job in
+    # .gitlab-ci.yml. Uses a temp file, so the workspace is never touched.
     preconditions: *pyyaml_precondition
     cmds:
       - |
@@ -1130,15 +1237,21 @@ tasks:
     desc: List the secret REFERENCES this repo uses (never the values)
     cmds:
       - |
+        # The vault segment is matched loosely for THIS file only: the Taskfile
+        # holds the go-task VARIABLE, not the vault name, so a pattern carrying
+        # the resolved name can never match its own source. The trailing sed
+        # rewrites that segment to the resolved vault so the printed references
+        # are the ones op takes. The inventory below holds the name literally.
         echo "op:// references in Taskfile.yml:"
-        grep -oE "op://{{.OP_VAULT}}/[^\"'\`)(]+" Taskfile.yml \
+        grep -oE "op://[^\"'\`)(]+" Taskfile.yml \
           | sed 's/[[:space:]]*$//' \
-          | grep -E "^op://{{.OP_VAULT}}/[^/]+/[^/]+$" | sort -u | sed 's/^/  - /'
+          | grep -E "^op://[^/]+/[^/]+/[^/]+$" \
+          | sed 's|^op://[^/]*/|op://{{.OP_VAULT}}/|' | sort -u | sed 's/^/  - /'
         echo ""
         echo "op:// references in the inventory (the canonical home):"
         find ansible/inventories -name '*.yml' -type f -exec grep -hoE "op://{{.OP_VAULT}}/[^\"'\`)(]+" {} \; 2>/dev/null \
           | sed 's/[[:space:]]*$//' \
           | grep -E "^op://{{.OP_VAULT}}/[^/]+/[^/]+$" | sort -u | sed 's/^/  - /' || echo "  (none)"
         echo ""
-        echo "Verify they exist:  op item list --vault {{.OP_VAULT}}"
+        echo "Verify they exist:  op item list --vault '{{.OP_VAULT}}'"
 {%- endraw %}

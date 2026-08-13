@@ -45,4 +45,7 @@ substitution happened.
 - No AI or assistant attribution anywhere: commits, MRs, code or docs.
 - Comments state the current rule and why it holds. No history, no narration, no
   commented-out manifests — ship an alternate as a real file excluded from the
-  kustomization instead.
+  kustomization instead. The one exception is a README arguing a *security*
+  rule, where "this actually happened" is the argument: `gitlab-runner-privileged`
+  and `kubernetes/apps/README.md` keep the instance-runner incident for that
+  reason. It stays in the prose, never in a manifest.

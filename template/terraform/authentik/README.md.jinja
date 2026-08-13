@@ -36,6 +36,28 @@ application before you walk away.
 3. Add the `applications` entry, a group, and a `policy_bindings` entry. **An
    application with no binding is open to every authenticated user.**
 
+## Renaming and removing
+
+Applications, all three provider kinds, groups, the custom scope mappings and
+the embedded outpost carry `lifecycle { prevent_destroy = true }` in the
+library module — destroying any of them is a live outage (a slug *is* the OIDC
+issuer path; a group destroy takes its memberships and every binding pointing at
+it). Policy bindings are exempt.
+
+The guard is module-side, so it cannot be switched off from here:
+
+```bash
+terraform state rm 'module.sso.authentik_application.this["retired-app"]'
+# then delete the sso.tf entry, and delete the object in authentik itself
+```
+
+Renaming a map key is the same operation in disguise — add a `moved {}` block
+instead, which `prevent_destroy` does not block.
+
+An application that no `policy_bindings` entry names fails the plan rather than
+quietly becoming reachable by every authenticated user; a tile that really is
+open to everyone declares `allow_unbound = true`.
+
 ## Adoption and recovery
 
 Objects created in the authentik UI are brought under management with `import`
@@ -80,16 +102,23 @@ Keep `import.sh` complete. After every apply that creates objects, read the ids
 back out (`terraform output application_ids policy_binding_ids group_ids`) and
 update the table — a list written once at adoption time is not a recovery path.
 
-## Known limitation: custom property mappings
+## Custom scope mappings
 
-`oauth2_providers[*].scope_mappings` resolves each name through the *managed*
-(blueprint-provided) scope mappings only, so a scope a blueprint does not ship
-cannot be referenced. The common case is an application that refuses a login
-whose ID token lacks a claim authentik does not emit by default (Mealie wants a
-true `email_verified`). Until the library module grows a `custom_scope_mappings`
-input, the mapping has to be created in the UI, which the drift plan will then
-report — record it in the repo's runbook so the drift is not mistaken for an
-unreviewed edit.
+`oauth2_providers[*].scope_mappings` (and the module-wide
+`oauth2_scope_mappings`) hold two kinds of entry in one ordered list: a
+*managed* id, read from the blueprint-provided mappings, or `custom:<key>`
+naming an entry of `custom_scope_mappings` in `sso.tf`, which this module
+authors.
+
+That is the escape hatch for an application that refuses a login whose ID token
+lacks a claim authentik does not emit by default — the stock `email` scope
+hardcodes `email_verified: false`, and some applications reject it. Give the
+replacement the same `scope_name` as the built-in it stands in for and leave the
+built-in out of that provider's list; providers that do not name it keep the
+stock mapping. Order is what the API stores, so the list is state, not style.
+
+Do not assert a claim the account model does not justify — an `expression` runs
+server-side on every token issue and is readable by any authentik admin.
 
 ## Security defaults worth knowing
 

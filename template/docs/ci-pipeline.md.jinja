@@ -22,7 +22,7 @@ sources are unaffected — they fetch over https from `{{ lib_url_ }}`.
 
 | Stage | Jobs | Source |
 |---|---|---|
-| `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `flux-lint` | library |
+| `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `flux-lint` (library); `version-coverage`, `repo-sync`, `deploy-coverage`, `netpol-parity` (this repo) | mixed |
 | `validate` | `terraform-validate` (library); `terraform-plan`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan` (this repo) | mixed |
 | `test` | `python-tests` (the cluster invariants in `tests/`) | library |
 | `security` | `secret_detection` | library |
@@ -47,6 +47,29 @@ with kubeconform.
 A placeholder that resolves to nothing is the failure this catches: Flux and
 `envsubst` both render an unknown variable as an **empty string**, so without
 the gate a typo reaches the cluster as a manifest with a blank hostname.
+
+Its `extra_validation` input then runs the cluster-invariant gates over that same
+rendered corpus, each covering a class kubeconform structurally cannot see:
+
+| Gate | Fails when |
+|---|---|
+| `check-hpa-vpa-invariant.py` | an HPA and a CPU-controlling VPA target one workload |
+| `check-scrape-netpol.py` | a scraped namespace's NetworkPolicies do not admit Prometheus (the symptom is a bare `TargetDown`) |
+| `check-secretstore-scope.py` | a `ClusterSecretStore` has no `spec.conditions`, or a consumer namespace those conditions do not admit |
+| `check-pvc-storageclass.py` | a claim omits `storageClassName`, which the DefaultStorageClass admission plugin rewrites at create time with no diff in git |
+| `validate-helm-values.py` | a `.spec.values` block the kustomize corpus never renders fails `helm template` |
+
+`netpol-parity` has a `lint` job of its own because it reads the manifests on
+disk rather than the corpus, so it also covers `kubernetes/clusters/*/flux-system/`,
+and it compares every public-egress `except:` list against the canonical
+reserved-CIDR sets. Deliberate exceptions live in `scripts/netpol-except.yaml`
+with their reason.
+
+Every one of them runs locally too, over the same corpus and with the same
+arguments: `task flux:lint` carries the `extra_validation` gates and
+`task lint:netpol-parity` the disk-reading one, both wired into `task lint`.
+Keep the two lists equal when you add a gate — a gate only in CI is a green
+local run followed by a red pipeline.
 
 `scripts/flux-render.sh` is the library's copy, vendored unmodified (CI checks
 it byte-for-byte). The multi-ConfigMap handling lives in the local wrapper
@@ -121,6 +144,21 @@ They are `interruptible: false` (a new pipeline must never cancel a running
 deploy) and retry twice on `runner_system_failure` only — an evicted runner pod
 is environmental and the playbooks are idempotent.
 
+### Cancellation policy
+
+The `default:` block sets `interruptible: true`, and `workflow.auto_cancel` sets
+`on_new_commit: interruptible` — so a new push to a merge request cancels the
+previous pipeline's jobs instead of letting them pile up on the runner. The
+`main` rule overrides that to `none`: a merged pipeline always runs to
+completion. Without the override, a second merge cancels the first's still-
+running jobs, which skips `validation-gate` and leaves the first merge's deploys
+unmet and never run — with its `changes:` not re-covered by the second pipeline.
+Rapid merges instead queue at the deploy jobs' `resource_group`s.
+
+`.deploy-base`, `validation-gate`, `terraform-plan` and `deploy-terraform`
+override `interruptible` back to `false`, so none of them is ever cancellable on
+either ref.
+
 ### The validation gate
 
 Every deploy job carries `needs: [validation-gate]`, non-optionally. That single
@@ -194,9 +232,13 @@ deploy-ansible-storage:
         - "ansible/playbooks/storage.yml"
 ```
 
-`.deploy-base` supplies the 1Password CLI, the pinned Ansible, a secure
-`ansible.cfg` copy, the SSH key, an `ssh-keyscan` of every inventory host (from
-`scripts/hosts.env`) and the galaxy install of `weisssrv.infra`.
+`.deploy-base` comes from the library (`/ci/deploy/deploy-base.yml`, included
+with this cluster's runner tag and vault name). It supplies the 1Password CLI,
+`git` (ansible-galaxy installs the collection from a `git+` source), the pinned
+Ansible, a secure `ansible.cfg` copy, the SSH key, an `ssh-keyscan` of every
+inventory host (from `scripts/hosts.env`), the galaxy install of
+`weisssrv.infra`, and the `LOKI_PUSH_*` references every log-shipping role
+needs. A job only declares what its OWN playbook adds.
 
 The `changes:` list is the contract: a role that a playbook runs but whose path
 is not listed here goes green on every change while never actually deploying.
@@ -245,10 +287,13 @@ generated:
 
 - **`secrets_backend: {{ secrets_backend }}`** — `.deploy-base` installs the
   1Password CLI and reads the SSH key with `op read`, playbooks run under
-  `op run --`, and `$OP_SERVICE_ACCOUNT_TOKEN` gates every deploy rule. Another
-  backend has to supply the same three things: a credential-fetch step in
-  `.deploy-base`, a way to resolve the `op://`-shaped references in the
-  inventory, and a variable to gate the deploy rules on.
+  `$SECRET_RUNNER`, and `$OP_SERVICE_ACCOUNT_TOKEN` gates every deploy rule.
+  Nothing in `.gitlab-ci.yml` spells a backend-native reference inline: the
+  `secret_ref` / `secret_read` Jinja macros at the top of the file write them,
+  and `SECRET_RUNNER` is the command that resolves them. Another backend needs a
+  branch in each of those, the library deploy fragment replaced with one that
+  fetches its credentials, a way to resolve the references in the inventory, and
+  a variable to gate the deploy rules on.
 - **`git_backend: {{ git_backend }}`** — the file is GitLab CI. A GitHub
   Actions equivalent would need workflows reproducing these jobs; the library
   ships GitLab CI templates only, so the shared half would have to be rebuilt

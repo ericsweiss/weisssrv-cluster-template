@@ -4,6 +4,40 @@
 {%- set cpu_selector = ci_cpu_selector | default(internal_domain ~ '/cpu=modern') -%}
 {%- set cluster_dir = 'kubernetes/clusters/' ~ cluster_name -%}
 {%- set versions_cm = 'kubernetes/infrastructure/sources/versions-configmap.yaml' -%}
+{#- SECRETS SEAM, the pipeline half of Taskfile.yml.jinja's. `secret_ref()`
+    composes one reference, `secret_read()` the command that fetches one to
+    stdout, and `secret_runner()` the wrapper that resolves the references a
+    job's environment holds (emitted once, as $SECRET_RUNNER). Every credential
+    site below emits their output, so a second backend is a branch here plus the
+    matching `secrets_backend` choice in copier.yml. The else-branches subscript
+    an empty mapping to hand `mandatory` an undefined value: an unimplemented
+    backend fails the RENDER instead of generating a pipeline whose deploy jobs
+    resolve nothing.
+
+    One thing stays backend-specific by nature: the library deploy fragment
+    included below fetches the SSH key with `op read` itself. A second backend
+    replaces that include (docs/ci-pipeline.md § Backend seams). -#}
+{%- macro secret_ref(item, field) -%}
+{%- if secrets_backend == 'onepassword' -%}
+op://{{ onepassword_vault }}/{{ item }}/{{ field }}
+{%- else -%}
+{{ {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no reference syntax — add a branch to secret_ref() in .gitlab-ci.yml.jinja') }}
+{%- endif -%}
+{%- endmacro -%}
+{%- macro secret_read(item, field) -%}
+{%- if secrets_backend == 'onepassword' -%}
+op read "{{ secret_ref(item, field) }}"
+{%- else -%}
+{{ {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no fetch command — add a branch to secret_read() in .gitlab-ci.yml.jinja') }}
+{%- endif -%}
+{%- endmacro -%}
+{%- macro secret_runner() -%}
+{%- if secrets_backend == 'onepassword' -%}
+op run --
+{%- else -%}
+{{ {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no host-side runner — add a branch to secret_runner() in .gitlab-ci.yml.jinja') }}
+{%- endif -%}
+{%- endmacro -%}
 ---
 # CI for the {{ cluster_name }} cluster. Generic lint / validate / security /
 # review jobs are pulled from {{ lib_project }} at a pinned ref; only the deploy
@@ -26,10 +60,45 @@ stages:
   - release
 {%- endif %}
 
+# Settings every job inherits unless it says otherwise.
+default:
+  # PINNED, and stated here rather than left to the runner: a job with no image
+  # runs on whatever the runner's config names as its default, which is neither
+  # reviewable nor reproducible from this repository. The deploy fragment
+  # apt-installs and pip-installs, so the image must be Debian-based with pip.
+  image: python:3.13-slim
+  # An UNTAGGED job goes to whichever runner accepts untagged work — the shared,
+  # non-root, LAN-blocked one — where an apt-get and any SSH reach to the hosts
+  # both fail. Every job below and every library include already carries this
+  # tag; the default is what makes a forgotten one land correctly anyway.
+  tags: ["{{ runner_tag }}"]
+  # Cancel a superseded pipeline's jobs on a new commit — see the workflow
+  # policy below. Deploys, the gate and the terraform plan/apply override this
+  # to false; everything else is safe to interrupt.
+  interruptible: true
+
 workflow:
+  # AUTHORITATIVE description of this pipeline's cancellation policy; jobs that
+  # override `interruptible` point here rather than restating it.
+  #
+  # MR refs: `on_new_commit: interruptible` — a new push cancels the previous
+  # pipeline's interruptible jobs instead of letting them pile up on a scarce
+  # runner. GitLab's project default is "conservative", which stops cancelling as
+  # soon as any non-interruptible job has started, so it leaves them running.
+  #
+  # main: `on_new_commit: none` (the rule below) — a merged pipeline always runs
+  # to completion. Under the aggressive setting a second merge cancels the
+  # first's still-running interruptible jobs, which skips validation-gate and
+  # leaves the first merge's deploys unmet and never run, with its `changes:` not
+  # re-covered by the second pipeline. Rapid merges instead QUEUE at the deploy
+  # jobs' `resource_group`s, which are per target and oldest-first.
+  auto_cancel:
+    on_new_commit: interruptible
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
+      auto_cancel:
+        on_new_commit: none
     # version-bump-bot runs on a pipeline schedule; without this clause the
     # schedule creates no pipeline at all.
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
@@ -45,8 +114,12 @@ variables:
   # The project half of the same pin, so the gate checks the includes this
   # cluster actually resolves (a fork or mirror answers lib_project).
   LIB_PROJECT: "{{ lib_project }}"
-  ANSIBLE_VERSION: "11.6.0"
   PYYAML_VERSION: "6.0.2"
+  # The command that resolves the secret references in a job's environment. Every
+  # deploy script goes through it rather than naming a backend's CLI, so the
+  # `secrets_backend` seam has one runtime half and one render-time half (the
+  # secret_ref macro that writes the references themselves).
+  SECRET_RUNNER: "{{ secret_runner() }}"
 
 include:
   - project: {{ lib_project }}
@@ -123,10 +196,15 @@ include:
   # terraform/*/*.tf to prove they pin the same library ref as this file's
   # `ref:`. Without those three entries an MR that bumps only a pin — the exact
   # change the gate exists for — never starts the job that would catch it.
-  # test_cluster_invariants.py reads two more by the same rule:
-  # ansible/inventories/prod/hosts.yml (the address-consistency asserts) and
+  # test_cluster_invariants.py reads four more by the same rule:
+  # ansible/inventories/prod/hosts.yml (the address-consistency asserts),
   # .copier-answers.yml (the site-values-not-in-the-k8s-tree assert, which
-  # sources the literals to hunt for from the answers file).
+  # sources the literals to hunt for from the answers file), the whole
+  # ansible/playbooks/ tree and scripts/deploy-coverage.conf (the playbook
+  # gates: every playbook the Taskfile names exists, and every playbook is
+  # mapped to a deploy job or acknowledged in the conf). Deleting or renaming a
+  # playbook touches ONLY that tree, so without it the gate is silent on the
+  # exact change it exists for.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/test/python-tests.yml
@@ -141,6 +219,8 @@ include:
         - "scripts/**/*.py"
         - "ansible/requirements.yml"
         - "ansible/inventories/prod/hosts.yml"
+        - "ansible/playbooks/**/*"
+        - "scripts/deploy-coverage.conf"
         - ".copier-answers.yml"
         - "Taskfile.yml"
         - "terraform/**/*.tf"
@@ -168,9 +248,16 @@ include:
   # the vendored copy directly would forfeit every cluster_* key — and `task
   # flux:lint` calls flux-env.sh too, so both see identical variables.
   #
-  # extra_validation is the parity the library documents: the kustomize corpus
-  # never renders a chart, so `.spec.values` is otherwise unvalidated, and an
-  # HPA/VPA pair fighting over the same workload has no other gate.
+  # extra_validation runs the cluster-invariant gates the library ships against
+  # the SAME rendered corpus kubeconform sees. Each one covers a class the
+  # kustomize/kubeconform pass structurally cannot: the corpus never renders a
+  # chart, so `.spec.values` is unvalidated; an HPA/VPA pair fighting over one
+  # workload is schema-valid; a PVC with no storageClassName is rewritten by the
+  # DefaultStorageClass admission plugin at create time; a scraped namespace
+  # behind an ingress default-deny reports only as TargetDown; and a
+  # ClusterSecretStore with no conditions is readable from every namespace.
+  # `changes:` below therefore names the gate scripts and their policy files too
+  # — a change that loosens one must run the job it loosens.
   # require_cluster_root is FALSE here because a freshly generated cluster has no
   # gotk-components.yaml / gotk-sync.yaml until `flux bootstrap` runs, and the
   # input defaults to true — which would fail the very first pipeline on a root
@@ -188,10 +275,19 @@ include:
       versions_configmap: "{{ versions_cm }}"
       flux_render_script: "scripts/flux-env.sh"
       skipped_script: "scripts/kubeconform-skipped.py"
-      extra_validation: 'echo "=== Checking HPA/VPA invariant ==="; python3 scripts/check-hpa-vpa-invariant.py --require-chart-native-vpas --policy-config scripts/autoscaling-policy.yaml < "$RENDER_ALL" || FAILED=1; echo "=== Schema-validating HelmRelease values blocks (helm template) ==="; MERGED_CM=$(mktemp /tmp/merged-cm-XXXXXX.yaml); scripts/flux-env.sh merged-configmap "{{ versions_cm }}" > "$MERGED_CM" && python3 scripts/validate-helm-values.py --kubeconform --releases scripts/helm-values-releases.yaml --versions-configmap "$MERGED_CM" --policy-config scripts/autoscaling-policy.yaml || FAILED=1; rm -f "$MERGED_CM"'
+      extra_validation: 'echo "=== Checking HPA/VPA invariant ==="; python3 scripts/check-hpa-vpa-invariant.py --require-chart-native-vpas --policy-config scripts/autoscaling-policy.yaml < "$RENDER_ALL" || FAILED=1; echo "=== Checking scrape/NetworkPolicy invariant ==="; python3 scripts/check-scrape-netpol.py < "$RENDER_ALL" || FAILED=1; echo "=== Checking ClusterSecretStore scoping ==="; python3 scripts/check-secretstore-scope.py < "$RENDER_ALL" || FAILED=1; echo "=== Checking PVC storageClassName ==="; python3 scripts/check-pvc-storageclass.py < "$RENDER_ALL" || FAILED=1; echo "=== Schema-validating HelmRelease values blocks (helm template) ==="; MERGED_CM=$(mktemp /tmp/merged-cm-XXXXXX.yaml); scripts/flux-env.sh merged-configmap "{{ versions_cm }}" > "$MERGED_CM" && python3 scripts/validate-helm-values.py --kubeconform --releases scripts/helm-values-releases.yaml --versions-configmap "$MERGED_CM" --policy-config scripts/autoscaling-policy.yaml || FAILED=1; rm -f "$MERGED_CM"'
       changes:
         - "kubernetes/**/*"
         - "ansible/inventories/prod/group_vars/all.yml"
+        - "scripts/autoscaling-policy.yaml"
+        - "scripts/helm-values-releases.yaml"
+        - "scripts/check-hpa-vpa-invariant.py"
+        - "scripts/check-scrape-netpol.py"
+        - "scripts/check-secretstore-scope.py"
+        - "scripts/check-pvc-storageclass.py"
+        - "scripts/validate-helm-values.py"
+        - "scripts/flux-env.sh"
+        - "scripts/kubeconform-skipped.py"
         - ".gitlab-ci.yml"
 
   # Doc-link rot: the checker is vendored (scripts/check-doc-links.py) and
@@ -318,6 +414,24 @@ include:
     ref: {{ lib_ref }}
     file: /ci/templates/install-1password.yml
 
+  # `.deploy-base` — the toolchain every Ansible deploy job extends: the op CLI
+  # and dependency cache, a pinned Ansible, a 0600 ansible.cfg copy, the deploy
+  # SSH key, a TOFU keyscan of scripts/hosts.env, and the collection install.
+  # `apt_packages` defaults to `git`, which ansible-galaxy needs to install
+  # weisssrv.infra from the `git+` source requirements.yml pins.
+  #
+  # This fragment is the 1Password-bound half of the `secrets_backend` seam: it
+  # reads the SSH key with `op read` and exports the Loki push references. A
+  # different backend replaces the include, not just the macros at the top of
+  # this file.
+  - project: {{ lib_project }}
+    ref: {{ lib_ref }}
+    file: /ci/deploy/deploy-base.yml
+    inputs:
+      tags: ["{{ runner_tag }}"]
+      op_vault: "{{ onepassword_vault }}"
+      ansible_version: "11.6.0"
+
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/templates/terraform-http-backend.yml
@@ -424,6 +538,40 @@ repo-sync:
       changes: *repo_sync_paths
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
+# The LAN fence. Public egress is written as `ipBlock: {cidr: 0.0.0.0/0,
+# except: [...]}` and the except-list is what keeps a compromised pod off the
+# LAN, loopback and cloud-metadata ranges — repeated in every policy that needs
+# it, because kustomize has no mechanism to share a list fragment. This compares
+# each one against the canonical sets, and also catches the two edits that
+# re-open the LAN without touching an except-list: an egress rule with no `to:`
+# peers, and blocks that individually look specific but together contain a whole
+# fenced range. Deliberate exceptions are declared in scripts/netpol-except.yaml
+# with their reason.
+#
+# It reads the manifests on disk rather than the rendered corpus, so it also
+# covers `kubernetes/clusters/*/flux-system/`, which no Kustomization builds.
+netpol-parity:
+  stage: lint
+  image: python:3.13-slim
+  tags: ["{{ runner_tag }}"]
+  needs: []
+  before_script:
+    - pip install --user --quiet "pyyaml==$PYYAML_VERSION"
+  script:
+    - python3 scripts/check-netpol-except-parity.py --config scripts/netpol-except.yaml kubernetes/
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &netpol_parity_paths
+        - "kubernetes/**/*"
+        - "scripts/netpol-except.yaml"
+        - "scripts/check-netpol-except-parity.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *netpol_parity_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
 # The `changes:` list on a deploy job is a contract, and nothing else enforces
 # it: a playbook or inventory path that no deploy job lists goes green on every
 # MR while never actually deploying. This fails the MR that introduces the gap,
@@ -509,6 +657,8 @@ validation-gate:
       optional: true
     - job: deploy-coverage
       optional: true
+    - job: netpol-parity
+      optional: true
     # Always created on a main pipeline (no path filter)
     - job: secret_detection
   script:
@@ -526,49 +676,15 @@ validation-gate:
 # Deploy — starter set. One job per playbook, gated to main + a changes list, so
 # a merge deploys exactly what it touched. Every job needs validation-gate
 # (non-optional). Adding a playbook means adding a job: the pattern is
-# documented in docs/ci-pipeline.md.
+# documented in docs/ci-pipeline.md. `.deploy-base` itself comes from the
+# library (see the include above).
 # ==============================================================================
-.deploy-base:
-  extends: [.install-1password, .dep-cache]
-  # The SAME tag every included job carries. An untagged job goes to whichever
-  # runner accepts untagged work — the shared, non-root, LAN-blocked one — where
-  # .install-1password's apt-get and the SSH reach to the hosts both fail. A
-  # deploy needs the privileged runner registered with this tag.
-  tags: ["{{ runner_tag }}"]
-  # Deploys touch live infrastructure: never cancel one because a new pipeline
-  # started. Runner-pod casualties are environmental and the playbooks are
-  # idempotent, so retry those rather than failing the chain.
-  interruptible: false
-  retry:
-    max: 2
-    when:
-      - runner_system_failure
-  before_script:
-    - !reference [.install-1password, before_script]
-    - pip install --quiet "ansible==${ANSIBLE_VERSION}"
-    - |
-      # A world-writable checkout makes Ansible ignore ansible.cfg outright.
-      export ANSIBLE_CONFIG="$(mktemp /tmp/ansible-XXXXXXXXXX.cfg)"
-      install -m 600 ansible/ansible.cfg "$ANSIBLE_CONFIG"
-      trap "rm -f '$ANSIBLE_CONFIG'" EXIT
-    - |
-      mkdir -p ~/.ssh
-      chmod 700 ~/.ssh
-      # umask in a subshell: the key file is never created 0644, so there is no
-      # chmod race window.
-      (umask 077; op read "op://{{ onepassword_vault }}/SSH Key/private key" > ~/.ssh/id_ed25519)
-      # TOFU keyscan — ephemeral runners inherit no known_hosts. ALL_SSH_IPS is
-      # generated from the inventory (scripts/hosts.env), so a new node is
-      # covered without editing this file.
-      . scripts/hosts.env
-      # shellcheck disable=SC2086  # word-split ALL_SSH_IPS into one keyscan
-      ssh-keyscan -H $ALL_SSH_IPS >> ~/.ssh/known_hosts 2>/dev/null || true
-    - ansible-galaxy collection install -r ansible/requirements.yml
 
-# The op:// variables mirror the matching Taskfile task's `env:` exactly — `op
-# run` resolves EVERY op:// reference in the environment, so a job must declare
-# what its playbook needs and nothing more (an item the vault lacks is a hard
-# failure, not an unused variable).
+# Each job's `variables:` mirror the matching Taskfile task's `env:`, minus the
+# Loki push pair that `.deploy-base` declares for every deploy. $SECRET_RUNNER
+# resolves EVERY reference in the environment, so a job declares what its
+# playbook needs and nothing more — an item the vault lacks is a hard failure,
+# not an unused variable.
 # Runs site.yml, the full host stack — the CI twin of `task infra:deploy`. It
 # has to: its trigger list includes the whole inventory and the roles site.yml
 # adds on top of base.yml (Proxmox host config, certs, firewall, host metrics
@@ -582,24 +698,22 @@ deploy-ansible-base:
   needs:
     - job: validation-gate
   variables:
-    ROOT_EMAIL_ALIAS: "op://{{ onepassword_vault }}/Email Config/root_alias"
-    SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
-    SMTP_RELAY_USER: "op://{{ onepassword_vault }}/SMTP Relay Auth/username"
-    SMTP_RELAY_PASSWORD: "op://{{ onepassword_vault }}/SMTP Relay Auth/password"
-    SMTP_UPSTREAM_USER: "op://{{ onepassword_vault }}/SMTP Smarthost/username"
-    SMTP_UPSTREAM_PASSWORD: "op://{{ onepassword_vault }}/SMTP Smarthost/password"
-    ADGUARD_ADMIN_PASSWORD: "op://{{ onepassword_vault }}/AdGuard Home/password"
-    SAMBA_NAS_PASSWORD: "op://{{ onepassword_vault }}/Samba NAS User/password"
-    ACME_SSH_PRIVATE_KEY: "op://{{ onepassword_vault }}/Cert Distribution Key/private key"
-    ACME_SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/Cert Distribution Key/public key"
-    LOKI_PUSH_USER: "op://{{ onepassword_vault }}/Loki Push Auth/username"
-    LOKI_PUSH_PASSWORD: "op://{{ onepassword_vault }}/Loki Push Auth/password"
+    ROOT_EMAIL_ALIAS: "{{ secret_ref('Email Config', 'root_alias') }}"
+    SSH_PUBLIC_KEY: "{{ secret_ref('SSH Key', 'public key') }}"
+    SMTP_RELAY_USER: "{{ secret_ref('SMTP Relay Auth', 'username') }}"
+    SMTP_RELAY_PASSWORD: "{{ secret_ref('SMTP Relay Auth', 'password') }}"
+    SMTP_UPSTREAM_USER: "{{ secret_ref('SMTP Smarthost', 'username') }}"
+    SMTP_UPSTREAM_PASSWORD: "{{ secret_ref('SMTP Smarthost', 'password') }}"
+    ADGUARD_ADMIN_PASSWORD: "{{ secret_ref('AdGuard Home', 'password') }}"
+    SAMBA_NAS_PASSWORD: "{{ secret_ref('Samba NAS User', 'password') }}"
+    ACME_SSH_PRIVATE_KEY: "{{ secret_ref('Cert Distribution Key', 'private key') }}"
+    ACME_SSH_PUBLIC_KEY: "{{ secret_ref('Cert Distribution Key', 'public key') }}"
 {%- if vpn_tailscale %}
-    TAILSCALE_AUTH_KEY: "op://{{ onepassword_vault }}/Tailscale Auth Key/credential"
+    TAILSCALE_AUTH_KEY: "{{ secret_ref('Tailscale Auth Key', 'credential') }}"
 {%- endif %}
   script:
     - cd ansible
-    - op run -- ansible-playbook -i inventories/prod playbooks/site.yml
+    - $SECRET_RUNNER ansible-playbook -i inventories/prod playbooks/site.yml
   environment:
     name: production/ansible-base
   rules:
@@ -630,18 +744,16 @@ deploy-ansible-dns:
     - job: deploy-ansible-base
       optional: true
   variables:
-    ROOT_EMAIL_ALIAS: "op://{{ onepassword_vault }}/Email Config/root_alias"
-    SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
-    SMTP_RELAY_USER: "op://{{ onepassword_vault }}/SMTP Relay Auth/username"
-    SMTP_RELAY_PASSWORD: "op://{{ onepassword_vault }}/SMTP Relay Auth/password"
-    ADGUARD_ADMIN_PASSWORD: "op://{{ onepassword_vault }}/AdGuard Home/password"
-    ACME_SSH_PRIVATE_KEY: "op://{{ onepassword_vault }}/Cert Distribution Key/private key"
-    ACME_SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/Cert Distribution Key/public key"
-    LOKI_PUSH_USER: "op://{{ onepassword_vault }}/Loki Push Auth/username"
-    LOKI_PUSH_PASSWORD: "op://{{ onepassword_vault }}/Loki Push Auth/password"
+    ROOT_EMAIL_ALIAS: "{{ secret_ref('Email Config', 'root_alias') }}"
+    SSH_PUBLIC_KEY: "{{ secret_ref('SSH Key', 'public key') }}"
+    SMTP_RELAY_USER: "{{ secret_ref('SMTP Relay Auth', 'username') }}"
+    SMTP_RELAY_PASSWORD: "{{ secret_ref('SMTP Relay Auth', 'password') }}"
+    ADGUARD_ADMIN_PASSWORD: "{{ secret_ref('AdGuard Home', 'password') }}"
+    ACME_SSH_PRIVATE_KEY: "{{ secret_ref('Cert Distribution Key', 'private key') }}"
+    ACME_SSH_PUBLIC_KEY: "{{ secret_ref('Cert Distribution Key', 'public key') }}"
   script:
     - cd ansible
-    - op run -- ansible-playbook -i inventories/prod playbooks/dns.yml
+    - $SECRET_RUNNER ansible-playbook -i inventories/prod playbooks/dns.yml
   environment:
     name: production/ansible-dns
   rules:
@@ -664,13 +776,11 @@ deploy-ansible-storage:
     - job: deploy-ansible-base
       optional: true
   variables:
-    SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
-    SAMBA_NAS_PASSWORD: "op://{{ onepassword_vault }}/Samba NAS User/password"
-    LOKI_PUSH_USER: "op://{{ onepassword_vault }}/Loki Push Auth/username"
-    LOKI_PUSH_PASSWORD: "op://{{ onepassword_vault }}/Loki Push Auth/password"
+    SSH_PUBLIC_KEY: "{{ secret_ref('SSH Key', 'public key') }}"
+    SAMBA_NAS_PASSWORD: "{{ secret_ref('Samba NAS User', 'password') }}"
   script:
     - cd ansible
-    - op run -- ansible-playbook -i inventories/prod playbooks/storage.yml
+    - $SECRET_RUNNER ansible-playbook -i inventories/prod playbooks/storage.yml
   environment:
     name: production/ansible-storage
   rules:
@@ -693,17 +803,15 @@ deploy-ansible-mail:
     - job: deploy-ansible-base
       optional: true
   variables:
-    ROOT_EMAIL_ALIAS: "op://{{ onepassword_vault }}/Email Config/root_alias"
-    SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
-    SMTP_RELAY_USER: "op://{{ onepassword_vault }}/SMTP Relay Auth/username"
-    SMTP_RELAY_PASSWORD: "op://{{ onepassword_vault }}/SMTP Relay Auth/password"
-    SMTP_UPSTREAM_USER: "op://{{ onepassword_vault }}/SMTP Smarthost/username"
-    SMTP_UPSTREAM_PASSWORD: "op://{{ onepassword_vault }}/SMTP Smarthost/password"
-    LOKI_PUSH_USER: "op://{{ onepassword_vault }}/Loki Push Auth/username"
-    LOKI_PUSH_PASSWORD: "op://{{ onepassword_vault }}/Loki Push Auth/password"
+    ROOT_EMAIL_ALIAS: "{{ secret_ref('Email Config', 'root_alias') }}"
+    SSH_PUBLIC_KEY: "{{ secret_ref('SSH Key', 'public key') }}"
+    SMTP_RELAY_USER: "{{ secret_ref('SMTP Relay Auth', 'username') }}"
+    SMTP_RELAY_PASSWORD: "{{ secret_ref('SMTP Relay Auth', 'password') }}"
+    SMTP_UPSTREAM_USER: "{{ secret_ref('SMTP Smarthost', 'username') }}"
+    SMTP_UPSTREAM_PASSWORD: "{{ secret_ref('SMTP Smarthost', 'password') }}"
   script:
     - cd ansible
-    - op run -- ansible-playbook -i inventories/prod playbooks/mail.yml
+    - $SECRET_RUNNER ansible-playbook -i inventories/prod playbooks/mail.yml
   environment:
     name: production/ansible-mail
   rules:
@@ -723,18 +831,16 @@ deploy-ansible-k3s:
   needs:
     - job: validation-gate
   variables:
-    ROOT_EMAIL_ALIAS: "op://{{ onepassword_vault }}/Email Config/root_alias"
-    SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
-    SMTP_RELAY_USER: "op://{{ onepassword_vault }}/SMTP Relay Auth/username"
-    SMTP_RELAY_PASSWORD: "op://{{ onepassword_vault }}/SMTP Relay Auth/password"
-    K3S_TOKEN: "op://{{ onepassword_vault }}/K3s Cluster Token/credential"
+    ROOT_EMAIL_ALIAS: "{{ secret_ref('Email Config', 'root_alias') }}"
+    SSH_PUBLIC_KEY: "{{ secret_ref('SSH Key', 'public key') }}"
+    SMTP_RELAY_USER: "{{ secret_ref('SMTP Relay Auth', 'username') }}"
+    SMTP_RELAY_PASSWORD: "{{ secret_ref('SMTP Relay Auth', 'password') }}"
+    K3S_TOKEN: "{{ secret_ref('K3s Cluster Token', 'credential') }}"
     # Agents join with the lower-privilege worker token the servers advertise.
-    K3S_AGENT_TOKEN: "op://{{ onepassword_vault }}/K3s Agent Token/credential"
-    LOKI_PUSH_USER: "op://{{ onepassword_vault }}/Loki Push Auth/username"
-    LOKI_PUSH_PASSWORD: "op://{{ onepassword_vault }}/Loki Push Auth/password"
+    K3S_AGENT_TOKEN: "{{ secret_ref('K3s Agent Token', 'credential') }}"
   script:
     - cd ansible
-    - op run -- ansible-playbook -i inventories/prod playbooks/k3s.yml
+    - $SECRET_RUNNER ansible-playbook -i inventories/prod playbooks/k3s.yml
   environment:
     name: production/k3s
   rules:
@@ -775,8 +881,12 @@ deploy-ansible-k3s:
 terraform-validate:
   extends: .terraform-git-credential
   tags: ["{{ runner_tag }}"]
-
+{% if dns_backend == 'cloudflare' %}
 # Pre-merge preview of the zone change, and the plan deploy-terraform applies.
+# The directory is the literal `terraform/cloudflare` the payload ships, and the
+# pair of jobs is gated on the answer instead — composing the path from
+# `dns_backend` would render a pipeline pointing at a directory no render
+# creates, failing at `cd` instead of at generation time.
 terraform-plan:
   stage: validate
   extends: [.terraform-http-backend, .terraform-git-credential]
@@ -790,13 +900,13 @@ terraform-plan:
   before_script:
     - !reference [.install-1password-alpine, before_script]
   script:
-    - cd terraform/{{ dns_backend }}
+    - cd terraform/cloudflare
     # -lockfile=readonly: provider hashes are committed; CI rewriting them would
     # mask supply-chain drift.
     - terraform init -lockfile=readonly
     - |
-      export TF_VAR_cloudflare_api_token=$(op read "op://{{ onepassword_vault }}/Cloudflare Terraform Token/credential")
-      export TF_VAR_cloudflare_account_id=$(op read "op://{{ onepassword_vault }}/Cloudflare Terraform Token/username")
+      export TF_VAR_cloudflare_api_token=$({{ secret_read("Cloudflare Terraform Token", "credential") }})
+      export TF_VAR_cloudflare_account_id=$({{ secret_read("Cloudflare Terraform Token", "username") }})
       terraform plan -input=false -no-color -lock-timeout=120s -out=tfplan
     # Change counts for the merge request's Terraform widget.
     - |
@@ -813,9 +923,9 @@ terraform-plan:
     # does not gate.
     access: developer
     paths:
-      - terraform/{{ dns_backend }}/tfplan
+      - terraform/cloudflare/tfplan
     reports:
-      terraform: terraform/{{ dns_backend }}/tfplan.json
+      terraform: terraform/cloudflare/tfplan.json
     # A day, not an hour: deploy-terraform is a manual job in a later stage and
     # the plan must still exist when someone presses it.
     expire_in: 1 day
@@ -829,10 +939,10 @@ terraform-plan:
     # no plan at all, which is a skip, not a clean plan.
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $OP_SERVICE_ACCOUNT_TOKEN'
       changes:
-        - "terraform/{{ dns_backend }}/**/*"
+        - "terraform/cloudflare/**/*"
     - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
       changes:
-        - "terraform/{{ dns_backend }}/**/*"
+        - "terraform/cloudflare/**/*"
 
 deploy-terraform:
   stage: deploy
@@ -856,27 +966,28 @@ deploy-terraform:
   before_script:
     - !reference [.install-1password-alpine, before_script]
   script:
-    - cd terraform/{{ dns_backend }}
+    - cd terraform/cloudflare
     # -lockfile=readonly: provider hashes are committed; CI rewriting them would
     # mask supply-chain drift.
     - terraform init -lockfile=readonly
     # Applies the SAVED plan, so what ships is what the merge request showed.
     # A fresh apply-time plan could delete a record nobody reviewed.
     - |
-      export TF_VAR_cloudflare_api_token=$(op read "op://{{ onepassword_vault }}/Cloudflare Terraform Token/credential")
-      export TF_VAR_cloudflare_account_id=$(op read "op://{{ onepassword_vault }}/Cloudflare Terraform Token/username")
+      export TF_VAR_cloudflare_api_token=$({{ secret_read("Cloudflare Terraform Token", "credential") }})
+      export TF_VAR_cloudflare_account_id=$({{ secret_read("Cloudflare Terraform Token", "username") }})
       terraform apply -auto-approve -lock-timeout=120s tfplan
   environment:
-    name: production/{{ dns_backend }}
+    name: production/cloudflare
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
       changes:
-        - "terraform/{{ dns_backend }}/**/*"
+        - "terraform/cloudflare/**/*"
       when: manual
       allow_failure: false
-{% if vpn_tailscale %}
+{% endif %}
+{%- if vpn_tailscale %}
 # Read-only drift plan for the tailnet ACL. It never applies — that stays
 # supervised (terraform/tailscale/README.md) — so a console hot-fix would
 # otherwise sit undetected until someone happened to plan. Exit-code and state
@@ -899,8 +1010,8 @@ tailscale-drift-plan:
     - cd terraform/tailscale
     - terraform init -lockfile=readonly
     - |
-      export TF_VAR_tailscale_oauth_client_id=$(op read "op://{{ onepassword_vault }}/Tailscale OAuth/client id")
-      export TF_VAR_tailscale_oauth_client_secret=$(op read "op://{{ onepassword_vault }}/Tailscale OAuth/credential")
+      export TF_VAR_tailscale_oauth_client_id=$({{ secret_read("Tailscale OAuth", "client id") }})
+      export TF_VAR_tailscale_oauth_client_secret=$({{ secret_read("Tailscale OAuth", "credential") }})
       terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
   allow_failure: true
   rules:
@@ -941,8 +1052,8 @@ authentik-drift-plan:
     - cd terraform/authentik
     - terraform init -lockfile=readonly
     - |
-      export TF_VAR_authentik_token=$(op read "op://{{ onepassword_vault }}/Authentik Terraform Token/credential")
-      export TF_VAR_oauth2_client_secret_grafana=$(op read "op://{{ onepassword_vault }}/Grafana SSO/oidc-client-secret")
+      export TF_VAR_authentik_token=$({{ secret_read("Authentik Terraform Token", "credential") }})
+      export TF_VAR_oauth2_client_secret_grafana=$({{ secret_read("Grafana SSO", "oidc-client-secret") }})
       terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
   allow_failure: true
   rules:

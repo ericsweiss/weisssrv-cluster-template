@@ -93,13 +93,6 @@ spec:
         - name: smtp-relay
           url: ${cluster_smtp_host}:587
           module: tcp_connect
-        # Examples to copy (they need site values this template does not carry):
-        #   - name: dns-01
-        #     url: 10.0.0.150:53
-        #     module: dns_resolution
-        #   - name: public-ingress
-        #     url: https://www.${cluster_external_domain}
-        #     module: http_2xx
     resources:
       requests:
         cpu: 25m

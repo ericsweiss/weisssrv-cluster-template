@@ -53,12 +53,15 @@ weisssrv-app-template ..... one application deployed onto such a cluster
 Kubernetes manifests live **here**, not in the library: a generated cluster is
 self-contained, with no remote kustomize bases to break.
 
-The app template is **not** parameterized the way this one is: its docs, CI
-variables and runner tags name the reference cluster. Onboarding a tenant onto a
-cluster you generated means swapping those site values by hand — the cluster
-side of the contract (the `Kustomization.spec.path`, the namespace labels, the
+The app template is a copier template too, with the same cluster-identity
+answers (`external_domain`, `internal_domain`, `internal_vip`, the registry
+hosts, `runbook_url`) and the same rule that none of them has a default — so
+onboarding a tenant onto a cluster you generated is `copier copy` plus that
+cluster's answers, not a hand sweep for site values. The cluster side of the
+contract (the `Kustomization.spec.path`, the namespace labels, the
 `ClusterSecretStore` name) is documented in the generated
-`kubernetes/clusters/<cluster_name>/tenants/README.md`.
+`kubernetes/clusters/<cluster_name>/tenants/README.md`, which is what the
+operator applies.
 
 ### Where the platform is documented
 

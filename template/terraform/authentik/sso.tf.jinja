@@ -1,6 +1,8 @@
 # Site data: which applications exist, who may reach them, and how each one
-# authenticates. Every map key is a STATE ADDRESS — renaming one destroys and
-# recreates the object.
+# authenticates. Every map key is a STATE ADDRESS — renaming one is a
+# destroy+create, which the module's `prevent_destroy` refuses: rename with a
+# `moved {}` block, remove with `terraform state rm` (README § Renaming and
+# removing).
 #
 # Users are never managed here. Only group membership is, so every username in
 # `groups[*].users` must already exist in authentik.
@@ -38,6 +40,24 @@ locals {
   proxy_providers = {}
 
   saml_providers = {}
+
+  # Scope mappings this cluster authors, for a claim authentik does not emit by
+  # default — a provider references one as `custom:<key>` in its
+  # `scope_mappings` list, interleaved with the managed ids in the order the API
+  # stores. The stock `email` scope hardcodes `email_verified: false`, which some
+  # applications refuse to log in without:
+  #
+  #   custom_scope_mappings = {
+  #     email_verified = {
+  #       name       = "OIDC email (asserted verified)"
+  #       scope_name = "email"
+  #       expression = "return {\"email\": request.user.email, \"email_verified\": True}"
+  #     }
+  #   }
+  #
+  # Only assert a claim the account model actually justifies — an expression
+  # runs server-side on every token issue.
+  custom_scope_mappings = {}
 
   groups = {
     "grafana-users" = { users = [] }

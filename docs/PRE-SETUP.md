@@ -140,6 +140,13 @@ x.x.x.161        Kubernetes API VIP        ← k3s_api_vip
 x.x.x.170-.254   DHCP pool and workstations
 ```
 
+Two of those blocks are composed from `compute_node_count`: the compute hosts
+from `.12` up, and one k3s agent per Proxmox host from `.41` up. Their bands are
+what caps the answer at **8 compute hosts** — copier rejects a count that would
+reach a resolver, the relay, the server band or past `.49`. For a bigger
+cluster, generate at 8 or fewer and add the rest to `hosts.yml` on a scheme of
+your own; nothing outside that file derives an address from the answer.
+
 The DHCP pool goes at the **top** here for one reason: most consumer routers
 default to handing out `.100`–`.199` or the whole `.2`–`.254` range, and every
 address above is static. Shrink the pool to a block that contains none of them
@@ -582,7 +589,7 @@ brew install hashicorp/tap/terraform
 brew install --cask 1password-cli
 brew install kubernetes-cli fluxcd/tap/flux
 # the gates task lint runs that the list above does not cover:
-brew install kustomize kubeconform gettext shellcheck
+brew install kustomize kubeconform gettext shellcheck helm
 pip install ansible-lint yamllint pyyaml ruff
 
 # Debian/Ubuntu: pipx install copier; apt install kubectl-equivalents, shellcheck,
@@ -592,7 +599,10 @@ pip install ansible-lint yamllint pyyaml ruff
 
 `gettext` is for `envsubst`, which `flux:lint` uses to expand `${cluster_...}`
 placeholders before schema validation; `kustomize` and `kubeconform` are the
-other two halves of that gate. `ansible-lint` and `yamllint` are the lint stage's
+other two halves of that gate. `helm` is the fourth: `flux:lint` renders the
+value-heavy HelmReleases with `helm template` to validate them against each
+chart's schema, so it also wants network access the first time (`helm repo
+add`/`update`). `ansible-lint` and `yamllint` are the lint stage's
 first two steps, and `ruff` is `lint:ruff` — the same check the CI python-lint
 job runs over `scripts/` and `tests/`.
 
@@ -664,6 +674,7 @@ Library and tooling
 - [ ] `lib_project` decided — the library exists on the GitLab instance your
       pipelines run on, or you plan to vendor the CI templates
 - [ ] Workstation tooling from § 9 installed, including the `task lint` gates
-      (kustomize, kubeconform, gettext, shellcheck, yamllint, ansible-lint, ruff)
+      (kustomize, kubeconform, gettext, helm, shellcheck, yamllint, ansible-lint,
+      ruff)
 
 Then continue with [SETUP.md](SETUP.md).

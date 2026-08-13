@@ -30,9 +30,13 @@ map (YAML), not here:
       - key: ALL_SSH_IPS
         combine: [PVE_IPS, DNS_IPS]   # union of earlier keys, in order
 
-`required` defaults to true: a group that resolves to zero hosts fails loudly
-(renamed/removed in the inventory) instead of emitting an empty roster value.
-A host with no `ansible_host` always fails.
+A `group:` may be a group-of-groups: membership resolves depth-first through
+`children:`, so `group: k3s` yields the union of k3s_servers and k3s_agents.
+
+`required` defaults to true: a group that resolves to zero hosts fails loudly,
+naming which of the three causes applies (group absent, host absent, group
+empty) instead of emitting an empty roster value. A host with no `ansible_host`
+always fails.
 
 Idempotent — pair it with a CI job that regenerates and diffs the committed
 output.
@@ -54,10 +58,55 @@ except ImportError:
 VALUE_KINDS = ("names", "ips", "ip")
 
 
+def _all_groups(data: dict) -> dict:
+    return (data.get("all") or {}).get("children") or {}
+
+
 def _group_hosts(data: dict, group: str) -> dict:
-    """Return the {name: hostvars} mapping for a top-level inventory group."""
-    children = (data.get("all") or {}).get("children") or {}
-    return (children.get(group) or {}).get("hosts") or {}
+    """Return {name: hostvars} for a group, including every nested child group.
+
+    A group-of-groups (`children:` with no `hosts:`) resolves to the union of
+    its descendants, depth-first in declaration order; a cycle is ignored via
+    the visited set. First occurrence of a host wins.
+    """
+    groups = _all_groups(data)
+    hosts: dict = {}
+    seen: set[str] = set()
+
+    def walk(name: str, inline: dict | None) -> None:
+        if name in seen:
+            return
+        seen.add(name)
+        # A child may be defined inline under its parent or at the top level.
+        for node in (groups.get(name), inline):
+            if not isinstance(node, dict):
+                continue
+            for host, hostvars in (node.get("hosts") or {}).items():
+                hosts.setdefault(host, hostvars)
+            for child, child_node in (node.get("children") or {}).items():
+                walk(child, child_node)
+
+    walk(group, None)
+    return hosts
+
+
+def _group_exists(data: dict, group: str) -> bool:
+    """True if `group` is declared anywhere in the inventory tree."""
+    groups = _all_groups(data)
+    if group in groups:
+        return True
+    stack = [node for node in groups.values() if isinstance(node, dict)]
+    seen_nodes: list[int] = []
+    while stack:
+        node = stack.pop()
+        if id(node) in seen_nodes:
+            continue
+        seen_nodes.append(id(node))
+        children = node.get("children") or {}
+        if group in children:
+            return True
+        stack.extend(n for n in children.values() if isinstance(n, dict))
+    return False
 
 
 def _host_ip(name: str, hostvars: dict | None) -> str:
@@ -83,6 +132,17 @@ def _resolve(data: dict, spec: dict) -> list[str]:
     return [_host_ip(name, hv) for name, hv in hosts.items()]
 
 
+def _why_empty(data: dict, spec: dict) -> str:
+    """Explain an empty resolution: missing group, missing host, or empty group."""
+    group = spec.get("group")
+    if not _group_exists(data, group):
+        return f"group {group!r} is not in the inventory (renamed/removed?)"
+    host = spec.get("host")
+    if host is not None:
+        return f"host {host!r} is not in group {group!r} (renamed/removed?)"
+    return f"group {group!r} contains no hosts, directly or through its children"
+
+
 def build(data: dict, exports: list[dict]) -> list[tuple[str, str]]:
     """Return ordered (KEY, space-joined-value) pairs for the env file."""
     values: dict[str, list[str]] = {}
@@ -106,10 +166,7 @@ def build(data: dict, exports: list[dict]) -> list[tuple[str, str]]:
                 raise ValueError(f"export {key!r} has unknown value kind {kind!r}")
             resolved = _resolve(data, spec)
             if not resolved and spec.get("required", True):
-                target = spec.get("host") or f"group {spec.get('group')!r}"
-                raise ValueError(
-                    f"required export {key!r} resolved to nothing ({target} renamed/removed?)"
-                )
+                raise ValueError(f"required export {key!r} resolved to nothing: {_why_empty(data, spec)}")
         values[key] = resolved
         pairs.append((key, " ".join(resolved)))
     return pairs

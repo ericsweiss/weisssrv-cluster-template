@@ -40,11 +40,11 @@ _message_after_copy: |
   cannot guess. Next:
 
     1. cd into the new directory, `git init`, and make the first commit.
-    2. Fill in ansible/inventories/prod/hosts.yml (and add host_vars/ files
-       for per-host data), then run `task hosts:sync`.
+    2. Fill in ansible/inventories/prod/hosts.yml (per-host facts go inline on
+       each host entry), then run `task hosts:sync`.
     3. Create the {{ secrets_backend }} items the generated
        ansible/inventories/prod/group_vars/all.yml references; the full
-       inventory with field names is in the template's PRE-SETUP.md:
+       inventory with field names is the template's PRE-SETUP.md:
        https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/PRE-SETUP.md
     4. Follow the bring-up order in the generated README.md ("Bring-up"),
        or the long form at
@@ -132,14 +132,19 @@ lan_prefix:
     lan_prefix must be three octets with no trailing dot, e.g. 192.168.0
     {% endif %}
 
-# The gateway-vs-VIP collision is tested on the THREE VIP QUESTIONS BELOW, not
-# here. A validator sees only the answers given so far (copier renders it against
-# AnswersMap.combined, whose `user` map fills in question order), and all three
-# VIPs are asked after this one — so a test here would compare against three
-# undefined names, pass everything interactively, and fire only in
-# `--data`/update mode where every answer is present up front. That is a check
-# that reads as enforcement and enforces nothing on the path the docs document.
-# Rule: only compare an answer against answers declared ABOVE it.
+# RULE: a validator may only compare an answer against answers declared ABOVE
+# it. copier renders validators against the answers given so far, so a forward
+# reference is undefined interactively and fires only in --data/update mode. The
+# gateway-vs-VIP collision is therefore tested on the three VIP questions below.
+# Enforced by tests/test_copier_config.py.
+#
+# The BAND check is the other half, and it is legal on this question and the
+# three VIPs alike because the bands are fixed literals, not answers: hosts.yml
+# composes .11+ (Proxmox hosts), .23 (SMTP relay), .31+ (k3s servers) and .41+
+# (k3s agents) from lan_prefix, which is declared above. Without it a VIP inside
+# a band is accepted and a generated guest takes the same address —
+# upstream_dns_servers and compute_node_count already test the mirror direction,
+# so leaving these out made the check one-way.
 lan_gateway:
   type: str
   help: >-
@@ -156,9 +161,21 @@ lan_gateway:
     {% set _b = 2 ** (32 - (_n[1] | int)) %}
     {% set _l = _n[0].split('.') | map('int') | list %}
     {% set _a = lan_gateway.split('.') | map('int') | list %}
+    {% set _o = lan_gateway.split('.')[-1] | int %}
+    {% set _band = ('the .11-.19 Proxmox host band' if 11 <= _o <= 19
+                    else 'the SMTP relay address (.23, vmid 123)' if _o == 23
+                    else 'the .31-.39 k3s server band (vmids 131+)' if 31 <= _o <= 39
+                    else 'the .41-.49 k3s agent band (vmids 141+)' if 41 <= _o <= 49
+                    else '') if lan_gateway.startswith(lan_prefix ~ '.') else '' %}
     {% if (_a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3]) // _b != (_l[0] * 16777216 + _l[1] * 65536 + _l[2] * 256 + _l[3]) // _b %}
     lan_gateway must sit inside lan_cidr ({{ lan_cidr }}) — every guest is
     created on the flat LAN and routes through it directly.
+    {% elif _band %}
+    lan_gateway {{ lan_gateway }} is in {{ _band }}, which hosts.yml composes
+    guest addresses from — a generated guest would be given your router's
+    address. Pick one outside .11-.19, .23, .31-.39 and .41-.49; the starter
+    scheme leaves .1-.10, .20-.22, .24-.30 and .50+ free, and hosts.yml's header
+    lists the whole layout.
     {% endif %}
     {% endif %}
 
@@ -176,12 +193,24 @@ k3s_api_vip:
     {% set _b = 2 ** (32 - (_n[1] | int)) %}
     {% set _l = _n[0].split('.') | map('int') | list %}
     {% set _a = k3s_api_vip.split('.') | map('int') | list %}
+    {% set _o = k3s_api_vip.split('.')[-1] | int %}
+    {% set _band = ('the .11-.19 Proxmox host band' if 11 <= _o <= 19
+                    else 'the SMTP relay address (.23, vmid 123)' if _o == 23
+                    else 'the .31-.39 k3s server band (vmids 131+)' if 31 <= _o <= 39
+                    else 'the .41-.49 k3s agent band (vmids 141+)' if 41 <= _o <= 49
+                    else '') if k3s_api_vip.startswith(lan_prefix ~ '.') else '' %}
     {% if (_a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3]) // _b != (_l[0] * 16777216 + _l[1] * 65536 + _l[2] * 256 + _l[3]) // _b %}
     k3s_api_vip must sit inside lan_cidr ({{ lan_cidr }}) — kube-vip advertises
     it with ARP on the LAN segment.
     {% elif k3s_api_vip == lan_gateway %}
     k3s_api_vip must differ from lan_gateway ({{ lan_gateway }}) — kube-vip
     would ARP-advertise your router's address and fight it for the LAN.
+    {% elif _band %}
+    k3s_api_vip {{ k3s_api_vip }} is in {{ _band }}, which hosts.yml composes
+    guest addresses from — kube-vip would ARP-advertise an address a generated
+    guest already holds. Pick one outside .11-.19, .23, .31-.39 and .41-.49; the
+    starter scheme leaves .1-.10, .20-.22, .24-.30 and .50+ free, and hosts.yml's
+    header lists the whole layout.
     {% endif %}
     {% endif %}
 
@@ -199,12 +228,24 @@ metallb_public_vip:
     {% set _b = 2 ** (32 - (_n[1] | int)) %}
     {% set _l = _n[0].split('.') | map('int') | list %}
     {% set _a = metallb_public_vip.split('.') | map('int') | list %}
+    {% set _o = metallb_public_vip.split('.')[-1] | int %}
+    {% set _band = ('the .11-.19 Proxmox host band' if 11 <= _o <= 19
+                    else 'the SMTP relay address (.23, vmid 123)' if _o == 23
+                    else 'the .31-.39 k3s server band (vmids 131+)' if 31 <= _o <= 39
+                    else 'the .41-.49 k3s agent band (vmids 141+)' if 41 <= _o <= 49
+                    else '') if metallb_public_vip.startswith(lan_prefix ~ '.') else '' %}
     {% if (_a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3]) // _b != (_l[0] * 16777216 + _l[1] * 65536 + _l[2] * 256 + _l[3]) // _b %}
     metallb_public_vip must sit inside lan_cidr ({{ lan_cidr }}).
     {% elif metallb_public_vip in [k3s_api_vip, lan_gateway] %}
     metallb_public_vip must differ from k3s_api_vip ({{ k3s_api_vip }}) and from
     lan_gateway ({{ lan_gateway }}) — MetalLB answers ARP for it, so sharing
     either address takes the API or the router off the LAN.
+    {% elif _band %}
+    metallb_public_vip {{ metallb_public_vip }} is in {{ _band }}, which
+    hosts.yml composes guest addresses from — MetalLB would answer ARP for an
+    address a generated guest already holds. Pick one outside .11-.19, .23,
+    .31-.39 and .41-.49; the starter scheme leaves .1-.10, .20-.22, .24-.30 and
+    .50+ free, and hosts.yml's header lists the whole layout.
     {% endif %}
     {% endif %}
 
@@ -222,12 +263,24 @@ metallb_internal_vip:
     {% set _b = 2 ** (32 - (_n[1] | int)) %}
     {% set _l = _n[0].split('.') | map('int') | list %}
     {% set _a = metallb_internal_vip.split('.') | map('int') | list %}
+    {% set _o = metallb_internal_vip.split('.')[-1] | int %}
+    {% set _band = ('the .11-.19 Proxmox host band' if 11 <= _o <= 19
+                    else 'the SMTP relay address (.23, vmid 123)' if _o == 23
+                    else 'the .31-.39 k3s server band (vmids 131+)' if 31 <= _o <= 39
+                    else 'the .41-.49 k3s agent band (vmids 141+)' if 41 <= _o <= 49
+                    else '') if metallb_internal_vip.startswith(lan_prefix ~ '.') else '' %}
     {% if (_a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3]) // _b != (_l[0] * 16777216 + _l[1] * 65536 + _l[2] * 256 + _l[3]) // _b %}
     metallb_internal_vip must sit inside lan_cidr ({{ lan_cidr }}).
     {% elif metallb_internal_vip in [k3s_api_vip, metallb_public_vip, lan_gateway] %}
     metallb_internal_vip must differ from k3s_api_vip ({{ k3s_api_vip }}),
     metallb_public_vip ({{ metallb_public_vip }}) and lan_gateway
     ({{ lan_gateway }}) — MetalLB answers ARP for it.
+    {% elif _band %}
+    metallb_internal_vip {{ metallb_internal_vip }} is in {{ _band }}, which
+    hosts.yml composes guest addresses from — MetalLB would answer ARP for an
+    address a generated guest already holds. Pick one outside .11-.19, .23,
+    .31-.39 and .41-.49; the starter scheme leaves .1-.10, .20-.22, .24-.30 and
+    .50+ free, and hosts.yml's header lists the whole layout.
     {% endif %}
     {% endif %}
 
@@ -482,8 +535,10 @@ secrets_backend:
     {% if secrets_backend != 'onepassword' %}
     secrets_backend '{{ secrets_backend }}' is not implemented — only
     'onepassword' generates the ClusterSecretStore, the Connect controller and
-    the op:// references the deploy jobs resolve. See docs/ARCHITECTURE.md
-    "Backend seams".
+    the references the deploy jobs resolve. The host-side half is the
+    secret_runner() / secret_ref() macros at the top of Taskfile.yml.jinja, which
+    fail the render rather than emitting an empty reference for a backend they
+    have no branch for. See docs/ARCHITECTURE.md "Backend seams".
     {% endif %}
 
 storage_backend:
@@ -516,6 +571,24 @@ onepassword_vault:
     {% if not onepassword_vault.strip() %}
     onepassword_vault is required — it is the first path segment of every
     op://<vault>/<item>/<field> reference the generated repo emits.
+    {% elif ':' in onepassword_vault %}
+    onepassword_vault must not contain ':': the name is also rendered UNQUOTED
+    as a YAML key in the ClusterSecretStore's `vaults:` map and as a value in
+    the generated Taskfile, and a colon splits both — the manifest stops
+    parsing, so the whole cluster fails to build rather than one reference
+    failing to resolve. Rename the vault.
+    {% elif '/' in onepassword_vault %}
+    onepassword_vault must not contain '/': it is the first path segment of an
+    op://<vault>/<item>/<field> URI, so a slash re-splits every reference —
+    op://{{ onepassword_vault }}/SSH Key/public key would parse as vault
+    '{{ onepassword_vault.split('/')[0] }}', item
+    '{{ onepassword_vault.split('/')[1] }}', and surface as an item-not-found
+    error from inside a deploy job. Use the vault's name; if it really contains
+    a slash, rename the vault.
+    {% elif onepassword_vault != onepassword_vault.strip() %}
+    onepassword_vault has leading or trailing whitespace. The value is emitted
+    verbatim into every op:// URI and into `op item list --vault`, where the
+    padding is not trimmed for you.
     {% endif %}
 
 dns_backend:
@@ -548,11 +621,49 @@ compute_node_count:
     Number of compute (non-NAS) Proxmox hosts in the starter inventory. With
     the NAS node that is compute_node_count + 1 hosts; 2 gives the three-node
     etcd quorum k3s wants. Edit hosts.yml afterwards either way.
+
+    It also sizes two generated address bands: compute hosts at .12 upwards and
+    one k3s agent per Proxmox host at .41 upwards, whose .41-.49 band is the
+    ceiling — 8 compute hosts. The validator rejects a count whose bands reach
+    an address already claimed. For a bigger cluster, generate at 8 or fewer and
+    add the rest to hosts.yml by hand on a scheme of your own; nothing outside
+    hosts.yml derives an address from this answer.
   default: 2
   validator: >-
-    {% if compute_node_count | int < 1 %}
+    {% set _n = compute_node_count | int %}
+    {% set _resolvers = upstream_dns_servers.split() %}
+    {% set _vips = {k3s_api_vip: 'the k3s API VIP',
+                    metallb_public_vip: 'the public MetalLB VIP',
+                    metallb_internal_vip: 'the internal MetalLB VIP',
+                    lan_gateway: 'the LAN gateway'} %}
+    {% set ns = namespace(taken=[]) %}
+    {% for i in range(1, _n + 1) %}
+    {% set _o = 11 + i %}
+    {% set _a = lan_prefix ~ '.' ~ _o %}
+    {% if _a in _vips %}
+    {% set ns.taken = ns.taken + ['pve-node-%02d' | format(i) ~ ' would take ' ~ _a ~ ', ' ~ _vips[_a]] %}
+    {% elif _a in _resolvers %}
+    {% set ns.taken = ns.taken + ['pve-node-%02d' | format(i) ~ ' would take ' ~ _a ~ ', a resolver'] %}
+    {% elif _o == 23 %}
+    {% set ns.taken = ns.taken + ['pve-node-%02d' | format(i) ~ ' would take ' ~ _a ~ ', the SMTP relay'] %}
+    {% elif 31 <= _o <= 39 %}
+    {% set ns.taken = ns.taken + ['pve-node-%02d' | format(i) ~ ' would take ' ~ _a ~ ', in the k3s server band'] %}
+    {% elif 41 <= _o <= 49 %}
+    {% set ns.taken = ns.taken + ['pve-node-%02d' | format(i) ~ ' would take ' ~ _a ~ ', in the k3s agent band'] %}
+    {% endif %}
+    {% endfor %}
+    {% if _n < 1 %}
     compute_node_count must be at least 1 — the NAS node alone cannot carry a
     k3s server quorum.
+    {% elif ns.taken %}
+    compute_node_count {{ _n }} composes host addresses that are already
+    claimed: {{ ns.taken | join('; ') }}. Generate 8 or fewer and extend
+    hosts.yml by hand.
+    {% elif 41 + _n > 49 %}
+    compute_node_count {{ _n }} puts {{ _n + 1 }} k3s agents at
+    {{ lan_prefix }}.41-{{ lan_prefix }}.{{ 41 + _n }}, past the .41-.49 agent
+    band and into .50+, which the starter scheme leaves for the application
+    guests you add later. Generate 8 or fewer and extend hosts.yml by hand.
     {% endif %}
 
 nas_host:
@@ -703,7 +814,7 @@ lib_ref:
     sources. Use a RELEASE TAG (vX.Y.Z) — the library's include contract is
     explicit that a branch is never a valid pin, and a branch deleted after
     merge takes every include, module source and collection install with it.
-  default: "v0.6.2"
+  default: "v0.7.2"
   validator: >-
     {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
     lib_ref must be a release TAG of the form vX.Y.Z (e.g. v1.2.3). A branch is

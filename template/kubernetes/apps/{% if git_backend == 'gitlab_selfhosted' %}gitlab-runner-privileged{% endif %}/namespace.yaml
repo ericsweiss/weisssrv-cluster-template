@@ -12,8 +12,7 @@ metadata:
     app.kubernetes.io/name: gitlab-runner-privileged
     app.kubernetes.io/part-of: gitlab
     app.kubernetes.io/managed-by: flux
-    # Opts this namespace into the platform ClusterSecretStore, whose
-    # spec.conditions admit only namespaces carrying this label.
+    # ClusterSecretStore opt-in label (configs/cluster-secret-store.yaml).
     ${cluster_node_label_domain}/cluster-secrets: "true"
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/warn: privileged

@@ -67,7 +67,7 @@ Violating one of these breaks production or fails review.
 |---|---|---|
 | A Kubernetes application | the closest existing directory under `kubernetes/apps/` | mirror its shape: namespace, workload, storage, ExternalSecret, certificate, ingress route, NetworkPolicy, autoscaling policy |
 | A host or guest | `ansible/inventories/prod/` and the [role's README in the library](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) | inventory first, playbook second; per-host facts go inline on the host entry in `hosts.yml` (there is no `host_vars/` unless you create one) |
-| Storage: pools, datasets, exports | `ansible/inventories/prod/group_vars/nas.yml` | declare only what exists — Ansible never creates or destroys a pool; per-guest zvols are `vm_additional_disks` in `hosts.yml` |
+| Storage: pools, datasets, exports | `ansible/inventories/prod/group_vars/nas.yml` | declare only what exists — Ansible never creates or destroys a pool; a NEW or empty pool goes through `docs/RUNBOOKS.md` § Storage bootstrap first; per-guest zvols are `vm_additional_disks` in `hosts.yml` |
 | Terraform state (DNS, tailnet, SSO) | the module directory and its README | plan, review, apply; SSO objects are a supervised apply |
 | A version pin or an upgrade | `docs/RUNBOOKS.md` § Upgrades | `task maintenance:check-versions`, then bump, `task flux:sync-versions`, commit both files |
 | An incident | `docs/RUNBOOKS.md` § Where to look first, then the service's dashboard and logs | `task flux:status`, `task infra:verify`, `task k3s:status` |
@@ -78,9 +78,24 @@ Violating one of these breaks production or fails review.
 
 Run from the repository root:
 
-- `task lint` — the local mirror of the CI lint stage. Run it for every change.
+- `task lint` — the local mirror of the CI lint stage (every job in it except
+  `deploy-coverage`, which needs the MR's merge base). It includes `tests/`
+  (`lint:invariants`), which is what catches a duplicate address or vmid, an
+  address outside the LAN, and an unresolvable `${placeholder}`. Run it for
+  every change.
 - `task flux:lint` — whenever `kubernetes/` changed. It renders every
-  Kustomization, substitutes, and fails on any unresolved `${...}`.
+  Kustomization, substitutes, fails on any unresolved `${...}`, and runs the
+  cluster-invariant gates over that corpus exactly as the CI flux-lint job's
+  `extra_validation` does: HPA/VPA conflicts, a scraped namespace its
+  NetworkPolicies do not admit Prometheus into, an unscoped
+  `ClusterSecretStore`, a PVC with no `storageClassName`, and `helm template`
+  over the value-heavy releases.
+- `task lint:netpol-parity` — the LAN fence, and the one gate that reads the
+  manifests on disk rather than the rendered corpus, so it also covers
+  `kubernetes/clusters/{{ cluster_name }}/flux-system/`. Every public-egress
+  `except:` list must match a canonical reserved-CIDR set; a deliberately
+  peer-less egress rule is declared in `scripts/netpol-except.yaml` with its
+  reason. `task lint` runs it.
 - `task flux:sync-versions` — whenever a version pin changed; commit both files.
 - `task hosts:sync` — whenever `hosts.yml` changed; commit the generated file.
 - `task lint:prometheus-config` — whenever alert or recording rules changed. It

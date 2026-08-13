@@ -67,14 +67,15 @@ tested, not a preference.
 |---|---|
 | `v0.1.0` | weisssrv-lib `v0.2.0` |
 | `v0.2.0` | weisssrv-lib `v0.5.2` |
-| `main` (unreleased) | weisssrv-lib `v0.6.2` |
+| `main` (unreleased) | weisssrv-lib `v0.7.2` |
 
 Rules that keep the table meaningful:
 
-- The `lib_ref` **default** in `copier.yml`, the fixture's `lib_ref`, and this
-  repository's own `include:` refs move together, in one MR. They are compared
-  by the test suite, so a partial bump fails rather than shipping a default the
-  pipeline never rendered against.
+- The `lib_ref` **default** in `copier.yml` and this repository's own `include:`
+  refs move together, in one MR — the answer fixtures do not answer `lib_ref`
+  at all, so they inherit that default and there is nothing to bump there. They
+  are compared by the test suite, so a partial bump fails rather than shipping a
+  default the pipeline never rendered against.
 - Add the row in that same MR, labelled `main` until the tag exists, then
   relabel it when the release is cut. The release notes are generated from
   commit subjects and carry no pin, so this table is the only place the pair is

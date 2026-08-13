@@ -390,7 +390,7 @@ implementation has to satisfy.
 
 | Seam | Today | Touchpoints | A new backend must provide |
 |---|---|---|---|
-| Secrets | 1Password | `op://` refs in Taskfile/CI/group_vars, one `ClusterSecretStore`, one controller | a store the operator supports, a run-time injection mechanism for host tooling, and the two bootstrap credentials |
+| Secrets (`secrets_backend`) | 1Password | the `secret_runner()` / `secret_ref()` macros every reference in the generated Taskfile **and** `.gitlab-ci.yml` is composed from, the library deploy fragment the CI file includes, the `op://` refs in `group_vars`, one `ClusterSecretStore`, one controller | a store the operator supports, a run-time injection mechanism for host tooling, and the two bootstrap credentials |
 | DNS | Cloudflare | Terraform zone module, external-dns provider, ACME DNS-01 solver | provider credentials, a Terraform module of the same shape, an operator-supported DNS-01 solver |
 | Git / CI | self-hosted GitLab | `.gitlab-ci.yml`, Flux `GitRepository`, in-cluster runners and agent | a pipeline definition, a Flux source the controller supports, a token model for both |
 | Overlay VPN | Tailscale (optional) | host role, in-cluster operator, ACL Terraform module, firewall admin set | node enrolment, a way to publish cluster services, policy as code |
@@ -430,7 +430,18 @@ entry only when a consumer must act. Three worked cases, cluster side:
 |---|---|---|
 | Ceph rather than ZFS+NFS | omit `weisssrv.infra.nas_storage` and the `zfs_*` roles from the plays and run a `ceph_*` family beside them — the collection is a flat FQCN namespace, so both families can be installed at once | `group_vars/nas.yml` and the storage playbook become that family's; the static `PersistentVolume`s stop being NFS; `vm_additional_disks` (zvol passthrough) has no analogue and its consumers move to PVs |
 | GitHub rather than self-hosted GitLab | the `ci/` templates are GitLab YAML and are not included; the scripts they call are forge-neutral and get vendored into workflows, and `semantic-release.py --platform github` covers the release path | `.gitlab-ci.yml` is replaced by workflows, the Flux source becomes a GitHub `GitRepository`, and the in-cluster runner manifests become whatever executes the jobs |
-| A secrets store that is not 1Password | nothing to change for host-side roles — they take **values**, resolved by the caller before Ansible starts; the one exception is `zfs_encryption`, whose boot-time fetch is behind `zfs_encryption_key_command` | the `op://` references in `group_vars`, `Taskfile.yml` and the deploy jobs become the new tool's, `infrastructure/configs` gets that provider's `ClusterSecretStore`, and the two hand-made bootstrap Secrets become whatever it needs |
+| A secrets store that is not 1Password | nothing to change for host-side roles — they take **values**, resolved by the caller before Ansible starts; the one exception is `zfs_encryption`, whose boot-time fetch is behind `zfs_encryption_key_command` | a branch in `secret_runner()` / `secret_ref()` (the Jinja macros at the top of `Taskfile.yml.jinja` and of `.gitlab-ci.yml.jinja`, which every reference and deploy wrapper in the generated Taskfile and pipeline is emitted from — an unimplemented backend fails the render there rather than generating a repo that resolves nothing), the library `ci/deploy/deploy-base.yml` include that fetches the deploy SSH key, the `op://` references in `group_vars`, that provider's `ClusterSecretStore` under `infrastructure/configs`, and whatever replaces the two hand-made bootstrap Secrets |
+
+> **Planned, on the GitHub row:** the reusable Actions cluster pipeline (deploy
+> matrix, validation-gate → deploy → verify graph, integration fan-out) is a
+> tracked weisssrv-lib addition — see its `docs/EXTENSIBILITY.md` § Forge
+> portability, PLANNED entry. It is the library-side half only. `git_backend:
+> github` stays validator-blocked on **two** blockers, which is exactly what
+> `copier.yml`'s validator says: the generated pipeline *and* the Flux bootstrap
+> task are GitLab-shaped. So the template still owes the GitHub bootstrap path
+> (`flux bootstrap github` in `Taskfile.yml.jinja`, a GitHub `GitRepository` as
+> the Flux source) and the in-cluster runner manifests — the third column of that
+> row is the template-side scope.
 
 None of these ships today. What each one has is a written boundary — the files
 it touches and the contract its replacement satisfies — which is the difference

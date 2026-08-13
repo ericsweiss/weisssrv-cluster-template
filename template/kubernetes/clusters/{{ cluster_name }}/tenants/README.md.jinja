@@ -39,14 +39,13 @@ conventions again.
 is always this cluster pulling, never the tenant pushing. That is true today and
 is the part that matters here.
 
-The app-template carries a *selector* for this, so a tenant is generated with the
-shape it wants rather than editing the pipeline out afterwards —
-`./scripts/select-ci.sh <shape>` in the scaffolded repository (a wrapper over
-`weisssrv-new-project prune ci:<shape>`):
+The app-template asks for the shape up front — its `ci_shape` answer — so a
+tenant is generated with the pipeline it wants rather than editing one out
+afterwards:
 
-| Shape | What the tenant repo carries | What this cluster does |
+| `ci_shape` | What the tenant repo carries | What this cluster does |
 |---|---|---|
-| `gitlab` | a `.gitlab-ci.yml` that lints and kubeconforms `kubernetes/flux/` | pulls and reconciles |
+| `gitlab_selfhosted` | a `.gitlab-ci.yml` that lints and kubeconforms `kubernetes/flux/` | pulls and reconciles |
 | `github` | the same gates as GitHub Actions workflows | pulls and reconciles |
 | `none` | no pipeline at all | pulls and reconciles |
 

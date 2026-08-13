@@ -7,8 +7,7 @@ metadata:
     app.kubernetes.io/name: registry-cache
     app.kubernetes.io/part-of: registry-cache
     app.kubernetes.io/managed-by: flux
-    # Opts this namespace into the platform ClusterSecretStore, whose
-    # spec.conditions admit only namespaces carrying this label.
+    # ClusterSecretStore opt-in label (configs/cluster-secret-store.yaml).
     ${cluster_node_label_domain}/cluster-secrets: "true"
     # enforce baseline / warn+audit restricted: the pod already applies
     # restricted-style hardening, but the upstream image is used verbatim and is

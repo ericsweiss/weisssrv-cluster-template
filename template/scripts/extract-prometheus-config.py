@@ -110,7 +110,11 @@ def _parse_dummy(values: list[str]) -> dict[str, str]:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog=Path(argv[0]).name, description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog=Path(argv[0]).name,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("subcommand", choices=("rules", "alertmanager"))
     parser.add_argument("out", type=Path)
     parser.add_argument("--release", type=Path, default=DEFAULT_RELEASE)

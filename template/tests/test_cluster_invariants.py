@@ -1,7 +1,7 @@
 """Invariants this cluster's own layout has to keep.
 
-Two families, both PyYAML-only so they run in the `python-tests` CI job without
-kustomize or Ansible:
+All PyYAML-only, so they run in the `python-tests` CI job without kustomize or
+Ansible:
 
 * **Site values stay out of the Kubernetes manifests.** Every domain, VIP and
   CIDR lives in ONE place — the cluster-config ConfigMap — and reaches the
@@ -10,8 +10,18 @@ kustomize or Ansible:
   ConfigMap defines. `flux-lint` covers the same ground POST-kustomize.
 * **The Ansible inventory's addresses are internally consistent.** `hosts.yml`
   ships as a skeleton you are told to re-address, and two guests on one address
-  — or one vmid, which `pct` and `qm` share a namespace for — fails phases later
-  than the edit that caused it, naming neither.
+  — or one vmid, which `pct` and `qm` share a namespace for, or a guest on one
+  of the cluster's VIPs — fails phases later than the edit that caused it,
+  naming neither.
+* **Every playbook the Taskfile names exists.** go-task never stats the files a
+  command template mentions, so a missing playbook is invisible to `task --list`
+  and surfaces only when an operator runs the task — which for the
+  disaster-recovery ones is the worst possible moment.
+* **Every playbook is classified for deploy coverage.** `check-deploy-coverage.sh`
+  only inspects the paths an MR touched, so a playbook that reaches neither a
+  deploy job nor `scripts/deploy-coverage.conf` sits green until someone edits
+  it — and then reds a pipeline they did not break. This asserts the whole tree
+  up front.
 """
 
 from __future__ import annotations
@@ -29,6 +39,14 @@ SOURCES_DIR = K8S_ROOT / "infrastructure" / "sources"
 CLUSTERS_DIR = K8S_ROOT / "clusters"
 ANSWERS_FILE = REPO_ROOT / ".copier-answers.yml"
 INVENTORY_HOSTS = REPO_ROOT / "ansible" / "inventories" / "prod" / "hosts.yml"
+TASKFILE = REPO_ROOT / "Taskfile.yml"
+# The ansible tasks run with `dir: ./ansible`, so a playbook path is relative to
+# that, not to the repository root.
+ANSIBLE_DIR = REPO_ROOT / "ansible"
+PLAYBOOK_REF_RE = re.compile(r"playbooks/[A-Za-z0-9_./-]+\.ya?ml")
+PLAYBOOKS_DIR = ANSIBLE_DIR / "playbooks"
+CI_FILE = REPO_ROOT / ".gitlab-ci.yml"
+COVERAGE_CONF = REPO_ROOT / "scripts" / "deploy-coverage.conf"
 
 # The postBuild sources every stage after `sources` substitutes from.
 SUBSTITUTE_SOURCES = ("cluster-versions", "cluster-config")
@@ -44,6 +62,11 @@ needs_k8s = pytest.mark.skipif(
 )
 needs_inventory = pytest.mark.skipif(
     not INVENTORY_HOSTS.is_file(), reason="no ansible/inventories/prod/hosts.yml"
+)
+needs_taskfile = pytest.mark.skipif(not TASKFILE.is_file(), reason="no Taskfile.yml")
+needs_deploy_coverage = pytest.mark.skipif(
+    not (PLAYBOOKS_DIR.is_dir() and CI_FILE.is_file() and COVERAGE_CONF.is_file()),
+    reason="no playbooks tree, .gitlab-ci.yml or deploy-coverage.conf",
 )
 
 
@@ -272,6 +295,32 @@ def test_every_ansible_host_is_unique():
 
 
 @needs_inventory
+def test_no_host_claims_a_cluster_vip():
+    """The VIPs are not inventory hosts, so the duplicate scan above cannot see
+    them. kube-vip and MetalLB answer ARP for them, and a guest configured on
+    the same address is an ARP fight that names neither side — it surfaces as
+    an API or ingress endpoint that works intermittently."""
+    if "cluster-config" not in CONFIGMAPS:
+        pytest.skip("no cluster-config ConfigMap to read the VIPs from")
+    data = CONFIGMAPS["cluster-config"][1]
+    vips = {
+        "cluster_k3s_api_vip": "the k3s API VIP",
+        "cluster_metallb_public_vip": "the public MetalLB VIP",
+        "cluster_metallb_internal_vip": "the internal MetalLB VIP",
+    }
+    claimed = {str(data[key]): label for key, label in vips.items() if data.get(key)}
+    assert claimed, "cluster-config declares no VIPs — this gate is examining nothing"
+    collisions = [
+        f"{name} is on {addr}, {claimed[addr]}"
+        for name, host_vars in sorted(_inventory_hosts().items())
+        if (addr := str(host_vars.get("ansible_host") or "")) in claimed
+    ]
+    assert not collisions, (
+        "inventory hosts configured on a cluster VIP:\n  " + "\n  ".join(collisions)
+    )
+
+
+@needs_inventory
 def test_every_ansible_host_is_inside_the_lan():
     """Guests are created on the flat LAN and route through its gateway; an
     address outside it is unreachable from everything that manages it."""
@@ -294,4 +343,108 @@ def test_every_ansible_host_is_inside_the_lan():
             outside.append(f"{name}: {addr}")
     assert not outside, (
         f"hosts addressed outside cluster_lan_cidr ({network}):\n  " + "\n  ".join(outside)
+    )
+
+
+@needs_taskfile
+def test_every_taskfile_playbook_exists():
+    """A task that names a playbook nobody wrote fails with `the playbook could
+    not be found`, and nothing before that moment says so: ansible-lint and the
+    syntax check walk the playbooks/ tree rather than the tasks, and
+    scripts/check-taskfile.sh resolves script and dotenv references only."""
+    refs = sorted(set(PLAYBOOK_REF_RE.findall(TASKFILE.read_text(encoding="utf-8"))))
+    assert refs, "the Taskfile names no playbooks — this gate is examining nothing"
+    missing = [ref for ref in refs if not (ANSIBLE_DIR / ref).is_file()]
+    assert not missing, (
+        "Taskfile.yml names playbooks that do not exist under ansible/:\n  "
+        + "\n  ".join(missing)
+    )
+
+
+class _CILoader(yaml.SafeLoader):
+    """SafeLoader that tolerates GitLab's `!reference` tags.
+
+    Subclassed so the constructor never lands on the global SafeLoader.
+    """
+
+
+_CILoader.add_multi_constructor("!", lambda loader, suffix, node: None)
+
+
+def _deploy_job_playbooks() -> set[str]:
+    """Playbook paths named verbatim in a deploy job's `changes:` list.
+
+    Same rule as check-deploy-coverage.sh: a wildcard confers no coverage, so a
+    single `ansible/playbooks/**` cannot mask a missing trigger.
+    """
+    ci = yaml.load(CI_FILE.read_text(encoding="utf-8"), Loader=_CILoader) or {}
+    prefix = "ansible/playbooks/"
+    mapped: set[str] = set()
+    for name, job in ci.items():
+        if not isinstance(job, dict) or not name.startswith("deploy-"):
+            continue
+        if job.get("stage") != "deploy":
+            continue
+        for rule in job.get("rules") or []:
+            if not isinstance(rule, dict):
+                continue
+            changes = rule.get("changes") or []
+            if isinstance(changes, dict):
+                changes = changes.get("paths") or []
+            if not isinstance(changes, list):
+                continue
+            for change in changes:
+                if not isinstance(change, str) or not change.startswith(prefix):
+                    continue
+                rel = change[len(prefix) :]
+                if "*" not in rel and rel.endswith((".yml", ".yaml")):
+                    mapped.add(rel)
+    return mapped
+
+
+def _acknowledged_playbooks() -> set[str]:
+    """The `[playbooks]` entries of deploy-coverage.conf, comments stripped."""
+    entries: set[str] = set()
+    section = None
+    for raw in COVERAGE_CONF.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            continue
+        if section == "playbooks":
+            entries.add(line.split("#", 1)[0].strip())
+    return entries
+
+
+@needs_deploy_coverage
+def test_every_playbook_is_deploy_classified():
+    """check-deploy-coverage.sh only inspects the paths one MR touched, so an
+    unclassified playbook stays green until someone edits it and then fails a
+    pipeline for a gap they did not introduce. Assert the whole tree instead:
+    every playbook is either wired to a deploy job or acknowledged (with its
+    rationale) in scripts/deploy-coverage.conf."""
+    playbooks = sorted(
+        str(p.relative_to(PLAYBOOKS_DIR))
+        for p in PLAYBOOKS_DIR.rglob("*")
+        if p.is_file() and p.suffix in {".yml", ".yaml"}
+    )
+    assert playbooks, "no playbooks found — this gate is examining nothing"
+    classified = _deploy_job_playbooks() | _acknowledged_playbooks()
+    unclassified = [p for p in playbooks if p not in classified]
+    assert not unclassified, (
+        "playbooks reachable by neither a deploy job's changes: list nor "
+        "scripts/deploy-coverage.conf [playbooks]:\n  " + "\n  ".join(unclassified)
+    )
+
+
+@needs_deploy_coverage
+def test_deploy_coverage_conf_lists_no_missing_playbook():
+    """The mirror direction: an entry left behind by a rename makes the conf
+    read as coverage for a file that no longer exists."""
+    stale = [p for p in sorted(_acknowledged_playbooks()) if not (PLAYBOOKS_DIR / p).is_file()]
+    assert not stale, (
+        "scripts/deploy-coverage.conf [playbooks] names files that do not "
+        "exist under ansible/playbooks/:\n  " + "\n  ".join(stale)
     )

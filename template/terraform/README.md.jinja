@@ -62,7 +62,7 @@ error, not a Terraform one.
 
 | Job | When | What it does |
 |---|---|---|
-| `terraform-plan` | MRs and `main`, on `terraform/{{ dns_backend }}/**` | Plans, saves `tfplan`, publishes the MR widget report |
+| `terraform-plan` | MRs and `main`, on `terraform/cloudflare/**` | Plans, saves `tfplan`, publishes the MR widget report |
 | `deploy-terraform` | manual on `main` | Applies **that saved plan**, not a fresh one |
 {% if vpn_tailscale %}| `tailscale-drift-plan` | schedule, and `main` on tailscale changes | Read-only plan, advisory |
 {% endif %}| `authentik-drift-plan` | schedule, and `main` on authentik changes | Read-only plan, advisory |
@@ -79,7 +79,9 @@ have to plug in:
 
 - **DNS** (`dns_backend`) — `cloudflare/` here, plus the cert-manager
   `ClusterIssuer` DNS-01 solver and the external-dns HelmRelease in
-  `kubernetes/infrastructure/`.
+  `kubernetes/infrastructure/`. The CI jobs name the directory literally and are
+  gated on the answer, so a second value renders no DNS pipeline rather than one
+  pointing at a directory that does not exist.
 - **SSO** — `authentik/` here, plus `kubernetes/apps/authentik` and the Traefik
   forward-auth middleware.
 - **Secrets** (`secrets_backend`) — not a Terraform concern beyond the `op://`

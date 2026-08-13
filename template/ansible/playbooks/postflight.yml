@@ -116,27 +116,16 @@
       loop_control:
         label: "{{ item.host }}"
 
-    # Exercise the real push channel end to end, short of pushing a certificate.
+    # Exercises the real push channel end to end, short of pushing a
+    # certificate. The pinned forced command (`cert-receive`) runs regardless of
+    # what the client asks for, and with empty stdin it bails `FAIL: empty
+    # bundle`, exit 3 — nothing written, no service reloaded. Exit 3 therefore
+    # proves host-key pin, key auth, forced command, sudoers drop-in and
+    # receiver install all hold; 255 is an SSH refusal, 1 a missing receiver.
     #
-    # The distribution pubkey is pinned in each target's authorized_keys with
-    # `command="sudo /usr/local/sbin/cert-receive",restrict`, so OpenSSH ignores
-    # whatever the client asks for and runs the receiver — an `echo success`
-    # payload can never run, and a probe that looks for its output can never
-    # pass. What the receiver DOES do with an empty stdin (`-n` gives it
-    # /dev/null) is bail on its first check: `FAIL: empty bundle`, exit 3,
-    # nothing written and no service reloaded.
-    #
-    # That exit code is therefore the proof, and it is a strong one: reaching it
-    # means the target's host key matched the pin (StrictHostKeyChecking=yes
-    # against the root known_hosts the role seeds), the distribution key
-    # authenticated, the forced command fired, its sudoers drop-in allowed the
-    # escalation, and the receiver script is installed. Anything earlier fails
-    # differently — 255 for an SSH-level refusal, 1 for a missing receiver.
-    #
-    # `acme_certs_ssh_key_path` is deliberately used WITHOUT a default: it is set
-    # in group_vars/dns.yml next to the rest of the channel's inputs, and an
-    # undefined-variable error here is the correct outcome if that ever stops
-    # being true.
+    # acme_certs_ssh_key_path deliberately has NO default: it is set in
+    # group_vars/dns.yml, and an undefined-variable error here is the right
+    # outcome if that stops being true.
     - name: Probe each certificate distribution target over the pinned-key channel
       ansible.builtin.command:
         argv:

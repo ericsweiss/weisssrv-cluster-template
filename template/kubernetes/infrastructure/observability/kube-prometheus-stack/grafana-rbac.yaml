@@ -12,8 +12,8 @@
 # BOTH objects, and NOT `rbac.useExistingClusterRole`: that keeps the chart's
 # fixed-name binding and only swaps its roleRef, which is IMMUTABLE — the apply
 # is rejected, and because the binding sorts before the Deployment the whole
-# release upgrade rolls back on every reconcile. Disabling the chart's RBAC makes
-# the binding below a NEW object and lets Helm delete the two it used to own.
+# release upgrade rolls back on every reconcile. Disabling the chart's RBAC
+# instead makes the binding below a distinct object with its own name.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

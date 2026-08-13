@@ -45,7 +45,7 @@ Every change, including one-line fixes, takes the same path:
 ```bash
 git switch -c <branch>
 # edit
-task lint                      # the local mirror of the CI lint stage
+task lint                      # every CI lint job except deploy-coverage
 task flux:lint                 # if kubernetes/ changed (task lint runs it too)
 git commit && git push -u origin <branch>
 # open a merge request; let the pipeline and review run
@@ -277,6 +277,28 @@ holding no copy of its disk does not start there.
 
 ---
 
+## Guest autostart and boot order
+
+`proxmox_autostart_enabled`, `proxmox_startup_order` and `proxmox_startup_delay`
+on a host entry decide whether a guest comes back after its hypervisor reboots
+and in what order — the resolvers before the relay, both before the k3s nodes.
+The `proxmox_lxc` and `proxmox_vm` roles apply them when they create a guest, so
+for anything provisioned from this inventory there is nothing else to do.
+
+For guests that already existed (created by hand, or carried over from before
+they were in `hosts.yml`), reconcile them:
+
+```bash
+task proxmox:configure-autostart          # add -- --limit <host> to narrow it
+```
+
+It reads each guest's live config through its `proxmox_host` and writes only on
+a difference, so it is safe to re-run and safe against a powered-off guest.
+Leave HA-managed guests out of the groups it walks: HA starts them, so `onboot`
+is meaningless for them and setting it invites two owners for one decision.
+
+---
+
 ## Per-host log-shipping alerts
 
 `kubernetes/infrastructure/observability/loki/host-log-staleness.yaml` ships the
@@ -430,6 +452,46 @@ That is also the rotation procedure: a vault edit alone changes nothing.
 ---
 
 ## Storage
+
+### Storage bootstrap
+
+For a NAS whose pools are new or empty — first setup, a rebuilt storage host, or
+a pool you just added. `task storage:deploy` is the day-2 path and deliberately
+fails on a declared dataset that does not exist, so this is what creates them.
+
+**1. Create the pools by hand.** Ansible never runs `zpool create`: geometry is
+a hardware decision and the command is destructive. Reference members by
+`/dev/disk/by-id/`, and check what is already on the device — a Proxmox boot
+disk holds its ESP and LVM in earlier partitions, so the pool goes on a
+partition, not the whole device.
+
+```bash
+lsblk -o NAME,SIZE,TYPE,FSTYPE,PARTLABEL /dev/disk/by-id/<device>
+zpool create -o ashift=12 \
+             -O acltype=posixacl -O xattr=sa -O compression=zstd \
+             -O relatime=on -O normalization=formD \
+             -m /mnt/<pool> <pool> <vdev-type> /dev/disk/by-id/<member> ...
+```
+
+**2. Create the datasets and configure the services.**
+
+```bash
+task disaster-recovery:storage-bootstrap
+```
+
+It reports what exists, refuses to continue while a declared pool is missing,
+prints the datasets it would create and waits for a typed `yes`, then creates
+them with the properties from `group_vars/nas.yml`, makes the export source
+directories, and runs the NFS/mergerfs/Samba configuration. Existing datasets
+are skipped; nothing is destroyed.
+
+**Encrypted datasets are skipped** and named in the output: they carry
+`encryption:` but no `keyformat`/`keylocation` (the key arrives at boot from the
+secrets backend), so `zfs create` needs those passed by hand. Create them, then
+re-run — `task zfs:encrypt` installs the boot-time key load.
+
+**3. Verify**: `task infra:verify`, `zpool status`, and the SMART checks on the
+new members.
 
 **A degraded pool**
 

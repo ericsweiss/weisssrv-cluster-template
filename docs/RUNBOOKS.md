@@ -26,10 +26,13 @@ repository afterwards.
 | Deploying an Ansible change | — | — |
 | Upgrades (versions, host packages, k3s nodes, the library) | — | — |
 | Adding a node | — | — |
+| Making a guest highly available | — | — |
+| Guest autostart and boot order | — | — |
+| Per-host log-shipping alerts | — | — |
 | Adding an application | — | — |
 | Rotating a secret | — | — |
 | Certificates | `#certificates` | the certificate-expiry alerts |
-| Suspending, rolling back, breaking glass | — | — |
+| Suspending, rolling back, and breaking glass | — | — |
 | Storage | — | — |
 | Backups and restore | `#backups-and-restore` | the backup-failed / stale alerts |
 | When Flux is unhappy | — | — |

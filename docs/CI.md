@@ -24,16 +24,22 @@ substitution in the shaped fixture and is only visible in a second, unlike one.
 | Check | What it proves | Needs |
 |---|---|---|
 | `yamllint` | the tree passes the generated repo's own `.yamllint` | `yamllint` |
+| `terraform` | `terraform fmt -check -recursive` over the rendered `terraform/`, plus the tailnet policy still parses. Five of those files are templates, so this is what catches a Jinja bug that lands as invalid HCL | `terraform` |
 | `flux` | for every Kustomization under `kubernetes/clusters/<name>/`: `kustomize build` the target path, assert every `${placeholder}` is a key of one of the two postBuild ConfigMaps, substitute, `kubeconform`. Mirrors `ci/validate/flux-lint.yml`, through the generated repo's own `scripts/flux-env.sh` | `kustomize`, `kubeconform` |
+| `cluster-gates` | the five invariant gates the generated pipeline wires — `check-scrape-netpol`, `check-secretstore-scope`, `check-pvc-storageclass` and `check-hpa-vpa-invariant` over the whole rendered corpus, `check-netpol-except-parity` over `kubernetes/` on disk — actually PASS on the manifests the template ships. The render suite proves they are wired; without this, a generated cluster's first pipeline can be red on manifests nobody edited, and the template change that caused it went green | `kustomize` |
+| `ci-policy` | the generated pipeline pins a `default: image:`, sets `default: interruptible: true` with the `workflow.auto_cancel` split (`interruptible` globally, `none` on `main`), and leaves every deploy/gate/plan job uninterruptible. All three are defaults a job inherits by saying nothing, so no rendered job fails when they go missing | — |
 | `inventory-addresses` | no two hosts in `inventories/prod/hosts.yml` share an `ansible_host` or a `vmid`, and every address sits inside `cluster_lan_cidr`. Copier answers are validated one at a time, never against the address plan `hosts.yml` composes them into — and a resolver's vmid is derived from its answer (`100 + last octet`), so `upstream_dns_servers` landing in the `.31+` server band duplicates both. Reads the rendered inventory rather than the answer, so a hand re-address reaches the same gate | — |
-| `vendored` | every script in the render's `scripts/` **and** in this repository's own `scripts/` is byte-identical to the library's copy. The second half is what holds `scripts/semantic-release.py` — the file that cuts the tag a generated cluster's `copier update` resolves to — to the library at the ref the includes pin, and it refuses to compare at all if those includes and the fixture's `lib_ref` disagree | `--lib-path` |
+| `version-coverage` | every pin in the rendered vars file has a `scripts/version-registry.py` entry. Both are template output, so an entry added to one `.jinja` and not the other renders a cluster whose weekly bump bot silently never reports that pin | — |
+| `versions-configmap` | the rendered `cluster-versions` ConfigMap matches the rendered vars file — `flux` substitutes FROM the ConfigMap, so a stale value is otherwise a valid render | — |
+| `vendored` | every script in the render's `scripts/` **and** in this repository's own `scripts/` is byte-identical to the library's copy, plus the library's own registry gate (`scripts/check-vendored-copies.py` against `scripts/vendored-paths.yml`) over this repository. The second half is what holds `scripts/semantic-release.py` — the file that cuts the tag a generated cluster's `copier update` resolves to — to the library at the ref the includes pin, and it refuses to compare at all if those includes and `copier.yml`'s `lib_ref` default disagree. The registry arm adds the copies no directory walk reaches: the canonical `tests/test_check_lib_pins.py` suite, and the lint profiles this repository deliberately forks | `--lib-path` |
 | `role-opt-ins` | no playbook invokes a `<role>_enabled: false` role without the inventory setting the flag — a role that runs and does nothing, successfully | `--lib-path` |
 | `role-inputs` | every input an invoked role *asserts* and has no **usable** default for is assigned in `inventories/prod` — the shape that took out `proxmox_lxc_gateway`. "Usable" is decided by rendering the default against the inventory, not by reading it: `proxmox_lxc_nameserver` defaults to `{{ dns_servers \| default([]) \| join(' ') }}`, which is non-empty as text and empty as a value the moment `dns_servers` is unset | `--lib-path` |
+| `terraform-validate` | `terraform validate` per module against the library checkout, with each `git::…?ref=` source rewritten to it — otherwise the RELEASED module is what validates | `--lib-path`, `terraform` |
 | `ansible` | `ansible-playbook --syntax-check` on every rendered playbook, with `weisssrv.infra` resolved from the library | `ansible-playbook` |
 
-**`vendored`, `role-opt-ins` and `role-inputs` are silently skipped without
-`--lib-path`** — they read the library's roles and scripts, so there is nothing
-to compare against. The validator prints `skipped (no --lib-path)` for each. A
+**`vendored`, `role-opt-ins`, `role-inputs` and `terraform-validate` are
+silently skipped without `--lib-path`** — they read the library's roles,
+scripts and Terraform modules, so there is nothing to compare against. The validator prints `skipped (no --lib-path)` for each. A
 local run without it is therefore weaker than CI, which always passes one.
 
 A template change that produces a cluster which cannot reconcile fails here
@@ -56,13 +62,17 @@ render the last commit, silently testing something other than the diff under
 review.
 
 Requirements: `copier>=9`, `pytest`, `pyyaml` for the pytest suite; plus
-`yamllint`, `kustomize`, `kubeconform` and `ansible-playbook` for the
-validator. Any missing tool is reported by name. `--skip` takes any of
-`yamllint,flux,inventory-addresses,vendored,role-opt-ins,role-inputs,ansible`.
+`yamllint`, `terraform`, `kustomize`, `kubeconform` and `ansible-playbook` for
+the validator. Any missing tool is reported by name. `--skip` takes any of
+`yamllint,terraform,flux,cluster-gates,ci-policy,inventory-addresses,version-coverage,versions-configmap,vendored,role-opt-ins,role-inputs,terraform-validate,ansible`
+— the same names `validate_render.py --help` prints, and the same order the
+table above lists them in. `test_ci_doc_lists_every_validator_check` holds the
+three together, so a check added to the registry without a row here fails the suite;
+an unknown `--skip` name is rejected rather than silently skipping nothing.
 
 `--lib-path` points at a weisssrv-lib checkout — the directory that *contains*
 `ansible_collections/`. Use it to exercise an unmerged library change, to avoid
-the network, and — as the table above says — to run the three library-reading
+the network, and — as the table above says — to run the four library-reading
 checks at all. Without it the collection is installed from the git ref in the render's
 `requirements.yml`. The library's galaxy dependencies (`ansible.posix`,
 `community.general`) are installed either way, with the operator's own
@@ -70,9 +80,11 @@ checks at all. Without it the collection is installed from the git ref in the re
 
 ## The two answer fixtures
 
-Both are complete answer sets, and every question must be answered in **both**:
-`tests/test_copier_config.py` fails if a question is added to `copier.yml`
-without an entry in the shaped fixture, and the render suite's
+Both are complete answer sets, and every question must be answered in **both** —
+except `lib_ref`, which neither answers so that both inherit `copier.yml`'s
+default (`test_lib_ref_is_inherited_by_the_validated_fixture` asserts exactly
+that). `tests/test_copier_config.py` fails if any other question is added to
+`copier.yml` without an entry in the shaped fixture, and the render suite's
 `test_the_two_fixtures_answer_differently` asserts that the two files answer the
 same question set — so a new question that reaches only one of them fails there
 instead.
@@ -92,7 +104,9 @@ not a substitution.
 
 Structural assertions that need only PyYAML belong in `tests/test_render.py`.
 Anything requiring a tool belongs in `tests/validate_render.py`, as a
-`check_*` function registered in `main()`.
+`check_*` function listed in `RENDER_CHECKS` (or `LIB_CHECKS`, if it needs the
+library checkout). Add its row to the table above in the same change —
+`test_ci_doc_lists_every_validator_check` compares the two.
 
 Invariants about a **cluster** rather than about the template belong in
 `template/tests/test_cluster_invariants.py` — they ship to every generated

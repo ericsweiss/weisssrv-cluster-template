@@ -12,7 +12,9 @@
 # takes). test_render_b_carries_no_fixture_a_values asserts that nothing from
 # fixture A survives into this render.
 #
-# Every question in copier.yml must have an entry here too.
+# Every question in copier.yml must have an entry here too — except `lib_ref`,
+# which neither fixture answers so that both inherit copier.yml's default (see
+# test_answer_fixture_covers_every_question's `inherited` set).
 cluster_name: brinemoor
 internal_domain: internal.brinemoor.test
 external_domain: brinemoor.test

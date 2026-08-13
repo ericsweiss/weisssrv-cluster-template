@@ -1,8 +1,7 @@
 ---
-# HelmRelease fields that are byte-identical in BOTH runner releases. They used
-# to be hand-mirrored with a "keep in sync" comment; the two runners are the
-# shared-vs-privileged trust boundary, so a fix applied here can no longer be
-# forgotten in one file.
+# HelmRelease fields that are byte-identical in BOTH runner releases, defined
+# once so a fix here cannot be forgotten in one of them. The two runners are the
+# shared-vs-privileged trust boundary.
 #
 # Each runner's release.yaml keeps only its genuine deltas: name/namespace,
 # releaseName, secret, tags, runUntagged/protected, concurrent, the executor TOML,
@@ -80,8 +79,8 @@ patches:
               memory: 128Mi
             limits:
               # No CPU limit: the manager is a trusted control loop that bursts
-              # when spawning and reaping job pods, and CFS throttling here was a
-              # chronic CPUThrottlingHigh source. The request still grants a
+              # when spawning and reaping job pods, and CFS throttling here is a
+              # dominant CPUThrottlingHigh source. The request still grants a
               # scheduling share; the memory limit stays.
               memory: 512Mi
 

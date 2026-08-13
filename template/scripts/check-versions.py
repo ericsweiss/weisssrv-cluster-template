@@ -55,7 +55,7 @@ from typing import Optional
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_CANDIDATES = ("scripts/version-registry.py", "scripts/version-registry.json")
 
-# All five are populated by load_config(); see its docstring for the schema.
+# All populated by load_config(); see its docstring for the schema.
 SERVICE_REGISTRY: list[dict] = []
 VARS_FILE: Path = REPO_ROOT / "ansible/inventories/prod/group_vars/all.yml"
 # Aliases for `version_file` values that are not repo-relative paths, e.g.
@@ -63,6 +63,9 @@ VARS_FILE: Path = REPO_ROOT / "ansible/inventories/prod/group_vars/all.yml"
 VERSION_FILE_ALIASES: dict[str, Path] = {}
 DEFAULT_DEPLOY_COMMAND = ""
 UNTRACKED_ALLOWLIST: set[str] = set()
+# Heading on the table report; consumer-named so the output is not this
+# library's.
+REPORT_TITLE = "Version Check Report"
 
 CACHE_DIR = REPO_ROOT / ".version-cache"
 CACHE_TTL = 3600  # 1 hour cache
@@ -93,9 +96,8 @@ class ServiceVersion:
     error: Optional[str] = None
     var_name: str = ""  # Key in the vars file (or the version_file pin)
     notes: str = ""
-    # A held update is reported but not actionable: it doesn't flip the
-    # exit code or trigger MR comments (e.g. MetalLB 0.16.x blocked on an
-    # open upstream regression). The registry entry documents why in notes.
+    # A held update is reported but not actionable: it does not flip the exit
+    # code or trigger MR comments. The registry entry documents why in notes.
     held: bool = False
     # True only when this check performed a live network fetch (not a cache
     # hit or a manual/no-check service). Lets check_all skip the rate-limit
@@ -166,6 +168,7 @@ def load_config(path: Path, repo_root: Optional[Path] = None) -> dict:
           "default_deploy_command": "task infra:deploy",
           "version_file_aliases": {"ci": ".gitlab-ci.yml"},
           "untracked_allowlist": ["debian_version"],
+          "report_title": "Homelab Version Check Report",
           "services": [
             {"name": "k3s", "var_name": "k3s_version", "category": "github",
              "github_repo": "k3s-io/k3s", "version_prefix": "v",
@@ -176,7 +179,7 @@ def load_config(path: Path, repo_root: Optional[Path] = None) -> dict:
     Every path is resolved against `repo_root` (default: the script's repo).
     """
     global SERVICE_REGISTRY, VARS_FILE, VERSION_FILE_ALIASES, CACHE_DIR
-    global DEFAULT_DEPLOY_COMMAND, UNTRACKED_ALLOWLIST, REPO_ROOT
+    global DEFAULT_DEPLOY_COMMAND, UNTRACKED_ALLOWLIST, REPO_ROOT, REPORT_TITLE
 
     cfg = _read_config(Path(path))
     if not isinstance(cfg, dict):
@@ -202,6 +205,7 @@ def load_config(path: Path, repo_root: Optional[Path] = None) -> dict:
     CACHE_DIR = REPO_ROOT / cfg.get("cache_dir", ".version-cache")
     DEFAULT_DEPLOY_COMMAND = cfg.get("default_deploy_command", "")
     UNTRACKED_ALLOWLIST = set(cfg.get("untracked_allowlist") or [])
+    REPORT_TITLE = str(cfg.get("report_title") or REPORT_TITLE)
     return cfg
 
 
@@ -286,7 +290,6 @@ def _make_request(url: str, headers: Optional[dict] = None) -> dict | list | str
             return data
     except urllib.error.HTTPError as e:
         if e.code == 403:
-            # Check for rate limiting
             remaining = e.headers.get("X-RateLimit-Remaining", "?")
             reset = e.headers.get("X-RateLimit-Reset", "?")
             raise RuntimeError(
@@ -443,7 +446,6 @@ def parse_version_tuple(version_str: str) -> tuple:
     and 1 for strings. This ensures consistent comparison ordering: all ints
     sort before all strings, and within each type, values compare naturally.
     """
-    # Remove leading 'v' for comparison
     v = version_str.lstrip("v")
     # Drop a Debian epoch prefix (e.g. "1:1.80.0" -> "1.80.0") so the epoch
     # integer is not parsed as a leading version segment.
@@ -452,19 +454,15 @@ def parse_version_tuple(version_str: str) -> tuple:
         v = epoch_match.group(1)
     # Replace + with . for k3s-style versions
     v = v.replace("+", ".")
-    # Split on . and - and try to convert to ints
     parts = re.split(r"[.\-]", v)
     result = []
     for part in parts:
-        # Split part into alternating text/numeric segments for proper ordering
-        # This handles both "123abc" and "abc123" patterns (e.g., "k3s1", "k3s10")
+        # Alternating text/numeric segments so k3s10 > k3s9.
         segments = re.findall(r"(\d+|\D+)", part)
         for seg in segments:
             if seg.isdigit():
-                # Tuple of (type_rank=0, int_value) - ints sort before strings
                 result.append((0, int(seg)))
             else:
-                # Tuple of (type_rank=1, str_value) - strings sort after ints
                 result.append((1, seg))
     return tuple(result)
 
@@ -1089,9 +1087,7 @@ def fetch_plex_version(svc: dict) -> str:
     Collects all plexmediaserver versions and returns the highest one,
     since the Packages file may contain multiple versions.
     """
-    # Fetch from the apt repository Packages file (where apt actually installs from)
-    # v2 repository URL (as of Plex v1.43.0)
-    # Uses fetch_apt_packages to handle both uncompressed and .gz formats
+    # v2 repo URL (Plex >= 1.43.0).
     packages_url = "https://repo.plex.tv/deb/dists/public/main/binary-amd64/Packages"
     raw = fetch_apt_packages(packages_url)
 
@@ -1113,8 +1109,7 @@ def fetch_gitlab_version(svc: dict) -> str:
     that's available for installation. Uses fetch_apt_packages to handle
     both uncompressed and .gz formats.
     """
-    # Fetch from the apt repository Packages file (Debian trixie/bookworm amd64)
-    # Try trixie first (Debian 13), fall back to bookworm (Debian 12)
+    # trixie (Debian 13) first, falling back to bookworm (Debian 12).
     packages_urls = [
         "https://packages.gitlab.com/gitlab/gitlab-ee/debian/dists/trixie/main/binary-amd64/Packages",
         "https://packages.gitlab.com/gitlab/gitlab-ee/debian/dists/bookworm/main/binary-amd64/Packages",
@@ -1288,10 +1283,9 @@ def update_version_in_file(var_name: str, new_version: str) -> bool:
 
     Returns True if the file was modified.
     """
-    # version_file entries are digest-locked outside the vars file. Flag the
-    # update but don't
-    # auto-rewrite the @sha256 pin — bumping a supply-chain pinned image
-    # should be a reviewed manual step.
+    # version_file entries are digest-locked outside the vars file: flag the
+    # update but never auto-rewrite the @sha256 pin — bumping a supply-chain
+    # pinned image is a reviewed manual step.
     pinned_svc = next(
         (s for s in SERVICE_REGISTRY
          if s.get("var_name") == var_name and s.get("version_file")),
@@ -1423,7 +1417,6 @@ def check_service(svc_def: dict, current_versions: dict[str, str], use_cache: bo
         held=bool(svc_def.get("held", False)),
     )
 
-    # Set source URLs
     if "github_repo" in svc_def:
         result.source_url = f"https://github.com/{svc_def['github_repo']}/releases"
         result.release_url = result.source_url
@@ -1444,7 +1437,6 @@ def check_service(svc_def: dict, current_versions: dict[str, str], use_cache: bo
         result.notes = notes or "Manual version management"
         return result
 
-    # Check cache first
     if use_cache:
         cached = _read_cache(name)
         if cached:
@@ -1457,7 +1449,6 @@ def check_service(svc_def: dict, current_versions: dict[str, str], use_cache: bo
             _annotate_latest_resolution(result, current)
             return result
 
-    # Fetch latest version
     result.fetched_live = True
     try:
         # Add current version to svc_def for major version pinning
@@ -1487,7 +1478,6 @@ def check_service(svc_def: dict, current_versions: dict[str, str], use_cache: bo
         result.latest_version = latest
         _write_cache(name, latest)
 
-        # Determine if update is available
         if current == "latest":
             _annotate_latest_resolution(result, current)
             result.update_available = False
@@ -1561,7 +1551,6 @@ CATEGORY_LABELS = {
     "manual": "Manual / APT Managed",
 }
 
-# ANSI colors
 GREEN = "\033[32m"
 RED = "\033[31m"
 YELLOW = "\033[33m"
@@ -1587,7 +1576,7 @@ def format_table(results: list[ServiceVersion]) -> str:
 
     lines = []
     lines.append("")
-    lines.append(c(BOLD, "Homelab Version Check Report"))
+    lines.append(c(BOLD, REPORT_TITLE))
     lines.append(c(DIM, f"Source: {VARS_FILE}"))
     lines.append(c(DIM, f"Checked: {time.strftime('%Y-%m-%d %H:%M:%S')}"))
     lines.append("")
@@ -1611,12 +1600,10 @@ def format_table(results: list[ServiceVersion]) -> str:
         lines.append(c(BOLD + CYAN, f"--- {cat_name} ---"))
         lines.append("")
 
-        # Column widths
         name_w = max(len(r.name) for r in cat_results)
         cur_w = max(len(r.current_version) for r in cat_results)
         lat_w = max(len(r.latest_version or "error") for r in cat_results)
 
-        # Header
         header = f"  {'Service':<{name_w}}  {'Current':<{cur_w}}  {'Latest':<{lat_w}}  Status"
         lines.append(c(DIM, header))
         lines.append(c(DIM, "  " + "-" * (name_w + cur_w + lat_w + 20)))
@@ -1646,7 +1633,6 @@ def format_table(results: list[ServiceVersion]) -> str:
 
         lines.append("")
 
-    # Summary
     lines.append(c(BOLD, "--- Summary ---"))
     total = len(results)
     held = sum(1 for r in results if r.update_available and r.held)
@@ -1954,7 +1940,6 @@ def main():
     service_filter = args.service
     category_filter = args.category
 
-    # Filter services
     services = SERVICE_REGISTRY
     if service_filter:
         services = [
@@ -1967,10 +1952,8 @@ def main():
             print("Run with --list to see available services")
             sys.exit(1)
 
-    # Run checks
     results = check_all(services=services, category_filter=category_filter, use_cache=use_cache)
 
-    # Output
     if args.json_output:
         print(format_json(results))
     else:

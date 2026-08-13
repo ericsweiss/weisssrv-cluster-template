@@ -30,13 +30,11 @@ exclude_paths:
   - ansible_collections/
   - ansible/ansible_collections/
 
-# No skip_list on purpose. weisssrv carries `var-naming[no-role-prefix]` for its
-# global vars, but that tag only fires from inside a role (role vars/defaults, a
-# `roles:` or include_role `vars:` block, or set_fact/register within a role) —
-# and a generated cluster owns no roles: every role it runs comes from the
-# weisssrv.infra collection, which is excluded above. Verified by running
-# ansible-lint over a render with the rule active: 0 failures in 32 files. Add
-# the skip only if this repository grows an `ansible/roles/` tree of its own.
+# No skip_list on purpose. `var-naming[no-role-prefix]` fires only from inside a
+# role (its vars/defaults, a `roles:` or include_role `vars:` block, or a
+# set_fact/register within one), and this repository owns no roles — every role
+# it runs comes from the weisssrv.infra collection, excluded above. Add the skip
+# only if an `ansible/roles/` tree appears here.
 
 # Let ansible-lint resolve the collection dependencies it needs to check FQCNs.
 offline: false

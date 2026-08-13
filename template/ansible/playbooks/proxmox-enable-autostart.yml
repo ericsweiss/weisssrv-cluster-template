@@ -1,0 +1,103 @@
+---
+# Reconcile onboot + boot order on guests that ALREADY exist. proxmox_lxc and
+# proxmox_vm apply the same settings when they provision a guest, so this is for
+# guests created before the inventory carried them (or by hand); it writes only
+# when the live config differs.
+#
+# Every guest here is addressed through its `proxmox_host` — the plays never
+# connect to the guest itself, so a powered-off VM is still reconciled.
+#
+#   task proxmox:configure-autostart
+#
+# Two classes are deliberately out of scope. HA-managed guests: HA starts them,
+# so onboot is moot — keep them out of the groups below. And the `services`
+# group: it sets `ansible_become: false` so a local play cannot sudo on the
+# operator's own machine, which would leave the delegated `qm set` here
+# unprivileged on the Proxmox host. An appliance VM that this cluster DOES
+# provision belongs in `app_servers` (or its own group under it) with
+# `ansible_connection: local`, a `vmid` and a `proxmox_host`, keeping the
+# inherited `become: true` — then it is covered by the VM play below.
+
+# Precedence mirrors proxmox_lxc exactly: the neutral proxmox_autostart_* names
+# win when set, then the per-container proxmox_lxc_* ones, then the role
+# defaults. Reading only the neutral names would flatten a container's place in
+# the boot order.
+- name: Reconcile autostart and boot order for LXC containers
+  hosts: lxc_containers
+  gather_facts: false
+  vars:
+    lxc_onboot: "{{ proxmox_autostart_enabled | default(proxmox_lxc_onboot | default(true)) }}"
+    lxc_startup_order: "{{ proxmox_startup_order | default(proxmox_lxc_startup_order | default(100)) }}"
+    lxc_startup_delay: "{{ proxmox_startup_delay | default(proxmox_lxc_startup_delay | default(0)) }}"
+    desired_onboot: "onboot: {{ lxc_onboot | ternary(1, 0) }}"
+    desired_startup: "startup: order={{ lxc_startup_order }},up={{ lxc_startup_delay }}"
+  tasks:
+    - name: Read the current container config
+      delegate_to: "{{ proxmox_host }}"
+      ansible.builtin.command: "pct config {{ vmid }}"
+      register: current_config
+      changed_when: false
+      failed_when: false
+
+    # An unset onboot/startup key never matches the desired line, so the first
+    # run converges it and later runs are no-ops.
+    - name: Apply autostart and boot order
+      delegate_to: "{{ proxmox_host }}"
+      ansible.builtin.command: >-
+        pct set {{ vmid }}
+        --onboot {{ lxc_onboot | ternary(1, 0) }}
+        --startup order={{ lxc_startup_order }},up={{ lxc_startup_delay }}
+      changed_when: true
+      when:
+        - current_config.rc == 0
+        - desired_onboot not in current_config.stdout_lines
+          or desired_startup not in current_config.stdout_lines
+
+    - name: Report the container's state
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ vmid }}) on {{ proxmox_host }}:
+          {{ 'onboot=' + (lxc_onboot | ternary(1, 0) | string) +
+             ', order=' + (lxc_startup_order | string) +
+             ', delay=' + (lxc_startup_delay | string) + 's'
+             if current_config.rc == 0 else 'not found on ' + proxmox_host }}
+
+# `proxmox_host` is guarded here and not in the LXC play above: every container
+# is created by proxmox_lxc, which requires it, while app_servers may hold a
+# guest this cluster does not provision.
+- name: Reconcile autostart and boot order for VMs
+  hosts: k3s:app_servers
+  gather_facts: false
+  vars:
+    desired_onboot: "onboot: {{ proxmox_autostart_enabled | default(true) | ternary(1, 0) }}"
+    desired_startup: "startup: order={{ proxmox_startup_order | default(100) }},up={{ proxmox_startup_delay | default(0) }}"
+  tasks:
+    - name: Read the current VM config
+      delegate_to: "{{ proxmox_host }}"
+      ansible.builtin.command: "qm config {{ vmid }}"
+      register: current_config
+      changed_when: false
+      failed_when: false
+      when: proxmox_host is defined
+
+    - name: Apply autostart and boot order
+      delegate_to: "{{ proxmox_host }}"
+      ansible.builtin.command: >-
+        qm set {{ vmid }}
+        --onboot {{ proxmox_autostart_enabled | default(true) | ternary(1, 0) }}
+        --startup order={{ proxmox_startup_order | default(100) }},up={{ proxmox_startup_delay | default(0) }}
+      changed_when: true
+      when:
+        - proxmox_host is defined
+        - current_config.rc == 0
+        - desired_onboot not in current_config.stdout_lines
+          or desired_startup not in current_config.stdout_lines
+
+    - name: Report the VM's state
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ vmid }}) on {{ proxmox_host }}:
+          {{ 'order=' + (proxmox_startup_order | default(100) | string) +
+             ', delay=' + (proxmox_startup_delay | default(0) | string) + 's'
+             if current_config.rc | default(1) == 0 else 'does not exist — skipped' }}
+      when: proxmox_host is defined

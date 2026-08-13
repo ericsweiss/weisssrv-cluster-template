@@ -160,11 +160,17 @@ data:
   cluster_nas_host: "{{ nas_host | default('pve-nas-01.' ~ internal_domain) }}"
   cluster_smtp_host: "{{ smtp_host | default('smtp-relay.' ~ internal_domain) }}"
   cluster_alert_email: "{{ alert_email | default(admin_email) }}"
-  # LAN resolvers that in-cluster forwarders point at, space-separated
-  # (the dns-01 / dns-02 addresses in the inventory).
+  # LAN resolvers the in-cluster forwarders point at, space-separated — one per
+  # address in the upstream_dns_servers answer.
   cluster_upstream_dns_servers: "{{ upstream_dns_servers | default(lan_prefix ~ '.21 ' ~ lan_prefix ~ '.22') }}"
-  # Prometheus job name the host node-exporters register under.
-  cluster_node_exporter_job_regex: "{{ node_exporter_job_regex | default('node-exporter') }}"
+  # Alternation of every Prometheus job the host/DaemonSet node-exporters
+  # register under. Add labels, never replace them (copier.yml
+  # node_exporter_job_regex).
+  # The fallback must stay equal to copier.yml's default. `node-exporter` alone
+  # is the value that validator exists to REJECT: dropping node-exporter-host
+  # leaves every host rule matching zero series, and a rule that matches nothing
+  # never fires — the one failure mode here that is completely silent.
+  cluster_node_exporter_job_regex: "{{ node_exporter_job_regex | default('node-exporter|node-exporter-host') }}"
 {%- if vpn_tailscale %}
 
   # MagicDNS suffix of your tailnet, from the Tailscale admin console DNS page.

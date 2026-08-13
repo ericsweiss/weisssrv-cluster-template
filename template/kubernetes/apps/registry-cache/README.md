@@ -49,10 +49,18 @@ rule with the shared `netpol-egress-public` component in `kustomization.yaml`.
 ### Name resolution for a self-hosted upstream
 
 If the upstream hostname resolves publicly but is actually served by this
-cluster's internal VIP, pods will hairpin over the WAN. `deployment.yaml` carries
-a commented `hostAliases` block that pins the name to
-`${cluster_metallb_internal_vip}` at pod scope — uncomment it in that case. TLS
-is unaffected: SNI and cert validation still use the hostname.
+cluster's internal VIP, pods will hairpin over the WAN. Node-level `/etc/hosts`
+entries do not reach pods (they resolve through CoreDNS), so pin the name at pod
+scope instead — add to the pod spec in `deployment.yaml`:
+
+```yaml
+      hostAliases:
+        - ip: "${cluster_metallb_internal_vip}"
+          hostnames:
+            - registry.${cluster_git_host}
+```
+
+TLS is unaffected: SNI and cert validation still use the hostname.
 
 ## Disable
 

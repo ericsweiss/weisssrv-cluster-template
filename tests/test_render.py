@@ -447,22 +447,106 @@ def test_flux_lint_reads_both_configmaps(cluster):
     )
 
 
+# The cluster-invariant gates that must run over the rendered corpus, and the
+# site data they read. Each covers a class kubeconform structurally cannot see:
+# a chart the corpus never renders, an HPA/VPA pair on one workload, a scraped
+# namespace its own NetworkPolicies do not admit Prometheus into, a PVC whose
+# unset storageClassName the DefaultStorageClass plugin rewrites at create time,
+# and a ClusterSecretStore readable from every namespace.
+EXTRA_VALIDATION_GATES = (
+    "scripts/check-hpa-vpa-invariant.py",
+    "scripts/check-scrape-netpol.py",
+    "scripts/check-secretstore-scope.py",
+    "scripts/check-pvc-storageclass.py",
+    "scripts/validate-helm-values.py",
+    "scripts/autoscaling-policy.yaml",
+    "scripts/helm-values-releases.yaml",
+)
+
+
 def test_flux_lint_runs_the_extra_validation_gates(cluster):
-    """kustomize build never renders a chart and never joins a chart-native HPA
-    to its VPA, so without extra_validation both classes of defect reach the
-    cluster. Assert the two scripts and their config data are wired AND present."""
+    """Every gate is wired AND present. A generated cluster gets the platform's
+    architecture; without these it does not get the checks that keep it."""
     extra = _flux_lint_include(cluster.path)["inputs"].get("extra_validation", "")
     assert extra, "flux-lint is wired without extra_validation"
-    for referenced in (
-        "scripts/check-hpa-vpa-invariant.py",
-        "scripts/validate-helm-values.py",
-        "scripts/autoscaling-policy.yaml",
-        "scripts/helm-values-releases.yaml",
-    ):
+    for referenced in EXTRA_VALIDATION_GATES:
         assert referenced in extra, f"extra_validation does not run {referenced}"
         assert (cluster.path / referenced).is_file(), (
             f"extra_validation references a missing {referenced}"
         )
+    # `changes:` decides whether the job runs at all, so a gate not named there
+    # is skipped by exactly the MR that loosens it.
+    changes = _flux_lint_include(cluster.path)["inputs"].get("changes") or []
+    for referenced in EXTRA_VALIDATION_GATES:
+        assert referenced in changes, (
+            f"flux-lint's changes: does not name {referenced}, so an MR editing "
+            "only that file never starts the job it weakens"
+        )
+
+
+def test_task_lint_mirrors_the_ci_lint_stage(cluster):
+    """`task lint` is documented in four places as the local mirror of the CI
+    lint stage. A gate wired only into CI turns that claim into a green local
+    run followed by a red pipeline, which is how the four corpus gates and
+    netpol-parity came to be CI-only.
+
+    The CI side is READ, not asserted into. `extra_validation` is a free-form
+    shell string, so a gate added there and nowhere else would leave a fixed
+    list green while `task lint` quietly stopped mirroring the stage — the exact
+    drift this gate exists to catch. EXTRA_VALIDATION_GATES stays the floor.
+    """
+    taskfile = yaml.safe_load((cluster.path / "Taskfile.yml").read_text()) or {}
+    tasks = taskfile.get("tasks") or {}
+    flux_lint = "\n".join(str(step) for step in (tasks.get("flux:lint") or {}).get("cmds") or [])
+    extra = _flux_lint_include(cluster.path)["inputs"].get("extra_validation", "")
+    ci_gates = set(re.findall(r"scripts/[\w.-]+\.py", extra))
+    assert ci_gates, "no gate script parsed out of extra_validation — this gate examined nothing"
+    floor = {gate for gate in EXTRA_VALIDATION_GATES if gate.endswith(".py")}
+    for gate in sorted(ci_gates | floor):
+        assert gate in flux_lint, (
+            f"the CI flux-lint job runs {gate} but `task flux:lint` does not"
+        )
+    lint_deps = [
+        str(step.get("task") if isinstance(step, dict) else step)
+        for step in (tasks.get("lint") or {}).get("cmds") or []
+    ]
+    assert "flux:lint" in lint_deps, f"`task lint` does not run flux:lint: {lint_deps}"
+    assert "lint:netpol-parity" in lint_deps, (
+        "the pipeline has a netpol-parity lint job but `task lint` has no "
+        f"counterpart: {lint_deps}"
+    )
+    netpol_task = "\n".join(
+        str(step) for step in (tasks.get("lint:netpol-parity") or {}).get("cmds") or []
+    )
+    assert "--config scripts/netpol-except.yaml" in netpol_task, (
+        "lint:netpol-parity must pass the same --config the CI job does, or the "
+        "peer-less egress allowlist is empty locally and full in CI"
+    )
+
+
+def test_netpol_except_parity_is_gated(cluster):
+    """The LAN fence has its own job: the checker reads the manifests on disk
+    (so it also covers kubernetes/clusters/*/flux-system/, which no Kustomization
+    builds) rather than the rendered corpus extra_validation sees."""
+    ci = _load_ci(cluster.path / ".gitlab-ci.yml")
+    job = ci.get("netpol-parity")
+    assert isinstance(job, dict), "the generated pipeline has no netpol-parity job"
+    script = " ".join(str(step) for step in job.get("script") or [])
+    assert "check-netpol-except-parity.py" in script
+    for referenced in ("scripts/check-netpol-except-parity.py", "scripts/netpol-except.yaml"):
+        assert (cluster.path / referenced).is_file(), f"netpol-parity needs a missing {referenced}"
+    assert "--config scripts/netpol-except.yaml" in script, (
+        "without --config the peer-less egress allowlist is empty and the shipped "
+        "runner policy fails; with the wrong one the allowlist is unreviewable"
+    )
+    gate_needs = [
+        entry.get("job") if isinstance(entry, dict) else entry
+        for entry in (ci.get("validation-gate") or {}).get("needs") or []
+    ]
+    assert "netpol-parity" in gate_needs, (
+        "validation-gate does not need netpol-parity, so a deploy proceeds past a "
+        "failed LAN fence"
+    )
 
 
 def test_every_job_carries_a_runner_tag(cluster):
@@ -476,9 +560,20 @@ def test_every_job_carries_a_runner_tag(cluster):
     """
     ci = _load_ci(cluster.path / ".gitlab-ci.yml")
     tag = cluster.answers["ci_runner_tag"]
+    default_tags = (ci.get("default") or {}).get("tags")
+    assert default_tags and tag in default_tags, (
+        "the `default:` block does not carry the configured runner tag, so a job "
+        f"that names none lands on the untagged runner: {default_tags!r}"
+    )
     untagged = []
     for name, job in ci.items():
-        if not isinstance(job, dict) or name in {"include", "workflow", "variables", "stages"}:
+        if not isinstance(job, dict) or name in {
+            "include",
+            "workflow",
+            "variables",
+            "stages",
+            "default",
+        }:
             continue
         parents = job.get("extends") or []
         parents = [parents] if isinstance(parents, str) else parents
@@ -486,6 +581,10 @@ def test_every_job_carries_a_runner_tag(cluster):
         if tags is None:
             tags = next((ci[p]["tags"] for p in parents if isinstance(ci.get(p), dict) and "tags" in ci[p]), None)
         if tags is None:
+            # A fragment the LIBRARY defines (.deploy-base) is not in this file;
+            # `default:` above is what tags it, and is asserted separately.
+            if any(p not in ci for p in parents):
+                continue
             untagged.append(name)
         else:
             assert tag in tags, f"{name} carries {tags}, not the configured runner tag {tag!r}"
@@ -564,6 +663,30 @@ def test_documented_tasks_exist(cluster, rendered, rendered_b):
     )
 
 
+def test_ci_doc_lists_every_validator_check():
+    """docs/CI.md's check table and its `--skip` list must equal main()'s registry.
+
+    The page is how anyone finds a check's skip name when a tool is missing from
+    their machine, so a check documented nowhere is one they cannot work around,
+    and a documented name that no longer exists sends them to `--skip` a check
+    that silently does not skip.
+    """
+    import validate_render
+
+    names = list(validate_render.CHECK_NAMES)
+    text = (_TEMPLATE_ROOT / "docs" / "CI.md").read_text(encoding="utf-8")
+    documented = re.findall(r"^\| `([a-z-]+)` \|", text, re.MULTILINE)
+    assert documented, "no check table found in docs/CI.md — this gate examined nothing"
+    assert documented == names, (
+        "docs/CI.md's check table is out of step with validate_render.main():\n"
+        f"  table: {documented}\n  code:  {names}"
+    )
+    assert ",".join(names) in text, (
+        "docs/CI.md's --skip list is out of step with validate_render.CHECK_NAMES: "
+        f"expected {','.join(names)}"
+    )
+
+
 def _section(text: str, heading: str) -> str:
     """The body of one `## <heading>` section, up to the next heading of the
     same level."""
@@ -579,10 +702,9 @@ def _section(text: str, heading: str) -> str:
     return "\n".join(out)
 
 
-# Steps that exist in SETUP.md only because round 2 put them there, and whose
-# absence from the generated README is the exact defect this gate was written
-# for: a one-pass deploy that dies on the storage host, a `terraform plan` with
-# no initialized backend, and a converged cluster nobody can sign in to.
+# SETUP steps whose absence from the generated README produces a one-pass deploy
+# that dies on the storage host, a `terraform plan` with no initialized backend,
+# and a converged cluster nobody can sign in to.
 BRINGUP_MUST_NAME = ("certs:show-host-keys", "terraform:init", "terraform:authentik-apply")
 
 
@@ -594,9 +716,9 @@ def test_generated_readme_bringup_matches_setup(cluster):
 
     Two directions, both real. Every task the README's bring-up names must be
     named by SETUP too (a task SETUP dropped or renamed cannot survive here),
-    and the three steps SETUP gained in round 2 must appear in the README (which
-    is what it was missing: it promised a single-pass `infra:deploy`, a
-    `terraform:apply` with no init, and no SSO step at all).
+    and every step in BRINGUP_MUST_NAME must appear in the README — a bring-up
+    that omits one promises a single-pass `infra:deploy`, a `terraform:apply`
+    with no init, or no SSO step at all.
     """
     readme = cluster.path / "README.md"
     if not readme.is_file():
@@ -707,9 +829,8 @@ def test_generated_files_are_drift_gated(cluster):
             if isinstance(job, dict)
             and generator in script_text(job)
             and "diff" in script_text(job)
-            # the version-bump bot REGENERATES as part of its own MR; that is
-            # the opposite of comparing, and is what used to be mistaken for
-            # this gate.
+            # the version-bump bot REGENERATES as part of its own MR, which is
+            # the opposite of comparing — it does not count as this gate.
             and target in script_text(job)
         ]
         assert gating_jobs, (
@@ -719,7 +840,7 @@ def test_generated_files_are_drift_gated(cluster):
             f"(jobs naming the generator at all: "
             f"{[n for n, j in ci.items() if isinstance(j, dict) and generator in script_text(j)]})"
         )
-        assert generator in ci_text and target in ci_text  # cheap belt-and-braces
+        assert generator in ci_text and target in ci_text
 
     # And the same gate locally, wired into `task lint` — otherwise the first
     # time anyone learns about the drift is in CI.
@@ -741,9 +862,7 @@ def test_generated_files_are_drift_gated(cluster):
 
 # Components the README's answer table names, and the evidence a render must
 # carry for the claim to be true. The table is a contract an operator picks
-# answers from: `gpu: nvidia` was advertised as adding DCGM telemetry that
-# copier.yml states in capitals is NOT shipped, so the answer bought a GPU node
-# with no GPU metrics and no way to know until you went looking for a dashboard.
+# answers from, so an over-claimed answer must fail here.
 README_TABLE_CLAIMS = {
     "DCGM": "dcgm",
 }
@@ -926,6 +1045,33 @@ def test_credential_inventory_is_complete(cluster):
     )
 
 
+# Binaries whose PRE-SETUP entry is the package that provides them.
+_TOOL_PACKAGES = {"ansible-playbook": "ansible"}
+
+
+def test_task_preconditions_name_tools_pre_setup_installs(cluster):
+    """Every binary a generated task hard-requires must be in the workstation
+    tooling list.
+
+    A failed go-task precondition ABORTS the task, so a tool the list omits is
+    the stranger's first `task lint` stopping on a package nothing told them to
+    install — which is how `helm` arrived with `validate-helm-values.py`.
+    """
+    pre_setup = _TEMPLATE_ROOT / "docs" / "PRE-SETUP.md"
+    if not pre_setup.is_file():
+        pytest.skip("no PRE-SETUP.md")
+    doc = pre_setup.read_text(encoding="utf-8")
+    required = set(
+        re.findall(r"command -v ([\w.+-]+)", (cluster.path / "Taskfile.yml").read_text())
+    )
+    assert required, "no `command -v` precondition found — this gate examined nothing"
+    undocumented = sorted(tool for tool in required if _TOOL_PACKAGES.get(tool, tool) not in doc)
+    assert not undocumented, (
+        "tools a generated task requires but docs/PRE-SETUP.md § 9 never names:\n  "
+        + "\n  ".join(undocumented)
+    )
+
+
 def _controller_releases_with_secrets(root: Path):
     """(dir, HelmRelease doc) for every controller whose directory also ships an
     externalsecret.yaml, plus the total number of controller HelmReleases seen."""
@@ -1024,9 +1170,9 @@ def test_version_registry_covers_every_pin(cluster):
 
 
 # Every place the generated repo composes a path to its own git repository. The
-# repository is named cluster_name (copier.yml, git_namespace help); these are
-# the sites that used to disagree about that, one of them silently, because
-# `flux bootstrap gitlab --repository=` CREATES what it cannot find.
+# repository is named cluster_name (copier.yml, git_namespace help); a mismatch
+# is silent because `flux bootstrap gitlab --repository=` CREATES what it cannot
+# find.
 _TASK_VAR = re.compile(r"\{\{\s*\.([A-Z_][A-Z0-9_]*)\s*\}\}")
 
 
@@ -1070,12 +1216,9 @@ def _repository_paths(root: Path) -> dict[str, str]:
 def test_repository_paths_agree(cluster):
     """Every repository path in one render must name the SAME repository.
 
-    They did not: the runbook base URL read a separate `git_repo` answer while
-    the Flux bootstrap target, the Terraform state project and the README read
-    cluster_name. Whichever name the operator actually used, half the render
-    pointed at a repository that does not exist — either Flux bootstrapping a
-    second, empty repo and `terraform init` 404ing on its state, or every alert
-    link 404ing at 3am.
+    A mismatch is silent: `flux bootstrap` creates the repository it is pointed
+    at, `terraform init` 404s on its state, and every alert runbook link
+    dead-ends.
     """
     expected = f"{cluster.answers['git_namespace']}/{cluster.answers['cluster_name']}"
     paths = _repository_paths(cluster.path)
@@ -1125,3 +1268,35 @@ def test_runbook_urls_resolve(rendered):
     # segment-anchored regex above matching zero of 25 real annotations.
     assert checked, "no runbook_url annotations were examined — the pattern is stale"
     assert not broken, "alert runbook_url annotations do not resolve:\n  " + "\n  ".join(sorted(set(broken)))
+
+
+def test_runbook_index_lists_every_section():
+    """docs/RUNBOOKS.md is the index of template/docs/RUNBOOKS.md.jinja and says
+    so; nothing but this holds the two in sync, and the last three sections
+    added to the runbook never reached the table."""
+    runbook = REPO_ROOT / "template" / "docs" / "RUNBOOKS.md.jinja"
+    index = REPO_ROOT / "docs" / "RUNBOOKS.md"
+    headings = [
+        line[3:].strip()
+        for line in runbook.read_text(encoding="utf-8").splitlines()
+        if line.startswith("## ")
+    ]
+    assert headings, "the runbook has no top-level sections — this gate reads nothing"
+    rows = [
+        line.split("|")[1].strip()
+        for line in index.read_text(encoding="utf-8").splitlines()
+        if line.startswith("| ") and not line.startswith("|---")
+    ]
+    rows = [r for r in rows if r != "Section"]
+    # A row may append a parenthetical gloss ("Upgrades (versions, …)"), but its
+    # first words are the heading, because the anchors are load-bearing.
+    unlisted = [h for h in headings if not any(r == h or r.startswith(h + " (") for r in rows)]
+    assert not unlisted, (
+        "docs/RUNBOOKS.md 'What it covers' has no row for:\n  " + "\n  ".join(unlisted)
+    )
+    stale = [
+        r for r in rows if not any(r == h or r.startswith(h + " (") for h in headings)
+    ]
+    assert not stale, (
+        "docs/RUNBOOKS.md names sections the runbook does not have:\n  " + "\n  ".join(stale)
+    )

@@ -410,6 +410,74 @@ def test_upstream_dns_servers_rejects_a_repeated_address():
     assert _dns_message("192.168.0.21 192.168.0.21"), "the same address twice was accepted"
 
 
+def _compute_count_message(count: int, resolvers: str = "192.168.0.21 192.168.0.22") -> str:
+    return _validator_message(
+        "compute_node_count",
+        compute_node_count=count,
+        upstream_dns_servers=resolvers,
+        lan_prefix="192.168.0",
+        **VIP_ANSWERS,
+    )
+
+
+@pytest.mark.parametrize("count", [1, 2, 4, 8])
+def test_compute_node_count_accepts_the_counts_the_scheme_covers(count):
+    """Eight compute hosts is the ceiling the agent band allows, so every count
+    up to it must pass — a false rejection is an operator stuck at the prompt."""
+    assert not _compute_count_message(count), f"{count} was rejected but composes free addresses"
+
+
+def test_compute_node_count_rejects_zero():
+    assert _compute_count_message(0), "0 was accepted, but the NAS node alone is not a quorum"
+
+
+def test_compute_node_count_stops_at_the_agent_band_ceiling():
+    """One agent per Proxmox host at .41+, so count n puts the last agent at
+    .41+n. At 9 that is .50, which the scheme leaves for application guests."""
+    message = _compute_count_message(9)
+    assert message, "9 was accepted, but its 10th agent lands outside the .41-.49 band"
+    assert "192.168.0.50" in message, f"the message does not name the address that overflows: {message}"
+
+
+@pytest.mark.parametrize(
+    "count,expected",
+    [
+        (10, "a resolver"),        # pve-node-10 at .21
+        (12, "the SMTP relay"),    # pve-node-12 at .23
+        (20, "the k3s server band"),
+    ],
+)
+def test_compute_node_count_rejects_counts_that_reach_a_claimed_address(count, expected):
+    """The compute band grows upward from .12 into addresses hosts.yml already
+    composes; each collision must be named, not just counted."""
+    message = _compute_count_message(count)
+    assert message, f"{count} was accepted despite reaching {expected}"
+    assert expected in message, f"the message does not say why {count} collides: {message}"
+
+
+@pytest.mark.parametrize("name", sorted(VIP_ANSWERS))
+def test_compute_node_count_rejects_a_count_that_reaches_a_vip(name):
+    """The VIPs and the gateway are answered ABOVE this question, so they are
+    comparable here — and a compute host landing on one is a collision hosts.yml
+    composes silently.
+
+    The shipped defaults sit outside the compute band, so each VIP is moved onto
+    pve-node-02's address in turn: a test parametrized over the defaults alone
+    would skip every case and assert nothing.
+    """
+    collide = "192.168.0.13"  # pve-node-02, the second host of a count-2 render
+    vips = dict(VIP_ANSWERS, **{name: collide})
+    message = _validator_message(
+        "compute_node_count",
+        compute_node_count=2,
+        upstream_dns_servers="192.168.0.21 192.168.0.22",
+        lan_prefix="192.168.0",
+        **vips,
+    )
+    assert message, f"{collide} was accepted as a compute host, but it is {name}"
+    assert collide in message, f"the message does not name the colliding address: {message}"
+
+
 # Overlap is decided by integer prefix arithmetic in Jinja, not by string
 # comparison, so a mask-boundary case is the only thing that proves it works.
 @pytest.mark.parametrize(
@@ -453,6 +521,86 @@ def test_vips_are_tested_against_the_whole_lan_cidr_not_a_prefix(name):
     context = {"lan_cidr": "172.20.0.0/16", "lan_prefix": "172.20.0"}
     assert not _validator_message(name, **{name: "172.20.9.161"}, **context)
     assert _validator_message(name, **{name: "10.1.1.161"}, **context)
+
+
+# The address questions, each with the answers its validator compares against.
+# Ordered as copier asks them, so every entry names only earlier answers.
+ADDRESS_QUESTIONS = {
+    "lan_gateway": {},
+    "k3s_api_vip": {"lan_gateway": "192.168.0.1"},
+    "metallb_public_vip": {"lan_gateway": "192.168.0.1", "k3s_api_vip": "192.168.0.161"},
+    "metallb_internal_vip": {
+        "lan_gateway": "192.168.0.1",
+        "k3s_api_vip": "192.168.0.161",
+        "metallb_public_vip": "192.168.0.100",
+    },
+}
+
+
+def _address_message(name: str, answer: str) -> str:
+    return _validator_message(
+        name,
+        **{name: answer},
+        lan_cidr="192.168.0.0/24",
+        lan_prefix="192.168.0",
+        **ADDRESS_QUESTIONS[name],
+    )
+
+
+@pytest.mark.parametrize("name", sorted(ADDRESS_QUESTIONS))
+@pytest.mark.parametrize("answer", sorted(COMPOSED_BANDS))
+def test_address_answers_reject_the_composed_bands(name, answer):
+    """The mirror of the upstream_dns_servers and compute_node_count checks:
+    hosts.yml composes guest addresses from fixed bands, so a VIP or a gateway
+    inside one is an address a generated guest also takes. kube-vip and MetalLB
+    answer ARP for it, and nothing downstream compares the two — the VIPs are
+    not inventory hosts."""
+    message = _address_message(name, answer)
+    assert message, (
+        f"{name} accepted {answer} ({COMPOSED_BANDS[answer]}), which hosts.yml "
+        "composes a guest onto"
+    )
+    assert answer in message, f"the message does not name the address: {message}"
+
+
+@pytest.mark.parametrize("name", sorted(ADDRESS_QUESTIONS))
+@pytest.mark.parametrize("answer", ["192.168.0.1", "192.168.0.20", "192.168.0.30", "192.168.0.161"])
+def test_address_answers_accept_addresses_outside_the_bands(name, answer):
+    """The bands must not swallow the LAN — a false rejection is an operator
+    stuck at the prompt. Each answer is tested as the FIRST of its group, so the
+    inequality checks against earlier answers do not confound the band check."""
+    context = {k: v for k, v in ADDRESS_QUESTIONS[name].items() if v != answer}
+    message = _validator_message(
+        name,
+        **{name: answer},
+        lan_cidr="192.168.0.0/24",
+        lan_prefix="192.168.0",
+        **context,
+    )
+    assert not message, f"{name} rejected {answer}, which collides with nothing: {message}"
+
+
+@pytest.mark.parametrize(
+    "answer,rejected",
+    [
+        ("Homelab", False),
+        ("My Cluster Vault", False),
+        ("", True),
+        ("   ", True),
+        ("infra/homelab", True),   # re-splits every op:// URI
+        ("Homelab: Prod", True),   # splits the unquoted YAML key it renders as
+        (" Homelab", True),        # emitted verbatim into the URI
+        ("Homelab ", True),
+    ],
+)
+def test_onepassword_vault_must_be_one_uri_segment(answer, rejected):
+    """The answer is the first path segment of `op://<vault>/<item>/<field>`,
+    and ~99 emission sites interpolate it raw. A slash re-splits the URI and
+    surfaces as an item-not-found error inside a deploy job, naming nothing; a
+    colon splits the unquoted YAML key the ClusterSecretStore renders it as, and
+    that failure takes the whole manifest build with it."""
+    message = _validator_message("onepassword_vault", onepassword_vault=answer)
+    assert bool(message) is rejected, f"{answer!r}: {message or 'accepted'}"
 
 
 @pytest.mark.parametrize("name", ["nas_host", "smtp_host"])
@@ -507,6 +655,70 @@ def test_lib_ref_is_inherited_by_the_validated_fixture():
         "answers-weisssrv-shaped.yml should inherit lib_ref from copier.yml's "
         "default (the single source), not restate it"
     )
+
+
+def test_this_repository_applies_its_own_lib_pin_gate():
+    """The gate the template ships must hold on the template's own pipeline.
+
+    `.gitlab-ci.yml` declares `variables.WEISSSRV_LIB_REF` as the single source
+    and its comment says `scripts/check-lib-pins.py` fails the pipeline on drift.
+    No job runs the checker here, so this is what makes the claim true: the
+    vendored checker over this repository's own includes, plus the tie between
+    that variable and `copier.yml`'s `lib_ref` default — the value
+    `render-validate` actually clones, and the one a generated cluster inherits.
+    """
+    import importlib.util
+
+    script = REPO_ROOT / "scripts" / "check-lib-pins.py"
+    spec = importlib.util.spec_from_file_location("check_lib_pins", script)
+    assert spec and spec.loader
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+
+    ci_file = REPO_ROOT / ".gitlab-ci.yml"
+    variables = checker.load_ci(ci_file).get("variables") or {}
+    project = variables.get("LIB_PROJECT") or checker.LIB_PROJECT
+    problems = checker.check(ci_file, project)
+    assert problems == [], "\n".join(problems)
+    assert variables.get("WEISSSRV_LIB_REF") == QUESTIONS["lib_ref"]["default"], (
+        "variables.WEISSSRV_LIB_REF and copier.yml's lib_ref default disagree — "
+        "render-validate clones the latter, so the includes would be gated "
+        "against a library this repository never exercises"
+    )
+
+
+def test_copier_pin_is_the_same_in_both_places_this_pipeline_installs_it():
+    """`variables.COPIER_VERSION` and the `pip_packages:` literal must agree.
+
+    GitLab resolves `include: inputs:` at pipeline-creation time, before job
+    variables exist, so the python-tests entry cannot read the variable and
+    repeats the pin — the same constraint `include: ref:` has, and the same
+    silent failure: the pytest suite would render under one copier and
+    render-validate under another, and the disagreement surfaces as a render
+    difference nobody can reproduce.
+    """
+    import importlib.util
+
+    script = REPO_ROOT / "scripts" / "check-lib-pins.py"
+    spec = importlib.util.spec_from_file_location("check_lib_pins", script)
+    assert spec and spec.loader
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+
+    ci = checker.load_ci(REPO_ROOT / ".gitlab-ci.yml")
+    pinned = (ci.get("variables") or {})["COPIER_VERSION"]
+    literals = [
+        package
+        for include in ci["include"]
+        if isinstance(include, dict)
+        for package in str((include.get("inputs") or {}).get("pip_packages", "")).split()
+        if package.startswith("copier==")
+    ]
+    assert literals, "no include installs copier — this gate examined nothing"
+    for literal in literals:
+        assert literal == f"copier=={pinned}", (
+            f"{literal} disagrees with variables.COPIER_VERSION ({pinned})"
+        )
 
 
 def test_lib_ref_validator_takes_release_tags_only():

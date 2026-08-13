@@ -6,8 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: observability
     app.kubernetes.io/managed-by: flux
-    # Opts this namespace into the platform ClusterSecretStore, whose
-    # spec.conditions admit only namespaces carrying this label.
+    # ClusterSecretStore opt-in label (configs/cluster-secret-store.yaml).
     ${cluster_node_label_domain}/cluster-secrets: "true"
     # The bundled node-exporter DaemonSet needs hostPID/hostNetwork/hostPath,
     # which only the privileged PSS permits, so enforce must stay privileged for

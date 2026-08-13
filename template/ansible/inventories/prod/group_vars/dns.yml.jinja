@@ -108,13 +108,11 @@ acme_certs_ssh_public_key: >-
 acme_certs_key_from: {{ resolvers[0] }}
 
 # The AUTHORITY side of the push: the local user whose ~/.ssh holds the
-# distribution private key, and the path the renewal hook reads it from. Both
-# match the role's own defaults and are written out anyway, because
-# ansible/playbooks/postflight.yml probes this exact channel and a playbook sees
-# inventory, never a role's defaults/main.yml — a `| default(...)` there on a
-# value the play cannot know is what turned a broken check into a passing-looking
-# one. `ssh_user` on each target below is the login user ON THE TARGET and is a
-# different thing entirely.
+# distribution private key, and the path the renewal hook reads it from. Written
+# out even though they match the role defaults, because postflight.yml probes
+# this channel and a play sees inventory, never a role's defaults — a
+# `| default(...)` there would make a broken check pass. `ssh_user` on each
+# target below is the login user ON THE TARGET, a different thing.
 acme_certs_ssh_user: root
 acme_certs_ssh_key_path: /root/.ssh/id_ed25519_certs
 
