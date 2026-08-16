@@ -13,17 +13,11 @@
 # {{ resolvers | length }} DNS resolver(s), one SMTP relay, and a {{ n_srv }}-server /
 # {{ pve_hosts | length }}-agent k3s cluster.
 #
-# The names and addresses that other layers depend on come from the answers, so
-# renaming them here alone is NOT enough — re-run `copier update` (or change the
-# answer) instead:
-#
-#   {{ nas_name }}  <- nas_host      (the NFS PVs mount it by name)
-#   {{ smtp_name }}  <- smtp_host     (Alertmanager + every null client submit to it)
-#   {{ resolvers | join(', ') }}  <- upstream_dns_servers (the in-cluster forwarders point here)
-#
-# Every OTHER hostname and address below is a placeholder: rename hosts to match
-# your hardware and re-address them to match your LAN. The scheme used here, so
-# you can extend it consistently:
+# {{ nas_name }} (nas_host), {{ smtp_name }} (smtp_host) and the resolvers
+# ({{ resolvers | join(', ') }}, upstream_dns_servers) come from the answers and are
+# referenced by the Kubernetes layer too, so renaming them HERE alone is not
+# enough — change the answer. Every other hostname and address below is a
+# placeholder; the scheme used here, so you can extend it consistently:
 #
 #   {{ lan_prefix }}.11        NAS host              vmid = 100 + last octet
 #   {{ lan_prefix }}.12+       compute hosts
@@ -231,14 +225,8 @@ all:
           #
           # Removing an entry leaves its PV permanently Pending, so drop one only
           # together with the manifest that claims it. Sizes match the PV
-          # capacities; proxmox_vm creates the zvol (`zfs create -p`, so the
-          # parent datasets are made on demand) and the k3s role mounts it by
-          # UUID after mkfs. sparse: true keeps them thin-provisioned — the ssd
-          # pool is only charged for what is written.
-          #
-          # Each entry pins a stable scsi_slot — never reorder or reuse one, that
-          # would rebind a data-bearing zvol to another device. The data survives
-          # VM recreation: the zvols live on the Proxmox host's pool.
+          # capacities. scsi_slot is a stable binding — never reorder or reuse
+          # one, that would rebind a data-bearing zvol to another device.
           vm_additional_disks:
             - name: prometheus-data
               size: 150G

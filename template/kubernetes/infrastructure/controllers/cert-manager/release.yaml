@@ -60,5 +60,9 @@ spec:
         limits:
           memory: 128Mi
     global:
+      # `platform` (sources/priorityclasses.yaml). global.priorityClassName is
+      # the chart's single key for all three controllers — controller, webhook
+      # and cainjector all render it.
+      priorityClassName: platform
       leaderElection:
         namespace: cert-manager

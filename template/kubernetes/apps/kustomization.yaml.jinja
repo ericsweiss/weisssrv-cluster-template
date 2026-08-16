@@ -1,6 +1,11 @@
 ---
 # One entry per app module. Removing a line makes Flux prune that module's
 # namespace and everything in it — which is the documented way to disable one.
+#
+# registry-cache carries no `git_backend` gate: its `registry.<git_host>`
+# upstream and its allowed client namespace are edit-here knobs its README names.
+# Point them elsewhere rather than deleting the module. The gating rule itself is
+# stated once, in infrastructure/sources/priorityclasses.yaml.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

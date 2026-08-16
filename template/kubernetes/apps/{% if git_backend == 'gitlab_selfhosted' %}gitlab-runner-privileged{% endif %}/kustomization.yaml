@@ -5,6 +5,7 @@ namespace: gitlab-runner-privileged
 resources:
   - namespace.yaml
   - externalsecret.yaml
+  - serviceaccount.yaml
   - release.yaml
   - networkpolicy.yaml
   - resourcequota.yaml

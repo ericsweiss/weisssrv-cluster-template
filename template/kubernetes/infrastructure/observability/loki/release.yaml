@@ -28,6 +28,13 @@ spec:
       retries: 3
       remediateLastFailure: true
   values:
+    global:
+      # `platform` (sources/priorityclasses.yaml). global is the chart's
+      # documented all-pods override; it reaches the singleBinary StatefulSet
+      # (the only component enabled here) and the gateway if it is ever turned
+      # on.
+      priorityClassName: platform
+
     deploymentMode: Monolithic  # Renamed from SingleBinary in chart 12.0.0; the singleBinary: values block name is unchanged.
 
     loki:

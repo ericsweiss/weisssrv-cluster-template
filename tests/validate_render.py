@@ -294,6 +294,7 @@ def check_flux(render: Path) -> None:
 # no Kustomization builds).
 _CORPUS_GATES = (
     ("check-scrape-netpol.py", ()),
+    ("check-default-deny-coverage.py", ()),
     ("check-secretstore-scope.py", ()),
     ("check-pvc-storageclass.py", ()),
     (
@@ -408,10 +409,10 @@ def check_vendored(render: Path, lib_path: Path | None) -> None:
       generic tooling so a generated cluster's CI never has to clone another
       repository. Nothing else notices when a copy drifts: the fix the library
       shipped is simply absent, and the next `task lib:sync` refresh silently
-      reverts whatever was edited here. `flux-env.sh` is the one script written
-      locally and has no library twin, so it is not compared — it must not be a
-      fork of a vendored file either, which is why `flux-render.sh` is compared
-      like the rest.
+      reverts whatever was edited here. Every file in the render's `scripts/` —
+      `flux-env.sh`, `flux-render.sh` and `check-default-deny-coverage.py`
+      included — is compared, and an unlisted file with no twin is reported
+      rather than skipped.
     * this REPOSITORY's own `scripts/` — the template's pipeline vendors the
       release script the same way, and it is the one file here whose drift would
       mis-cut the tag every generated cluster's `copier update` resolves to.
@@ -440,7 +441,7 @@ def check_vendored(render: Path, lib_path: Path | None) -> None:
     vendored, problems = _compare_vendored(
         render / "scripts",
         lib_scripts,
-        local={"flux-env.sh"},
+        local=set(),
         site_data={"version-registry.py"},
     )
     problems += _check_registered_copies(lib_path)
@@ -791,7 +792,7 @@ def _referenced_names(value) -> set[str]:
     env = jinja2.Environment(undefined=jinja2.ChainableUndefined)  # noqa: S701
     try:
         return meta.find_undeclared_variables(env.parse(value))
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - an unmodelled expression, not a failure
         return set()
 
 
@@ -805,20 +806,14 @@ def _default_gap(defaults: dict, var: str, context: dict, assigned: set[str]) ->
     """None when defaults/main.yml gives `var` a value that is non-empty ONCE
     RENDERED against this inventory; otherwise the reason it does not.
 
-    Two gaps, and the second is the one a raw-string test cannot see:
-
-    * the key is absent — the operator must supply it (`proxmox_lxc_gateway`);
-    * the key is present and its value renders EMPTY. `proxmox_lxc_nameserver`
-      defaults to `{{ dns_servers | default([]) | join(' ') }}`: non-empty as
-      TEXT, empty as a VALUE on any inventory that does not set `dns_servers`,
-      so the role's own `proxmox_lxc_nameserver | default('') | length > 0`
-      fails on the first task of the first play — the same failure this gate
-      exists to catch, one variable over.
+    Two gaps, and the second is the one a raw-string test cannot see: the key is
+    absent, or the key is present and its value renders EMPTY (an expression
+    over a name the inventory does not set is non-empty as TEXT and empty as a
+    VALUE).
 
     An empty render whose expression reads a name that IS set somewhere in the
-    inventory (in `hosts.yml`, say, which `context` does not model) is treated
-    as supplied, so the check cannot invent work for an operator whose value
-    simply lives where this evaluator does not look.
+    inventory but outside `context` is treated as supplied, so the check cannot
+    invent work for a value that simply lives where this evaluator does not look.
     """
     if var not in defaults:
         return "gives it no default in defaults/main.yml"
@@ -835,31 +830,18 @@ def _default_gap(defaults: dict, var: str, context: dict, assigned: set[str]) ->
 
 def check_required_role_inputs(render: Path, lib_path: Path | None) -> None:
     """A role input the role ASSERTS and has no usable default for must be set
-    in the inventory.
+    in the inventory. The sibling opt-in check covers inputs that HAVE a
+    default; this is the other half — the assert is the first task of the first
+    play, so a missing input stops `task infra:deploy` immediately.
 
-    The sibling opt-in check reads `<role>_enabled: false` defaults, so it sees
-    only inputs that HAVE a default. The other half of the same class is an
-    input with none: the role asserts it up front, the assert is the first task
-    of the first play, and nothing in the template supplies it. That shipped —
-    `proxmox_lxc_gateway` / `proxmox_vm_cloudinit_gateway` were asserted by both
-    guest-provisioning roles, answered by no copier question and set in no
-    group_var, so `task infra:deploy` (SETUP's stated entry point) stopped on
-    its very first task in every generated cluster while 74 tests, both renders
-    and `task lint` stayed green.
+    "Usable" is decided by RENDERING the default, not by reading it: an input
+    defaulting to an expression over `dns_servers` reads as supplied and
+    evaluates to nothing when the inventory stops setting it. See `_default_gap`.
 
-    "Usable" is decided by RENDERING the default, not by looking at it: the
-    inputs sitting immediately next to those two — `proxmox_lxc_nameserver`,
-    `proxmox_vm_cloudinit_dns` — default to expressions over `dns_servers`,
-    which read as supplied and evaluate to nothing the moment the inventory
-    stops setting it. See `_default_gap`.
-
-    Static on purpose: it reads the library's own `defaults/main.yml` and
-    `assert` tasks rather than replaying a play, so it needs no hosts and costs
-    nothing. The price of that is scope — `assigned` is every name assigned
-    anywhere under `inventories/prod`, not the subset a given group inherits, so
-    a var set only in `group_vars/dns.yml` counts for a role invoked on `mail`
-    too. No shipped playbook passes role-scoped `vars:`, so nothing exploits it
-    today; it is the direction that under-reports rather than over-reports.
+    Static on purpose — it reads the library's `defaults/main.yml` and `assert`
+    tasks rather than replaying a play. The price is scope: `assigned` is every
+    name assigned anywhere under `inventories/prod`, not the subset a given
+    group inherits, so it under-reports rather than over-reports.
     """
     if not lib_path:
         raise Failure("--lib-path is required to read the roles' required inputs")
@@ -950,21 +932,17 @@ def check_inventory_addresses(render: Path) -> None:
     the cluster's VIPs, and every address must sit inside the LAN.
 
     The copier answers are validated one at a time, never against the plan they
-    compose into, and `hosts.yml` hardcodes every address and vmid except the
-    resolvers': the relay is `.23` / vmid 123, k3s servers `.31+` / 131+, agents
-    `.41+` / 141+, while a resolver's vmid is DERIVED from its answer
-    (`100 + last octet`). So `upstream_dns_servers: <prefix>.31 <prefix>.32` —
-    an ordinary answer for anyone whose `.21`/`.22` are already taken — puts
-    dns-01 and k3s-srv-01 on one address under one vmid, and every static gate
-    stays green. `pct` and `qm` share a single vmid namespace, so the collision
-    surfaces two phases later as a create against an id Proxmox already knows.
+    compose into: `hosts.yml` hardcodes every address and vmid except the
+    resolvers', whose vmid is DERIVED from the answer (`100 + last octet`), so a
+    resolver answered into another guest's band collides with it while every
+    static gate stays green. `pct` and `qm` share one vmid namespace, so the
+    collision surfaces two phases later as a create against a known id.
 
     Deliberately a check on the RENDERED INVENTORY rather than on the answer:
-    `hosts.yml` is a skeleton the operator is told to re-address by hand, and a
-    hand edit reaches the same collision by a route no answer validator sees.
-    The generated repository carries the same assertions in its own
-    `tests/test_cluster_invariants.py`, which is what covers those edits after
-    generation; this is the copy that gates the template itself.
+    `hosts.yml` is a skeleton the operator re-addresses by hand, and a hand edit
+    reaches the same collision by a route no answer validator sees. The
+    generated repo carries the same assertions in its own
+    `tests/test_cluster_invariants.py`; this copy gates the template itself.
     """
     hosts_file = render / "ansible" / "inventories" / "prod" / "hosts.yml"
     if not hosts_file.is_file():

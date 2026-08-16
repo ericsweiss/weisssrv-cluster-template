@@ -266,8 +266,7 @@ spec:
             value: "true"
             effect: PreferNoSchedule
 
-    # authentik dropped the bundled Redis dependency in 2025.10 — all state now
-    # lives in PostgreSQL.
+    # No bundled Redis — all authentik state lives in PostgreSQL.
     redis:
       enabled: false
 

@@ -63,8 +63,9 @@ k3s_etcd_snapshot_nfs_export: /k3s-etcd
 # /etc/hosts pins so image pulls and PV mounts survive a cluster-DNS outage
 # (CoreDNS itself needs the registry to start). The NFS mount MUST be by
 # hostname for the TLS handshake to verify — the wildcard certificate has no IP
-# SAN. The name comes from the nas_host answer; the address follows the roster.
+# SAN. The name comes from the nas_host answer; the address is read out of the
+# inventory, so re-addressing the NAS in hosts.yml cannot leave a stale pin here.
 k3s_storage_host_pins:
   - name: "{{ nas_host }}"
-    ip: {{ lan_prefix }}.11
+    ip: "{% raw %}{{ hostvars[groups['nas'][0]].ansible_host }}{% endraw %}"
 k3s_registry_host_pins: []

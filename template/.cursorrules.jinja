@@ -1,0 +1,24 @@
+# Cursor rules
+
+**Before making any change, read and follow
+`.claude/skills/cluster-development/SKILL.md`** — the authoritative workflow for
+this cluster (also loaded by `.cursor/rules/cluster-development.mdc`,
+`alwaysApply: true`). `CLAUDE.md` and `AGENTS.md` point at the same place.
+
+The rules that must hold in every change, restated here because they are the
+ones that cost real damage:
+
+- NEVER push to the default branch — branch plus merge request, always, including
+  one-line fixes. The deploy jobs and Flux act on it.
+- NEVER commit secrets. Host tooling references
+  {% if secrets_backend == 'onepassword' %}`op://{{ onepassword_vault }}/<item>/<field>`{% else %}the secrets backend{% endif %};
+  workloads read a Secret produced by an `ExternalSecret`.
+- NEVER `kubectl apply` or `helm upgrade` to deploy: Flux owns everything under
+  `kubernetes/`. Preview with `task flux:lint`, deploy by merging.
+- Kubernetes manifests carry NO site literals — domains, addresses and CIDRs
+  arrive as `${cluster_...}` substitutions from the `cluster-config` ConfigMap.
+- Versions are single-sourced in `ansible/inventories/prod/group_vars/all.yml`;
+  run `task flux:sync-versions` after changing a pin and commit the result.
+- Ansible roles live in the weisssrv.infra collection, not in this repo. A role
+  change is a library change plus a pin bump.
+- Run `task lint` before opening a merge request.

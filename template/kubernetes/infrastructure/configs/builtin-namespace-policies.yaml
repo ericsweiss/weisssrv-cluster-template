@@ -1,0 +1,38 @@
+---
+# Fail-closed policies for the two pod-free built-in namespaces. Neither holds a
+# workload — kube-public carries only kube-root-ca.crt and the bootstrap-signer
+# RoleBinding, kube-node-lease only the node Leases — so this costs nothing and
+# guards the case it exists for: a pod created there by hand or by a future
+# chart would otherwise be completely unguarded, and neither namespace owns a
+# workload the coverage gate would flag (`scripts/check-default-deny-coverage.py`
+# only examines namespaces that do).
+#
+# Ingress AND egress, mirroring `default` in default-namespace.yaml — the same
+# reasoning applies, and there is no traffic to preserve.
+#
+# The Namespace objects themselves are deliberately NOT adopted here. `default`
+# is adopted to gain PSA labels because manifests in this repo really do put
+# Services there; these two hold nothing of ours, so the narrower change is the
+# right blast radius.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: kube-public
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: kube-node-lease
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

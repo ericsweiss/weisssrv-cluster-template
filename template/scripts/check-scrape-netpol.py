@@ -1,54 +1,18 @@
 #!/usr/bin/env python3
 """Assert every scraped namespace admits Prometheus through its NetworkPolicies.
 
-A namespace that carries ANY NetworkPolicy with `Ingress` in policyTypes is
-ingress-default-deny for everything that policy set does not explicitly allow —
-including the Prometheus scrape. Enabling a ServiceMonitor/PodMonitor without the
-paired ingress allow leaves the pod healthy (kubelet probes originate in the host
-netns and bypass the CNI policy chain) while the scrape is REJECTed, so the only
-symptom is a `TargetDown` alert.
+A namespace carrying any NetworkPolicy with `Ingress` in policyTypes is
+ingress-default-deny. Enabling a ServiceMonitor/PodMonitor without the paired
+allow leaves the pod healthy — kubelet probes originate in the host netns and
+bypass the CNI policy chain — while the scrape is REJECTed, so the only symptom
+is TargetDown. A namespace counts as scraped via a ServiceMonitor/PodMonitor
+(its own namespace or `spec.namespaceSelector.matchNames`) or via a HelmRelease
+enabling a chart-native monitor in `.spec.values`; chart-rendered monitors never
+appear in the kustomize corpus.
 
-This guards that invariant in CI. It reads the rendered corpus `task flux:lint`
-builds (`kustomize build | envsubst`, no `helm template`) on stdin and fails when
-a scraped, ingress-restricted namespace has no ingress rule sourced from the
-observability namespace.
-
-A namespace counts as scraped when either:
-  * a ServiceMonitor/PodMonitor targets it — its own namespace, or the namespaces
-    named in `spec.namespaceSelector.matchNames`; or
-  * a HelmRelease deploying into it enables a chart-native monitor
-    (any `.../serviceMonitor.enabled: true` or `.../podMonitor.enabled: true` in
-    `.spec.values`). Chart-rendered monitors never appear in the kustomize corpus,
-    so matching on the HelmRelease values is the only way to see them.
-
-Deliberately NOT checked: the port. A chart-native monitor names a container/
-service port (`port: http`) that only resolves once the chart is rendered, so a
-port-level assertion would be enforceable for hand-written monitors and silently
-vacuous for chart ones. Namespace-level reachability is the invariant that can be
-checked uniformly.
-
-Pod-selector granularity is out of reach for the same reason. Which pods a
-monitor ultimately scrapes resolves through Service label selectors (and, for
-chart-native monitors, through templates the corpus never contains), so the
-gate cannot tell whether an observability-sourced allow's podSelector covers
-the scraped pods, nor whether a pod-scoped ingress policy isolates them. It
-therefore counts any observability-sourced allow for the namespace and treats
-only namespace-wide policies as restricting — an allow scoped to the wrong
-pod, or a pod-scoped default-deny, passes here and surfaces at runtime as
-TargetDown. Requiring namespace-wide allows instead would fail the tighter
-(and preferred) app-scoped allow policies this gate exists to encourage.
-
-Site data — which namespace Prometheus runs in, and any namespace exempt from
-the invariant — comes from flags, not from this file.
-
-The gate refuses to be vacuous, in both the shapes its siblings guard. An EMPTY
-corpus is an operator error (exit 2), not a pass, and so is a corpus that HAS
-documents but holds no scrape target at all: that is what a render loop which
-never reached the observability stage produces, and every namespace below it
-goes unexamined. Scrape targets with none ingress-restricted among them stays a
-pass — default-deny is a per-namespace choice — and the success line reports
-both counts. A malformed `--exempt` is the same operator-error class (exit 2),
-never exit 1.
+Namespace-level reachability only — port and pod-selector granularity resolve at
+chart-render time (docs/SCRIPTS.md). Exit 0 clean, 1 on a finding, 2 on an
+operator error including an empty corpus or one holding no scrape target.
 
 Usage (wired into flux:lint, on the accumulated full corpus):
   kustomize build <path> | envsubst >> corpus

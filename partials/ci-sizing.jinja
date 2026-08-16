@@ -1,0 +1,90 @@
+{#- CI runner capacity model — the ONE place both tiers' sizing constants live.
+
+    Imported by each runner's release.yaml.jinja and resourcequota.yaml.jinja:
+
+        {% import "partials/ci-sizing.jinja" as sizing with context %}
+
+    so a tier's `concurrent` and the ResourceQuota that has to admit it are
+    computed from one block and cannot drift apart. This file sits OUTSIDE
+    template/, so it is never copied into a generated cluster — it renders the
+    numbers, and the generated repo carries the literals. Nothing recomputes them
+    after generation: grow the fleet and raise them by hand.
+
+    Names with a leading underscore are NOT exported by Jinja's `import`, so
+    everything below is deliberately unprefixed; tests/test_render.py § CI runner
+    sizing pins what this file produces and holds it to the reference cluster.
+
+    Roster: hosts.yml.jinja gives every k3s agent 4 cores / 8Gi and puts one agent
+    on each Proxmox host. Job pods are HARD-excluded from the NAS agent on the
+    PRIVILEGED tier only, so that tier's pool is compute_node_count agents while
+    the shared tier's is compute_node_count + 1.
+
+    Both quotas deliberately omit a cpu / limits.cpu dimension: it would force
+    EVERY pod in the namespace to declare a CPU limit, which rejects the runner
+    manager (it runs without one, to avoid CFS throttling). CPU is bounded via
+    requests.cpu, memory via both.
+-#}
+{%- set agent_cores = 4 -%}
+{%- set agent_mem_gib = 8 -%}
+{%- set compute_agents = compute_node_count | default(2) | int -%}
+
+{#- The manager pod (components/gitlab-runner-common) counts against every
+    dimension of its namespace's quota, so each one carries slack for it. -#}
+{%- set manager_cpu = 0.15 -%}
+{%- set manager_mem_gib = 0.125 -%}
+{%- set manager_mem_limit_gib = 0.5 -%}
+
+{#- ------------------------------------------------------------------
+    Privileged tier — CPU is the governor.
+
+    A job costs ~1.5 cpu (build 900m + DinD 500m + helper 100m), 1Gi of memory
+    requests and 3.25Gi of DECLARED memory limits. Two cores stay with the
+    platform pods co-tenanting those agents.
+
+    Quota dimensions = the per-job cost DOUBLED (a Terminating pod still counts,
+    and a thin buffer 403s under churn — GitLab reports that as
+    runner_system_failure) plus slack for the manager. requests.* are the
+    scheduler's reservation; limits.memory is an admission ceiling for declared
+    limits, deliberately above what the pool can resident-hold, which is why job
+    pods carry the `ci-jobs` PriorityClass.
+    ------------------------------------------------------------------ -#}
+{%- set privileged_job_cpu = 1.5 -%}
+{%- set privileged_job_mem_gib = 1.0 -%}
+{%- set privileged_job_mem_limit_gib = 3.25 -%}
+{%- set privileged_pool_cores = compute_agents * agent_cores -%}
+{%- set privileged_pool_mem_gib = compute_agents * agent_mem_gib -%}
+{%- set privileged_concurrent = [1, ((privileged_pool_cores - 2) / privileged_job_cpu) | round(0, 'floor') | int] | max -%}
+{%- set privileged_quota_cpu = privileged_concurrent * 3 + 2 -%}
+{%- set privileged_quota_mem_gib = privileged_concurrent * 2 + 1 -%}
+{%- set privileged_quota_limit_mem_gib = privileged_concurrent * 6 + 10 -%}
+{%- set privileged_quota_pods = privileged_concurrent * 2 + 1 -%}
+
+{#- ------------------------------------------------------------------
+    Shared tier — MEMORY is the governor.
+
+    A job is cheap on CPU (build 500m + helper 100m) and expensive on memory:
+    1.25Gi of requests (1Gi + the LimitRange's 256Mi default for the helper) and
+    5Gi of DECLARED limits (4Gi + the LimitRange's 1Gi default limit — the helper
+    declares none of its own). `concurrent` therefore comes off the memory pool,
+    capped so a full burst of declared limits stays at three quarters of it,
+    leaving the rest for the resident workloads sharing those agents.
+
+    requests.* carry the doubled-for-churn per-job cost (1 cpu, 2Gi) plus manager
+    slack, as on the privileged tier. limits.memory and pods do NOT double:
+    at 5Gi a job, doubling would put the ceiling above the whole pool, so churn
+    gets two extra SLOTS instead.
+    ------------------------------------------------------------------ -#}
+{%- set shared_job_cpu = 0.6 -%}
+{%- set shared_job_mem_gib = 1.25 -%}
+{%- set shared_job_mem_limit_gib = 5 -%}
+{%- set shared_churn_slots = 2 -%}
+{%- set shared_pool_fraction = 0.75 -%}
+{%- set shared_agents = compute_agents + 1 -%}
+{%- set shared_pool_cores = shared_agents * agent_cores -%}
+{%- set shared_pool_mem_gib = shared_agents * agent_mem_gib -%}
+{%- set shared_concurrent = [1, ((shared_pool_mem_gib * shared_pool_fraction) / shared_job_mem_limit_gib) | round(0, 'floor') | int] | max -%}
+{%- set shared_slots = shared_concurrent + shared_churn_slots -%}
+{%- set shared_quota_cpu = shared_concurrent * 1 + 1 -%}
+{%- set shared_quota_mem_gib = shared_concurrent * 2 + 2 -%}
+{%- set shared_quota_limit_mem_gib = shared_slots * shared_job_mem_limit_gib + 1 -%}
+{%- set shared_quota_pods = shared_slots * 2 + 2 -%}

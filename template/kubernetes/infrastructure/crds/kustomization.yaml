@@ -5,3 +5,8 @@ namespace: prometheus-operator-crds
 resources:
   - namespace.yaml
   - release.yaml
+
+# default-deny-ingress for the namespace; the `namespace:` transformer above
+# places it. Free here — nothing runs in this namespace.
+components:
+  - ../../components/netpol-baseline

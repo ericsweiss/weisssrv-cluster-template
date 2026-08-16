@@ -19,13 +19,10 @@ locals {
   }
 
   # Client secrets come in as variables (injected from the secret store by the
-  # terraform:authentik-* tasks) so this file stays non-sensitive. A provider
-  # with no entry gets a server-generated secret that exists only in state,
-  # which the application itself then cannot know — pass one for every app that
-  # keeps its own copy of the secret.
-  #
-  # The null filter is for genuinely optional providers only: an app whose
-  # secret variable is required (no default) can never be null here.
+  # terraform:authentik-* tasks) so this file stays non-sensitive. Pass one for
+  # every app that keeps its own copy: a provider with no entry gets a
+  # server-generated secret that exists only in state. The null filter is for
+  # genuinely optional providers — a required variable can never be null here.
   oauth2_client_secrets = {
     for key, secret in {
       grafana = var.oauth2_client_secret_grafana
@@ -41,22 +38,9 @@ locals {
 
   saml_providers = {}
 
-  # Scope mappings this cluster authors, for a claim authentik does not emit by
-  # default — a provider references one as `custom:<key>` in its
-  # `scope_mappings` list, interleaved with the managed ids in the order the API
-  # stores. The stock `email` scope hardcodes `email_verified: false`, which some
-  # applications refuse to log in without:
-  #
-  #   custom_scope_mappings = {
-  #     email_verified = {
-  #       name       = "OIDC email (asserted verified)"
-  #       scope_name = "email"
-  #       expression = "return {\"email\": request.user.email, \"email_verified\": True}"
-  #     }
-  #   }
-  #
-  # Only assert a claim the account model actually justifies — an expression
-  # runs server-side on every token issue.
+  # Scope mappings this cluster authors, referenced as `custom:<key>` in a
+  # provider's `scope_mappings` list — order matters, the API stores it. Example
+  # and the email_verified case: README § Custom scope mappings.
   custom_scope_mappings = {}
 
   groups = {
@@ -84,13 +68,9 @@ locals {
     grafana = { application = "grafana", group = "grafana-users" }
   }
 
-  # The embedded outpost serves the proxy providers. null leaves it alone —
-  # managing it means importing the object authentik created itself, and going
-  # back to null later DESTROYS it (detach with `terraform state rm` instead).
-  #
-  # Once managed it is `{ proxy_provider_keys = [...] }`, and the list is
-  # ORDERED: the API preserves insertion order, so reordering it is a permanent
-  # diff — append new providers at the end. A proxy provider missing from the
-  # list serves 404 from the outpost.
+  # The embedded outpost serves the proxy providers. null leaves it alone; going
+  # back to null once managed DESTROYS it (detach with `terraform state rm`).
+  # Managed it is `{ proxy_provider_keys = [...] }`, ORDERED — append at the end,
+  # and a proxy provider missing from the list serves 404 from the outpost.
   embedded_outpost = null
 }

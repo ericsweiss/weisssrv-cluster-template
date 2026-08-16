@@ -1,0 +1,32 @@
+---
+# kured's metrics endpoint — container port 8080 named `metrics`, fronted by the
+# `kured` Service on the same port.
+#
+# The ServiceMonitor is chart-native, rendered from `metrics.create: true` in
+# controllers/kured/release.yaml. scripts/check-scrape-netpol.py cannot see it —
+# that gate matches `serviceMonitor.enabled` / `podMonitor.enabled` toggles, and
+# this chart spells it `metrics.create`. Miss this rule and the scrape is
+# REJECTed at the CNI while the pods stay 1/1: the only symptom is TargetDown,
+# plus a KuredRebootStuck that can never fire.
+#
+# kured needs no other ingress. It exposes no API and no webhook — its
+# cluster-wide reboot lock is a node annotation it writes through the apiserver.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kured-metrics-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kured
+      app.kubernetes.io/instance: kured
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 8080

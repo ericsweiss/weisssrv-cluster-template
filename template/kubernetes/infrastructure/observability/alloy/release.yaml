@@ -89,6 +89,9 @@ spec:
           }
 
     controller:
+      # `platform` (sources/priorityclasses.yaml) — the chart nests the key
+      # under controller, not at the top level.
+      priorityClassName: platform
       type: daemonset
       tolerations:
         - operator: Exists

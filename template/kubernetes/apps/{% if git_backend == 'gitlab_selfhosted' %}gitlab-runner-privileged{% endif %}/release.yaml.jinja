@@ -1,24 +1,21 @@
+{#- CI capacity, derived so the shipped numbers match the roster this cluster was
+    generated for rather than a reference cluster's. The model — pool, per-job
+    cost, and every quota dimension for BOTH tiers — lives in one place,
+    partials/ci-sizing.jinja, which resourcequota.yaml.jinja imports too, so the
+    two files cannot drift apart. README § Sizing is the prose. -#}
+{%- import "partials/ci-sizing.jinja" as sizing with context -%}
 ---
 # Privileged (infrastructure) GitLab Runner. Shared fields come from
 # components/gitlab-runner-common; only this runner's deltas live here.
 #
-# ===========================================================================
-# REGISTER THIS RUNNER AS A **PROJECT** RUNNER, LOCKED TO THIS REPOSITORY.
-# Never an instance runner. Never a group runner over a group that contains
-# untrusted projects.
-#
-# The registration SCOPE is the security boundary — the tag is not. Tags are
-# cooperative routing: any project on the instance can write
-# `tags: [{{ ci_runner_tag }}]` in its own .gitlab-ci.yml. Registered
-# instance-wide, that one line gets an arbitrary authenticated user root +
-# Docker-in-Docker execution on this cluster, on a runner that also holds SSH
-# reach to the hosts.
-#
-# Verify right after registering, and again after ANY re-registration:
-#     GET /api/v4/runners/<id>   ->   "runner_type": "project_type"
-#
-# Full reasoning, and the tenant-build alternative, in README.md.
-# ===========================================================================
+# REGISTER AS A **PROJECT** RUNNER LOCKED TO THIS REPOSITORY — never an
+# instance runner, never a group runner over a group holding untrusted
+# projects. The registration SCOPE is the security boundary; the tag is only
+# cooperative routing, so any project on the instance can write
+# `tags: [{{ ci_runner_tag }}]` and claim root + Docker-in-Docker here on a
+# runner that also holds SSH reach to the hosts. Verify after every
+# registration: GET /api/v4/runners/<id> -> "runner_type": "project_type".
+# Reasoning and the tenant-build alternative: README.md.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -30,21 +27,21 @@ spec:
     # Size to the schedulable pool, NOT above it: overflow above pool capacity
     # parks as Pending pods, and pod-Pending time burns the JOB timeout clock, so
     # jobs get killed without ever starting. At or below capacity the overflow
-    # waits in GitLab's queue, where that clock does not run. Keep this and
-    # requests.cpu in the ResourceQuota in lockstep. See README (Sizing).
-    concurrent: 9
+    # waits in GitLab's queue, where that clock does not run. Derived from
+    # compute_node_count (header above); raise it here and in the
+    # ResourceQuota's requests.cpu together. Sizing model: README.
+    concurrent: {{ sizing.privileged_concurrent }}
 
     runners:
       name: k3s-runner-{{ ci_runner_tag }}
 
       secret: gitlab-runner-privileged-token
 
-      # THE TAG THE RUNNER CLAIMS. It must equal the `ci_runner_tag` answer,
-      # because that is the tag every job in this repository's pipeline declares
-      # (`tags:` in .gitlab-ci.yml). If the two ever drift, nothing errors: the
-      # tagged jobs simply queue against a tag no runner offers and sit
-      # "pending" until their timeout. Both sides are generated from the same
-      # answer so they cannot drift — do not hardcode either one.
+      # THE TAG THE RUNNER CLAIMS — must equal the `ci_runner_tag` answer that
+      # every job in this repository's pipeline declares. Drift does not error:
+      # the tagged jobs queue against a tag no runner offers and sit "pending"
+      # until their timeout. Both sides come from the same answer, so do not
+      # hardcode either one.
       tags: "{{ ci_runner_tag }}"
       # ...and untagged jobs never do (they go to the shared runner).
       runUntagged: false
@@ -52,22 +49,17 @@ spec:
       # ACCEPTED RISK: lets this privileged runner execute MR pipelines from
       # UNPROTECTED feature branches. Deliberate — every job in this repo's
       # pipeline is tagged for this runner, so protected:true would silently break
-      # MR CI (feature branches are not protected).
-      #
-      # The isolation boundary is the runner REGISTRATION SCOPE, not the tag: tags
-      # are cooperative routing, and any project on the instance can declare
-      # tags:[{{ ci_runner_tag }}]. The registration behind this token MUST be a
-      # PROJECT runner locked to this repository — never an instance runner.
+      # MR CI (feature branches are not protected). The isolation boundary is the
+      # registration scope, not the tag — see the file header.
       protected: false
 
       executor: kubernetes
 
       config: |
-        # TOML sections are POSITIONAL: every key after a [section] header belongs
-        # to that section until the next header. All scalar [runners.kubernetes]
-        # keys must come BEFORE any sub-table — a mid-section pod_labels table
-        # once swallowed every key after it and the runner crash-looped on first
-        # render.
+        # TOML sections are POSITIONAL: every key after a [section] header
+        # belongs to that section until the next header, so all scalar
+        # [runners.kubernetes] keys must precede any sub-table or they are
+        # silently swallowed by it.
         [[runners]]
           # A [[runners]] scalar — must precede the [runners.kubernetes] sub-table.
           clone_url = "https://${cluster_git_host}"
@@ -82,6 +74,13 @@ spec:
             # readability; the digest is authoritative).
             image = "python:3.11@sha256:9800957d2a88867f853ce6072ae1669e37fa269cc6f76009fa1aef4757f62212"
             privileged = true
+
+            # Rank job pods below every unclassed workload and never preempt
+            # (sources/priorityclasses.yaml): the namespace quotas admit more CPU
+            # requests than the cluster has allocatable, so a burst would otherwise
+            # compete with platform pods on arrival order alone. A scalar key —
+            # must stay above the first sub-table.
+            priority_class_name = "ci-jobs"
 
             # Build container: the CPU REQUEST is the scheduler's per-node
             # reservation, so it must reflect what a converge actually uses
@@ -103,7 +102,9 @@ spec:
             helper_memory_limit = "256Mi"
             helper_memory_request = "128Mi"
 
-            service_account = "gitlab-runner-privileged"
+            # Job pods run as the token-less jobs SA (serviceaccount.yaml), not
+            # the manager SA — they must not inherit its secrets/pods-exec Role.
+            service_account = "gitlab-runner-privileged-jobs"
 
             # No pod_security_context: DinD needs a root Docker daemon. This is
             # the whole reason this tier exists in its own namespace.

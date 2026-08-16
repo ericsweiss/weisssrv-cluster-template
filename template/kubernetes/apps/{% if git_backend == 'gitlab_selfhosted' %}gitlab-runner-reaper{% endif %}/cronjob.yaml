@@ -109,14 +109,12 @@ spec:
                       return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
                   def terminal_age_minutes(pod, now):
-                      # Age from the NEWEST container termination across ALL status
-                      # lists: a pod that fails in an INIT container has its
-                      # finishedAt only there, and its regular containers never
-                      # start. For a status with no parseable terminated.finishedAt:
-                      # KEEP the pod if that container actually STARTED (has a
-                      # containerID) — ambiguous; SKIP a never-started container so
-                      # it cannot block reaping. NEVER fall back to
-                      # startTime/creationTimestamp.
+                      # Age from the NEWEST container termination across ALL
+                      # status lists; NEVER fall back to startTime or
+                      # creationTimestamp. A status with no parseable
+                      # terminated.finishedAt KEEPS the pod if that container
+                      # actually started (has a containerID), and is skipped if
+                      # it never did. See README.
                       status = pod.get("status", {})
                       statuses = (status.get("initContainerStatuses", [])
                                   + status.get("containerStatuses", [])

@@ -27,18 +27,37 @@ is compressible, so a CPU limit only adds CFS throttling that hurts latency and
 inflates the CPU% a CPU-based HPA reads. The check covers both rendered pod specs
 and HelmRelease `.spec.values`.
 
-The chart-native target list and the CPU-limit allowlist are consumer data, read
-from --policy-config (YAML/JSON, both keys optional):
+The same flag enforces the VPA memory-cap rule, scoped to what each policy
+controls (`maxAllowed.memory` against the container's memory limit):
+
+    policy shape                                    cap rule
+    controlledValues: RequestsOnly (Auto/Initial)   == the limit is CORRECT
+    limit-controlling (RequestsAndLimits or unset)  must stay BELOW the limit —
+                                                    the updater rescales the
+                                                    limit with the request, so a
+                                                    cap at the limit leaves no
+                                                    ceiling that binds
+    updateMode/mode Off                             exempt from the == rule
+
+    above the limit                                 always wrong, every shape
+
+The chart-native target list, the CPU-limit allowlist and the VPA-cap allowlist
+are consumer data, read from --policy-config (YAML/JSON, all keys optional):
 
     chart_native_hpa_targets:
       - {namespace: traefik, kind: Deployment, name: traefik, source: chart autoscaling}
     cpu_limit_allowlist:
       - kube-system/DaemonSet/foo   # rationale
+    vpa_cap_allowlist:
+      - apps/VerticalPodAutoscaler/foo   # rationale (cap not re-derived yet)
 
 Limitation: a CPU limit baked into a third-party chart's subchart defaults that
 is NOT overridden in `.spec.values` is invisible here (the corpus is kustomize-
 only, no `helm template`). validate-helm-values.py renders the value-heavy
-releases via `helm template` and reuses cpu_limit_violations to catch those.
+releases via `helm template` and reuses cpu_limit_violations to catch those. The
+cap rule has the same blind spot from the other side: a VPA whose target workload
+is rendered by a chart has no limit to compare against in this corpus, so it is
+skipped rather than guessed at.
 
 Usage (on the accumulated full corpus):
   kustomize build <path> | envsubst >> corpus
@@ -69,13 +88,19 @@ class Policy:
     own annotations.)
     """
 
-    def __init__(self, chart_native_hpa_targets=None, cpu_limit_allowlist=None) -> None:
+    def __init__(
+        self, chart_native_hpa_targets=None, cpu_limit_allowlist=None, vpa_cap_allowlist=None
+    ) -> None:
         # (namespace, target-kind, target-name) -> where the chart-native HPA comes from.
         self.chart_native_hpa_targets: dict[tuple[str, str, str], str] = dict(
             chart_native_hpa_targets or {}
         )
         # "namespace/Kind/name" workloads intentionally permitted a CPU limit.
         self.cpu_limit_allowlist: set[str] = set(cpu_limit_allowlist or ())
+        # "namespace/VerticalPodAutoscaler/name" policies whose memory cap has not
+        # been re-derived against its limit yet. A grace list, not an exemption:
+        # every entry carries a rationale in the consumer's policy file.
+        self.vpa_cap_allowlist: set[str] = set(vpa_cap_allowlist or ())
 
 
 def _target_key(ns: str, ref: dict) -> tuple[str, str, str]:
@@ -159,6 +184,8 @@ def load_policy(path) -> Policy:
         )
     for item in doc.get("cpu_limit_allowlist") or []:
         policy.cpu_limit_allowlist.add(str(item))
+    for item in doc.get("vpa_cap_allowlist") or []:
+        policy.vpa_cap_allowlist.add(str(item))
     return policy
 
 
@@ -223,6 +250,152 @@ def cpu_limit_violations(docs: list[dict], allowlist: set[str] | None = None) ->
                     out.append(
                         f"  {wlkey}: container {c.get('name', '?')!r} sets "
                         f"limits.cpu={lim.get('cpu')}"
+                    )
+    return out
+
+
+# --- VPA memory-cap rule ------------------------------------------------------
+_BINARY_SUFFIXES = {"Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "Pi": 2**50, "Ei": 2**60}
+_DECIMAL_SUFFIXES = {
+    "n": 1e-9, "u": 1e-6, "m": 1e-3,
+    "k": 1e3, "M": 1e6, "G": 1e9, "T": 1e12, "P": 1e15, "E": 1e18,
+}
+
+
+def parse_quantity(value) -> float | None:
+    """A Kubernetes quantity in bytes, or None when it cannot be read.
+
+    Unparseable is None rather than 0: a value this cannot compare must not
+    become a violation invented out of a parse failure.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        # Plain and decimal-exponent forms ("1", "1.5", "1e6") — tried first so
+        # the exponent form is never mistaken for the "E" (exa) suffix.
+        return float(text)
+    except ValueError:
+        pass
+    for suffix, mult in _BINARY_SUFFIXES.items():
+        if text.endswith(suffix):
+            try:
+                return float(text[: -len(suffix)]) * mult
+            except ValueError:
+                return None
+    mult = _DECIMAL_SUFFIXES.get(text[-1])
+    if mult is None:
+        return None
+    try:
+        return float(text[:-1]) * mult
+    except ValueError:
+        return None
+
+
+def _workload_memory_limits(docs: list[dict]) -> dict[tuple[str, str, str], dict[str, str]]:
+    """(namespace, kind, name) -> {container name: its memory limit}.
+
+    A workload present with no limits still gets an (empty) entry: "visible in
+    the corpus" and "has a limit to compare against" are different facts.
+    """
+    out: dict[tuple[str, str, str], dict[str, str]] = {}
+    for d in docs:
+        kind = d.get("kind")
+        if kind not in POD_SPEC_KINDS and kind != "CronJob":
+            continue
+        meta = d.get("metadata") or {}
+        name = meta.get("name")
+        if not name:
+            continue
+        limits: dict[str, str] = {}
+        for c in _containers_of(d):
+            mem = ((c.get("resources") or {}).get("limits") or {}).get("memory")
+            if mem not in (None, ""):
+                limits[str(c.get("name") or "?")] = str(mem)
+        out[(meta.get("namespace") or "default", kind, str(name))] = limits
+    return out
+
+
+def vpa_cap_violations(docs: list[dict], allowlist: set[str] | None = None) -> list[str]:
+    """Flag `maxAllowed.memory` caps that cannot do their job.
+
+    Above the container's limit is always wrong — the updater can never apply a
+    recommendation the kubelet would reject. Exactly AT the limit is wrong only
+    where the policy also controls limits (`controlledValues: RequestsAndLimits`
+    or unset, mode not Off): there the limit is rescaled with the request, so a
+    cap at the limit leaves no ceiling that ever binds. Under `RequestsOnly` the
+    same cap == limit is the correct shape — the limit is hand-set and only the
+    request moves.
+
+    Targets the kustomize-only corpus does not render (chart-native workloads)
+    have no limit to compare against and are skipped.
+    """
+    allowed = allowlist or set()
+    workloads = _workload_memory_limits(docs)
+    out: list[str] = []
+    for d in docs:
+        if d.get("kind") != VPA_KIND:
+            continue
+        meta = d.get("metadata") or {}
+        ns = meta.get("namespace") or "default"
+        vpakey = f"{ns}/{VPA_KIND}/{meta.get('name', '?')}"
+        if vpakey in allowed:
+            continue
+        spec = d.get("spec") or {}
+        ref = spec.get("targetRef") or {}
+        if not ref.get("name"):
+            continue
+        target = _target_key(ns, ref)
+        limits = workloads.get(target)
+        if not limits:
+            continue
+        vpa_off = str((spec.get("updatePolicy") or {}).get("updateMode", "Auto")).lower() == "off"
+        tns, tkind, tname = target
+        policies = (spec.get("resourcePolicy") or {}).get("containerPolicies", []) or []
+        # An exact-named containerPolicy overrides "*" for that container, so
+        # the wildcard's cap must not be judged against explicitly-covered ones.
+        explicit = {p.get("containerName") for p in policies
+                    if p.get("containerName") not in (None, "*")}
+        for p in policies:
+            cap_raw = (p.get("maxAllowed") or {}).get("memory")
+            cap = parse_quantity(cap_raw)
+            if cap is None:
+                continue
+            off = vpa_off or str(p.get("mode") or "").lower() == "off"
+            # Unset controlledValues defaults to RequestsAndLimits, i.e. the
+            # policy moves the limit too.
+            controls_limits = (
+                str(p.get("controlledValues") or "RequestsAndLimits").lower() != "requestsonly"
+            )
+            cname = p.get("containerName")
+            targets = (
+                {k: v for k, v in limits.items() if k not in explicit}
+                if cname in (None, "*")
+                else {k: v for k, v in limits.items() if k == cname}
+            )
+            for container, limit_raw in sorted(targets.items()):
+                limit = parse_quantity(limit_raw)
+                if limit is None or limit <= 0:
+                    continue
+                if cap > limit * (1 + 1e-9):
+                    out.append(
+                        f"  {vpakey}: maxAllowed.memory {cap_raw} is above the {limit_raw} "
+                        f"limit of container {container!r} in {tns}/{tkind}/{tname} — a "
+                        f"recommendation the kubelet would reject; lower the cap or raise "
+                        f"the limit in the same commit"
+                    )
+                elif controls_limits and not off and abs(cap - limit) <= limit * 1e-9:
+                    out.append(
+                        f"  {vpakey}: maxAllowed.memory {cap_raw} equals the limit of "
+                        f"container {container!r} in {tns}/{tkind}/{tname} while the policy "
+                        f"also controls limits (controlledValues: "
+                        f"{p.get('controlledValues') or 'unset'}) — the updater rescales the "
+                        f"limit with the request, so that ceiling never binds; cap below the "
+                        f"limit, or set controlledValues: RequestsOnly with a hand-set limit"
                     )
     return out
 
@@ -334,6 +507,10 @@ def main(argv: list[str] | None = None) -> int:
         cpu_limit_violations(docs, policy.cpu_limit_allowlist)
         if args.require_chart_native_vpas else []
     )
+    cap_violations = (
+        vpa_cap_violations(docs, policy.vpa_cap_allowlist)
+        if args.require_chart_native_vpas else []
+    )
 
     failed = False
     if violations:
@@ -349,13 +526,27 @@ def main(argv: list[str] | None = None) -> int:
         )
         print("\n".join(cpu_violations), file=sys.stderr)
         failed = True
+    if cap_violations:
+        print(
+            "VPA cap policy violated — maxAllowed.memory must stay under the container's "
+            "memory limit, and may equal it only where the policy does not control limits "
+            "(controlledValues: RequestsOnly). Offenders:",
+            file=sys.stderr,
+        )
+        print("\n".join(cap_violations), file=sys.stderr)
+        print(
+            "  (a cap awaiting re-derivation goes in the policy file's vpa_cap_allowlist "
+            "with its rationale, not left silently violating)",
+            file=sys.stderr,
+        )
+        failed = True
     if failed:
         return 1
 
     print(
         f"HPA/VPA invariant OK ({len(hpas)} HPAs, {len(vpas)} VPAs checked"
         + (f", {len(policy.chart_native_hpa_targets)} chart-native targets asserted"
-           ", CPU-limit policy OK"
+           ", CPU-limit policy OK, VPA cap policy OK"
            if args.require_chart_native_vpas else "")
         + ")"
     )

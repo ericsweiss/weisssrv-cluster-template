@@ -5,7 +5,7 @@ collections:
   # The collection lives in a subdirectory of the library repo, so the path goes
   # on the URL fragment. `version:` takes a release tag (pin it) or a branch
   # (local iteration against an unmerged library change).
-  - name: git+{{ lib_url | default('https://git.ericsweiss.com/eric/weisssrv-lib.git') }}#/ansible_collections/weisssrv/infra
+  - name: git+{{ lib_url }}#/ansible_collections/weisssrv/infra
     type: git
     version: {{ lib_ref }}
 

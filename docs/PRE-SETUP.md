@@ -206,11 +206,14 @@ If you only own one domain, use a subdomain for the internal zone
 identical values because the per-zone certificate and ingress pairs would
 collide.
 
-Two addresses also belong here rather than to any zone: `admin_email` is where
-system mail (cron, SMART, ZFS events) lands and the account address ACME
-registers with, and `alert_email` is where critical Alertmanager notifications
-go. They default to the same inbox; separate them if pages should not land in
-the same place as nightly SMART reports.
+Two addresses also belong here rather than to any zone: `admin_email` is the
+operator contact — the zone's CAA iodef and DMARC rua records, the in-cluster
+ACME account and the seeded tailnet admin — and `alert_email` is where critical
+Alertmanager notifications go. They default to the same inbox; separate them if
+pages should not land in the same place as nightly SMART reports. System mail
+(cron, SMART, ZFS events) and the host-side ACME account are NOT this answer:
+they read `Email Config` → `root_alias` from the vault (§ 4), so put the same
+address there unless you want the two to differ.
 
 ### Cloudflare (`dns_backend: cloudflare`, the implemented DNS backend)
 
@@ -658,8 +661,8 @@ Names and accounts
       Flux token created
 - [ ] `ci_runner_tag` matches a tag on a runner registered to that project
 - [ ] Optional: tailnet auth key and OAuth clients, **and the MagicDNS suffix
-      noted for `tailnet_dns_suffix`** (its default is a sentinel that renders a
-      broken resolver)
+      noted for `tailnet_dns_suffix`** (no default — copier asks for it and
+      rejects the `CHANGEME` placeholder)
 - [ ] Every host-side item from § 4 present in the vault
 - [ ] Every in-cluster item from § 4 present, including `Healthchecks Watchdog`
       and `Grafana SSO` — placeholders are fine **except** `Grafana SSO` →

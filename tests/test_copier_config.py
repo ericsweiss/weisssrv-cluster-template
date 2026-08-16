@@ -6,6 +6,7 @@ cluster. These tests pin the schema and the mechanics the template relies on.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import jinja2
@@ -18,6 +19,17 @@ CONFIG = yaml.safe_load((REPO_ROOT / "copier.yml").read_text())
 QUESTIONS = {k: v for k, v in CONFIG.items() if not k.startswith("_")}
 TEMPLATE_ROOT = REPO_ROOT / CONFIG["_subdirectory"]
 TEMPLATES_SUFFIX = CONFIG["_templates_suffix"]
+
+# `when: false` entries: copier evaluates their default and puts it in scope for
+# every question below, but never prompts and records nothing in
+# .copier-answers.yml. They are shared machinery, not answers, so the gates that
+# hold an operator-facing question (documented, answered by the fixtures) do not
+# apply to them.
+COMPUTED = {
+    name
+    for name, question in QUESTIONS.items()
+    if isinstance(question, dict) and question.get("when") is False
+}
 
 # The schema every subtree of the template is written against.
 REQUIRED_QUESTIONS = {
@@ -273,7 +285,9 @@ def test_every_question_is_named_in_an_operator_doc():
     )
     assert prose, "neither operator doc could be read — this gate examined nothing"
     undocumented = sorted(
-        name for name in QUESTIONS if name not in DOC_EXEMPT and name not in prose
+        name
+        for name in QUESTIONS
+        if name not in DOC_EXEMPT and name not in COMPUTED and name not in prose
     )
     assert not undocumented, (
         "copier questions named in neither docs/PRE-SETUP.md nor docs/SETUP.md:\n  "
@@ -518,7 +532,11 @@ def test_service_cidr_must_not_overlap_the_pod_range_or_the_lan(service, rejecte
 def test_vips_are_tested_against_the_whole_lan_cidr_not_a_prefix(name):
     """A /16 LAN has 256 usable third octets; membership is a mask test, so a VIP
     outside `lan_prefix`'s /24 is legal and must be accepted."""
-    context = {"lan_cidr": "172.20.0.0/16", "lan_prefix": "172.20.0"}
+    context = {
+        "lan_cidr": "172.20.0.0/16",
+        "lan_prefix": "172.20.0",
+        **_address_shared("172.20.0.0/16"),
+    }
     assert not _validator_message(name, **{name: "172.20.9.161"}, **context)
     assert _validator_message(name, **{name: "10.1.1.161"}, **context)
 
@@ -537,12 +555,33 @@ ADDRESS_QUESTIONS = {
 }
 
 
+def _computed(name: str, **context):
+    """Render one `when: false` computed value the way copier does — its default
+    is evaluated once and is in scope for every question below it."""
+    question = QUESTIONS[name]
+    env = jinja2.Environment()  # noqa: S701 - rendering our own config, no user input
+    env.filters = _AnyFilter(env.filters)
+    rendered = env.from_string(str(question["default"])).render(**context)
+    return yaml.safe_load(rendered) if question.get("type") == "yaml" else rendered.strip()
+
+
+def _address_shared(lan_cidr: str) -> dict:
+    """The computed values the four address validators read. Rendered from
+    copier.yml rather than restated, so the shared block is under test too."""
+    return {
+        "reserved_address_bands": _computed("reserved_address_bands"),
+        "reserved_address_note": _computed("reserved_address_note"),
+        "lan_address_range": _computed("lan_address_range", lan_cidr=lan_cidr),
+    }
+
+
 def _address_message(name: str, answer: str) -> str:
     return _validator_message(
         name,
         **{name: answer},
         lan_cidr="192.168.0.0/24",
         lan_prefix="192.168.0",
+        **_address_shared("192.168.0.0/24"),
         **ADDRESS_QUESTIONS[name],
     )
 
@@ -575,6 +614,7 @@ def test_address_answers_accept_addresses_outside_the_bands(name, answer):
         **{name: answer},
         lan_cidr="192.168.0.0/24",
         lan_prefix="192.168.0",
+        **_address_shared("192.168.0.0/24"),
         **context,
     )
     assert not message, f"{name} rejected {answer}, which collides with nothing: {message}"
@@ -767,4 +807,148 @@ def test_docs_quote_only_the_current_library_tag():
     assert not stale, (
         f"docs quote a library tag other than copier.yml's lib_ref default ({want}):\n  "
         + "\n  ".join(stale)
+    )
+
+
+def test_every_template_release_has_a_validated_pair_row():
+    """The pair table is the only record of which library release a template
+    release was rendered against, and nothing at tag time writes the row — so a
+    release cut without relabelling the `main` row leaves the pair unrecorded."""
+    tags = subprocess.run(
+        ["git", "tag", "-l", "v*"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if tags.returncode != 0 or not tags.stdout.strip():
+        pytest.skip("no tags in this checkout (shallow clone)")
+
+    table = (REPO_ROOT / "docs" / "VERSIONING.md").read_text(encoding="utf-8")
+    rows = {
+        cell.strip().strip("`")
+        for line in table.splitlines()
+        if line.strip().startswith("|")
+        for cell in [line.split("|")[1]]
+    }
+    missing = [tag for tag in tags.stdout.split() if tag not in rows]
+    assert not missing, (
+        "docs/VERSIONING.md's validated-pair table has no row for: "
+        + ", ".join(missing)
+    )
+
+
+# One accept and one reject per validator that no other test exercises, plus the
+# two SEMANTIC rules (a domain that equals the internal one; root as the admin
+# user) whose absence is invisible in a render: both produce a repository that
+# lints clean and is wrong the first time it is deployed.
+#
+# `context` supplies only the answers the validator itself reads.
+VALIDATOR_CASES = [
+    ("cluster_name", "homelab", None, {}),
+    ("cluster_name", "Homelab", "uppercase is not a DNS label", {}),
+    ("cluster_name", "1homelab", "must start with a letter", {}),
+    ("cluster_name", "ho", "shorter than three characters", {}),
+    ("internal_domain", "lan.example.com", None, {}),
+    ("internal_domain", "LAN.example.com", "uppercase", {}),
+    ("internal_domain", "lan", "not fully qualified", {}),
+    ("external_domain", "example.com", None, {"internal_domain": "lan.example.com"}),
+    (
+        "external_domain",
+        "lan.example.com",
+        "identical to internal_domain — one certificate and ingress pair for two zones",
+        {"internal_domain": "lan.example.com"},
+    ),
+    ("admin_user", "ops", None, {}),
+    ("admin_user", "root", "SSH hardening disables root login, locking Ansible out", {}),
+    ("admin_user", "0ps", "a POSIX username may not start with a digit", {}),
+    ("admin_email", "ops@example.com", None, {}),
+    ("admin_email", "ops@example", "no TLD", {}),
+    ("alert_email", "pager@example.com", None, {}),
+    ("alert_email", "pager", "not an address", {}),
+    ("timezone", "UTC", None, {}),
+    ("timezone", "Europe/Berlin", None, {}),
+    ("timezone", "PST", "not an IANA name", {}),
+    ("git_host", "git.example.com", None, {}),
+    ("git_host", "https://git.example.com", "a scheme is not a hostname", {}),
+    ("git_namespace", "homelab/infra", None, {}),
+    ("git_namespace", "/homelab", "leading slash", {}),
+    ("lib_url", "https://git.example.com/group/weisssrv-lib.git", None, {}),
+    ("lib_url", "git@git.example.com:group/weisssrv-lib.git", "ssh form, not http(s)", {}),
+    ("lib_project", "group/weisssrv-lib", None, {}),
+    ("lib_project", "weisssrv-lib", "no namespace segment", {}),
+    ("ci_runner_tag", "infrastructure", None, {}),
+    ("ci_runner_tag", "   ", "blank leaves the job on the untagged runner", {}),
+    ("ci_cpu_selector", "lan.example.com/cpu=modern", None, {"internal_domain": "lan.example.com"}),
+    (
+        "ci_cpu_selector",
+        "zone=fast",
+        "the runners' node_selector_overwrite_allowed regex refuses it at pod creation",
+        {"internal_domain": "lan.example.com"},
+    ),
+    (
+        "ci_cpu_selector",
+        "lan.example.com/cpu=fast",
+        "only modern and legacy are allowed values",
+        {"internal_domain": "lan.example.com"},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "name,answer,why,context",
+    VALIDATOR_CASES,
+    ids=[f"{c[0]}-{c[1]}" for c in VALIDATOR_CASES],
+)
+def test_validator_accepts_and_rejects(name, answer, why, context):
+    message = _validator_message(name, **{name: answer}, **context)
+    if why is None:
+        assert not message, f"{name}={answer!r} was rejected: {message}"
+    else:
+        assert message, f"{name}={answer!r} was accepted — {why}"
+
+
+# Validators with a test of their own above, which the table deliberately does
+# not duplicate — the value is in the reasoning those tests carry, not in a
+# second accept/reject pair.
+DEDICATED_VALIDATOR_TESTS = {
+    "lan_cidr": "test_pod_cidr_must_not_overlap_the_lan",
+    "lan_prefix": "test_address_answers_* (every case renders it)",
+    "lan_gateway": "test_address_answers_*",
+    "k3s_api_vip": "test_address_answers_*",
+    "metallb_public_vip": "test_address_answers_*",
+    "metallb_internal_vip": "test_address_answers_*",
+    "k3s_pod_cidr": "test_pod_cidr_must_not_overlap_the_lan",
+    "k3s_service_cidr": "test_service_cidr_must_not_overlap_the_pod_range_or_the_lan",
+    "upstream_dns_servers": "test_upstream_dns_servers_*",
+    "compute_node_count": "test_compute_node_count_*",
+    "git_backend": "test_unimplemented_backend_choices_fail_at_copy_time",
+    "secrets_backend": "test_unimplemented_backend_choices_fail_at_copy_time",
+    "storage_backend": "test_unimplemented_backend_choices_fail_at_copy_time",
+    "dns_backend": "test_unimplemented_backend_choices_fail_at_copy_time",
+    "onepassword_vault": "test_onepassword_vault_must_be_one_uri_segment",
+    "nas_host": "test_service_fqdns_must_sit_under_the_internal_domain",
+    "smtp_host": "test_service_fqdns_must_sit_under_the_internal_domain",
+    "node_exporter_job_regex": "test_node_exporter_job_regex_validator_requires_the_shipped_jobs",
+    "tailnet_dns_suffix": "test_tailnet_dns_suffix_*",
+    "lib_ref": "test_lib_ref_validator_takes_release_tags_only",
+}
+
+
+def test_every_validator_is_exercised():
+    """A validator no test exercises is one a regression could widen to accept
+    everything with the suite still green — which is how the address family came
+    to be the only part of the schema under test."""
+    declared = {
+        name
+        for name, question in QUESTIONS.items()
+        if isinstance(question, dict) and "validator" in question
+    }
+    covered = {case[0] for case in VALIDATOR_CASES} | set(DEDICATED_VALIDATOR_TESTS)
+    assert not declared - covered, (
+        "copier.yml validators no test exercises: " + ", ".join(sorted(declared - covered))
+    )
+    assert not covered - declared, (
+        "these names are listed as covered but declare no validator: "
+        + ", ".join(sorted(covered - declared))
     )

@@ -40,6 +40,9 @@ spec:
       serviceAccount: kube-prometheus-stack-prometheus
       namespace: observability
     speaker:
+      # `platform` (sources/priorityclasses.yaml). The chart has no global key,
+      # so controller and speaker are set separately.
+      priorityClassName: platform
       # No nodeSelector: the speaker is the ARP announcer and should run on
       # every node that can carry a VIP. Restrict it only if your VIPs must
       # live on a specific uplink.
@@ -58,6 +61,7 @@ spec:
           limits:
             memory: 256Mi
     controller:
+      priorityClassName: platform
       nodeSelector: {}
       tolerations: []
       resources:

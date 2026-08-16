@@ -357,9 +357,12 @@ task's `env:` block. Put the cache directory on an encrypted dataset: it holds
 the repository tree — file *paths* — in plaintext even though the data blobs are
 client-encrypted.
 
-Note the asymmetry that makes this worth doing promptly: the `OffsiteBackup*`
-alert rules ship **enabled**, so a fresh cluster alerts on a chain it does not
-yet have. Either configure it or gate the alerts off deliberately.
+The `OffsiteBackup*` alert rules ship inert rather than off: their `absent()`
+arm is gated on `cluster_offsite_backup_probe_metric`, which ships pointed at a
+metric that always exists, and their other arms match no series while the
+exporter is absent. Flip that key to
+`restic_offsite_last_success_timestamp_seconds` in the same change that enables
+the tier — otherwise the chain is unmonitored rather than unalerting.
 
 The important discipline is not the chain but the rehearsal: a restore that has
 never been performed is a plan, not a backup.

@@ -1,7 +1,7 @@
 # The zone shape (settings, per-record destroy/drift protection) comes from the
 # library at a pinned ref; the record inventory in dns.tf is this site's data.
 module "zone" {
-  source = "git::{{ lib_url | default('https://git.ericsweiss.com/eric/weisssrv-lib.git') }}//terraform/modules/cloudflare-zone?ref={{ lib_ref }}"
+  source = "git::{{ lib_url }}//terraform/modules/cloudflare-zone?ref={{ lib_ref }}"
 
   account_id = var.cloudflare_account_id
   zone_name  = var.external_domain

@@ -22,10 +22,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import jinja2
 import pytest
 import yaml
 
 import render_cluster
+# The copier-config suite owns the list of exporter jobs the template ships;
+# imported rather than restated so the render is checked against THAT list.
+from test_copier_config import SHIPPED_EXPORTER_JOBS
 
 REPO_ROOT = render_cluster.REPO_ROOT
 
@@ -63,9 +67,7 @@ def answers_b() -> dict:
 @pytest.fixture(scope="session")
 def rendered_b(tmp_path_factory) -> Path:
     """A second render from deliberately unlike answers, with both optional
-    modules off. It is what makes a hardcoded value visible: in the shaped
-    fixture a literal carried over from another cluster renders identically to a
-    correct substitution."""
+    modules off — see tests/answers-unlike.yml for why it is not optional."""
     scratch = tmp_path_factory.mktemp("render-b")
     return render_cluster.render(scratch, answers=ANSWERS_B, dest_name="render-b")
 
@@ -80,11 +82,10 @@ class Cluster:
 
 
 # Everything that is not ABOUT the difference between the two fixtures runs
-# against BOTH. Fixture B is the only render that reaches the both-modules-off
-# branches, a 5-host roster, a single resolver and a non-/24-shaped LAN; a suite
-# that asserts the cluster's invariants on fixture A alone leaves all of that
-# checked by nothing but a Jinja-leftover scan. Rendering is session-scoped, so
-# the second parameter costs assertions, not renders.
+# against BOTH: fixture B is the only render that reaches the both-modules-off
+# branches, the larger roster, the single resolver and the unlike LAN.
+# Rendering is session-scoped, so the second parameter costs assertions, not
+# renders.
 @pytest.fixture(scope="session", params=["shaped", "unlike"])
 def cluster(request) -> Cluster:
     render_fixture, answers_fixture = {
@@ -303,6 +304,81 @@ def test_cluster_config_holds_the_site_values(cluster):
     assert data.get("cluster_k3s_api_vip") == cluster.answers["k3s_api_vip"]
 
 
+# The kube-prometheus-stack subchart's DaemonSet job. Its ServiceMonitor is
+# rendered by Helm and so never appears in this corpus, which is why the name is
+# spelled here — tied below to the `nodeExporter.enabled` switch that ships it,
+# so turning the DaemonSet off drops the job from the derived set.
+CHART_NODE_EXPORTER_JOB = "node-exporter"
+
+
+def _node_exporter_jobs(root: Path) -> set[str]:
+    """The node-exporter Prometheus jobs the RENDER actually produces.
+
+    Derived, never listed: a ServiceMonitor's `jobLabel` names the Service label
+    whose VALUE becomes the `job` label on every series it scrapes, so resolving
+    the monitor against the Service it selects gives the job name Prometheus
+    will really use. Rename either half and the name derived here changes.
+    """
+    observability = root / "kubernetes" / "infrastructure" / "observability"
+    docs: list[dict] = []
+    for path in sorted(observability.rglob("*.yaml")):
+        docs += [d for d in yaml.safe_load_all(path.read_text()) if isinstance(d, dict)]
+
+    services = [d for d in docs if d.get("kind") == "Service"]
+    jobs: set[str] = set()
+    for monitor in (d for d in docs if d.get("kind") == "ServiceMonitor"):
+        spec = monitor.get("spec") or {}
+        job_label = spec.get("jobLabel")
+        selector = (spec.get("selector") or {}).get("matchLabels") or {}
+        if not selector:
+            continue
+        for service in services:
+            labels = (service.get("metadata") or {}).get("labels") or {}
+            if all(labels.get(k) == v for k, v in selector.items()):
+                jobs.add(
+                    labels.get(job_label)
+                    if job_label
+                    else (service.get("metadata") or {}).get("name")
+                )
+
+    release = yaml.safe_load(
+        (observability / "kube-prometheus-stack" / "release.yaml").read_text()
+    )
+    if ((release["spec"]["values"] or {}).get("nodeExporter") or {}).get("enabled"):
+        jobs.add(CHART_NODE_EXPORTER_JOB)
+
+    # Only the node exporters: the corpus also ships unbound and zfs monitors,
+    # which the node/storage alert scoping is not about.
+    return {job for job in jobs if job and "node-exporter" in job}
+
+
+def test_shipped_exporter_jobs_match_the_rendered_manifests(cluster):
+    """`SHIPPED_EXPORTER_JOBS` is what makes the `node_exporter_job_regex`
+    validator enforce something real. As a bare literal it can only be as
+    accurate as the last person to read the manifests, so it is checked against
+    the render: rename the host exporter's Service label, drop its
+    ServiceMonitor, or disable the chart's DaemonSet, and this reds instead of
+    the validator quietly policing a job nobody scrapes."""
+    shipped = _node_exporter_jobs(cluster.path)
+    assert shipped == set(SHIPPED_EXPORTER_JOBS), (
+        f"the render ships node-exporter jobs {sorted(shipped)}, but "
+        f"SHIPPED_EXPORTER_JOBS says {sorted(SHIPPED_EXPORTER_JOBS)}"
+    )
+    assert len(shipped) == len(SHIPPED_EXPORTER_JOBS), "SHIPPED_EXPORTER_JOBS has a duplicate"
+
+
+def test_the_job_regex_in_cluster_config_covers_every_shipped_job(cluster):
+    """The end of the same chain: the alert rules scope on
+    `job=~"${cluster_node_exporter_job_regex}"`, so a shipped job the answered
+    regex does not name is one whose alerts silently match zero series."""
+    _, data = _cluster_config(cluster.path)
+    named = set(data["cluster_node_exporter_job_regex"].split("|"))
+    shipped = _node_exporter_jobs(cluster.path)
+    assert shipped <= named, (
+        f"jobs the render ships but the alert scoping omits: {sorted(shipped - named)}"
+    )
+
+
 def test_manifests_reference_substitution_placeholders(cluster):
     hits = sum(
         text.count("${cluster_internal_domain}") + text.count("${cluster_metallb_internal_vip}")
@@ -450,12 +526,14 @@ def test_flux_lint_reads_both_configmaps(cluster):
 # The cluster-invariant gates that must run over the rendered corpus, and the
 # site data they read. Each covers a class kubeconform structurally cannot see:
 # a chart the corpus never renders, an HPA/VPA pair on one workload, a scraped
-# namespace its own NetworkPolicies do not admit Prometheus into, a PVC whose
-# unset storageClassName the DefaultStorageClass plugin rewrites at create time,
-# and a ClusterSecretStore readable from every namespace.
+# namespace its own NetworkPolicies do not admit Prometheus into, a namespace
+# that owns a workload but no ingress default-deny, a PVC whose unset
+# storageClassName the DefaultStorageClass plugin rewrites at create time, and a
+# ClusterSecretStore readable from every namespace.
 EXTRA_VALIDATION_GATES = (
     "scripts/check-hpa-vpa-invariant.py",
     "scripts/check-scrape-netpol.py",
+    "scripts/check-default-deny-coverage.py",
     "scripts/check-secretstore-scope.py",
     "scripts/check-pvc-storageclass.py",
     "scripts/validate-helm-values.py",
@@ -552,7 +630,7 @@ def test_netpol_except_parity_is_gated(cluster):
 def test_every_job_carries_a_runner_tag(cluster):
     """An untagged job lands on whichever runner accepts untagged work — for
     this cluster the shared, non-root, LAN-blocked one, which cannot install
-    packages or SSH to a host. The deploy jobs are the ones that used to slip.
+    packages or SSH to a host.
 
     Runs on BOTH renders, which is what CROSS_RENDER_EXEMPT['ci_runner_tag']
     trades the blanket leak scan away for: a `tags: ["infrastructure"]` literal
@@ -942,8 +1020,10 @@ def test_relative_markdown_links_resolve(cluster):
 
 def test_generated_repo_passes_its_own_invariants(cluster):
     tests_dir = cluster.path / "tests"
-    if not tests_dir.is_dir():
-        pytest.skip("the render ships no tests/")
+    # Hard failure, not a skip: this gate's whole value is that a generated
+    # cluster runs its own invariants, and a render that stopped shipping tests/
+    # would silently switch it off rather than report the regression.
+    assert tests_dir.is_dir(), "the render ships no tests/ — this gate ran nothing"
     env = dict(os.environ)
     # Do not let this run's cache/rootdir config leak into the nested run.
     env.pop("PYTEST_CURRENT_TEST", None)
@@ -975,6 +1055,93 @@ def test_documented_playbooks_exist(cluster):
                     missing.append(f"{path}:{lineno} {rel}")
     assert not missing, "documentation names playbooks the render does not ship:\n  " + "\n  ".join(
         missing
+    )
+
+
+# A top-level key in a fenced YAML block: the job name in a worked example.
+# `<>` is deliberate — the example names its job `deploy-ansible-<name>`, and a
+# placeholder is a key this gate must see rather than skip.
+_EXAMPLE_JOB = re.compile(r"^([a-z][a-z0-9<>-]*):$", re.MULTILINE)
+
+
+def test_ci_doc_example_job_does_not_already_exist(cluster):
+    """docs/ci-pipeline.md's "Adding one" block is a job the operator PASTES in.
+    If the pipeline already defines that name, following the doc produces a
+    duplicate top-level key and the pipeline fails to be created at all."""
+    text = (cluster.path / "docs" / "ci-pipeline.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"```yaml\n(.*?)```", _section(text, "Deploys") or text, re.DOTALL)
+    assert blocks, "no worked YAML example found in docs/ci-pipeline.md — this gate examined nothing"
+    example_jobs = {name for block in blocks for name in _EXAMPLE_JOB.findall(block)}
+    assert example_jobs, "no job name found in the worked example — the pattern is stale"
+    clashing = sorted(example_jobs & set(_load_ci(cluster.path / ".gitlab-ci.yml")))
+    assert not clashing, (
+        "docs/ci-pipeline.md tells the operator to add jobs .gitlab-ci.yml already "
+        "defines: " + ", ".join(clashing)
+    )
+
+
+# Top-level keys of a pipeline that are not jobs. GitLab also allows the
+# job-keyword globals (`image`, `services`, `cache`, `before_script`,
+# `after_script`) at the top level, and one of those read as a job name would
+# make this gate demand a documentation row for it.
+_CI_RESERVED = {
+    "stages",
+    "default",
+    "workflow",
+    "variables",
+    "include",
+    "image",
+    "services",
+    "cache",
+    "before_script",
+    "after_script",
+}
+
+
+def _local_jobs(ci: dict) -> set[str]:
+    """Every job `.gitlab-ci.yml` defines itself — hidden fragments excluded."""
+    return {
+        name
+        for name, job in ci.items()
+        if isinstance(job, dict) and name not in _CI_RESERVED and not name.startswith(".")
+    }
+
+
+def test_ci_doc_stages_table_names_every_local_job(cluster):
+    """The Stages table is the operator's map of the pipeline, and a job absent
+    from it is invisible to anyone reading the doc rather than the YAML — which
+    is how deploy-preflight and deploy-verify came to be undocumented. The
+    included library jobs are named there too, but only the local ones can be
+    enumerated from the file, so those are what this gate holds."""
+    text = (cluster.path / "docs" / "ci-pipeline.md").read_text(encoding="utf-8")
+    stages = _section(text, "Stages")
+    assert stages, "docs/ci-pipeline.md has no `## Stages` section — this gate examined nothing"
+    documented = set(re.findall(r"`([^`]+)`", stages))
+    missing = sorted(_local_jobs(_load_ci(cluster.path / ".gitlab-ci.yml")) - documented)
+    assert not missing, (
+        "docs/ci-pipeline.md's Stages table does not name these jobs the "
+        "pipeline defines: " + ", ".join(missing)
+    )
+
+
+def test_ansible_version_variable_matches_the_deploy_base_input(cluster):
+    """`variables.ANSIBLE_VERSION` is what deploy-preflight pip-installs and the
+    `ansible_version` include input is what .deploy-base does. GitLab resolves
+    includes before job variables exist, so the input CANNOT read the variable
+    and repeats the literal — two Ansibles running the same playbooks is the
+    drift that buys."""
+    ci = _load_ci(cluster.path / ".gitlab-ci.yml")
+    declared = (ci.get("variables") or {}).get("ANSIBLE_VERSION")
+    assert declared, "the generated pipeline declares no ANSIBLE_VERSION variable"
+    inputs = [
+        entry["inputs"]["ansible_version"]
+        for entry in ci.get("include") or []
+        if isinstance(entry, dict) and "ansible_version" in (entry.get("inputs") or {})
+    ]
+    assert inputs, "no include passes an ansible_version input — the pair this gate holds is gone"
+    assert all(str(value) == str(declared) for value in inputs), (
+        f"ANSIBLE_VERSION is {declared!r} but an include pins {inputs!r}; deploy-preflight "
+        "and .deploy-base would install different Ansibles"
     )
 
 
@@ -1264,16 +1431,14 @@ def test_runbook_urls_resolve(rendered):
                 broken.append(f"{path.relative_to(rendered)} -> docs/{m.group(1)} (missing)")
             elif m.group(2) and m.group(2).lstrip("#") not in _anchors(target):
                 broken.append(f"{path.relative_to(rendered)} -> docs/{m.group(1)}{m.group(2)} (no such heading)")
-    # A gate that examines nothing passes forever; this is what caught the
-    # segment-anchored regex above matching zero of 25 real annotations.
+    # A gate that examines nothing passes forever.
     assert checked, "no runbook_url annotations were examined — the pattern is stale"
     assert not broken, "alert runbook_url annotations do not resolve:\n  " + "\n  ".join(sorted(set(broken)))
 
 
 def test_runbook_index_lists_every_section():
     """docs/RUNBOOKS.md is the index of template/docs/RUNBOOKS.md.jinja and says
-    so; nothing but this holds the two in sync, and the last three sections
-    added to the runbook never reached the table."""
+    so; nothing but this holds the two in sync."""
     runbook = REPO_ROOT / "template" / "docs" / "RUNBOOKS.md.jinja"
     index = REPO_ROOT / "docs" / "RUNBOOKS.md"
     headings = [
@@ -1300,3 +1465,133 @@ def test_runbook_index_lists_every_section():
     assert not stale, (
         "docs/RUNBOOKS.md names sections the runbook does not have:\n  " + "\n  ".join(stale)
     )
+
+
+# --------------------------------------------------------------------------
+# CI runner sizing
+# --------------------------------------------------------------------------
+#
+# partials/ci-sizing.jinja is the one place both runner tiers' capacity model
+# lives; these gates hold it to the reference cluster it was calibrated against
+# and to the invariants a quota has to satisfy to be safe.
+
+# The reference cluster's live values, at the roster it runs (5 compute hosts).
+# A derivation that no longer reproduces them has been re-tuned by accident.
+REFERENCE_COMPUTE_NODES = 5
+REFERENCE_SIZING = {
+    "privileged": {"concurrent": 12, "cpu": 38, "mem": 25, "limit_mem": 82, "pods": 25},
+    "shared": {"concurrent": 7, "cpu": 8, "mem": 16, "limit_mem": 46, "pods": 20},
+}
+
+
+def _sizing(compute_node_count: int):
+    """Render partials/ci-sizing.jinja and return its exported names."""
+    env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(REPO_ROOT)))  # noqa: S701
+    module = env.get_template("partials/ci-sizing.jinja").make_module(
+        {"compute_node_count": compute_node_count}
+    )
+    return {name: getattr(module, name) for name in dir(module) if not name.startswith("_")}
+
+
+def _quota(model: dict, tier: str) -> dict:
+    return {
+        "concurrent": model[f"{tier}_concurrent"],
+        "cpu": model[f"{tier}_quota_cpu"],
+        "mem": model[f"{tier}_quota_mem_gib"],
+        "limit_mem": model[f"{tier}_quota_limit_mem_gib"],
+        "pods": model[f"{tier}_quota_pods"],
+    }
+
+
+@pytest.mark.parametrize("tier", ["privileged", "shared"])
+def test_ci_sizing_reproduces_the_reference_cluster(tier):
+    """Both tiers are calibrated: at the reference roster the derivation must
+    emit exactly what that cluster runs, or the model has drifted off the only
+    values anyone has operated."""
+    assert _quota(_sizing(REFERENCE_COMPUTE_NODES), tier) == REFERENCE_SIZING[tier]
+
+
+@pytest.mark.parametrize("compute", [2, REFERENCE_COMPUTE_NODES])
+def test_shared_quota_stays_inside_the_agent_pool(compute):
+    """The shared tier co-tenants every agent, including the NAS one, so its
+    reservations must stay a minority of the pool: requests.* are what the
+    scheduler actually holds, and a burst of fully-used job limits is what
+    could evict resident workloads.
+
+    The privileged tier is deliberately NOT held to this — its quota admits more
+    CPU requests than the pool has allocatable, and job pods carry the `ci-jobs`
+    PriorityClass so the overflow queues instead of competing (see
+    partials/ci-sizing.jinja).
+    """
+    model = _sizing(compute)
+    quota = _quota(model, "shared")
+    assert quota["cpu"] <= 2 / 3 * model["shared_pool_cores"]
+    assert quota["mem"] <= 2 / 3 * model["shared_pool_mem_gib"]
+    burst = quota["concurrent"] * model["shared_job_mem_limit_gib"]
+    assert burst <= model["shared_pool_fraction"] * model["shared_pool_mem_gib"]
+    if compute == 2:
+        # The default roster is the smallest one shipped, and the tightest.
+        assert burst <= 2 / 3 * model["shared_pool_mem_gib"]
+
+
+@pytest.mark.parametrize("compute", [2, REFERENCE_COMPUTE_NODES])
+def test_privileged_concurrent_fits_the_schedulable_pool(compute):
+    """The privileged tier is CPU-bound and deliberately sits at the edge of its
+    pool: above it the overflow parks as Pending pods, which burns the JOB
+    timeout clock. So the bound is the pool minus the platform holdback — and it
+    must be the largest value that fits, or the tier is quietly undersized. Its
+    MEMORY footprint stays a minority, which is why memory is not its governor.
+    """
+    model = _sizing(compute)
+    scheduled = model["privileged_concurrent"] * model["privileged_job_cpu"]
+    headroom = model["privileged_pool_cores"] - 2
+    assert scheduled <= headroom
+    assert scheduled > headroom - model["privileged_job_cpu"]
+    footprint = model["privileged_concurrent"] * model["privileged_job_mem_gib"]
+    assert footprint <= 2 / 3 * model["privileged_pool_mem_gib"]
+
+
+@pytest.mark.parametrize("tier", ["privileged", "shared"])
+@pytest.mark.parametrize("compute", [1, 2, 4, REFERENCE_COMPUTE_NODES, 8])
+def test_quota_admits_every_job_the_runner_submits(tier, compute):
+    """`concurrent` above what the quota admits does not throttle: the runner
+    submits a pod, the quota 403s it, and GitLab reports that as a job failure
+    with no retry. Every dimension must therefore admit `concurrent` jobs with
+    the manager pod already resident."""
+    model = _sizing(compute)
+    quota = _quota(model, tier)
+    admitted = min(
+        (quota["cpu"] - model["manager_cpu"]) // model[f"{tier}_job_cpu"],
+        (quota["mem"] - model["manager_mem_gib"]) // model[f"{tier}_job_mem_gib"],
+        (quota["limit_mem"] - model["manager_mem_limit_gib"])
+        // model[f"{tier}_job_mem_limit_gib"],
+        quota["pods"] - 1,
+    )
+    assert admitted >= quota["concurrent"], (
+        f"{tier} at compute={compute}: quota admits {admitted} jobs but concurrent is "
+        f"{quota['concurrent']}"
+    )
+
+
+@pytest.mark.parametrize("tier", ["privileged", "shared"])
+def test_rendered_runner_numbers_come_from_the_sizing_model(cluster, tier):
+    """Wiring: the shipped manifests must BE the model's output. `concurrent`
+    and the quota live in two files, so a hand-edit to either is the drift this
+    single-sourcing exists to prevent."""
+    app = "gitlab-runner-privileged" if tier == "privileged" else "gitlab-runner"
+    app_dir = cluster.path / "kubernetes" / "apps" / app
+    assert app_dir.is_dir(), (
+        f"{app} is missing from the render (git_backend={cluster.answers['git_backend']})"
+    )
+    expected = _quota(_sizing(cluster.answers["compute_node_count"]), tier)
+    release = yaml.safe_load((app_dir / "release.yaml").read_text())
+    quota = next(
+        doc
+        for doc in yaml.safe_load_all((app_dir / "resourcequota.yaml").read_text())
+        if doc and doc["kind"] == "ResourceQuota"
+    )["spec"]["hard"]
+    assert release["spec"]["values"]["concurrent"] == expected["concurrent"]
+    assert quota["requests.cpu"] == str(expected["cpu"])
+    assert quota["requests.memory"] == f"{expected['mem']}Gi"
+    assert quota["limits.memory"] == f"{expected['limit_mem']}Gi"
+    assert quota["pods"] == str(expected["pods"])

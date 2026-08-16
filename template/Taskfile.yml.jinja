@@ -73,7 +73,7 @@ vars:
   # Checkout of weisssrv-lib used to refresh the vendored copies in scripts/
   # (`task lib:sync`); nothing at run time reads from it.
   LIB_DIR: .weisssrv-lib
-  LIB_URL: {{ lib_url | default('https://git.ericsweiss.com/eric/weisssrv-lib.git') }}
+  LIB_URL: {{ lib_url }}
   LIB_REF: {{ lib_ref }}
   # GitLab-managed Terraform state. The API takes the URL-encoded project PATH
   # wherever it documents a numeric ID, so nothing needs looking up after the
@@ -562,13 +562,9 @@ tasks:
           exit 1
         fi
         IFS='/' read -r NS NAME <<< "{{.CLI_ARGS}}"
-        # Wait for the sync to actually HAPPEN, not merely for Ready to be true.
-        # An ExternalSecret that was already Ready stays Ready across the
-        # annotation, so `kubectl wait --for=condition=Ready` returns instantly
-        # and rotate-secret would restart consumers against the OLD value — the
-        # failure mode is silent and looks like a successful rotation.
-        # status.refreshTime advances only when ESO has completed a fetch, so
-        # waiting for it to CHANGE is the signal that means what we need.
+        # Wait for status.refreshTime to CHANGE, not for condition=Ready: an
+        # already-Ready ExternalSecret stays Ready across the annotation, so
+        # Ready returns instantly and consumers restart against the OLD value.
         BEFORE=$(kubectl get -n "$NS" externalsecret "$NAME" \
           -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
         kubectl annotate --overwrite -n "$NS" externalsecret "$NAME" force-sync="$(date +%s)"
@@ -677,7 +673,7 @@ tasks:
         # once — an HPA in one namespace against a VPA in another, a
         # ClusterSecretStore against its consumers — so each build is appended
         # here rather than checked in isolation. Same file the CI flux-lint job
-        # passes to the same four scripts as "$RENDER_ALL".
+        # passes to the same scripts as "$RENDER_ALL".
         RENDER_ALL=$(mktemp)
         trap 'rm -f "$RENDER_ALL"' EXIT
 
@@ -732,16 +728,17 @@ tasks:
           fi
         done
 
-        # The four corpus gates the CI flux-lint job runs as extra_validation,
-        # in the same order over the same corpus — each covers a class
-        # kustomize/kubeconform structurally cannot see. Keep the two lists
-        # equal: a gate only here is one CI does not enforce, and a gate only
-        # there is a green `task lint` followed by a red pipeline.
+        # The gates CI's flux-lint job runs as extra_validation, in the same
+        # order over the same corpus. Keep the two lists EQUAL: a gate only here
+        # is one CI does not enforce, and a gate only there is a green
+        # `task lint` followed by a red pipeline.
         echo "=== Checking HPA/VPA invariant ==="
         python3 scripts/check-hpa-vpa-invariant.py --require-chart-native-vpas \
           --policy-config scripts/autoscaling-policy.yaml < "$RENDER_ALL" || FAILED=1
         echo "=== Checking scrape/NetworkPolicy invariant ==="
         python3 scripts/check-scrape-netpol.py < "$RENDER_ALL" || FAILED=1
+        echo "=== Checking ingress default-deny coverage ==="
+        python3 scripts/check-default-deny-coverage.py < "$RENDER_ALL" || FAILED=1
         echo "=== Checking ClusterSecretStore scoping ==="
         python3 scripts/check-secretstore-scope.py < "$RENDER_ALL" || FAILED=1
         echo "=== Checking PVC storageClassName ==="
@@ -1108,15 +1105,16 @@ tasks:
       - shellcheck --severity=warning --exclude=SC1091,SC2034 scripts/*.sh terraform/*/*.sh
 
   lint:ruff:
-    desc: Ruff over scripts/ and tests/ (mirrors the CI python-lint job)
+    desc: Ruff over scripts/, tests/ and the Python kubernetes/ ships (mirrors the CI python-lint job)
     preconditions:
       - sh: command -v ruff
         msg: "ruff not installed (pipx install ruff)"
     cmds:
-      # Same argv as the CI python-lint include: targets `scripts tests`, and no
-      # --config, so ruff's own discovery finds ruff.toml at the repository root
-      # (the library's shared profile, vendored here) exactly as it does in CI.
-      - ruff check --no-cache --output-format concise scripts tests
+      # Same argv as the CI python-lint include: targets `scripts tests
+      # kubernetes`, and no --config, so ruff's own discovery finds ruff.toml at
+      # the repository root (the library's shared profile, vendored here)
+      # exactly as it does in CI.
+      - ruff check --no-cache --output-format concise scripts tests kubernetes
 
   lint:doc-links:
     desc: Resolve relative Markdown cross-links offline

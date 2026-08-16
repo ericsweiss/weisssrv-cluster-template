@@ -21,10 +21,13 @@ the diff.
 | `check-hpa-vpa-invariant.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — no HPA and a CPU-controlling VPA on one workload |
 | `check-scrape-netpol.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every scraped namespace admits Prometheus through its NetworkPolicies |
 | `check-secretstore-scope.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every ClusterSecretStore declares `conditions` and admits its consumers |
+| `check-default-deny-coverage.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every namespace that owns a workload carries an ingress default-deny (see below) |
 | `check-pvc-storageclass.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every claim pins a `storageClassName` |
 | `check-netpol-except-parity.py` | `task lint:netpol-parity`, the CI netpol-parity job — public-egress except-lists match a canonical reserved-CIDR set |
 | `validate-helm-values.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — `helm template` over the value-heavy releases |
 | `check-deploy-coverage.sh` | the CI deploy-coverage job — every changed playbook/inventory path reaches a deploy job |
+| `check-lib-pins.py` | `task lint:lib-pins` and `tests/test_lib_pins.py` — every library pin is a literal equal to `variables.WEISSSRV_LIB_REF` |
+| `check-backup-artifact-apps.py` | nothing yet: it pairs `nas_storage_backup_artifact_apps` (group_vars/nas.yml) against the `BackupArtifactStale` arms, and no alert rules ship. Wire it into `lint:` once you add that rule |
 | `generate-versions-configmap.py` | `task flux:sync-versions` and its CI drift gate |
 | `generate-hosts-env.py` | `task hosts:sync` and its CI drift gate |
 | `check-versions.py` | `task maintenance:check-versions`, the CI version-bump bot |
@@ -43,19 +46,28 @@ under review. `task lib:sync` clones the library at the pinned ref into
 `.weisssrv-lib/` (gitignored) so a refresh is a copy plus a reviewed diff.
 
 The copies here are **byte-identical** to the library's at the pinned ref, and
-nothing above is forked. That is what makes the refresh a mechanical `cp` and a
-diff review; the library's own gate compares them, so a local edit that has to
-survive belongs upstream in the library, not here.
+nothing above is forked or excluded from the comparison. That is what makes the
+refresh a mechanical `cp` and a diff review; the library's own gate compares
+them, so a local edit that has to survive belongs upstream in the library, not
+here.
 
-Note on `flux-env.sh`: this cluster substitutes from **two** ConfigMaps
-(`cluster-versions` for pins, `cluster-config` for domains, VIPs and CIDRs)
-while the library's render helper takes one file per call. `flux-env.sh` merges
-them behind the same `export-versions` / `k8s-version` interface, so the local
-lint and the CI job see identical variables — which is why `task flux:lint` and
-the CI flux-lint job's `flux_render_script` input both point at THIS file, never
-at `flux-render.sh` directly. Extra ConfigMaps can also come from
-`$FLUX_EXTRA_CONFIGMAPS`; `merged-configmap` emits the union as one document for
-the tools that accept a single ConfigMap path.
+Note on `check-default-deny-coverage.py`: it ships one built-in exemption
+(`flux-system`, universal to a Flux cluster), and a freshly generated cluster
+adds none — the invocations in `Taskfile.yml` and the CI job's
+`extra_validation` pass no flags. When this cluster does need one, the mechanism
+is a `--exempt NS=REASON` flag on those invocations, never an edit to the
+script, which the next refresh would revert.
+
+Note on `flux-env.sh`: it ships from the library like the rest, and is compared
+like the rest. What it adds over `flux-render.sh` is the second ConfigMap — this
+cluster substitutes from **two** (`cluster-versions` for pins, `cluster-config`
+for domains, VIPs and CIDRs) while the render helper takes one file per call.
+`flux-env.sh` merges them behind the same `export-versions` / `k8s-version`
+interface, so the local lint and the CI job see identical variables, which is
+why `task flux:lint` and the CI flux-lint job's `flux_render_script` input both
+point at THIS file, never at `flux-render.sh` directly. Extra ConfigMaps can
+also come from `$FLUX_EXTRA_CONFIGMAPS`; `merged-configmap` emits the union as
+one document for the tools that accept a single ConfigMap path.
 
 ## Site data
 

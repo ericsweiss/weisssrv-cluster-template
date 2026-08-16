@@ -63,10 +63,12 @@ failing.
 | `cluster_lan_cidr` | LAN range — ingress allowlists |
 | `cluster_pod_cidr` / `cluster_service_cidr` | k3s CIDRs |
 | `cluster_tailnet_cidr` | Tailscale CGNAT range |
-| `cluster_k3s_api_vip` (alias `cluster_api_vip`) | kube-apiserver VIP |
+| `cluster_api_vip` (reserved alias `cluster_k3s_api_vip`) | kube-apiserver VIP |
 | `cluster_apiserver_egress_cidr` | What pod egress policies allow on 6443 |
 | `cluster_etcd_endpoints` | etcd scrape targets for `kubeEtcd` — a **JSON flow sequence**, because Helm needs a real list where Flux substitutes text |
 | `cluster_node_exporter_host_addresses` | EndpointSlice roster for the host node-exporters (`:9101`) — also a flow sequence |
+| `cluster_zfs_exporter_addresses` | EndpointSlice roster for `zfs_exporter` (`:9134`) — flow sequence; ZFS storage backend only |
+| `cluster_unbound_exporter_addresses` | EndpointSlice roster for `unbound_exporter` (`:9167`), one entry per resolver — also a flow sequence |
 | `cluster_offsite_backup_probe_metric` | gates `OffsiteBackupStale`'s `absent()` arm; `up` until the offsite tier is enabled |
 | `cluster_metallb_public_vip` / `cluster_metallb_internal_vip` | Ingress VIPs |
 | `cluster_issuer` / `cluster_acme_email` | cert-manager ClusterIssuer name + ACME contact |
@@ -126,6 +128,23 @@ last two are set on Namespaces. They live in this table because they share the
 prefix and the same opt-in-by-label mechanism — and because getting one of them
 wrong fails silently rather than loudly.
 
+## Scheduling priority
+
+`infrastructure/sources/priorityclasses.yaml` defines two classes, and they live
+in `sources` because the Priority admission plugin rejects a pod naming a class
+that does not exist yet — `controllers` schedules such pods and reconciles first.
+
+| Class | Value | Applied to |
+|---|---|---|
+| `platform` | 100000 | every platform HelmRelease, through that chart's own `priorityClassName` value path |
+| `ci-jobs` | -10, `preemptionPolicy: Never` | CI job pods, through `priority_class_name` in both runner TOMLs |
+
+`ci-jobs` is the load-bearing half: every unclassed pod sits at 0 and therefore
+outranks a job pod without needing a class of its own, and `Never` means a burst
+queues rather than evicting anything. `platform` is deliberately **not** set on
+kured or metrics-server — both already carry a higher built-in class, so setting
+it would be a downgrade.
+
 ## Backend seams
 
 Only the backends the answers file offers are implemented; each is isolated so a
@@ -178,21 +197,9 @@ into the bring-up itself:
 > repository. Never an instance runner; never a group runner over a group that
 > contains untrusted projects.**
 
-Tags are cooperative routing, not access control — any project on the instance
-can write `tags: [{{ ci_runner_tag | default('infrastructure') }}]` in its own
-`.gitlab-ci.yml`. If this runner is registered instance-wide, that single line
-gets an arbitrary authenticated user root + Docker-in-Docker execution on your
-cluster, on a runner that also holds SSH reach to your hosts. In the system this
-template generalizes, the docs stated the project-runner rule while the live
-registration was `instance_type`, and another project's pipeline was observed
-executing on it — the gap survived because nothing checked it.
-
-Verify immediately after registering, and again after any re-registration:
-
-```bash
-# Expect "runner_type": "project_type"
-curl -sH "PRIVATE-TOKEN: $TOKEN" "https://{{ git_host }}/api/v4/runners/<id>" | jq .runner_type
-```
+Tags are cooperative routing, not access control. That module's README carries
+the reasoning, the residual risk `protected: false` accepts, and the
+`GET /api/v4/runners/<id>` check to run after every registration.
 
 {% endif %}## Bootstrap and day-2
 

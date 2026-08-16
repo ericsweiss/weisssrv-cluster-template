@@ -44,9 +44,11 @@ data:
   # so ingress allowlists stay declarative.
   cluster_tailnet_cidr: "100.64.0.0/10"
 
-  cluster_k3s_api_vip: "{{ k3s_api_vip }}"
-  # Alias kept for manifests that spell it without the k3s_ segment.
+  # `cluster_api_vip` is what the manifests read; `cluster_k3s_api_vip` is the
+  # reserved longer spelling, kept so a manifest written with the k3s_ segment
+  # resolves rather than substituting to an empty string.
   cluster_api_vip: "{{ k3s_api_vip }}"
+  cluster_k3s_api_vip: "{{ k3s_api_vip }}"
   # Pod egress to the apiserver must allow the SERVER NODE IPs, not the VIP:
   # kube-proxy DNATs the in-cluster API VIP before NetworkPolicy evaluation.
   # Widened to the LAN because the server roster is inventory data rather than a
@@ -78,23 +80,11 @@ data:
   # substitutes text. `conditions.ready` is explicit — a slice with no controller
   # behind it has nobody to fill it in, and Prometheus skips a not-ready address.
   #
-  # Seeded from the starter inventory's roster, which is exactly the set the
-  # playbooks deploy the role onto:
-{%- for host in pve_hosts %}
-  #   {{ lan_prefix }}.{{ 11 + loop.index0 }}  {{ host }} (bare metal — hwmon, SMART, NIC, disk I/O)
-{%- endfor %}
-{%- for addr in resolvers %}
-  #   {{ addr }}  dns-{{ '%02d' | format(loop.index) }} (LXC — filesystem + textfile metrics)
-{%- endfor %}
-  #   {{ lan_prefix }}.23  {{ smtp_host.split('.')[0] }} (LXC — filesystem + textfile metrics)
-{%- for j in range(1, n_srv + 1) %}
-  #   {{ lan_prefix }}.{{ 30 + j }}  k3s-srv-{{ '%02d' | format(j) }} (server — off-node etcd snapshot textfile metric)
-{%- endfor %}
-  #
-  # The k3s AGENTS are deliberately absent: the in-cluster node-exporter
-  # DaemonSet already scrapes them on 9100, and listing them here would produce
-  # two series per agent under different jobs. Add an app VM to this list when it
-  # grows a textfile collector worth alerting on.
+  # Seeded from the starter inventory's roster: the bare-metal hosts, the
+  # resolver and relay LXCs, and the k3s servers. The k3s AGENTS are
+  # deliberately absent — the in-cluster DaemonSet already scrapes them on 9100,
+  # so listing them here would produce two series per agent under different
+  # jobs. Add an app VM when it grows a textfile collector worth alerting on.
   cluster_node_exporter_host_addresses: '[{% for host in pve_hosts %}{"addresses": ["{{ lan_prefix }}.{{ 11 + loop.index0 }}"], "conditions": {"ready": true}}, {% endfor %}{% for addr in resolvers %}{"addresses": ["{{ addr }}"], "conditions": {"ready": true}}, {% endfor %}{"addresses": ["{{ lan_prefix }}.23"], "conditions": {"ready": true}}{% for j in range(1, n_srv + 1) %}, {"addresses": ["{{ lan_prefix }}.{{ 30 + j }}"], "conditions": {"ready": true}}{% endfor %}]'
 {%- if storage_backend | default('zfs') == 'zfs' %}
 
@@ -110,21 +100,11 @@ data:
   # from a single Service.
   cluster_unbound_exporter_addresses: '[{% for addr in resolvers %}{"addresses": ["{{ addr }}"], "conditions": {"ready": true}}{{ ", " if not loop.last }}{% endfor %}]'
 
-  # Gate for OffsiteBackupStale's absent() arm. It holds a METRIC NAME rather
-  # than a boolean because Flux substitutes text: `${...}` is only valid PromQL
-  # inside a quoted string, and the rules are linted before substitution.
-  #
-  #   "up"  — the default, and the OFF position. `up` always has series, so
-  #           absent() is never true and the arm cannot fire. Correct while
-  #           `restic_offsite_enabled` is false in the Ansible inventory:
-  #           otherwise a cluster that never opted into offsite backups would
-  #           page about a backup it was never asked to take, forever.
-  #
-  #   "restic_offsite_last_success_timestamp_seconds" — the ON position. Set it
-  #           in the SAME change that flips `restic_offsite_enabled` to true.
-  #           The arm then means what it should: no offsite metric at all, i.e.
-  #           the unit was never installed, was removed, or the storage host is
-  #           unreachable — the failure mode a freshness alert cannot see.
+  # Gate for OffsiteBackupStale's absent() arm — a METRIC NAME, not a boolean,
+  # because Flux substitutes text and `${...}` is only valid PromQL inside a
+  # quoted string. "up" is the OFF position (always has series, so the arm can
+  # never fire); set it to restic_offsite_last_success_timestamp_seconds in the
+  # SAME change that flips `restic_offsite_enabled` true.
   cluster_offsite_backup_probe_metric: "up"
 
   cluster_metallb_public_vip: "{{ metallb_public_vip }}"
@@ -134,8 +114,12 @@ data:
   cluster_issuer: "letsencrypt-prod"
   cluster_acme_email: "{{ admin_email }}"
 
-  # Secrets backend: the ClusterSecretStore every ExternalSecret references.
-  cluster_secret_store: "{{ 'onepassword-cluster' if secrets_backend == 'onepassword' else '' }}"
+  # Secrets backend: the ClusterSecretStore every ExternalSecret references. The
+  # else-branch subscripts an empty mapping to hand `mandatory` an undefined
+  # value, the same seam the Taskfile's secret_ref() macro uses: an unimplemented
+  # backend FAILS THE RENDER instead of emitting an empty store name, which every
+  # ExternalSecret would then reference as `name: ""`.
+  cluster_secret_store: "{{ 'onepassword-cluster' if secrets_backend == 'onepassword' else {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no ClusterSecretStore — add a branch to cluster_secret_store in cluster-config.yaml.jinja') }}"
 {%- if secrets_backend == 'onepassword' %}
   cluster_secrets_vault: "{{ onepassword_vault }}"
 {%- endif %}
@@ -147,16 +131,11 @@ data:
   # and the repo Flux actually reconciles from can never drift apart.
   cluster_runbook_base_url: "https://{{ git_host }}/{{ git_namespace }}/{{ cluster_name }}/-/blob/main/docs"
 
-  # Host-side services the platform talks to. These three come from the copier
-  # ANSWERS (nas_host, smtp_host, upstream_dns_servers), and the Ansible
-  # inventory derives its host names and addresses from those SAME answers — the
-  # dependency runs answers -> both layers, not inventory -> here.
-  #
-  # So: to move the NAS, the relay or a resolver, change the answer (or change
-  # both files together in one commit). Editing only hosts.yml leaves the
-  # manifests pointed at the old address; editing only this ConfigMap leaves
-  # Ansible building the old host. Either way the two layers split apart, and
-  # nothing fails until an NFS mount or an alert route quietly stops working.
+  # Host-side services the platform talks to. These come from the copier ANSWERS
+  # (nas_host, smtp_host, upstream_dns_servers), which also drive the Ansible
+  # inventory — to move the NAS, the relay or a resolver, change the answer, or
+  # change this file and hosts.yml together. Editing one alone splits the two
+  # layers apart silently.
   cluster_nas_host: "{{ nas_host | default('pve-nas-01.' ~ internal_domain) }}"
   cluster_smtp_host: "{{ smtp_host | default('smtp-relay.' ~ internal_domain) }}"
   cluster_alert_email: "{{ alert_email | default(admin_email) }}"

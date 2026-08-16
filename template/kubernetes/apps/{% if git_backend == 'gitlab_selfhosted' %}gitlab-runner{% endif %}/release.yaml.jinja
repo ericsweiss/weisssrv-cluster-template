@@ -1,3 +1,9 @@
+{#- CI capacity, derived so the shipped numbers match the roster this cluster was
+    generated for rather than a reference cluster's. The model — pool, per-job
+    cost, and every quota dimension for BOTH tiers — lives in one place,
+    partials/ci-sizing.jinja, which resourcequota.yaml.jinja imports too, so the
+    two files cannot drift apart. README § Sizing is the prose. -#}
+{%- import "partials/ci-sizing.jinja" as sizing with context -%}
 ---
 # Shared, non-privileged GitLab Runner. The fields shared with the privileged
 # sibling (chart, timeouts, gitlabUrl, replicas, rbac, manager resources,
@@ -11,12 +17,13 @@ metadata:
 spec:
   releaseName: gitlab-runner
   values:
-    # MUST stay at or below what the ResourceQuota admits: a job pod sums to ~5Gi
-    # of memory limits and the manager counts too, so a 40Gi ceiling admits ~7.
-    # Set it higher and the runner submits pods the quota 403s — GitLab reports
-    # that as a job failure with no retry. At the right value the overflow waits
-    # in GitLab's queue instead. Move it in lockstep with the quota.
-    concurrent: 7
+    # MUST stay at or below what the ResourceQuota admits: a job pod sums to
+    # ~5Gi of memory limits and the manager counts too. Set it higher and the
+    # runner submits pods the quota 403s — GitLab reports that as a job failure
+    # with no retry. At the right value the overflow waits in GitLab's queue
+    # instead. Derived from the roster (header above); the ResourceQuota is
+    # derived from the same figure, so the two cannot drift.
+    concurrent: {{ sizing.shared_concurrent }}
 
     runners:
       name: k3s-runner-shared
@@ -50,10 +57,8 @@ spec:
           environment = ["HOME=/home/gitlab-runner", "GIT_CONFIG_GLOBAL=/home/gitlab-runner/.gitconfig"]
 
           # TOML sections are POSITIONAL: every key after a [section] header
-          # belongs to that section until the next header. ALL scalar keys must
-          # therefore come BEFORE any sub-table — a past layout had cpu/memory
-          # limits silently parsed as pod_labels, with chart defaults applied
-          # instead, and pull_policy swallowed by a volume table.
+          # belongs to that section until the next header, so all scalar keys
+          # must precede any sub-table or they are silently swallowed by it.
           [runners.kubernetes]
             namespace = "gitlab-runner"
             # Default CI job image, digest-pinned for reproducibility (the tag is
@@ -61,6 +66,13 @@ spec:
             # `docker buildx imagetools inspect <image>:<tag>`.
             image = "debian:trixie@sha256:d07d1b51c39f51188e60be9b64e6bf769fa94e187f092bc32b91305cfa34ba5a"
             privileged = false
+
+            # Rank job pods below every unclassed workload and never preempt
+            # (sources/priorityclasses.yaml): the namespace quotas admit more CPU
+            # requests than the cluster has allocatable, so a burst would otherwise
+            # compete with platform pods on arrival order alone. A scalar key —
+            # must stay above the first sub-table.
+            priority_class_name = "ci-jobs"
 
             cpu_limit = "2"
             cpu_request = "500m"

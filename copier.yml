@@ -132,19 +132,51 @@ lan_prefix:
     lan_prefix must be three octets with no trailing dot, e.g. 192.168.0
     {% endif %}
 
+# The three entries below are COMPUTED VALUES, not questions: `when: false`
+# means copier never prompts for them and records nothing in
+# .copier-answers.yml, but their rendered defaults are in scope for every
+# question that follows. They exist so the address scheme is written once
+# instead of once per address question.
+reserved_address_bands:
+  type: yaml
+  help: computed — not asked
+  when: false
+  # [first octet, last octet, what holds it]. hosts.yml composes guest
+  # addresses from these, so an answer inside one is an address a generated
+  # guest also takes. Keep in step with
+  # template/ansible/inventories/prod/hosts.yml.jinja.
+  default: |
+    - [11, 19, "the .11-.19 Proxmox host band"]
+    - [23, 23, "the SMTP relay address (.23, vmid 123)"]
+    - [31, 39, "the .31-.39 k3s server band (vmids 131+)"]
+    - [41, 49, "the .41-.49 k3s agent band (vmids 141+)"]
+
+reserved_address_note:
+  type: str
+  help: computed — not asked
+  when: false
+  default: >-
+    Pick one outside .11-.19, .23, .31-.39 and .41-.49; the starter scheme
+    leaves .1-.10, .20-.22, .24-.30 and .50+ free, and hosts.yml's header lists
+    the whole layout.
+
+lan_address_range:
+  type: yaml
+  help: computed — not asked
+  when: false
+  # [first, last] address of lan_cidr as 32-bit integers, so an address
+  # validator only has to convert its own answer and compare.
+  default: >-
+    {%- set _o = lan_cidr.split('/')[0].split('.') | map('int') | list -%}
+    {%- set _n = _o[0] * 16777216 + _o[1] * 65536 + _o[2] * 256 + _o[3] -%}
+    {%- set _size = 2 ** (32 - (lan_cidr.split('/')[1] | int)) -%}
+    [{{ _n - (_n % _size) }}, {{ _n - (_n % _size) + _size - 1 }}]
+
 # RULE: a validator may only compare an answer against answers declared ABOVE
-# it. copier renders validators against the answers given so far, so a forward
-# reference is undefined interactively and fires only in --data/update mode. The
-# gateway-vs-VIP collision is therefore tested on the three VIP questions below.
-# Enforced by tests/test_copier_config.py.
-#
-# The BAND check is the other half, and it is legal on this question and the
-# three VIPs alike because the bands are fixed literals, not answers: hosts.yml
-# composes .11+ (Proxmox hosts), .23 (SMTP relay), .31+ (k3s servers) and .41+
-# (k3s agents) from lan_prefix, which is declared above. Without it a VIP inside
-# a band is accepted and a generated guest takes the same address —
-# upstream_dns_servers and compute_node_count already test the mirror direction,
-# so leaving these out made the check one-way.
+# it — copier renders validators against the answers given so far, so a forward
+# reference is undefined interactively. The gateway-vs-VIP collision is
+# therefore tested on the three VIP questions below. Enforced by
+# tests/test_copier_config.py, which also carries the band-collision rationale.
 lan_gateway:
   type: str
   help: >-
@@ -157,25 +189,19 @@ lan_gateway:
     {% if not (lan_gateway | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
     lan_gateway must be an IPv4 address, e.g. {{ lan_prefix }}.1
     {% else %}
-    {% set _n = lan_cidr.split('/') %}
-    {% set _b = 2 ** (32 - (_n[1] | int)) %}
-    {% set _l = _n[0].split('.') | map('int') | list %}
     {% set _a = lan_gateway.split('.') | map('int') | list %}
-    {% set _o = lan_gateway.split('.')[-1] | int %}
-    {% set _band = ('the .11-.19 Proxmox host band' if 11 <= _o <= 19
-                    else 'the SMTP relay address (.23, vmid 123)' if _o == 23
-                    else 'the .31-.39 k3s server band (vmids 131+)' if 31 <= _o <= 39
-                    else 'the .41-.49 k3s agent band (vmids 141+)' if 41 <= _o <= 49
-                    else '') if lan_gateway.startswith(lan_prefix ~ '.') else '' %}
-    {% if (_a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3]) // _b != (_l[0] * 16777216 + _l[1] * 65536 + _l[2] * 256 + _l[3]) // _b %}
+    {% set _v = _a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3] %}
+    {% set _hit = namespace(band='') %}
+    {% for _lo, _hi, _name in reserved_address_bands %}
+    {% if lan_gateway.startswith(lan_prefix ~ '.') and _lo <= _a[3] <= _hi %}{% set _hit.band = _name %}{% endif %}
+    {% endfor %}
+    {% if _v < lan_address_range[0] or _v > lan_address_range[1] %}
     lan_gateway must sit inside lan_cidr ({{ lan_cidr }}) — every guest is
     created on the flat LAN and routes through it directly.
-    {% elif _band %}
-    lan_gateway {{ lan_gateway }} is in {{ _band }}, which hosts.yml composes
+    {% elif _hit.band %}
+    lan_gateway {{ lan_gateway }} is in {{ _hit.band }}, which hosts.yml composes
     guest addresses from — a generated guest would be given your router's
-    address. Pick one outside .11-.19, .23, .31-.39 and .41-.49; the starter
-    scheme leaves .1-.10, .20-.22, .24-.30 and .50+ free, and hosts.yml's header
-    lists the whole layout.
+    address. {{ reserved_address_note }}
     {% endif %}
     {% endif %}
 
@@ -189,28 +215,22 @@ k3s_api_vip:
     {% if not (k3s_api_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
     k3s_api_vip must be an IPv4 address, e.g. {{ lan_prefix }}.161
     {% else %}
-    {% set _n = lan_cidr.split('/') %}
-    {% set _b = 2 ** (32 - (_n[1] | int)) %}
-    {% set _l = _n[0].split('.') | map('int') | list %}
     {% set _a = k3s_api_vip.split('.') | map('int') | list %}
-    {% set _o = k3s_api_vip.split('.')[-1] | int %}
-    {% set _band = ('the .11-.19 Proxmox host band' if 11 <= _o <= 19
-                    else 'the SMTP relay address (.23, vmid 123)' if _o == 23
-                    else 'the .31-.39 k3s server band (vmids 131+)' if 31 <= _o <= 39
-                    else 'the .41-.49 k3s agent band (vmids 141+)' if 41 <= _o <= 49
-                    else '') if k3s_api_vip.startswith(lan_prefix ~ '.') else '' %}
-    {% if (_a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3]) // _b != (_l[0] * 16777216 + _l[1] * 65536 + _l[2] * 256 + _l[3]) // _b %}
+    {% set _v = _a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3] %}
+    {% set _hit = namespace(band='') %}
+    {% for _lo, _hi, _name in reserved_address_bands %}
+    {% if k3s_api_vip.startswith(lan_prefix ~ '.') and _lo <= _a[3] <= _hi %}{% set _hit.band = _name %}{% endif %}
+    {% endfor %}
+    {% if _v < lan_address_range[0] or _v > lan_address_range[1] %}
     k3s_api_vip must sit inside lan_cidr ({{ lan_cidr }}) — kube-vip advertises
     it with ARP on the LAN segment.
     {% elif k3s_api_vip == lan_gateway %}
     k3s_api_vip must differ from lan_gateway ({{ lan_gateway }}) — kube-vip
     would ARP-advertise your router's address and fight it for the LAN.
-    {% elif _band %}
-    k3s_api_vip {{ k3s_api_vip }} is in {{ _band }}, which hosts.yml composes
+    {% elif _hit.band %}
+    k3s_api_vip {{ k3s_api_vip }} is in {{ _hit.band }}, which hosts.yml composes
     guest addresses from — kube-vip would ARP-advertise an address a generated
-    guest already holds. Pick one outside .11-.19, .23, .31-.39 and .41-.49; the
-    starter scheme leaves .1-.10, .20-.22, .24-.30 and .50+ free, and hosts.yml's
-    header lists the whole layout.
+    guest already holds. {{ reserved_address_note }}
     {% endif %}
     {% endif %}
 
@@ -224,28 +244,22 @@ metallb_public_vip:
     {% if not (metallb_public_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
     metallb_public_vip must be an IPv4 address, e.g. {{ lan_prefix }}.100
     {% else %}
-    {% set _n = lan_cidr.split('/') %}
-    {% set _b = 2 ** (32 - (_n[1] | int)) %}
-    {% set _l = _n[0].split('.') | map('int') | list %}
     {% set _a = metallb_public_vip.split('.') | map('int') | list %}
-    {% set _o = metallb_public_vip.split('.')[-1] | int %}
-    {% set _band = ('the .11-.19 Proxmox host band' if 11 <= _o <= 19
-                    else 'the SMTP relay address (.23, vmid 123)' if _o == 23
-                    else 'the .31-.39 k3s server band (vmids 131+)' if 31 <= _o <= 39
-                    else 'the .41-.49 k3s agent band (vmids 141+)' if 41 <= _o <= 49
-                    else '') if metallb_public_vip.startswith(lan_prefix ~ '.') else '' %}
-    {% if (_a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3]) // _b != (_l[0] * 16777216 + _l[1] * 65536 + _l[2] * 256 + _l[3]) // _b %}
+    {% set _v = _a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3] %}
+    {% set _hit = namespace(band='') %}
+    {% for _lo, _hi, _name in reserved_address_bands %}
+    {% if metallb_public_vip.startswith(lan_prefix ~ '.') and _lo <= _a[3] <= _hi %}{% set _hit.band = _name %}{% endif %}
+    {% endfor %}
+    {% if _v < lan_address_range[0] or _v > lan_address_range[1] %}
     metallb_public_vip must sit inside lan_cidr ({{ lan_cidr }}).
     {% elif metallb_public_vip in [k3s_api_vip, lan_gateway] %}
     metallb_public_vip must differ from k3s_api_vip ({{ k3s_api_vip }}) and from
     lan_gateway ({{ lan_gateway }}) — MetalLB answers ARP for it, so sharing
     either address takes the API or the router off the LAN.
-    {% elif _band %}
-    metallb_public_vip {{ metallb_public_vip }} is in {{ _band }}, which
+    {% elif _hit.band %}
+    metallb_public_vip {{ metallb_public_vip }} is in {{ _hit.band }}, which
     hosts.yml composes guest addresses from — MetalLB would answer ARP for an
-    address a generated guest already holds. Pick one outside .11-.19, .23,
-    .31-.39 and .41-.49; the starter scheme leaves .1-.10, .20-.22, .24-.30 and
-    .50+ free, and hosts.yml's header lists the whole layout.
+    address a generated guest already holds. {{ reserved_address_note }}
     {% endif %}
     {% endif %}
 
@@ -259,28 +273,22 @@ metallb_internal_vip:
     {% if not (metallb_internal_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
     metallb_internal_vip must be an IPv4 address, e.g. {{ lan_prefix }}.101
     {% else %}
-    {% set _n = lan_cidr.split('/') %}
-    {% set _b = 2 ** (32 - (_n[1] | int)) %}
-    {% set _l = _n[0].split('.') | map('int') | list %}
     {% set _a = metallb_internal_vip.split('.') | map('int') | list %}
-    {% set _o = metallb_internal_vip.split('.')[-1] | int %}
-    {% set _band = ('the .11-.19 Proxmox host band' if 11 <= _o <= 19
-                    else 'the SMTP relay address (.23, vmid 123)' if _o == 23
-                    else 'the .31-.39 k3s server band (vmids 131+)' if 31 <= _o <= 39
-                    else 'the .41-.49 k3s agent band (vmids 141+)' if 41 <= _o <= 49
-                    else '') if metallb_internal_vip.startswith(lan_prefix ~ '.') else '' %}
-    {% if (_a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3]) // _b != (_l[0] * 16777216 + _l[1] * 65536 + _l[2] * 256 + _l[3]) // _b %}
+    {% set _v = _a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3] %}
+    {% set _hit = namespace(band='') %}
+    {% for _lo, _hi, _name in reserved_address_bands %}
+    {% if metallb_internal_vip.startswith(lan_prefix ~ '.') and _lo <= _a[3] <= _hi %}{% set _hit.band = _name %}{% endif %}
+    {% endfor %}
+    {% if _v < lan_address_range[0] or _v > lan_address_range[1] %}
     metallb_internal_vip must sit inside lan_cidr ({{ lan_cidr }}).
     {% elif metallb_internal_vip in [k3s_api_vip, metallb_public_vip, lan_gateway] %}
     metallb_internal_vip must differ from k3s_api_vip ({{ k3s_api_vip }}),
     metallb_public_vip ({{ metallb_public_vip }}) and lan_gateway
     ({{ lan_gateway }}) — MetalLB answers ARP for it.
-    {% elif _band %}
-    metallb_internal_vip {{ metallb_internal_vip }} is in {{ _band }}, which
+    {% elif _hit.band %}
+    metallb_internal_vip {{ metallb_internal_vip }} is in {{ _hit.band }}, which
     hosts.yml composes guest addresses from — MetalLB would answer ARP for an
-    address a generated guest already holds. Pick one outside .11-.19, .23,
-    .31-.39 and .41-.49; the starter scheme leaves .1-.10, .20-.22, .24-.30 and
-    .50+ free, and hosts.yml's header lists the whole layout.
+    address a generated guest already holds. {{ reserved_address_note }}
     {% endif %}
     {% endif %}
 
@@ -419,8 +427,11 @@ admin_user:
 admin_email:
   type: str
   help: >-
-    Destination for system mail (cron, SMART, ZFS events) and the ACME account
-    address used when requesting certificates.
+    Operator contact address. It drives the zone's CAA iodef and DMARC rua
+    records, the in-cluster ACME account (cluster_acme_email), and the seeded
+    tailnet admin. System mail (cron, SMART, ZFS events) and the HOST-side ACME
+    account come from the vault instead — `Email Config` → `root_alias` — so
+    give that item this same address unless you want the two to differ.
   placeholder: "you@example.com"
   validator: >-
     {% if not (admin_email | regex_search('^[^@\\s]+@[^@\\s]+\\.[^@\\s]{2,}$')) %}
@@ -452,14 +463,10 @@ timezone:
 # Backends — the four seam axes
 #
 # git_backend (forge), secrets_backend, storage_backend and dns_backend are
-# enums, one implemented value each. A choice with no implementation fails here
-# rather than producing a repo that looks complete and never reconciles, and
-# adding an implementation is additive: a value on the choice list, a branch in
-# the validator, and the conditional paths under template/.
-#
-# docs/ARCHITECTURE.md "Backend seams" records what a new implementation has to
-# provide on the Kubernetes side; the library's seam contract for the Ansible
-# and CI halves is weisssrv-lib docs/EXTENSIBILITY.md.
+# enums with one implemented value each; an unimplemented choice fails here
+# rather than producing a repo that never reconciles. What a new implementation
+# must provide: docs/ARCHITECTURE.md "Backend seams" (Kubernetes side) and
+# weisssrv-lib docs/EXTENSIBILITY.md (Ansible and CI).
 # --------------------------------------------------------------------------
 
 git_backend:
@@ -814,7 +821,7 @@ lib_ref:
     sources. Use a RELEASE TAG (vX.Y.Z) — the library's include contract is
     explicit that a branch is never a valid pin, and a branch deleted after
     merge takes every include, module source and collection install with it.
-  default: "v0.7.4"
+  default: "v0.8.0"
   validator: >-
     {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
     lib_ref must be a release TAG of the form vX.Y.Z (e.g. v1.2.3). A branch is
@@ -864,9 +871,13 @@ ci_cpu_selector:
     agents' `k3s_labels` in ansible/inventories/prod/hosts.yml before the first
     pipeline; see kubernetes/README.md's node-label contract.
   default: "{{ internal_domain }}/cpu=modern"
+  # The generated runners' node_selector_overwrite_allowed, spelled the same
+  # way: anything looser is accepted here and refused at pod creation, where the
+  # job is Pending with nothing naming the answer as the cause.
   validator: >-
-    {% if not (ci_cpu_selector | regex_search('^[^\\s=]+=[^\\s=]+$')) %}
-    ci_cpu_selector must be a single label=value pair, e.g.
+    {% if not (ci_cpu_selector | regex_search('^[a-z0-9.-]+/cpu=(modern|legacy)$')) %}
+    ci_cpu_selector must match the runners' node_selector_overwrite_allowed
+    regex ^[a-z0-9.-]+/cpu=(modern|legacy)$, e.g.
     {{ internal_domain }}/cpu=modern
     {% endif %}
 

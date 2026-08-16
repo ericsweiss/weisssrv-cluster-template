@@ -1,7 +1,7 @@
 # The provider/application/group/binding shapes and their security defaults
 # come from the library at a pinned ref; the object inventory is sso.tf.
 module "sso" {
-  source = "git::{{ lib_url | default('https://git.ericsweiss.com/eric/weisssrv-lib.git') }}//terraform/modules/authentik-sso?ref={{ lib_ref }}"
+  source = "git::{{ lib_url }}//terraform/modules/authentik-sso?ref={{ lib_ref }}"
 
   oauth2_providers      = local.oauth2_providers
   oauth2_client_secrets = local.oauth2_client_secrets

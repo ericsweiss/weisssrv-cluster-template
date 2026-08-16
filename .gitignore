@@ -1,6 +1,5 @@
-# Secrets / local env — never commit these. NOT `*.env`: the template ships
-# scripts/hosts.env, a generated-but-committed file, and a broad glob would
-# silently drop it from every commit.
+# Secrets / local env — never commit these. NOT `*.env`: scripts/hosts.env is
+# generated but committed.
 .env
 .env.*
 .tmp/

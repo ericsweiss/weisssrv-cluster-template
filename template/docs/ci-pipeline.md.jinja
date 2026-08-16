@@ -1,5 +1,5 @@
 {%- set runner_tag = ci_runner_tag | default('infrastructure') -%}
-{%- set lib_url_ = lib_url | default('https://git.ericsweiss.com/eric/weisssrv-lib.git') -%}
+{%- set lib_url_ = lib_url -%}
 {%- set lib_project = lib_project | default(lib_url_.split('://')[1].split('/', 1)[1] | replace('.git', '')) -%}
 # CI/CD pipeline
 
@@ -23,13 +23,18 @@ sources are unaffected — they fetch over https from `{{ lib_url_ }}`.
 | Stage | Jobs | Source |
 |---|---|---|
 | `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `flux-lint` (library); `version-coverage`, `repo-sync`, `deploy-coverage`, `netpol-parity` (this repo) | mixed |
-| `validate` | `terraform-validate` (library); `terraform-plan`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan` (this repo) | mixed |
+| `validate` | `terraform-validate` (library); `deploy-preflight`, `terraform-plan`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan` (this repo) | mixed |
 | `test` | `python-tests` (the cluster invariants in `tests/`) | library |
 | `security` | `secret_detection` | library |
 | `ai-review` | `pr-agent-review` | library |
 | `gate` | `validation-gate` | this repo |
-| `deploy` | `deploy-ansible-base`, `deploy-ansible-k3s`, `deploy-terraform` | this repo |
+| `deploy` | `deploy-ansible-base`, `deploy-ansible-dns`, `deploy-ansible-storage`, `deploy-ansible-mail`, `deploy-ansible-k3s`, `deploy-terraform` | this repo |
+| `verify` | `deploy-verify` (the postflight play, `when: always`) | this repo |
 | `maintenance` | `version-bump-bot` | library, scheduled |
+
+Every job `.gitlab-ci.yml` defines locally is named in that table, and the
+template's render gate fails when one is not — a new local job cannot ship
+undocumented.
 
 Nothing in `kubernetes/` is deployed by CI. Flux reconciles it from `main`;
 `flux-lint` is the gate that keeps an unreconcilable commit off that branch.
@@ -55,6 +60,7 @@ rendered corpus, each covering a class kubeconform structurally cannot see:
 |---|---|
 | `check-hpa-vpa-invariant.py` | an HPA and a CPU-controlling VPA target one workload |
 | `check-scrape-netpol.py` | a scraped namespace's NetworkPolicies do not admit Prometheus (the symptom is a bare `TargetDown`) |
+| `check-default-deny-coverage.py` | a namespace owns a workload but carries no namespace-wide ingress default-deny (or one defeated by an allow-everything rule beside it) |
 | `check-secretstore-scope.py` | a `ClusterSecretStore` has no `spec.conditions`, or a consumer namespace those conditions do not admit |
 | `check-pvc-storageclass.py` | a claim omits `storageClassName`, which the DefaultStorageClass admission plugin rewrites at create time with no diff in git |
 | `validate-helm-values.py` | a `.spec.values` block the kustomize corpus never renders fails `helm template` |
@@ -81,8 +87,8 @@ it byte-for-byte). The multi-ConfigMap handling lives in the local wrapper
 
 Every job is tagged `{{ runner_tag }}`. `flux-lint` (substitute mode) and the
 deploy jobs need a **root-capable** runner: they `apt-get install` and read
-secrets with the 1Password CLI. If you split runners, keep those three on the
-privileged one; the rest are non-root safe.
+secrets with the 1Password CLI. If you split runners, keep `flux-lint` and every
+job in the `deploy` stage on the privileged one; the rest are non-root safe.
 
 `secret_detection` pins `KUBERNETES_NODE_SELECTOR_CPU` to
 `{{ ci_cpu_selector | default(internal_domain ~ '/cpu=modern') }}` — gitleaks
@@ -96,8 +102,9 @@ creation; a runner that sets no regex ignores it.
 job logs. **Protected** is what stops a feature branch from reading it at all:
 without it, anyone who can open a merge request can print the whole-vault token
 by adding a line to `.gitlab-ci.yml` in that MR. Set Protected on every
-credential that could move state, and protect `main` (SETUP.md) so the setting
-means something.
+credential that could move state, and protect `main`
+([SETUP.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/SETUP.md))
+so the setting means something.
 
 | Variable | Used by | Protected | Notes |
 |---|---|---|---|
@@ -111,17 +118,28 @@ means something.
 
 The deploy jobs read these at job time with `op`:
 
+The five Ansible deploy jobs are abbreviated below by their suffix — `base`,
+`dns`, `storage`, `mail`, `k3s`.
+
 | Item / field | Used by |
 |---|---|
-| `SSH Key` → `private key`, `public key` | every Ansible deploy (the key Ansible connects with) |
-| `Email Config` → `root_alias` | `deploy-ansible-base`, `deploy-ansible-k3s` |
-| `SMTP Relay Auth` → `username`, `password` | `deploy-ansible-k3s` |
-| `K3s Cluster Token` / `K3s Agent Token` → `credential` | `deploy-ansible-k3s` |
-| `Loki Push Auth` → `username`, `password` | `deploy-ansible-k3s` |
+| `SSH Key` → `private key`, `public key` | every Ansible deploy — `.deploy-base` reads the private key Ansible connects with, each job passes the public one to the user role |
+| `Loki Push Auth` → `username`, `password` | every Ansible deploy — `.deploy-base` exports it so a log-shipping role never renders empty credentials |
+| `Email Config` → `root_alias` | `base`, `dns`, `mail`, `k3s` |
+| `SMTP Relay Auth` → `username`, `password` | `base`, `dns`, `mail`, `k3s` (senders authenticating TO the relay) |
+| `SMTP Smarthost` → `username`, `password` | `base`, `mail` (the relay authenticating to its upstream) |
+| `AdGuard Home` → `password` | `base`, `dns` |
+| `Cert Distribution Key` → `private key`, `public key` | `base`, `dns` |
+| `Samba NAS User` → `password` | `base`, `storage` |
+{% if vpn_tailscale %}| `Tailscale Auth Key` → `credential` | `base` |
+{% endif %}| `K3s Cluster Token` / `K3s Agent Token` → `credential` | `k3s` |
 | `Cloudflare Terraform Token` → `credential`, `username` | `terraform-plan`, `deploy-terraform` |
 {% if vpn_tailscale %}| `Tailscale OAuth` → `client id`, `credential` | `tailscale-drift-plan` |
 {% endif %}| `Authentik Terraform Token` → `credential` | `authentik-drift-plan` |
 | `<App> SSO` → the OIDC client secret | `authentik-drift-plan`, one per application |
+
+`deploy-ansible-base` runs `site.yml`, the whole host stack, so it reads the
+union of what the group jobs do.
 
 Each deploy job's `op://` variables mirror the `env:` of the matching Taskfile
 task, and that correspondence is load-bearing: `op run` resolves **every**
@@ -135,10 +153,12 @@ Everything else a playbook needs is an `op://` reference in
 ## Deploys
 
 Deploy jobs run on `main` only, and only when their own paths changed, so a
-merge deploys exactly what it touched. `deploy-ansible-base` runs
-automatically; `deploy-ansible-k3s` and `deploy-terraform` are **manual** —
-both can disrupt the control plane or public DNS, so an operator triggers them
-after reading the diff.
+merge deploys exactly what it touched. `deploy-ansible-base` runs `site.yml` on
+a cluster-wide inventory or playbook change; `deploy-ansible-dns`,
+`-storage` and `-mail` are the fast path for a change scoped to one group's
+`group_vars` or playbook. All four run automatically. `deploy-ansible-k3s` and
+`deploy-terraform` are **manual** — both can disrupt the control plane or public
+DNS, so an operator triggers them after reading the diff.
 
 They are `interruptible: false` (a new pipeline must never cancel a running
 deploy) and retry twice on `runner_system_failure` only — an evicted runner pod
@@ -209,28 +229,37 @@ silently stop running.
 
 ### Adding one
 
-Add a job per playbook, following `deploy-ansible-base`:
+The six jobs above are the shape every deploy job follows. A playbook of your
+own gets one more; `<name>` below is yours to fill in, and must not collide with
+a job the pipeline already defines:
 
 ```yaml
-deploy-ansible-storage:
+deploy-ansible-<name>:
   stage: deploy
   extends: .deploy-base
-  resource_group: deploy-ansible-storage      # serialize runs of THIS job
+  resource_group: deploy-ansible-<name>       # serialize runs of THIS job
   needs:
     - job: validation-gate                    # NOT optional — see above
+    - job: deploy-ansible-base                # ordering only, so: optional
+      optional: true
+  variables:                                  # only what THIS playbook needs
+    SSH_PUBLIC_KEY: "op://{{ onepassword_vault }}/SSH Key/public key"
   script:
     - cd ansible
-    - op run -- ansible-playbook -i inventories/prod playbooks/storage.yml
+    - $SECRET_RUNNER ansible-playbook -i inventories/prod playbooks/<name>.yml
   environment:
-    name: production/storage
+    name: production/ansible-<name>
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
       changes:
-        - "ansible/inventories/**/*"
-        - "ansible/playbooks/storage.yml"
+        - "ansible/inventories/prod/group_vars/<name>.yml"
+        - "ansible/playbooks/<name>.yml"
 ```
+
+`$SECRET_RUNNER` is what resolves the `op://` references, so the playbook is
+always invoked through it, never bare.
 
 `.deploy-base` comes from the library (`/ci/deploy/deploy-base.yml`, included
 with this cluster's runner tag and vault name). It supplies the 1Password CLI,

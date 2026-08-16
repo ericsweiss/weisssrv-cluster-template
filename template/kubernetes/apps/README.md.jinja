@@ -42,9 +42,8 @@ cooperative routing, and any project on the instance can write
 `tags: [{{ ci_runner_tag | default('infrastructure') }}]` in its own
 `.gitlab-ci.yml`. Registered instance-wide, that one line gets an arbitrary
 authenticated user root + Docker-in-Docker execution on this cluster, on a runner
-that also holds SSH reach to the hosts. In the system this template generalizes,
-the docs stated the rule while the live registration was `instance_type` and
-another project's pipeline was observed running on it — nothing checked it.
+that also holds SSH reach to the hosts. Nothing in this repository can check the
+scope, so it is verified by hand.
 
 Verify after registering, and after any re-registration or token rotation:
 
@@ -66,7 +65,10 @@ the tenant-build alternative.
   components (`netpol-egress-dns`, `netpol-egress-public`,
   `netpol-egress-apiserver`) rather than hand-written copies. Adding ANY egress
   policy makes egress default-deny for the pods it selects — enumerate every
-  path the workload needs.
+  path the workload needs. The ingress deny is not optional:
+  `scripts/check-default-deny-coverage.py` fails `task flux:lint` for any
+  namespace that owns a workload without one, and the only declared exemption is
+  `flux-system`, whose gotk manifests carry their own policies.
 - A VPA (`Initial` for single-replica apps, `Off` for stateful ones you tune by
   hand, and never CPU-controlled where an HPA owns CPU).
 - Its own ServiceMonitor/PodMonitor and PrometheusRule if it has metrics —

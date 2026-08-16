@@ -5,6 +5,10 @@
 # Which records it manages comes from cluster-config (cluster_ddns_records), NOT
 # from this file. Records are also created/updated by Terraform and by
 # external-dns; the three owners must stay on disjoint record NAMES.
+#
+# The program is cloudflare-ddns.py in this directory, mounted from the
+# configMapGenerator in kustomization.yaml — a real file so ruff and a unit test
+# can reach it, which an inlined heredoc would not be.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -40,119 +44,7 @@ spec:
               image: python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
               command:
                 - python3
-                - -c
-                - |
-                  import ipaddress
-                  import json
-                  import os
-                  import sys
-                  import time
-                  import urllib.error
-                  import urllib.request
-
-                  TOKEN = os.environ.get("CF_API_TOKEN")
-                  ZONE = os.environ.get("DDNS_ZONE", "").strip()
-                  RECORDS = os.environ.get("DDNS_RECORDS", "").strip()
-                  if not TOKEN or not ZONE:
-                      sys.exit("ERROR: CF_API_TOKEN and DDNS_ZONE are required")
-
-                  def api(url, method="GET", data=None):
-                      headers = {
-                          "Authorization": "Bearer " + TOKEN,
-                          "Content-Type": "application/json",
-                      }
-                      body = json.dumps(data).encode() if data else None
-                      req = urllib.request.Request(url, data=body, headers=headers, method=method)
-                      try:
-                          with urllib.request.urlopen(req, timeout=30) as resp:
-                              return json.loads(resp.read().decode())
-                      except urllib.error.HTTPError as e:
-                          try:
-                              detail = e.read().decode(errors="replace")
-                          except Exception:
-                              detail = "<unreadable>"
-                          print("ERROR: HTTP %s on %s %s: %s" % (e.code, method, url, detail), file=sys.stderr)
-                      except Exception as e:
-                          print("ERROR: %s on %s %s: %s" % (type(e).__name__, method, url, e), file=sys.stderr)
-                      return None
-
-                  def public_ip():
-                      """Try several providers: one being down, or a transient
-                      egress blip while the network reconverges, must not fail
-                      the job. Only a GLOBAL IPv4 is accepted — a dual-stack
-                      provider can answer with AAAA, and a captive portal with
-                      private space; either would publish an unreachable A."""
-                      providers = (
-                          "https://api.ipify.org",
-                          "https://ipv4.icanhazip.com",
-                          "https://checkip.amazonaws.com",
-                      )
-                      for attempt in range(3):
-                          for url in providers:
-                              try:
-                                  with urllib.request.urlopen(url, timeout=10) as resp:
-                                      candidate = resp.read().decode().strip()
-                                  if ipaddress.IPv4Address(candidate).is_global:
-                                      return candidate
-                                  print("WARN: %s returned %r, trying next" % (url, candidate), file=sys.stderr)
-                              except Exception as e:
-                                  print("WARN: %s failed: %s" % (url, e), file=sys.stderr)
-                          if attempt < 2:
-                              time.sleep(5)
-                      return None
-
-                  def update(zone_id, name, current, proxied_on_create):
-                      """proxied and ttl seed CREATION only. On update the
-                      record's existing values are preserved, so this job and
-                      Terraform cannot flip-flop them on every cycle: Terraform
-                      owns proxied/ttl, this job owns the address."""
-                      url = "https://api.cloudflare.com/client/v4/zones/%s/dns_records?type=A&name=%s" % (zone_id, name)
-                      data = api(url)
-                      if not data or not data.get("success"):
-                          print("ERROR: cannot query %s" % name)
-                          return False
-                      existing = (data.get("result") or [None])[0]
-                      if existing and existing.get("content") == current:
-                          print("%s unchanged" % name)
-                          return True
-                      payload = {
-                          "type": "A",
-                          "name": name,
-                          "content": current,
-                          "ttl": existing.get("ttl", 1) if existing else 1,
-                          "proxied": existing.get("proxied", proxied_on_create) if existing else proxied_on_create,
-                      }
-                      if existing:
-                          result = api(
-                              "https://api.cloudflare.com/client/v4/zones/%s/dns_records/%s" % (zone_id, existing["id"]),
-                              method="PUT",
-                              data=payload,
-                          )
-                      else:
-                          result = api(
-                              "https://api.cloudflare.com/client/v4/zones/%s/dns_records" % zone_id,
-                              method="POST",
-                              data=payload,
-                          )
-                      ok = bool(result and result.get("success"))
-                      print("%s -> %s: %s" % (name, current, "ok" if ok else "FAILED"))
-                      return ok
-
-                  current = public_ip()
-                  if not current:
-                      sys.exit("ERROR: no usable public IPv4 after retries")
-                  print("public IPv4: %s" % current)
-
-                  zones = api("https://api.cloudflare.com/client/v4/zones?name=%s" % ZONE)
-                  if not zones or not zones.get("success") or not zones.get("result"):
-                      sys.exit("ERROR: zone %s not found" % ZONE)
-                  zone_id = zones["result"][0]["id"]
-
-                  ok = True
-                  for entry in [r.strip() for r in RECORDS.split(",") if r.strip()]:
-                      name, _, flag = entry.partition(":")
-                      ok = update(zone_id, name.strip(), current, flag.strip().lower() != "false") and ok
-                  sys.exit(0 if ok else 1)
+                - /opt/ddns/cloudflare-ddns.py
               env:
                 - name: DDNS_ZONE
                   value: "${cluster_external_domain}"
@@ -175,3 +67,14 @@ spec:
                 capabilities:
                   drop:
                     - ALL
+              volumeMounts:
+                - name: script
+                  mountPath: /opt/ddns
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                # kustomize rewrites this to the hashed generator name, so a
+                # script edit rolls a new ConfigMap instead of mutating in place.
+                name: cloudflare-ddns-script
+                defaultMode: 0555

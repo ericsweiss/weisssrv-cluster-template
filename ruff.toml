@@ -1,13 +1,11 @@
-# Vendored from weisssrv-lib lint/ruff.toml so `ruff check` locally and the
-# python-lint CI job (which uses ruff's own discovery) agree.
+# Forked from weisssrv-lib `lint/ruff.toml` (narrower target set) so `ruff
+# check` locally and the python-lint CI job, which uses ruff's own config
+# discovery, agree.
 #
 # `target-version` matches the lowest Python the render tests run on.
 target-version = "py39"
 
 [lint]
-# Correctness-first selection: pyflakes (F), the pycodestyle subsets that flag
-# real errors rather than layout (E4 imports, E7 statements, E9 syntax/IO), W
-# (invalid escapes, trailing whitespace), and bugbear (B). Formatting-only rules
-# (line length, quote style, import order) are deliberately OUT — the family has
-# no formatter and churning them would bury the findings that matter.
+# Correctness-first selection; formatting-only rules are deliberately out.
+# Rationale: weisssrv-lib lint/ruff.toml.
 select = ["E4", "E7", "E9", "F", "W", "B"]

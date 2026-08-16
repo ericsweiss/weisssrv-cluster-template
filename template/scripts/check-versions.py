@@ -48,9 +48,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
+# --- Configuration ---
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_CANDIDATES = ("scripts/version-registry.py", "scripts/version-registry.json")
@@ -105,9 +103,7 @@ class ServiceVersion:
     fetched_live: bool = False
 
 
-# ---------------------------------------------------------------------------
-# Consumer config
-# ---------------------------------------------------------------------------
+# --- Consumer config ---
 
 def resolve_config_path(explicit: Optional[str] = None, repo_root: Path = REPO_ROOT) -> Path:
     """First of: --config, $CHECK_VERSIONS_CONFIG, the default candidates."""
@@ -225,9 +221,7 @@ def missing_registry_entries() -> list[str]:
     )
 
 
-# ---------------------------------------------------------------------------
-# HTTP helpers
-# ---------------------------------------------------------------------------
+# --- HTTP helpers ---
 
 def _urlopen_with_retry_full(req, timeout: int = REQUEST_TIMEOUT) -> tuple[str, bytes]:
     """urlopen with a bounded retry on transient failures; return (content_type, body).
@@ -331,14 +325,11 @@ def fetch_apt_packages(base_url: str) -> str:
 
     def _is_valid_packages_response(content_type: str, content: str) -> bool:
         """Check if response is a valid Packages file (not an HTML error page)."""
-        # Packages files are text/plain or have no Content-Type
-        # HTML error pages will have text/html
+        # A Packages file is text/plain or untyped; an error page is text/html.
         if "text/html" in content_type.lower():
             return False
-        # Also check content for HTML markers in case Content-Type is missing
         if content.strip().startswith("<!DOCTYPE") or content.strip().startswith("<html"):
             return False
-        # Valid Packages files contain "Package:" lines
         if "Package:" not in content:
             return False
         return True
@@ -356,19 +347,16 @@ def fetch_apt_packages(base_url: str) -> str:
     except (urllib.error.HTTPError, urllib.error.URLError, socket.timeout, UnicodeDecodeError):
         pass
 
-    # Fall back to .gz compressed version
     gz_url = f"{base_url}.gz"
     req = urllib.request.Request(gz_url, headers=req_headers)
 
     try:
         content_type, compressed_data = _urlopen_with_retry_full(req, timeout=REQUEST_TIMEOUT)
-        # Check Content-Type before attempting decompression
         if "text/html" in content_type.lower():
             raise RuntimeError(f"Received HTML error page instead of Packages.gz from {gz_url}")
 
         with gzip.GzipFile(fileobj=BytesIO(compressed_data)) as gz:
             content = gz.read().decode("utf-8")
-            # Validate the decompressed content
             if not content.strip() or "Package:" not in content:
                 raise RuntimeError(f"Invalid or empty Packages file from {gz_url}")
             return content
@@ -382,9 +370,7 @@ def fetch_apt_packages(base_url: str) -> str:
         raise RuntimeError(f"Invalid gzip data from {gz_url}") from e
 
 
-# ---------------------------------------------------------------------------
-# Cache helpers
-# ---------------------------------------------------------------------------
+# --- Cache helpers ---
 
 def _cache_key(service_name: str) -> Path:
     """Generate a cache file path for a service."""
@@ -429,9 +415,7 @@ def _write_cache(service_name: str, version: str) -> None:
         print(f"Warning: failed to write cache for {service_name}: {e}", file=sys.stderr)
 
 
-# ---------------------------------------------------------------------------
-# Version parsing
-# ---------------------------------------------------------------------------
+# --- Version parsing ---
 
 def parse_version_tuple(version_str: str) -> tuple:
     """Parse a version string into a comparable tuple.
@@ -452,7 +436,6 @@ def parse_version_tuple(version_str: str) -> tuple:
     epoch_match = re.match(r"^\d+:(.*)$", v)
     if epoch_match:
         v = epoch_match.group(1)
-    # Replace + with . for k3s-style versions
     v = v.replace("+", ".")
     parts = re.split(r"[.\-]", v)
     result = []
@@ -468,62 +451,34 @@ def parse_version_tuple(version_str: str) -> tuple:
 
 
 def version_tuple_greater(a: tuple, b: tuple) -> bool:
-    """Compare two version tuples, handling different lengths correctly.
+    """Return True if version tuple a is newer than b.
 
-    This handles the case where versions have different segment counts:
-    - "17.1" > "17" (17.1 is newer - more segments with matching prefix)
-    - "17.1-trixie" > "17-trixie" (17.1 is newer)
-    - "18-trixie" > "17.1-trixie" (18 is newer)
-
-    The key insight: when comparing version segments at the same position,
-    a numeric segment (like a minor version number) takes precedence over
-    a string segment (like a suffix). This handles the case where:
-    - "17.1-trixie" ((0,17),(0,1),(1,"trixie")) vs "17-trixie" ((0,17),(1,"trixie"))
-    - At index 1: (0,1) vs (1,"trixie") - numeric vs string
-
-    Comparison rules for (type_rank, value) tuples at same position:
-    - Same type_rank: compare values normally
-    - Different type_rank: numeric (0) beats string (1) for version purposes
-      because a numeric segment represents a version number, not a suffix
-
-    Returns True if tuple a represents a newer version than tuple b.
+    Segments are (type_rank, value) with 0 = numeric, 1 = string. At the same
+    position a numeric segment beats a string one: it is a version number, not a
+    pre-release suffix ("17.1-trixie" > "17-trixie"). A longer version with a
+    matching prefix is newer only when its extra segment is numeric ("17.1" >
+    "17", but "17-alpha" < "17").
     """
-    # Compare element by element up to the shorter length
     min_len = min(len(a), len(b))
     for i in range(min_len):
-        a_elem, b_elem = a[i], b[i]
-        a_type, a_val = a_elem
-        b_type, b_val = b_elem
+        a_type, a_val = a[i]
+        b_type, b_val = b[i]
 
-        # Same type: compare values
         if a_type == b_type:
             if a_val > b_val:
                 return True
             if a_val < b_val:
                 return False
-            # Equal, continue to next element
         else:
-            # Different types: numeric (0) beats string (1)
-            # This handles "17.1-trixie" vs "17-trixie" at position 1:
-            #   (0, 1) [numeric minor version] vs (1, "trixie") [string suffix]
-            #   Numeric segment = more specific version = newer
-            return a_type < b_type  # 0 < 1, so numeric wins
+            return a_type < b_type
 
-    # All compared elements are equal; now check remaining elements
     if len(a) == len(b):
-        return False  # Identical versions
+        return False
 
-    # Versions have different lengths with matching prefix
-    # The longer version is newer IF its next element is numeric (type_rank=0)
-    # Examples:
-    #   "17.1" ((0,17),(0,1)) > "17" ((0,17)) - extra numeric = newer
-    #   "17-alpha" ((0,17),(1,"alpha")) < "17" ((0,17)) - extra string suffix = older (pre-release)
     if len(a) > len(b):
-        # a has more segments - a is newer if next segment is numeric
-        return a[min_len][0] == 0  # type_rank 0 = numeric
+        return a[min_len][0] == 0
     else:
-        # b has more segments - b is newer if next segment is numeric, so a is NOT newer
-        return b[min_len][0] != 0  # a is newer only if b's extra is a string (pre-release)
+        return b[min_len][0] != 0
 
 
 def version_greater(a: str, b: str) -> bool:
@@ -549,11 +504,9 @@ def version_compare(a: str, b: str) -> int:
     This is a comparator function suitable for use with functools.cmp_to_key.
     Uses semantic comparison via parsed tuples, so "1.0.0" and "v1.0.0" are equal.
     """
-    # Parse both versions to tuples for semantic comparison
     a_tuple = parse_version_tuple(a)
     b_tuple = parse_version_tuple(b)
 
-    # If tuples are equal, versions are semantically identical
     if a_tuple == b_tuple:
         return 0
     if version_tuple_greater(a_tuple, b_tuple):
@@ -561,9 +514,7 @@ def version_compare(a: str, b: str) -> int:
     return -1
 
 
-# ---------------------------------------------------------------------------
-# Version fetchers
-# ---------------------------------------------------------------------------
+# --- Version fetchers ---
 
 def _debian_version_part_compare(a: str, b: str) -> int:
     """Compare one Debian upstream_version or debian_revision part per
@@ -588,7 +539,6 @@ def _debian_version_part_compare(a: str, b: str) -> int:
 
     i = j = 0
     while i < len(a) or j < len(b):
-        # Non-digit run
         sa = ""
         while i < len(a) and not a[i].isdigit():
             sa += a[i]
@@ -597,14 +547,12 @@ def _debian_version_part_compare(a: str, b: str) -> int:
         while j < len(b) and not b[j].isdigit():
             sb += b[j]
             j += 1
-        # Compare character by character with Debian's ordering tweaks
         for k in range(max(len(sa), len(sb))):
             ca = sa[k] if k < len(sa) else ""
             cb = sb[k] if k < len(sb) else ""
             if order(ca) != order(cb):
                 return -1 if order(ca) < order(cb) else 1
 
-        # Digit run — compare numerically (skipping leading zeros)
         na = ""
         while i < len(a) and a[i].isdigit():
             na += a[i]
@@ -752,16 +700,12 @@ def fetch_github_release(svc: dict) -> str:
     strip_prefix = svc.get("strip_prefix", False)
 
     if tag_filter:
-        # List releases and filter, then sort by version to get the highest
-        # Use per_page=100 (GitHub API maximum) and paginate to avoid missing
-        # versions in repos with many releases across multiple branches
         matching_versions = []
         max_pages = 5  # Limit pagination to avoid excessive API calls
 
         for page in range(1, max_pages + 1):
             releases = github_api(f"/repos/{repo}/releases?per_page=100&page={page}")
 
-            # Empty page means we've exhausted all releases
             if not releases:
                 break
 
@@ -775,15 +719,13 @@ def fetch_github_release(svc: dict) -> str:
                         version = version[len(prefix):]
                     matching_versions.append(version)
 
-            # If we got fewer than 100 releases, this is the last page
             if len(releases) < 100:
                 break
 
         if not matching_versions:
             raise RuntimeError(f"No release matching {tag_filter}")
 
-        # Sort by semantic version comparison to get the highest version, not the most recent by date
-        # Uses version_compare for proper handling of mixed numeric/string segments
+        # Highest by version, not most recent by date.
         matching_versions.sort(key=functools.cmp_to_key(version_compare), reverse=True)
         return matching_versions[0]
     else:
@@ -1005,7 +947,6 @@ def fetch_helm_version(svc: dict) -> str:
     if not isinstance(raw, str):
         raise RuntimeError(f"Unexpected response type from {index_url}")
 
-    # Find the chart section using a simple state machine
     lines = raw.split("\n")
     in_entries = False
     in_chart = False
@@ -1022,7 +963,6 @@ def fetch_helm_version(svc: dict) -> str:
         if not stripped or stripped.startswith("#"):
             continue
 
-        # Track when we enter the entries: block
         if stripped == "entries:":
             in_entries = True
             continue
@@ -1030,22 +970,17 @@ def fetch_helm_version(svc: dict) -> str:
         if not in_entries:
             continue
 
-        # Detect chart name entry - it appears as "  chartname:" under entries
-        # The key thing is that chart names are at a consistent indentation level
         if not in_chart:
-            # Chart names are indented exactly 2 spaces under entries:
             if line.rstrip().rstrip(":") and stripped.rstrip(":") == chart_name:
                 in_chart = True
                 chart_indent = len(line) - len(line.lstrip())
                 continue
         else:
-            # Calculate this line's indent
             if not line or line.isspace():
                 continue
             line_indent = len(line) - len(line.lstrip())
 
-            # If we hit something at the same indent as the chart name
-            # (another chart entry), we've exited our chart section
+            # Same indent as the chart name = the next chart entry.
             if line_indent <= chart_indent and not stripped.startswith("-"):
                 break
 
@@ -1072,7 +1007,6 @@ def fetch_helm_version(svc: dict) -> str:
     if not versions:
         raise RuntimeError(f"No versions found for chart {chart_name}")
 
-    # Sort by semantic version comparison for proper handling of mixed numeric/string segments
     versions.sort(key=functools.cmp_to_key(version_compare), reverse=True)
     return versions[0]
 
@@ -1091,13 +1025,10 @@ def fetch_plex_version(svc: dict) -> str:
     packages_url = "https://repo.plex.tv/deb/dists/public/main/binary-amd64/Packages"
     raw = fetch_apt_packages(packages_url)
 
-    # The Packages file may carry multiple plexmediaserver versions; collect
-    # them all (Package: plexmediaserver / Version: X.Y.Z.BUILD-hash).
     versions = _collect_apt_versions(raw, "plexmediaserver")
     if not versions:
         raise RuntimeError("Could not find plexmediaserver version in apt repository")
 
-    # Sort by semantic version comparison for proper handling of mixed numeric/string segments
     versions.sort(key=functools.cmp_to_key(version_compare), reverse=True)
     return versions[0]
 
@@ -1153,9 +1084,7 @@ def fetch_gitlab_version(svc: dict) -> str:
     return best_version
 
 
-# ---------------------------------------------------------------------------
-# Vars-file parser (simple YAML extraction without PyYAML)
-# ---------------------------------------------------------------------------
+# --- Vars-file parser (simple YAML extraction without PyYAML) ---
 
 def read_pinned_image_versions() -> dict[str, str]:
     """Current tags of digest-locked `image:` pins that live outside the vars file.
@@ -1231,34 +1160,28 @@ def read_current_versions() -> dict[str, str]:
         if s.get("var_name") and "_version" not in s["var_name"] and not s.get("version_file")
     }
 
-    # Track if we are inside helm_chart_versions block
     in_helm = False
 
     for line in content.split("\n"):
         stripped = line.strip()
 
-        # Skip comments and empty lines
         if not stripped or stripped.startswith("#"):
             continue
 
-        # Detect helm_chart_versions block
         if stripped == "helm_chart_versions:":
             in_helm = True
             continue
 
         if in_helm:
-            # Indented entries under helm_chart_versions
             if line.startswith("  ") and ":" in stripped:
                 key, _, val = stripped.partition(":")
                 key = key.strip()
                 val = val.strip().strip('"').strip("'")
-                # Remove inline comments
                 if "#" in val:
                     val = val[:val.index("#")].strip().strip('"').strip("'")
                 versions[f"helm_chart_versions.{key}"] = val
             elif not line.startswith(" "):
                 in_helm = False
-                # Fall through to check this line as a regular entry
 
         # Only column-0 keys are pins; an indented `*_version:` belongs to some
         # other mapping and must not be read (or later rewritten) as top level.
@@ -1309,7 +1232,6 @@ def update_version_in_file(var_name: str, new_version: str) -> bool:
     modified = False
 
     if var_name.startswith("helm_chart_versions."):
-        # Handle nested helm chart version
         chart_key = var_name.split(".", 1)[1]
         in_helm = False
         for i, line in enumerate(lines):
@@ -1388,9 +1310,7 @@ def update_version_in_file(var_name: str, new_version: str) -> bool:
     return modified
 
 
-# ---------------------------------------------------------------------------
-# Main logic
-# ---------------------------------------------------------------------------
+# --- Main logic ---
 
 def _annotate_latest_resolution(result: ServiceVersion, current: str) -> None:
     """When a service tracks 'latest', surface the resolved version in the notes
@@ -1431,7 +1351,6 @@ def check_service(svc_def: dict, current_versions: dict[str, str], use_cache: bo
     if svc_def.get("source_url"):
         result.source_url = svc_def["source_url"]
 
-    # Manual/apt services - no automated check
     if category == "manual":
         result.latest_version = current
         result.notes = notes or "Manual version management"
@@ -1451,7 +1370,6 @@ def check_service(svc_def: dict, current_versions: dict[str, str], use_cache: bo
 
     result.fetched_live = True
     try:
-        # Add current version to svc_def for major version pinning
         svc_def_with_current = svc_def.copy()
         svc_def_with_current["_current_version"] = current
 
@@ -1533,9 +1451,7 @@ def check_all(
     return results
 
 
-# ---------------------------------------------------------------------------
-# Output formatting
-# ---------------------------------------------------------------------------
+# --- Output formatting ---
 
 # The categories check_service() knows how to resolve. Also the --category
 # choices; a registry entry outside this map renders under "Other".
@@ -1706,9 +1622,7 @@ def format_json(results: list[ServiceVersion]) -> str:
     return json.dumps(data, indent=2)
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+# --- CLI ---
 
 def get_deploy_command(result: ServiceVersion) -> str:
     """How to roll out a bumped pin — registry data, with two derived fallbacks.

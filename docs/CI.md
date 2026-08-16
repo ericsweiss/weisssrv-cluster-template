@@ -26,14 +26,14 @@ substitution in the shaped fixture and is only visible in a second, unlike one.
 | `yamllint` | the tree passes the generated repo's own `.yamllint` | `yamllint` |
 | `terraform` | `terraform fmt -check -recursive` over the rendered `terraform/`, plus the tailnet policy still parses. Five of those files are templates, so this is what catches a Jinja bug that lands as invalid HCL | `terraform` |
 | `flux` | for every Kustomization under `kubernetes/clusters/<name>/`: `kustomize build` the target path, assert every `${placeholder}` is a key of one of the two postBuild ConfigMaps, substitute, `kubeconform`. Mirrors `ci/validate/flux-lint.yml`, through the generated repo's own `scripts/flux-env.sh` | `kustomize`, `kubeconform` |
-| `cluster-gates` | the five invariant gates the generated pipeline wires — `check-scrape-netpol`, `check-secretstore-scope`, `check-pvc-storageclass` and `check-hpa-vpa-invariant` over the whole rendered corpus, `check-netpol-except-parity` over `kubernetes/` on disk — actually PASS on the manifests the template ships. The render suite proves they are wired; without this, a generated cluster's first pipeline can be red on manifests nobody edited, and the template change that caused it went green | `kustomize` |
+| `cluster-gates` | the six invariant gates the generated pipeline wires — `check-scrape-netpol`, `check-default-deny-coverage`, `check-secretstore-scope`, `check-pvc-storageclass` and `check-hpa-vpa-invariant` over the whole rendered corpus, `check-netpol-except-parity` over `kubernetes/` on disk — actually PASS on the manifests the template ships. The render suite proves they are wired; without this, a generated cluster's first pipeline can be red on manifests nobody edited, and the template change that caused it went green | `kustomize` |
 | `ci-policy` | the generated pipeline pins a `default: image:`, sets `default: interruptible: true` with the `workflow.auto_cancel` split (`interruptible` globally, `none` on `main`), and leaves every deploy/gate/plan job uninterruptible. All three are defaults a job inherits by saying nothing, so no rendered job fails when they go missing | — |
 | `inventory-addresses` | no two hosts in `inventories/prod/hosts.yml` share an `ansible_host` or a `vmid`, and every address sits inside `cluster_lan_cidr`. Copier answers are validated one at a time, never against the address plan `hosts.yml` composes them into — and a resolver's vmid is derived from its answer (`100 + last octet`), so `upstream_dns_servers` landing in the `.31+` server band duplicates both. Reads the rendered inventory rather than the answer, so a hand re-address reaches the same gate | — |
 | `version-coverage` | every pin in the rendered vars file has a `scripts/version-registry.py` entry. Both are template output, so an entry added to one `.jinja` and not the other renders a cluster whose weekly bump bot silently never reports that pin | — |
 | `versions-configmap` | the rendered `cluster-versions` ConfigMap matches the rendered vars file — `flux` substitutes FROM the ConfigMap, so a stale value is otherwise a valid render | — |
 | `vendored` | every script in the render's `scripts/` **and** in this repository's own `scripts/` is byte-identical to the library's copy, plus the library's own registry gate (`scripts/check-vendored-copies.py` against `scripts/vendored-paths.yml`) over this repository. The second half is what holds `scripts/semantic-release.py` — the file that cuts the tag a generated cluster's `copier update` resolves to — to the library at the ref the includes pin, and it refuses to compare at all if those includes and `copier.yml`'s `lib_ref` default disagree. The registry arm adds the copies no directory walk reaches: the canonical `tests/test_check_lib_pins.py` suite, and the lint profiles this repository deliberately forks | `--lib-path` |
 | `role-opt-ins` | no playbook invokes a `<role>_enabled: false` role without the inventory setting the flag — a role that runs and does nothing, successfully | `--lib-path` |
-| `role-inputs` | every input an invoked role *asserts* and has no **usable** default for is assigned in `inventories/prod` — the shape that took out `proxmox_lxc_gateway`. "Usable" is decided by rendering the default against the inventory, not by reading it: `proxmox_lxc_nameserver` defaults to `{{ dns_servers \| default([]) \| join(' ') }}`, which is non-empty as text and empty as a value the moment `dns_servers` is unset | `--lib-path` |
+| `role-inputs` | every input an invoked role *asserts* and has no **usable** default for is assigned in `inventories/prod`. "Usable" is decided by rendering the default against the inventory, not by reading it: `proxmox_lxc_nameserver` defaults to `{{ dns_servers \| default([]) \| join(' ') }}`, which is non-empty as text and empty as a value the moment `dns_servers` is unset | `--lib-path` |
 | `terraform-validate` | `terraform validate` per module against the library checkout, with each `git::…?ref=` source rewritten to it — otherwise the RELEASED module is what validates | `--lib-path`, `terraform` |
 | `ansible` | `ansible-playbook --syntax-check` on every rendered playbook, with `weisssrv.infra` resolved from the library | `ansible-playbook` |
 
@@ -152,3 +152,43 @@ The generated cluster's pipeline gets the same stage only when the operator
 answers `enable_semantic_release: true` — off by default, because a cluster
 repository is normally released by hand. `answers-unlike.yml` turns it on, so
 the rendered wiring is exercised on every run.
+
+## Deferred by design
+
+Gaps against the reference cluster that a review has raised and this repository
+deliberately does not close. Each is a live decision, not a backlog entry — if
+you reopen one, change this list in the same MR.
+
+- **Deploy-job `rules:` are written out per job.** The reference cluster factors
+  the shared preamble into a hidden `.skip-schedule-web` fragment; the generated
+  pipeline repeats it. Repetition is what makes each job's trigger set readable
+  where the job is, and a `!reference` that silently changes every deploy's
+  trigger set is the more expensive mistake in a repository an operator forks
+  and edits.
+- **The template's `task lint` is a subset of the reference cluster's.** The
+  gates it omits — Prometheus/Alertmanager config lint, the cluster-literal
+  check, the flux/kubectl/busybox pin checks, the CI-policy and tailnet-policy
+  checks — each need a tool or a policy file a freshly generated cluster does
+  not have yet. They are adopted per cluster, not shipped empty.
+- **Not every library script is vendored.** `template/scripts/` carries what a
+  generated cluster's tasks and CI jobs actually invoke; the library's
+  role-development and matrix-generation tooling stays out. `scripts/README.md`
+  in the render is the inventory, and the library's registry is what gates the
+  copies that do ship.
+- **Agent guidance ships; agent settings do not.** A generated cluster gets
+  `AGENTS.md`, `CLAUDE.md`, the `.claude/` skill and the `.cursor/` rule — all
+  prose — but no `.claude/settings.json`. Permissions and hooks are per operator
+  and per machine, and a shipped one is a permission grant nobody reviewed.
+- **The `{{ {}['unimplemented'] | mandatory('...') }}` else-branches are
+  unreachable.** Every backend selector is an enum whose `choices` list only the
+  implemented values, and `test_unimplemented_backend_choices_fail_at_copy_time`
+  holds that list to what the render can actually produce, so an unimplemented
+  backend is refused before a single file is written. The idiom stays as
+  defence-in-depth for the case a choice is added without its branch — accepting
+  that if it ever did fire, the operator gets a Jinja `FilterArgumentError`
+  traceback carrying the message rather than copier's clean validation error.
+- **Chart and image pins ship at the version the template was last released
+  with**, not at the latest upstream. Currency is the version-bump cycle's job
+  ([VERSIONING.md](VERSIONING.md)): the generated cluster's own
+  `version-bump-bot` picks up from wherever it starts, so a pin that is one
+  release behind at generation costs one bot run, not a re-release here.

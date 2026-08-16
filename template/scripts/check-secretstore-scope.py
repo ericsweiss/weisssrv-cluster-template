@@ -1,35 +1,19 @@
 #!/usr/bin/env python3
 """Assert every ClusterSecretStore is namespace-scoped and covers its consumers.
 
-A `ClusterSecretStore` with no `spec.conditions` is referenceable from EVERY
+A ClusterSecretStore with no `spec.conditions` is referenceable from EVERY
 namespace: any principal that can create an ExternalSecret anywhere can mint any
-item in the backing vault. The scoping mechanism is native to ESO (conditions
-with `namespaces` / `namespaceRegexes` / `namespaceSelector`), and this check
-keeps it honest in both directions:
+item in the backing vault. Both directions are checked — every store declares
+conditions, and every ExternalSecret (plus every namespace a
+ClusterExternalSecret fans out to) sits in a namespace those conditions admit.
+Matching mirrors ESO: any condition matching admits, via exact `namespaces`,
+`namespaceRegexes`, or `namespaceSelector`; a fan-out is the UNION of
+`namespaceSelectors` and literal `namespaces`.
 
-  * every ClusterSecretStore in the tree declares conditions (an unscoped store
-    fails), and
-  * every ExternalSecret (and every namespace a ClusterExternalSecret fans out
-    to) sits in a namespace those conditions actually admit — so adding an app
-    with an ExternalSecret without widening the store fails the build instead of
-    failing silently at runtime with a stale Secret.
-
-Condition matching mirrors ESO: a namespace is admitted when ANY condition
-matches, and a condition matches on an exact `namespaces` entry, a
-`namespaceRegexes` match, or a `namespaceSelector` label match. A
-ClusterExternalSecret's fan-out is the UNION of its `namespaceSelectors` (or the
-deprecated singular `namespaceSelector`) and its literal `namespaces` list, the
-way ESO resolves it.
-
-The gate refuses to be vacuous. An EMPTY corpus is an operator error (exit 2),
-not a pass — a broken pipe or a wrong `kustomize build` path would otherwise
-report green — and so is a corpus that HAS documents but holds neither a
-ClusterSecretStore nor a consumer, which is what a render loop that never
-reached the defining stage produces. And a ClusterSecretStore that is REFERENCED
-but not defined in the corpus is a violation, because that is the runtime failure
-the gate exists to catch: the ExternalSecret never syncs and its Secret goes
-stale. A store that genuinely lives outside the linted tree is declared with
-`--external-store NAME`, so the exemption is visible instead of silent.
+A store REFERENCED but not defined in the corpus is a violation (the
+ExternalSecret never syncs and its Secret goes stale); one that genuinely lives
+outside the linted tree is declared with `--external-store NAME`. Exit 0 clean,
+1 on a finding, 2 on an operator error including a vacuous corpus.
 
 Usage (wired into flux:lint, on the accumulated full corpus):
   kustomize build <path> | envsubst >> corpus

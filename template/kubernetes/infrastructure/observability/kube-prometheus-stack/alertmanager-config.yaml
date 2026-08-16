@@ -75,14 +75,13 @@ spec:
               target_matchers:
                 - severity="info"
             # Node-outage storm control: while a node is down, per-pod and
-            # per-workload warnings are noise (one real outage produced ~25
-            # distinct warnings and rate-limited the chat receiver). Tradeoff: an
-            # unrelated pod failure elsewhere is also suppressed during the
-            # window. The etcd/kubelet CRITICALS are deliberately NOT inhibited —
-            # a serialized reboot must never lose quorum, so their firing is a
-            # genuine signal. EndpointDown and TargetDown are also excluded: they
-            # cover off-cluster infrastructure whose health is independent of node
-            # readiness.
+            # per-workload warnings are noise, so they stay suppressed for as
+            # long as the node is NotReady. Tradeoff: an unrelated pod failure
+            # elsewhere is also suppressed during the window. Criticals are
+            # deliberately NOT inhibited — a serialized reboot must never lose
+            # quorum, so their firing is a genuine signal. EndpointDown and
+            # TargetDown are also excluded: they cover off-cluster
+            # infrastructure whose health is independent of node readiness.
             - source_matchers:
                 - alertname=~"KubeNodeNotReady|KubeNodeUnreachable"
               target_matchers:

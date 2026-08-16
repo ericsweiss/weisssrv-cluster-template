@@ -1,30 +1,16 @@
 #!/usr/bin/env python3
 """Assert every claim pins a storageClassName.
 
-A cluster on pre-provisioned PersistentVolumes (zvol or NFS, `Retain`, bound by
-`storageClassName: ""`) needs the field written out. Omitting it is not neutral:
-the DefaultStorageClass admission plugin rewrites an unset `storageClassName` to
-whatever class is marked default, at create time, with no diff in git — so the
-claim binds a dynamically provisioned volume that no backup path covers.
-StatefulSet `volumeClaimTemplates` are immutable, so that is not editable
-afterwards; the PVC has to be deleted and recreated.
-
-Disabling the packaged provisioner removes the class to fall through to, but is
-one inventory edit away from returning. This makes the omission itself fail in
-CI.
+Omitting the field is not neutral: the DefaultStorageClass admission plugin
+rewrites an unset `storageClassName` to whatever class is marked default, at
+create time, with no diff in git — so a cluster on pre-provisioned PVs
+(`storageClassName: ""`) silently binds a dynamically provisioned volume no
+backup path covers. StatefulSet `volumeClaimTemplates` are immutable, so the PVC
+then has to be deleted and recreated.
 
 Input: the rendered manifest corpus on stdin (what `task flux:lint` accumulates
-from `kustomize build | envsubst`).
-
-The gate refuses to be vacuous, in both the shapes its siblings guard. An EMPTY
-corpus is an operator error (exit 2), not a pass, and so is a corpus that HAS
-documents but declares no claim at all: that is what a render loop which never
-reached the storage-declaring stages produces. This gate takes no arguments, so
-a mis-piped invocation has no other symptom — and it reads the same accumulated
-corpus as check-scrape-netpol.py and check-secretstore-scope.py, which hold the
-same contract.
-
-Exit 0 clean, 1 on a finding, 2 on an operator error.
+from `kustomize build | envsubst`). Exit 0 clean, 1 on a finding, 2 on an
+operator error including an empty corpus or one declaring no claim.
 
 Usage:
   cat rendered-corpus.yaml | python3 scripts/check-pvc-storageclass.py

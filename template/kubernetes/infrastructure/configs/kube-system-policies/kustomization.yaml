@@ -1,0 +1,30 @@
+---
+# Every NetworkPolicy kube-system carries, in one directory: the ingress
+# default-deny plus exactly the allows its residents need.
+#
+# WHY ALL OF IT LIVES HERE and not beside each workload: the deny is only safe
+# if its allow set is complete, so the two must be reviewable together and must
+# land in the same reconcile. kured is reconciled by the controllers stage and
+# CoreDNS/metrics-server by k3s itself — splitting the policies to match would
+# let the deny land while an allow's stage is still pending. The resources below
+# are ordered allows-first for the same reason: kustomize emits them in list
+# order and the component's deny is appended last.
+#
+# Current kube-system residents and their ingress:
+#   coredns                 53/udp+tcp from everything, 9153 from observability  -> allow-coredns.yaml
+#   metrics-server (k3s)    10250 from the kube-apiserver aggregation layer      -> allow-metrics-server.yaml
+#   kured                   8080 from observability                              -> allow-kured.yaml
+#   local-path-provisioner  none — it drives the apiserver and helper pods, listens on nothing
+#   kube-vip                hostNetwork — NetworkPolicy never gates it as a target
+# Adding a workload here means adding its allow in the same commit.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# No namespace.yaml: k3s owns the kube-system Namespace object. This transformer
+# only places the policies below (and the component's deny) into it.
+namespace: kube-system
+resources:
+  - allow-coredns.yaml
+  - allow-metrics-server.yaml
+  - allow-kured.yaml
+components:
+  - ../../../components/netpol-baseline

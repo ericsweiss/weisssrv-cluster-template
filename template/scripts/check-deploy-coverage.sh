@@ -123,7 +123,6 @@ fi
 # asset has nothing left to roll out. Renames surface via their added path.
 DIFF_FILES=$(git diff --name-only --diff-filter=d "$BASE_REF"...HEAD)
 
-# Extract changed roles (path component after <roles_dir>/).
 CHANGED_ROLES=$(
     printf '%s\n' "$DIFF_FILES" \
         | grep -oE "^${ROLES_ERE}/[A-Za-z0-9_-]+" \
@@ -132,8 +131,7 @@ CHANGED_ROLES=$(
         || true
 )
 
-# Extract changed playbooks. Match anything ending in .yml (or .yaml)
-# under <playbooks_dir>/ at any depth. Identifier is the path relative to it.
+# Playbook identifier is the path relative to <playbooks_dir>/.
 CHANGED_PLAYBOOKS=$(
     printf '%s\n' "$DIFF_FILES" \
         | grep -E "^${PLAYBOOKS_ERE}/.+\.ya?ml$" \
@@ -142,9 +140,7 @@ CHANGED_PLAYBOOKS=$(
         || true
 )
 
-# Extract changed inventory paths under <inventory_dir>/ at any depth. Covers
-# group_vars/, host_vars/, the top-level hosts.yml, and any other *.yml/*.yaml
-# that may be added (inventory plugin configs, membership files, etc).
+# Any *.yml/*.yaml under <inventory_dir>/ at any depth, identified relative to it.
 CHANGED_INVENTORY_PATHS=$(
     printf '%s\n' "$DIFF_FILES" \
         | grep -E "^${INVENTORY_ERE}/.+\.ya?ml$" \

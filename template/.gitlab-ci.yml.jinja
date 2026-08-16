@@ -1,4 +1,4 @@
-{%- set lib_url_ = lib_url | default('https://git.ericsweiss.com/eric/weisssrv-lib.git') -%}
+{%- set lib_url_ = lib_url -%}
 {%- set lib_project = lib_project | default(lib_url_.split('://')[1].split('/', 1)[1] | replace('.git', '')) -%}
 {%- set runner_tag = ci_runner_tag | default('infrastructure') -%}
 {%- set cpu_selector = ci_cpu_selector | default(internal_domain ~ '/cpu=modern') -%}
@@ -55,6 +55,14 @@ stages:
   - ai-review
   - gate
   - deploy
+  # Post-deploy verification, a SEPARATE stage rather than a deploy-stage job
+  # with `needs:` on the deploys: a job that declares ANY `needs:` starts as soon
+  # as those needs complete and ignores stage order, and a need that was created
+  # and then FAILED blocks it (`optional: true` only tolerates one that was never
+  # created). deploy-verify therefore carries NO `needs:` — stage order alone
+  # sequences it — plus `when: always`, so a partly-failed deploy stage is still
+  # verified instead of leaving the cluster unchecked.
+  - verify
   - maintenance
 {%- if enable_semantic_release | default(false) %}
   - release
@@ -87,11 +95,10 @@ workflow:
   # soon as any non-interruptible job has started, so it leaves them running.
   #
   # main: `on_new_commit: none` (the rule below) — a merged pipeline always runs
-  # to completion. Under the aggressive setting a second merge cancels the
-  # first's still-running interruptible jobs, which skips validation-gate and
-  # leaves the first merge's deploys unmet and never run, with its `changes:` not
-  # re-covered by the second pipeline. Rapid merges instead QUEUE at the deploy
-  # jobs' `resource_group`s, which are per target and oldest-first.
+  # to completion. Cancelling one would skip validation-gate and leave the first
+  # merge's deploys unmet, with its `changes:` not re-covered by the second
+  # pipeline. Rapid merges instead QUEUE at the deploy jobs' `resource_group`s,
+  # which are per target and oldest-first.
   auto_cancel:
     on_new_commit: interruptible
   rules:
@@ -115,6 +122,10 @@ variables:
   # cluster actually resolves (a fork or mirror answers lib_project).
   LIB_PROJECT: "{{ lib_project }}"
   PYYAML_VERSION: "6.0.2"
+  # Single source for the Ansible the local jobs pip-install. `include:` inputs
+  # cannot read it (they resolve before this block exists), so the deploy-base
+  # entry below repeats the literal — bump the two together.
+  ANSIBLE_VERSION: "11.6.0"
   # The command that resolves the secret references in a job's environment. Every
   # deploy script goes through it rather than naming a backend's CLI, so the
   # `secrets_backend` seam has one runtime half and one render-time half (the
@@ -179,10 +190,14 @@ include:
     inputs:
       tags: ["{{ runner_tag }}"]
       image: python:3.13-slim
-      targets: "scripts tests"
+      # kubernetes/ is in the list for the Python a manifest delivers through a
+      # configMapGenerator (the DDNS CronJob's program): a real file so ruff can
+      # see it, which an inlined heredoc could not be.
+      targets: "scripts tests kubernetes"
       changes:
         - "scripts/**/*.py"
         - "tests/**/*.py"
+        - "kubernetes/**/*.py"
         - "ruff.toml"
         - "pyproject.toml"
         - ".gitlab-ci.yml"
@@ -275,7 +290,7 @@ include:
       versions_configmap: "{{ versions_cm }}"
       flux_render_script: "scripts/flux-env.sh"
       skipped_script: "scripts/kubeconform-skipped.py"
-      extra_validation: 'echo "=== Checking HPA/VPA invariant ==="; python3 scripts/check-hpa-vpa-invariant.py --require-chart-native-vpas --policy-config scripts/autoscaling-policy.yaml < "$RENDER_ALL" || FAILED=1; echo "=== Checking scrape/NetworkPolicy invariant ==="; python3 scripts/check-scrape-netpol.py < "$RENDER_ALL" || FAILED=1; echo "=== Checking ClusterSecretStore scoping ==="; python3 scripts/check-secretstore-scope.py < "$RENDER_ALL" || FAILED=1; echo "=== Checking PVC storageClassName ==="; python3 scripts/check-pvc-storageclass.py < "$RENDER_ALL" || FAILED=1; echo "=== Schema-validating HelmRelease values blocks (helm template) ==="; MERGED_CM=$(mktemp /tmp/merged-cm-XXXXXX.yaml); scripts/flux-env.sh merged-configmap "{{ versions_cm }}" > "$MERGED_CM" && python3 scripts/validate-helm-values.py --kubeconform --releases scripts/helm-values-releases.yaml --versions-configmap "$MERGED_CM" --policy-config scripts/autoscaling-policy.yaml || FAILED=1; rm -f "$MERGED_CM"'
+      extra_validation: 'echo "=== Checking HPA/VPA invariant ==="; python3 scripts/check-hpa-vpa-invariant.py --require-chart-native-vpas --policy-config scripts/autoscaling-policy.yaml < "$RENDER_ALL" || FAILED=1; echo "=== Checking scrape/NetworkPolicy invariant ==="; python3 scripts/check-scrape-netpol.py < "$RENDER_ALL" || FAILED=1; echo "=== Checking ingress default-deny coverage ==="; python3 scripts/check-default-deny-coverage.py < "$RENDER_ALL" || FAILED=1; echo "=== Checking ClusterSecretStore scoping ==="; python3 scripts/check-secretstore-scope.py < "$RENDER_ALL" || FAILED=1; echo "=== Checking PVC storageClassName ==="; python3 scripts/check-pvc-storageclass.py < "$RENDER_ALL" || FAILED=1; echo "=== Schema-validating HelmRelease values blocks (helm template) ==="; MERGED_CM=$(mktemp /tmp/merged-cm-XXXXXX.yaml); scripts/flux-env.sh merged-configmap "{{ versions_cm }}" > "$MERGED_CM" && python3 scripts/validate-helm-values.py --kubeconform --releases scripts/helm-values-releases.yaml --versions-configmap "$MERGED_CM" --policy-config scripts/autoscaling-policy.yaml || FAILED=1; rm -f "$MERGED_CM"'
       changes:
         - "kubernetes/**/*"
         - "ansible/inventories/prod/group_vars/all.yml"
@@ -283,6 +298,7 @@ include:
         - "scripts/helm-values-releases.yaml"
         - "scripts/check-hpa-vpa-invariant.py"
         - "scripts/check-scrape-netpol.py"
+        - "scripts/check-default-deny-coverage.py"
         - "scripts/check-secretstore-scope.py"
         - "scripts/check-pvc-storageclass.py"
         - "scripts/validate-helm-values.py"
@@ -600,28 +616,195 @@ deploy-coverage:
         - ".gitlab-ci.yml"
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
+# Credential-free preflight over the deploy jobs themselves: every
+# `ansible-playbook` invocation in a job extending .deploy-base names a playbook
+# that exists, and every `--tags` selection reaches at least one task. A tag that
+# matches nothing makes a deploy job a green no-op — the failure mode nothing
+# else in this pipeline can see, because the play still exits 0.
+deploy-preflight:
+  stage: validate
+  needs: []
+  # The FULL python image: ansible-galaxy installs weisssrv.infra from a git+ URL.
+  image: python:3.13
+  tags: ["{{ runner_tag }}"]
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
+    - pip install --quiet "ansible==$ANSIBLE_VERSION" "pyyaml==$PYYAML_VERSION"
+    - for i in 1 2 3; do ansible-galaxy collection install -r ansible/requirements.yml && break; [ "$i" = 3 ] && exit 1; echo "galaxy install failed (attempt $i) - retrying in 20s"; sleep 20; done
+  script:
+    - |
+      python3 - <<'PREFLIGHT'
+      import re
+      import shlex
+      import subprocess
+      import sys
+      from pathlib import Path
+
+      import yaml
+
+      class Loader(yaml.SafeLoader):
+          pass
+
+      # The pipeline uses !reference throughout; resolve every unknown tag to None.
+      Loader.add_multi_constructor("!", lambda *_: None)
+
+      ANSIBLE_DIR = Path("ansible")
+      pipeline = yaml.load(Path(".gitlab-ci.yml").read_text(), Loader=Loader)
+
+      VALUE_FLAGS = ("-i", "--inventory", "--inventory-file", "-e", "--extra-vars")
+
+      def invocations(text):
+          """Every `ansible-playbook` call in a job's script -> (inventory, playbook, argv).
+
+          Read the argv rather than a fixed argument ORDER: both
+          `-i <inv> <playbook>` and `-i <inv> -e "..." <playbook>` occur, and a
+          YAML flow scalar can fold two calls onto one line.
+          """
+          found = []
+          for segment in text.split("ansible-playbook")[1:]:
+              # The next shell command is not part of this argv.
+              segment = re.split(r"[;&|\n]", segment, maxsplit=1)[0]
+              try:
+                  tokens = shlex.split(segment)
+              except ValueError:
+                  # An unbalanced quote is the tail of the enclosing `bash -c '...'`.
+                  tokens = segment.replace('"', " ").replace("'", " ").split()
+              inventory = None
+              playbook = None
+              index = 0
+              while index < len(tokens):
+                  token = tokens[index]
+                  if token in VALUE_FLAGS:
+                      if token.startswith("-i") or token.startswith("--inventory"):
+                          inventory = tokens[index + 1] if index + 1 < len(tokens) else None
+                      index += 2
+                      continue
+                  if playbook is None and not token.startswith("-") and token.endswith(".yml"):
+                      playbook = token
+                  index += 1
+              if playbook:
+                  found.append((inventory, playbook, " ".join(tokens)))
+          return found
+
+      TAGS = re.compile(r"--(?:skip-)?tags[= ]+(?P<tags>[A-Za-z0-9_,.-]+)")
+      # `--list-tasks` prints one `TAGS: [a, b]` per selected task. `always` tasks
+      # are printed for ANY selection, so output alone proves nothing — the
+      # requested tag must appear in a task's own tag list.
+      TASK_TAGS = re.compile(r"TAGS: \[([^\]]*)\]")
+
+      failures = []
+      playbooks = set()
+      selections = 0
+
+      for name, job in pipeline.items():
+          if not isinstance(job, dict) or name.startswith("."):
+              continue
+          # extends is a string OR a list; a job naming several parents must not
+          # slip the preflight.
+          parents = job.get("extends") or []
+          if isinstance(parents, str):
+              parents = [parents]
+          if not {".deploy-base", ".maintenance-base"}.intersection(parents):
+              continue
+          script = "\n".join(str(line) for line in job.get("script") or [])
+          parsed = invocations(script)
+          # Refuse to shrink silently: a shape the parser cannot read would cost
+          # coverage with no output at all.
+          written = script.count("ansible-playbook")
+          if len(parsed) < written:
+              failures.append(
+                  f"{name}: parsed {len(parsed)} of {written} `ansible-playbook` "
+                  "invocation(s) - this job is written in a shape the preflight "
+                  "parser does not understand, so its playbook/tag checks were "
+                  "skipped. Fix invocations() rather than the job."
+              )
+          for inventory, playbook, argv in parsed:
+              if not (ANSIBLE_DIR / playbook).is_file():
+                  failures.append(f"{name}: playbook ansible/{playbook} does not exist")
+                  continue
+              playbooks.add(playbook)
+              tags = sorted({
+                  t
+                  for m in TAGS.finditer(argv)
+                  for t in m.group("tags").split(",")
+                  if t
+              })
+              # A job may omit `-i` and take ansible.cfg's default inventory.
+              # Omitting the flag reproduces that; `-i None` is a TypeError.
+              inventory_argv = ["-i", inventory] if inventory else []
+              for tag in tags:
+                  selections += 1
+                  proc = subprocess.run(
+                      ["ansible-playbook", *inventory_argv, playbook,
+                       "--list-tasks", "--tags", tag],
+                      cwd=ANSIBLE_DIR, capture_output=True, text=True,
+                  )
+                  if proc.returncode != 0:
+                      failures.append(
+                          f"{name}: --list-tasks failed for {playbook} --tags {tag}\n"
+                          f"{proc.stderr.strip()}"
+                      )
+                      continue
+                  selected = any(
+                      tag in [t.strip() for t in m.group(1).split(",")]
+                      for m in TASK_TAGS.finditer(proc.stdout)
+                  )
+                  if selected:
+                      print(f"OK   {name}: {playbook} --tags {tag}")
+                  else:
+                      failures.append(
+                          f"{name}: `--tags {tag}` on {playbook} selects NO task - "
+                          "that deploy step is a silent no-op"
+                      )
+
+      if not playbooks:
+          failures.append(
+              "preflight resolved 0 playbooks - candidate-job selection or "
+              "invocation parsing is no longer inspecting the deploy jobs"
+          )
+
+      # The starter deploy jobs run whole playbooks, so 0 tag selections is the
+      # expected state, not a fault - it only means the no-op-tag guard had
+      # nothing to inspect.
+      print(f"\n{len(playbooks)} playbook(s), {selections} tag selection(s) checked")
+      if failures:
+          print("", file=sys.stderr)
+          for f in failures:
+              print(f"FAIL {f}", file=sys.stderr)
+          sys.exit(1)
+      PREFLIGHT
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &deploy_preflight_paths
+        # Everything the answer depends on: the playbooks and tags it walks, the
+        # inventory `--list-tasks` parses, the collection pin it installs, and the
+        # deploy jobs it reads the invocations out of.
+        - "ansible/playbooks/**/*"
+        - "ansible/inventories/prod/**/*"
+        - "ansible/requirements.yml"
+        - "ansible/ansible.cfg"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *deploy_preflight_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
 # ==============================================================================
 # GATE STAGE — the single dependency every deploy job carries.
 #
-# Stage order alone does NOT gate a deploy job that declares `needs:`. GitLab's
-# `optional: true` semantics (https://docs.gitlab.com/ci/yaml/#needsoptional):
-#
-#   - needed job NOT created (rules excluded it): the dependency is DROPPED
-#   - needed job created and succeeds:            dependency satisfied
-#   - needed job created and fails:               the dependent job is BLOCKED
-#
-# A job whose every `needs:` entry was dropped ends up with an EMPTY needs set,
-# and GitLab starts an empty-needs job immediately — before its own stage, and
-# regardless of whether the lint/validate/test stages later fail. That is why
-# each deploy job needs THIS job non-optionally instead of naming lint jobs
-# directly: this one always exists on a main pipeline, so the needs set is never
+# Stage order alone does NOT gate a deploy job that declares `needs:`, and a job
+# whose every needs: entry was DROPPED (the needed job's rules excluded it) has
+# an EMPTY needs set, which GitLab starts immediately — before its own stage.
+# Deploy jobs therefore need THIS job non-optionally rather than naming lint
+# jobs directly: it always exists on a main pipeline, so the needs set is never
 # empty and stage order is never bypassed.
+# https://docs.gitlab.com/ci/yaml/#needsoptional
 #
-# Path-filtered jobs are listed optional (they may not exist in a given
-# pipeline); secret_detection has no path filter and always runs on main, which
-# is what keeps this gate's own needs set non-empty. The drift plans and
-# pr-agent-review are deliberately absent: they are `allow_failure: true`, so
-# they could never block anything.
+# Path-filtered jobs are listed optional; secret_detection has no path filter
+# and always runs on main, which is what keeps this gate's own needs set
+# non-empty. The drift plans and pr-agent-review are `allow_failure: true` and
+# so could never block anything.
 validation-gate:
   stage: gate
   image: alpine:3.23
@@ -657,11 +840,25 @@ validation-gate:
       optional: true
     - job: deploy-coverage
       optional: true
+    - job: deploy-preflight
+      optional: true
     - job: netpol-parity
       optional: true
     # Always created on a main pipeline (no path filter)
     - job: secret_detection
   script:
+    # Every deploy job gates on `$CI_COMMIT_BRANCH == "main" &&
+    # $OP_SERVICE_ACCOUNT_TOKEN`. With the token unset or empty those jobs are
+    # never CREATED, so main goes green having deployed nothing. This gate has no
+    # token clause of its own, so it is the one place that can say so out loud.
+    - |
+      if [ -z "$OP_SERVICE_ACCOUNT_TOKEN" ]; then
+        echo "ERROR: OP_SERVICE_ACCOUNT_TOKEN is unset/empty on a main pipeline." >&2
+        echo "       Every deploy job gates on it and was silently skipped," >&2
+        echo "       deploying nothing while the pipeline reports success." >&2
+        echo "       Set the CI/CD variable (masked, protected) and re-run." >&2
+        exit 1
+      fi
     - echo "All applicable checks passed - deploy jobs may proceed"
   # These rules MUST stay a superset of every deploy job's: a deploy job needing
   # a gate that was not created fails pipeline CREATION. Deploy jobs are
@@ -1062,3 +1259,40 @@ authentik-drift-plan:
     - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
       changes:
         - "terraform/authentik/**/*"
+
+# ==============================================================================
+# VERIFY STAGE — read-only, runs after the deploy stage whatever it did.
+# ==============================================================================
+
+# The postflight play: SSH reachability, disk headroom, service state, on every
+# managed host. It extends .deploy-base for the SSH key and the collection, and
+# changes nothing — a failure here means the deploy left the fleet in a state
+# the assertions reject.
+#
+# `when: always` is relative to the WHOLE pipeline, not just the deploy stage: on
+# a main pipeline that matches the rules below but fails at lint or validate, the
+# deploys are blocked by validation-gate and this job still runs, verifying hosts
+# nothing was deployed to. It is read-only, so that is a second failure surface
+# on an already-red pipeline rather than a risk — no rule can see gate status.
+deploy-verify:
+  stage: verify
+  when: always
+  extends: .deploy-base
+  script:
+    - cd ansible
+    - $SECRET_RUNNER ansible-playbook -i inventories/prod playbooks/postflight.yml
+  environment:
+    name: production/verify
+  # Each deploy job's rules verbatim, so this job appears if and only if at least
+  # one deploy job does and the two trigger sets cannot drift. Rules are
+  # first-match-wins and every block starts with the same schedule guard, so
+  # schedules stay excluded; a manual deploy's rule makes this manual too.
+  rules:
+    - !reference [deploy-ansible-base, rules]
+    - !reference [deploy-ansible-dns, rules]
+    - !reference [deploy-ansible-storage, rules]
+    - !reference [deploy-ansible-mail, rules]
+    - !reference [deploy-ansible-k3s, rules]
+{%- if dns_backend == 'cloudflare' %}
+    - !reference [deploy-terraform, rules]
+{%- endif %}

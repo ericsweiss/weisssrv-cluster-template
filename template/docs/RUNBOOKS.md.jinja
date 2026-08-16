@@ -623,10 +623,6 @@ that always exists so the alert stays inert until this tier actually runs.
 Put the cache directory on an **encrypted** dataset: it holds the repository
 tree — file paths — in plaintext even though the data blobs are client-encrypted.
 
-Until offsite is on, the `OffsiteBackup*` alerts describe a backup that does not
-exist (`OffsiteBackupStale` carries an `absent()` arm and fires immediately) —
-either configure it or gate those rules off deliberately.
-
 Inspect what exists:
 
 ```bash

@@ -1,13 +1,6 @@
-# gitleaks allowlist for weisssrv-cluster-template.
-#
-# Consumed by GitLab's secret_detection job (which uses gitleaks under the hood)
-# through the passthrough in .gitlab/secret-detection-ruleset.toml — GitLab loads
-# the ruleset from that fixed path and the passthrough points it here.
-#
-# docs are scanned normally: the `regexes` content allowlist below covers the
-# placeholder SHAPES this tree uses (1Password op:// references, `[your-…]` and
-# `<angle-bracket>` placeholders, the published supply-chain pins), so a real
-# secret committed under docs/ is still caught.
+# gitleaks allowlist for weisssrv-cluster-template, reached from GitLab's
+# secret_detection job via the passthrough in
+# .gitlab/secret-detection-ruleset.toml.
 #
 # `useDefault = true` is REQUIRED — without it gitleaks loads only the rules
 # defined in this file (which has none), disabling all detection.

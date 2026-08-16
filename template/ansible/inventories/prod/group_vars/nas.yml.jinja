@@ -62,23 +62,11 @@ nas_storage_zfs_pools:
           mountpoint: /mnt/ssd/appdata
           atime: "off"
           compression: lz4     # latency over ratio for live app data
-      # The three zvols in hosts.yml (prometheus/loki/authentik) are created
-      # under here by proxmox_vm's `zfs create -p`, which materializes a parent
-      # FILESYSTEM per app that mounts inside the /export/appdata bind. Once the
-      # k3s VMs exist, add them here so the properties are enforced — a declared
-      # dataset that does not exist yet HARD-FAILS this deploy, so they are
-      # deliberately not listed on a first run:
-      #   - name: ssd/appdata/prometheus
-      #     properties:
-      #       canmount: "off"                # keep it out of the appdata export
-      #       com.sun:auto-snapshot: "false"  # the TSDB has its own retention
-      #   - name: ssd/appdata/loki
-      #     properties:
-      #       canmount: "off"
-      #       com.sun:auto-snapshot: "false"
-      #   - name: ssd/appdata/authentik
-      #     properties:
-      #       canmount: "off"
+      # proxmox_vm's `zfs create -p` materializes a parent FILESYSTEM under here
+      # per app zvol in hosts.yml, and it mounts inside the /export/appdata bind
+      # unless canmount=off. Add those datasets here once the k3s VMs exist — a
+      # declared dataset that does not exist yet HARD-FAILS this deploy, so they
+      # are deliberately absent on a first run.
 
 # Unified media directory across tiers. Leave as an empty list if you have one
 # media pool. inodecalc/noforget are not optional when the branch is re-exported
@@ -138,13 +126,11 @@ nas_storage_exports:
         options: "rw,sync,no_subtree_check,no_root_squash,fsid=13"
 {%- endfor %}
 
-  # REQUIRED by the authentik-pg-dump PV: the landing zone for the nightly
-  # logical dump. The postgres block device is a crash-consistent snapshot only;
-  # this dump is the restorable copy, and being file-walkable it is what an
-  # offsite backup can actually pick up. Scoped to the k3s nodes alone — each
-  # app gets its OWN export under /export/backups-apps/<app> so one app's client
-  # cannot read another's dumps. Add a sibling block per app you deploy, with a
-  # fresh fsid.
+  # REQUIRED by the authentik-pg-dump PV: landing zone for the nightly logical
+  # dump, which is the restorable copy (the postgres block device is only
+  # crash-consistent) and the one an offsite backup can walk. Each app gets its
+  # OWN export under /export/backups-apps/<app> so one app's client cannot read
+  # another's dumps — add a sibling block per app, with a fresh fsid.
   - path: /export/backups-apps/authentik
     bind_source: /mnt/tank/backups/apps/authentik
     bind_source_check: /mnt/tank/backups
@@ -196,43 +182,34 @@ nas_storage_encrypted_bind_sources: []
 # An app's own wrapper can report success while the dump never reached this host
 # (broken mount, wrong path), so this is measured NAS-side. One entry per app
 # with a landing zone above.
+# Each entry is `name` + the `pattern` the collector globs for (the role renders
+# `app.name`/`app.pattern`, so a bare string emits no series at all).
 nas_storage_backup_artifact_apps:
-  - authentik
+  - name: authentik
+    pattern: "authentik-*.sql.gz"
 
 # --- Backups ----------------------------------------------------------------
 # NOTHING BELOW IS ON BY DEFAULT, so a generated cluster has NO backups until
-# you fill these in. The chain is four independent tiers, weakest to strongest:
-#
-#   1. Logical dumps  -> /mnt/tank/backups/apps/<app>  (already wired: the
-#      authentik pg_dump CronJob writes through the export above)
-#   2. vzdump         -> guest images on an NFS target  (proxmox_backup, below)
-#   3. Local ZFS replication -> a detachable `archive` pool (nas_storage_archive_backup_*)
-#   4. Offsite        -> restic to an object store, client-side encrypted
-#
-# Tier 4 hard-requires tier 3: restic walks the archsync-* snapshots that
-# archive-backupctl takes, and ABORTS if the newest is older than
-# restic_offsite_freshness_max_age_h. Enable them in order, and only after you
-# have tested a RESTORE — not just a backup.
+# you fill these in. Four tiers, weakest to strongest: logical dumps (wired
+# already) -> vzdump -> local ZFS replication to a detachable `archive` pool ->
+# offsite restic. Tier 4 hard-requires tier 3 — restic walks the archsync-*
+# snapshots and ABORTS on a stale one. Enable in order, and only after testing a
+# RESTORE, not just a backup.
 
 # Cluster-wide vzdump target and jobs. storage.cfg is clustered, so this runs
-# from the NAS only; empty leaves both unmanaged. Filling them in needs an NFS
-# target that already exists and is exported to the hosts — the worked pair,
-# including the per-node bandwidth cap an `all` job needs, is in
-# docs/RUNBOOKS.md "Backups and restore".
+# from the NAS only; empty leaves both unmanaged, and the NFS target must
+# already exist. Keys in docs/RUNBOOKS.md "Backups and restore".
 proxmox_backup_storage: []
 proxmox_backup_vzdump_jobs: []
 
 # Nightly ZFS replication to a detachable archive pool. OFF by default: the
-# control script rewrites the destination pool's root properties (including
-# mountpoint=none) and destroys its own snapshots there, so it must never run
-# against a pool this site did not nominate. The role asserts the pool exists
-# and is listed in nas_storage_zfs_pools above; the keys to set are in
-# docs/RUNBOOKS.md "Backups and restore".
+# control script rewrites the destination pool's root properties and destroys
+# its own snapshots there, so it must never run against a pool this site did not
+# nominate. Keys in docs/RUNBOOKS.md "Backups and restore".
 nas_storage_archive_backup_enabled: false
 
 # Offsite backup (restic over rclone). Off until the archive tier above runs and
-# you have tested a RESTORE, not just a backup. The role asserts every required
-# key, so a half-configured enable fails the deploy; the full set, and the
-# cluster_offsite_backup_probe_metric flip that must land in the same change,
-# are in docs/RUNBOOKS.md "Backups and restore".
+# you have tested a RESTORE. A half-configured enable fails the deploy; the full
+# key set, and the cluster_offsite_backup_probe_metric flip that must land in
+# the same change, are in docs/RUNBOOKS.md "Backups and restore".
 restic_offsite_enabled: false

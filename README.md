@@ -251,7 +251,7 @@ change — read the target release's notes before updating across a MAJOR.
 ```bash
 python3 -m pytest tests -q       # copier.yml schema + render invariants
 copier copy --data-file tests/answers-weisssrv-shaped.yml --defaults . /tmp/render-smoke
-yamllint -c .yamllint .
+yamllint -c .yamllint copier.yml tests/ .gitlab-ci.yml   # CI's target list; template/ is covered by the rendered-tree lint
 ```
 
 Conventions:
@@ -260,6 +260,10 @@ Conventions:
   `.jinja` suffix. Paths may contain answers (`clusters/{{ cluster_name }}/`).
 - `trim_blocks` and `lstrip_blocks` are **off** — use explicit `{%- -%}`
   whitespace control.
+- A derivation two template files must agree on lives in `partials/`, imported
+  as `{% import "partials/<name>.jinja" as x with context %}`. That directory is
+  outside `template/`, so it is never copied into a generated cluster — only its
+  results are. `partials/ci-sizing.jinja` is the worked example.
 - Kubernetes manifests must not interpolate answers. Site values reach them
   through the `cluster-config` ConfigMap and Flux `postBuild.substituteFrom`;
   copier fills the ConfigMap and the genuinely structural spots only. This is

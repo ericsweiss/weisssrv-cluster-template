@@ -1,6 +1,10 @@
+{#- Same model as release.yaml.jinja, imported from the one file that holds it. -#}
+{%- import "partials/ci-sizing.jinja" as sizing with context -%}
 ---
 # Aggregate bounds for the privileged-runner namespace, sized to admit
-# `concurrent` (release.yaml) plus a churn buffer.
+# `concurrent` (release.yaml) plus a churn buffer. Every number below is derived
+# from the same `concurrent` the release computes, so the two cannot drift apart
+# when the roster changes.
 #
 # requests.* are the scheduler's reservation and should match REAL per-job usage
 # (~1.5 cpu, ~1Gi), so the scheduler — not this quota — caps effective
@@ -21,10 +25,12 @@ metadata:
   namespace: gitlab-runner-privileged
 spec:
   hard:
-    requests.cpu: "24"
-    requests.memory: 22Gi
-    limits.memory: 64Gi
-    pods: "22"
+    # concurrent x ~1.5 cpu, doubled for the Terminating pods that still count,
+    # plus the manager.
+    requests.cpu: "{{ sizing.privileged_quota_cpu }}"
+    requests.memory: {{ sizing.privileged_quota_mem_gib }}Gi
+    limits.memory: {{ sizing.privileged_quota_limit_mem_gib }}Gi
+    pods: "{{ sizing.privileged_quota_pods }}"
 ---
 # Defaults so a pod created without explicit resources still counts against the
 # quota. Memory only — never a default CPU limit (see above).

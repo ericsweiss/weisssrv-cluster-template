@@ -24,12 +24,23 @@ above is what makes that acceptable. In a team environment, set `protected: true
 
 ## Sizing
 
-`concurrent` must stay at or below what the ResourceQuota admits. A job pod sums
-to ~5Gi of memory limits, and the manager counts too — so a 40Gi limit admits
-about 7. Set it higher and the runner submits pods the quota rejects with a 403,
-which GitLab surfaces as a spurious job failure with no retry. At the right
-value, excess jobs wait in GitLab's queue instead. **Move `concurrent` and the
-quota together.**
+The governor here is memory, not CPU: a job pod is cheap on CPU (build 500m +
+helper 100m) and sums to ~5Gi of declared memory limits, and the manager counts
+too. `concurrent` must stay at or below what the ResourceQuota admits — set it
+higher and the runner submits pods the quota rejects with a 403, which GitLab
+surfaces as a spurious job failure with no retry. At the right value, excess
+jobs wait in GitLab's queue instead.
+
+Both numbers are **derived at generation time** from the roster: one 4-core /
+8Gi k3s agent per Proxmox host, and unlike the privileged tier this one is not
+excluded from the NAS agent, so the pool is every agent. `concurrent` is sized
+so a full burst of declared job limits stays at three quarters of that pool's
+memory, leaving the rest for the resident workloads sharing those agents, and
+the quota is computed from the same figure. What ships here are the resulting
+**literals**: nothing recomputes them after generation, so growing the agents
+means raising `concurrent` in `release.yaml` and every dimension of
+`resourcequota.yaml` — **together**, since a quota that admits fewer pods than
+the runner submits 403s the job rather than throttling it.
 
 ## Configure
 

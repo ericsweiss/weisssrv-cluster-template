@@ -2,6 +2,10 @@
 # Earliest-reconciling stage: HelmRepository sources plus the two ConfigMaps
 # every later stage substitutes from. They live here because they MUST exist
 # before controllers/ renders HelmReleases carrying ${...} placeholders.
+#
+# priorityclasses.yaml is here for the same ordering reason: the Priority
+# admission plugin rejects a pod naming a class that does not exist, and the
+# controllers stage schedules pods that name `platform`.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -29,5 +33,6 @@ resources:
 {%- if gpu == 'nvidia' %}
   - nvidia.yaml
 {%- endif %}
+  - priorityclasses.yaml
   - versions-configmap.yaml
   - cluster-config.yaml

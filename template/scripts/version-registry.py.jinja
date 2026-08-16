@@ -120,7 +120,15 @@ CONFIG = {
             "https://charts.external-secrets.io",
             "external-secrets",
         ),
-        _chart("MetalLB", "metallb", "https://metallb.github.io/metallb", "metallb"),
+        _chart(
+            "MetalLB", "metallb", "https://metallb.github.io/metallb", "metallb",
+            held=True,
+            notes=(
+                "0.16.x intentionally held back: open apiserver-flooding "
+                "regression (metallb#3063); re-evaluate when the fix ships in "
+                "a release."
+            ),
+        ),
         _chart("Traefik", "traefik", "https://traefik.github.io/charts", "traefik"),
         _chart(
             "kube-prometheus-stack",
@@ -135,7 +143,16 @@ CONFIG = {
             "https://prometheus-community.github.io/helm-charts",
             "prometheus-operator-crds",
         ),
-        _chart("Loki", "loki", "https://grafana.github.io/helm-charts", "loki"),
+        # The OSS Loki chart lives in grafana-community, not grafana — the two
+        # diverged at 6.55.0 and the repo here must match the HelmRelease's
+        # sourceRef or the checker resolves a chart line the cluster never pulls.
+        _chart(
+            "Loki",
+            "loki",
+            "https://grafana-community.github.io/helm-charts",
+            "loki",
+            source_url="https://artifacthub.io/packages/helm/grafana-community/loki",
+        ),
         _chart("Alloy", "alloy", "https://grafana.github.io/helm-charts", "alloy"),
         _chart(
             "Blackbox Exporter",
@@ -208,6 +225,20 @@ CONFIG = {
 {%- endif %}
 {%- if vpn_tailscale %}
         # --- Overlay VPN ----------------------------------------------------
+        {
+            "name": "Tailscale (host)",
+            "var_name": "tailscale_version",
+            # The apt repo, not GitHub releases: the hosts install via
+            # `apt install tailscale=<pin>` and the apt publish lags the GitHub
+            # tag by days, so tracking GitHub advertises versions apt cannot
+            # satisfy yet. The index is trixie/amd64 — extend it to a list if the
+            # fleet ever carries another suite or architecture.
+            "category": "apt_repo",
+            "apt_index_url": "https://pkgs.tailscale.com/stable/debian/dists/trixie/main/binary-amd64/Packages.gz",
+            "apt_package": "tailscale",
+            "source_url": "https://pkgs.tailscale.com/stable/debian/dists/trixie/main/binary-amd64/Packages.gz",
+            "deploy_command": "task maintenance:update-applications",
+        },
         _chart(
             "Tailscale Operator",
             "tailscale_operator",

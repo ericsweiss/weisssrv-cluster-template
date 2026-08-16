@@ -42,6 +42,9 @@ spec:
       # the pod with no writable /tmp.
       readOnlyRootFileSystem: true
       deployment:
+        # `platform` (sources/priorityclasses.yaml) — the chart nests the key
+        # under reloader.deployment.
+        priorityClassName: platform
         replicas: 1
         containerSecurityContext:
           allowPrivilegeEscalation: false

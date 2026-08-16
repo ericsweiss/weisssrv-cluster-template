@@ -1,32 +1,18 @@
 #!/usr/bin/env python3
 """Assert the backup-artifact app list and its alert arms stay paired.
 
-The COLLECTOR's app list is site data (`nas_storage_backup_artifact_apps` in the
-NAS host_vars; the nas_storage role defaults it to `[]`); the matching
-`absent(backup_artifact_last_mtime_seconds{app="..."})` arms are hand-enumerated
-in the BackupArtifactStale rule. The two live in different lifecycles (Ansible
-deploy vs Flux reconcile) and nothing else ties them together:
+The collector's app list is site data (`nas_storage_backup_artifact_apps`); the
+matching `absent(backup_artifact_last_mtime_seconds{app="..."})` arms are
+hand-enumerated in the BackupArtifactStale rule. They live in different
+lifecycles (Ansible deploy vs Flux reconcile) and both directions fail silently:
+an app with no absent() arm emits NO series when its landing dir is never
+created, so the freshness arm has nothing to fire on; an arm left behind fires
+forever. `companions:` and BackupArtifactCompanionMissing are the same pairing —
+a companion rule with no declaring app reads as active DR coverage that can
+never fire.
 
-  - adding an app with no absent() arm means a landing dir that is never created
-    emits NO series at all, so the freshness arm has nothing to fire on — the
-    exact "no dump ever arrived" hole the enumerated arms exist to close;
-  - removing an app but leaving its arm behind leaves BackupArtifactStale
-    firing forever on a series that will never come back.
-
-Both directions are silent today. This check makes them a lint failure.
-
-The same split owns `companions:` — the files an artefact cannot be restored
-WITHOUT, which live outside its `pattern:` and are alerted on by
-BackupArtifactCompanionMissing. That rule keys on
-`backup_artifact_companion_{present,size_bytes}`, and the collector emits those
-only inside `{% for companion in app.companions | default([]) %}`. A rule
-shipped while no app declares a companion has zero series to match: it reads as
-active DR coverage and can never fire. Both directions of that pairing are
-checked too.
-
-Both file paths are site data and come from flags.
-
-Exit 0 when the two sets match, 1 otherwise.
+Both file paths are site data and come from flags. Exit 0 when the sets match,
+1 otherwise.
 
   check-backup-artifact-apps.py --host-vars FILE --rules FILE
 """

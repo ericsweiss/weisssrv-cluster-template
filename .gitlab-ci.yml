@@ -14,10 +14,35 @@ stages:
   - ai-review
   - release
 
+# Settings every job inherits unless it says otherwise. No image or tags here —
+# each job and every library include already names its own, and this repository's
+# jobs are deliberately tag-less so they land on the shared runner.
+default:
+  # Cancel a superseded pipeline's jobs on a new commit; see the workflow policy
+  # below. The library's `release` job overrides this to false itself.
+  interruptible: true
+
 workflow:
+  # AUTHORITATIVE description of this pipeline's cancellation policy; jobs that
+  # override `interruptible` point here rather than restating it.
+  #
+  # MR refs: `on_new_commit: interruptible` — a new push cancels the previous
+  # pipeline's interruptible jobs instead of letting render-validate, the
+  # heaviest job here, pile up on the shared runner it is already quota-refused
+  # on. GitLab's project default is "conservative", which stops cancelling as
+  # soon as any non-interruptible job has started, so it leaves them running.
+  #
+  # main: `on_new_commit: none` (the rule below) — a merged pipeline always runs
+  # to completion, because `release` cuts the tag every generated cluster's
+  # `copier update` resolves to and a cancelled one leaves that tag uncut with a
+  # green pipeline behind it.
+  auto_cancel:
+    on_new_commit: interruptible
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
+      auto_cancel:
+        on_new_commit: none
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 variables:
@@ -27,7 +52,7 @@ variables:
   # a literal and scripts/check-lib-pins.py (vendored from the library) fails the
   # pipeline if they drift from it or pin a branch. Bump here, then
   # `scripts/check-lib-pins.py --fix`.
-  WEISSSRV_LIB_REF: "v0.7.4"
+  WEISSSRV_LIB_REF: "v0.8.0"
   COPIER_VERSION: "9.17.0"
   PYYAML_VERSION: "6.0.2"
   YAMLLINT_VERSION: "1.38.0"
@@ -46,7 +71,7 @@ include:
   # Jinja sources, not documents. The render-validate job below yamllints the
   # rendered tree, which is where template/ actually gets covered.
   - project: eric/weisssrv-lib
-    ref: v0.7.4
+    ref: v0.8.0
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: []
@@ -60,7 +85,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.7.4
+    ref: v0.8.0
     file: /ci/lint/python-lint.yml
     inputs:
       tags: []
@@ -68,7 +93,7 @@ include:
       # The Python under template/ is static (no .jinja suffix), so it is linted
       # here as well as in every repository it ships to. `scripts` is this
       # repository's OWN tooling (the vendored release script), not payload.
-      targets: "scripts tests template/tests template/scripts"
+      targets: "scripts tests template/tests template/scripts template/kubernetes"
       changes:
         - "scripts/**/*.py"
         - "tests/**/*.py"
@@ -79,7 +104,7 @@ include:
   # The shell the template ships is static (no .jinja suffix), so it can be
   # checked in place rather than only after a render.
   - project: eric/weisssrv-lib
-    ref: v0.7.4
+    ref: v0.8.0
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: []
@@ -92,7 +117,7 @@ include:
   # copier.yml schema checks + the full render invariants. Everything in the
   # repository feeds the render, hence the catch-all `changes`.
   - project: eric/weisssrv-lib
-    ref: v0.7.4
+    ref: v0.8.0
     file: /ci/test/python-tests.yml
     inputs:
       tags: []
@@ -106,7 +131,7 @@ include:
   # Self-application: the template ships this gate into every generated cluster,
   # and its own docs carry the same relative cross-links.
   - project: eric/weisssrv-lib
-    ref: v0.7.4
+    ref: v0.8.0
     file: /ci/lint/docs-link-check.yml
     inputs:
       tags: []
@@ -116,13 +141,12 @@ include:
         - "scripts/check-doc-links.py"
         - ".gitlab-ci.yml"
 
-  # Pin drift in the SHIPPED defaults. The checker runs inside a render of this
-  # template — `template/…/all.yml.jinja` is Jinja, not a vars file, and the
-  # registry it reads is rendered from the same answers — so what the job reports
-  # is exactly what a freshly generated cluster would be pinned to. Soft-fail
-  # everywhere: rc 1 is "updates available".
+  # Pin drift in the SHIPPED defaults. The checker runs inside a RENDER of this
+  # template (all.yml.jinja is Jinja, not a vars file), so it reports what a
+  # freshly generated cluster would be pinned to. Soft-fail: rc 1 is "updates
+  # available".
   - project: eric/weisssrv-lib
-    ref: v0.7.4
+    ref: v0.8.0
     file: /ci/maintenance/version-check.yml
     inputs:
       tags: []
@@ -142,23 +166,19 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.7.4
+    ref: v0.8.0
     file: /ci/security/secret-detection.yml
     inputs:
       tags: []
 
   - project: eric/weisssrv-lib
-    ref: v0.7.4
+    ref: v0.8.0
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []
-      # Stated rather than inherited even though all three equal the library
-      # defaults: they are interlocked. `timeout` must outlast
-      # ai_timeout x len(commands) — 2 x 1200s = 40m — plus image pull and
-      # clone, and ai_timeout is per CALL. Inheriting would hide that, so a
-      # later change to one default could silently invalidate another; written
-      # out, the sum has to be redone deliberately. `high` rather than `xhigh`
-      # because xhigh has run past this job's timeout on diffs this size.
+      # Interlocked, so stated rather than inherited: `timeout` must outlast
+      # ai_timeout (per CALL) x len(commands), plus image pull and clone.
+      # reasoning_effort `high` — xhigh overruns this timeout.
       reasoning_effort: "high"
       ai_timeout: "1200"
       timeout: "45m"
@@ -176,7 +196,7 @@ include:
   # tag on every job here. Policy and the major_on_zero decision:
   # docs/VERSIONING.md.
   - project: eric/weisssrv-lib
-    ref: v0.7.4
+    ref: v0.8.0
     file: /ci/release/semantic-release.yml
     inputs:
       tags: []
@@ -248,14 +268,8 @@ render-validate:
         "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" \
         "$LIB_CHECKOUT"
   script:
-    # BOTH fixtures. answers-weisssrv-shaped.yml has the reference cluster's
-    # shape, which makes it blind to a value hardcoded FROM that cluster — it
-    # renders byte-identical to a correct substitution. answers-unlike.yml is
-    # the contrast render: different LAN, domains, names, vault and runner tag,
-    # both optional modules OFF, 4 compute hosts plus the NAS node, one resolver.
-    # Validating only
-    # the shaped one leaves every `{% if not %}` branch and every site-identity
-    # leak checked by nothing that runs the real toolchain.
+    # BOTH fixtures — see tests/answers-unlike.yml for why the contrast render
+    # is not optional.
     - python3 tests/validate_render.py --lib-path "$LIB_CHECKOUT"
     - |
       python3 tests/validate_render.py \

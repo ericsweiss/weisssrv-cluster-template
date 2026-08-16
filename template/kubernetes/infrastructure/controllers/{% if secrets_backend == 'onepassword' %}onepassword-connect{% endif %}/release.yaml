@@ -36,6 +36,9 @@ spec:
       # Secret instead of expecting the credentials inline.
       credentials_base64: ""
       serviceType: ClusterIP
+      # `platform` (sources/priorityclasses.yaml). Only the connect key is set:
+      # operator.create is false below, so the operator pod never renders.
+      priorityClassName: platform
       replicas: 2
       # Chart-native HPA on CPU only; the Connect VPA is memory-only so the two
       # never drive the same resource. replicas stays equal to minReplicas so

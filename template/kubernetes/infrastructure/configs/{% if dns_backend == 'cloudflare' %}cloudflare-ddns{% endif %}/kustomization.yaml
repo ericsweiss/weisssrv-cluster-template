@@ -12,3 +12,10 @@ components:
   # Public only — the RFC1918 except-list is what makes this safe to run with a
   # write-capable DNS token.
   - ../../../components/netpol-egress-public
+
+# The CronJob's program. It lives beside this kustomization because kustomize
+# refuses generator sources outside the kustomization root.
+configMapGenerator:
+  - name: cloudflare-ddns-script
+    files:
+      - cloudflare-ddns.py

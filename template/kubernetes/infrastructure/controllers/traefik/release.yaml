@@ -32,6 +32,9 @@ spec:
       retries: 3
       remediateLastFailure: true
   values:
+    # `platform` (sources/priorityclasses.yaml) — the ingress path must outrank
+    # apps and CI job pods when the cluster is full.
+    priorityClassName: platform
     podDisruptionBudget:
       enabled: true
       minAvailable: 1
@@ -74,8 +77,8 @@ spec:
     # which the ipAllowList middlewares depend on; MetalLB L2 is endpoint-aware,
     # so it only announces from a node with a Ready Traefik pod.
     # allocateLoadBalancerNodePorts: false — L2 announces the VIP directly and
-    # never uses NodePorts (a Service created before this flag was set keeps its
-    # stale nodePorts until they are removed by hand once).
+    # never uses NodePorts. healthCheckNodePort stays; externalTrafficPolicy:
+    # Local requires it.
     service:
       type: LoadBalancer
       annotations:

@@ -1,0 +1,56 @@
+---
+# CoreDNS ingress — the one allow a kube-system default-deny can break
+# cluster-wide, so every clause is deliberate.
+#
+# podSelector: k3s labels its CoreDNS pods `k8s-app: kube-dns` and nothing else
+# besides the ReplicaSet hash. It is the same selector the kube-dns Service and
+# kube-prometheus-stack's coredns Service carry, so all three agree.
+#
+# A DNS query reaches those pods three ways, hence three peer shapes on one rule:
+#   * namespaceSelector {} — ordinary pods, in every namespace, present and
+#     future. This is the path essentially all cluster traffic takes.
+#   * the pod CIDR — a query aimed at the kube-dns ClusterIP from outside the pod
+#     network is DNAT'd AND masqueraded by kube-proxy/flannel before it reaches
+#     the pod, so its source can arrive as the sending node's flannel gateway
+#     address rather than as a pod IP. Strictly a superset of what the
+#     namespaceSelector above already admits, so it widens nothing.
+#   * the LAN — defence in depth for host-netns clients. The hostNetwork
+#     DaemonSets do not need it (kubelet demotes ClusterFirst to Default under
+#     hostNetwork, so they resolve via the node's /etc/resolv.conf), and it
+#     widens nothing because neither pod IPs nor the ClusterIP are LAN-routable.
+#     Confirm no host-side unit queries the cluster DNS ClusterIP before
+#     narrowing it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-coredns-ingress
+spec:
+  podSelector:
+    matchLabels:
+      k8s-app: kube-dns
+  policyTypes:
+    - Ingress
+  ingress:
+    # Cluster DNS (container ports `dns` 53/UDP and `dns-tcp` 53/TCP).
+    - from:
+        - namespaceSelector: {}
+        - ipBlock:
+            cidr: ${cluster_pod_cidr}
+        - ipBlock:
+            cidr: ${cluster_lan_cidr}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Prometheus scrape of the `metrics` container port, via the
+    # kube-prometheus-stack-coredns Service + ServiceMonitor the chart renders
+    # into this namespace. Chart-rendered monitors never appear in the
+    # flux:lint corpus, so check-scrape-netpol.py cannot see this one.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 9153

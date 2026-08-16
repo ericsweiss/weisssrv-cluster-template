@@ -29,6 +29,10 @@ spec:
       retries: 3
       remediateLastFailure: true
   values:
+    # `platform` (sources/priorityclasses.yaml). The chart's top-level key
+    # covers all three controllers (recommender, updater, admissionController);
+    # the certgen Jobs are one-off and stay unclassed.
+    priorityClassName: platform
     recommender:
       enabled: true
       # Defaults (25m / 250Mi) floor every recommendation above what small

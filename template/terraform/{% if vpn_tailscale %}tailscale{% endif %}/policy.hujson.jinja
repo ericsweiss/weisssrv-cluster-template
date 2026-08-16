@@ -19,20 +19,12 @@
     "group:admins": ["{{ admin_email }}"],
   },
 
-  // Tags let a device authenticate as a role instead of as a person. Each is
-  // advertised elsewhere in this repo and must stay in sync with it:
-  //
-  //   tag:subnet-router  ansible/inventories/prod/group_vars/proxmox.yml
-  //                      (tailscale_advertise_tags) — the Proxmox hosts that
-  //                      advertise the LAN.
-  //   tag:k8s-operator   the Tailscale Kubernetes operator's own device. `[]`
-  //                      means "owned by tailnet admins", which is what lets an
-  //                      admin mint the operator's OAuth client bearing it.
-  //   tag:k8s            every proxy device the operator registers
-  //                      (kubernetes/infrastructure/controllers/tailscale-operator,
-  //                      proxyConfig.defaultTags). Must be ownable by
-  //                      tag:k8s-operator or registration fails.
-  //
+  // Tags let a device authenticate as a role instead of as a person, and each
+  // is advertised elsewhere in this repo — tag:subnet-router in
+  // group_vars/proxmox.yml (tailscale_advertise_tags), tag:k8s-operator and
+  // tag:k8s in controllers/tailscale-operator. tag:k8s must be ownable by
+  // tag:k8s-operator or registration fails; tag:k8s-operator's EMPTY owner list
+  // means "tailnet admins", which is what lets an admin mint its OAuth client.
   // `autogroup:admin` owns the host tag rather than group:admins so tag
   // ownership keeps working while group:admins is being corrected.
   "tagOwners": {
@@ -59,25 +51,11 @@
     // to the advertising host's LAN address, so it arrives at the Proxmox
     // firewall as an on-LAN source.
     //
-    // Each port is a service this template deploys:
-    //   22    SSH — hosts, LXC guests and k3s VMs
-    //   53    DNS (tcp+udp) — the AdGuard/unbound resolvers
-    //   80    HTTP ingress (Traefik; redirects to 443)
-    //   111   rpcbind — the debugging companion to 2049
-    //   443   HTTPS — every Traefik-fronted app
-    //   853   DNS-over-TLS (tcp+udp)
-    //   2049  NFS, for debugging the exports from a tailnet client
-    //   3000  the AdGuard Home admin UI/API
-    //   6443  kube-apiserver — the VIP and the server nodes
-    //   8006  Proxmox VE web UI, on the host LAN address
-    //
-    // Add a port ONLY for something that must be reached directly rather than
-    // through Traefik: 445 (SMB, once nas_storage_samba_shares is populated),
-    // 3389 (RDP), an alternate git SSH port, a media direct-play port.
-    //
-    // Deliberately absent: k3s-internal ports (etcd, kubelet, the CNI
-    // transport, memberlist), exporter metrics ports and the cluster/corosync
-    // ports — node-to-node traffic, scoped by the host firewall's IP sets.
+    // Each port is a service this template deploys. Add one ONLY for something
+    // that must be reached directly rather than through Traefik — SMB, RDP, an
+    // alternate git SSH port. Deliberately absent: the k3s-internal, corosync
+    // and exporter ports, which are node-to-node traffic scoped by the host
+    // firewall's IP sets.
     {
       "action": "accept",
       "src":    ["group:admins"],

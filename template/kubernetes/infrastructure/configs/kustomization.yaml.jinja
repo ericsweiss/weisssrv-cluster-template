@@ -1,10 +1,18 @@
 ---
 # Reconciles AFTER controllers/: every resource here is a CR whose CRD (and,
 # for cert-manager, whose webhook) the controllers stage installs.
+#
+# Three entries are built-in kinds needing no CRD — the NetworkPolicy sets
+# (default-namespace.yaml, builtin-namespace-policies.yaml,
+# kube-system-policies/), which fence the built-in namespaces this repo does not
+# otherwise own. They sit here rather than earlier because nothing renders or
+# schedules against them.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - default-namespace.yaml
+  - builtin-namespace-policies.yaml
+  - kube-system-policies
   - cluster-issuer.yaml
   - metallb-ip-pools.yaml
   - traefik-tls-options.yaml

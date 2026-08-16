@@ -17,5 +17,5 @@ spec:
     containerPolicies:
       - containerName: coredns
         minAllowed: {cpu: 25m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 128Mi}
+        maxAllowed: {cpu: 200m, memory: 102Mi}
         controlledResources: [cpu, memory]

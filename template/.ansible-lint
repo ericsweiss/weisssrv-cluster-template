@@ -17,15 +17,10 @@ exclude_paths:
   - venv/
   # `task lib:sync` checkout — the library lints itself upstream.
   - .weisssrv-lib/
-  # Where ansible-galaxy installs weisssrv.infra (and where ansible-lint
-  # auto-installs it when `offline: false` and it is missing). Without this,
-  # `task lint` run before `task ansible:install-collections` reports the
-  # LIBRARY's line lengths as failures in a repository that does not own them.
-  # .ansible-home/ is the CI job's ANSIBLE_HOME (weisssrv-lib
-  # /ci/lint/ansible-lint.yml sets ANSIBLE_HOME=$CI_PROJECT_DIR/.ansible-home
-  # and installs the collection into its collections/ subtree), so it lands
-  # INSIDE the project directory ansible-lint walks; the other two cover a
-  # local install at the repository root or under ansible/.
+  # Where ansible-galaxy installs weisssrv.infra. Without these, ansible-lint
+  # reports the LIBRARY's findings against a repository that does not own them.
+  # .ansible-home/ is the CI job's ANSIBLE_HOME, inside the project directory
+  # ansible-lint walks; the other two cover a local install.
   - .ansible-home/
   - ansible_collections/
   - ansible/ansible_collections/

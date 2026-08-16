@@ -1,13 +1,7 @@
 # gitleaks allowlist for the {{ cluster_name }} cluster repository.
 #
-# Consumed by GitLab's secret_detection job (which uses gitleaks under the hood)
-# through the passthrough in .gitlab/secret-detection-ruleset.toml — GitLab loads
-# the ruleset from that fixed path and the passthrough points it here.
-#
-# docs are scanned normally: the `regexes` content allowlist below covers the
-# placeholder SHAPES this tree uses (1Password op:// references, `[your-…]` and
-# `<angle-bracket>` placeholders, the published supply-chain pins), so a real
-# secret committed under docs/ is still caught.
+# Reached from GitLab's secret_detection job via the passthrough in
+# .gitlab/secret-detection-ruleset.toml, which GitLab loads from that fixed path.
 #
 # `useDefault = true` is REQUIRED — without it gitleaks loads only the rules
 # defined in this file (which has none), disabling all detection.
@@ -24,8 +18,7 @@ regexes = [
   '''op://[A-Za-z0-9_ /-]+''',
   # Documentation placeholders like [your-cloudflare-api-token].
   '''\[your-[a-z0-9-]+\]''',
-  # Documentation placeholders written as <angle-bracket> tokens, e.g. the
-  # `curl -u admin:<password>` example in the observability README. A literal
+  # Documentation placeholders written as <angle-bracket> tokens — a literal
   # <…> is never real credential material.
   '''<[a-z][a-z0-9_-]*>''',
   # Test/fixture tokens — anchored at start of token so a real secret prefixed

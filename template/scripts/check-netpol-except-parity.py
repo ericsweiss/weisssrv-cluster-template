@@ -1,66 +1,17 @@
 #!/usr/bin/env python3
-"""Assert every public-egress NetworkPolicy uses a canonical reserved-CIDR except-list.
+"""Assert no fenced pod has unrestricted egress.
 
-Public egress in this repo is written as `ipBlock: {cidr: 0.0.0.0/0, except: [...]}`.
-The except-list is what stops a compromised pod from reaching the LAN, and it is
-repeated in every policy that needs it — kustomize has no mechanism to share a
-list fragment, and Flux postBuild substitution would need the value in the
-generated cluster-versions ConfigMap. So the lists are compared instead: each one
-must match a named canonical list exactly, in order.
+Three shapes, because each escapes the others: every egress `ipBlock` /0 peer
+must carry a named canonical except-list exactly and in order (an absent or
+emptied `except:` is the edit that most directly re-opens the LAN); no egress
+rule may reach a whole fenced range (`0.0.0.0/1` + `128.0.0.0/1`, or a lone
+`192.168.0.0/16`, never touch a /0); and a peer-less rule — which allows every
+destination — must be declared in `unrestricted_egress_ok`. Ingress is exempt.
 
-Adding a CIDR to a canonical list here and to the policies is a deliberate,
-reviewable act; a hand-edited or half-updated copy fails this check.
-
-Comparing only the lists that are STILL THERE would miss the single edit that
-most directly re-opens the LAN: dropping the `except:` key altogether. So an
-egress peer whose ipBlock is a /0 must carry a canonical except-list — an absent
-or empty one is a violation, not a skip. Ingress is exempt: an unfenced
-`0.0.0.0/0` ingress peer is a deliberate shape here (wg-easy's WAN endpoint).
-
-That is still only the "the except-list drifted" edit. The invariant that
-actually matters is "no fenced pod has unrestricted egress", and there are two
-ways to reach it without touching an except-list at all — both of which this
-check used to pass silently, because it only ever looked at ipBlock peers that
-existed:
-
-  1. delete the whole `to:` (`- {}`, or a rule carrying only `ports:`). A NetworkPolicy
-     egress rule with no peers allows egress to EVERY destination, so this is
-     strictly more open than a /0 ipBlock with an except-list — and it leaves no
-     ipBlock for a peer-shaped check to find;
-  2. reach a fenced range through blocks that individually look specific:
-     `0.0.0.0/1` + `128.0.0.0/1` is `0.0.0.0/0` written so that
-     `endswith("/0")` is false for both halves, and a lone `192.168.0.0/16`
-     peer hands a pod the entire LAN while never going near a /0 at all.
-
-So the check is peer-shaped AND rule-shaped. Per egress rule it also computes
-the address space the rule's ipBlocks actually reach (each cidr minus its OWN
-excepts) and fails when a whole fenced range still fits inside it. The test is
-containment, not total coverage — a rule need not reach everything to hand a pod
-the LAN. Rules that legitimately allow a LAN /32 are untouched: a /32 contains no
-fence range, so the coverage arm has nothing to report on them.
-
-Unrestricted egress that IS intended (privileged CI job pods, Flux's own
-upstream-shipped policy) is allowlisted BY NAME, with the reason — an exemption a
-reviewer can see beats a check that cannot see the shape at all. That allowlist
-is site data, so it comes from `--config` (see examples/netpol-except.example.yaml):
-
-    canonical_except_lists:      # optional; replaces the built-in sets
-      lan-fence: [10.0.0.0/8, ...]
-    fence_networks: [...]        # optional; the ranges no rule may reach in full
-    unrestricted_egress_ok:      # "<namespace>/<name>": reason
-      ci/job-egress: "job pods deploy the cluster itself"
-
-With no --config the built-in canonical sets apply and the allowlist is EMPTY, so
-a peer-less egress rule fails until it is declared.
-
-The gate refuses to be vacuous: a run that inspects ZERO NetworkPolicy documents,
-or is pointed at a path that does not exist, is an operator error (exit 2), not a
-pass — a renamed manifest subtree must not silently retire the LAN fence. A
-`--config` that is missing, unparseable, or malformed (a bad CIDR in
-`fence_networks`, a reasonless exemption) is the same class: exit 2, never exit 1
-and never a traceback, so "my config is broken" is never read as "the fence
-drifted". A scanned manifest that does not parse is the same class again — it
-says nothing about any except-list.
+Site data (canonical lists, fence networks, the exemption allowlist) comes from
+`--config`; see examples/netpol-except.example.yaml. Exit 0 clean, 1 on a
+violation, 2 on an operator error including a run that scanned zero policies.
+Contract: docs/SCRIPTS.md.
 
 Usage: check-netpol-except-parity.py [--config FILE] [path ...]  (default: kubernetes/)
 """

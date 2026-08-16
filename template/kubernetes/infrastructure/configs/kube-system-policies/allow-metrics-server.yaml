@@ -1,0 +1,33 @@
+---
+# metrics-server's aggregated API (metrics.k8s.io), served on :10250 — the k3s
+# AddOn's `--secure-port`. This cluster runs the k3s-bundled copy (k3s_disable
+# omits metrics-server), which labels its pods `k8s-app: metrics-server`.
+#
+# The peer is deliberately unrestricted, matching the other apiserver-path
+# policies in this repo (cert-manager, vpa-system, metallb-system): the
+# aggregation-layer call is DNAT'd — and masqueraded — from whichever server is
+# active before it reaches the pod, so no source IP is pinnable.
+# metrics-server's own TLS and delegated authn/authz is the gate, the same trade
+# those policies already make for their webhooks.
+#
+# Label-scoped rather than `podSelector: {}`: nothing else in kube-system listens
+# on 10250 (the kubelet's 10250 is in the host netns, which NetworkPolicy never
+# gates), so a namespace-wide selector would open a port with no listener until
+# some future workload lands here and binds it. If you replace the AddOn with
+# the upstream chart, add its `app.kubernetes.io/name: metrics-server` selector
+# beside this one — NetworkPolicies are additive, so two objects cover both
+# label sets at once.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-server-ingress
+spec:
+  podSelector:
+    matchLabels:
+      k8s-app: metrics-server
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 10250

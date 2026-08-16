@@ -117,7 +117,14 @@ Work through, in order:
    commented example on the NAS-adjacent k3s agent). Each entry pins a
    `scsi_slot` — never reorder or reuse one, that rebinds a data-bearing zvol to
    a different device.
-4. **`group_vars/all.yml`** — check the platform defaults copier filled in
+4. **`group_vars/mail.yml`** — `smtp_relay_upstream` ships empty and is
+   REQUIRED: the smarthost this relay forwards to, in Postfix `[host]:port`
+   form (brackets suppress the MX lookup), e.g.
+   `"[smtp.example-provider.com]:587"`. The `smtp_relay` role asserts a
+   non-empty `relayhost`, so an empty value aborts the first `task infra:deploy`
+   on the relay play. The credentials beside it come from the vault, not this
+   file.
+5. **`group_vars/all.yml`** — check the platform defaults copier filled in
    (domains, addresses, timezone, admin user), the `secrets:` references, and
    the version pins. Versions are single-sourced here; nothing else in the
    repository names a version.
@@ -345,7 +352,15 @@ close the first.
 
 If your pools are encrypted, `task zfs:encrypt` deploys the key-load mechanism
 and its boot units. It needs the in-cluster 1Password Connect endpoint, so it is
-a post-Flux step, not part of this phase.
+a post-Flux step, not part of this phase. Which pools it unlocks is inventory,
+not an answer: declare `zfs_encryption_pools` — a list of `{name, item, field}`
+naming the vault item holding each pool's passphrase — in `group_vars/nas.yml`,
+or in `host_vars/<host>.yml` if more than one host in the `proxmox` group has
+encrypted pools. The playbook runs against every Proxmox host and activates only
+where that list is non-empty. The
+[`zfs_encryption` role README](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles/zfs_encryption)
+documents the rest of the variables, including scoping the token to a dedicated
+vault.
 
 ---
 
@@ -599,7 +614,7 @@ Once the platform is Ready:
    variable, and push a branch to watch the pipeline run. From here changes ship
    as merge requests, not as local `task` invocations. `docs/ci-pipeline.md` in
    the generated repository is the operator-side reference: it covers which jobs
-   need a **root-capable** runner (the three deploy jobs do), the CI/CD
+   need a **root-capable** runner (`flux-lint` and every deploy job do), the CI/CD
    variables each job expects, and the node-selector regex a runner must allow.
 
    > **Register the privileged runner as a PROJECT runner, never instance-wide.**

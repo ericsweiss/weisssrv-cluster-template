@@ -29,6 +29,10 @@ spec:
       retries: 3
       remediateLastFailure: true
   values:
+    # `platform` (sources/priorityclasses.yaml). The chart has no global key —
+    # the controller reads the top-level one and webhook/certController each
+    # read their own, so all three are set.
+    priorityClassName: platform
     serviceMonitor:
       enabled: true
     installCRDs: true
@@ -50,6 +54,7 @@ spec:
               topologyKey: kubernetes.io/hostname
     webhook:
       replicaCount: 2
+      priorityClassName: platform
       resources:
         requests:
           cpu: 25m
@@ -69,6 +74,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
     certController:
       replicaCount: 2
+      priorityClassName: platform
       resources:
         requests:
           cpu: 25m

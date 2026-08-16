@@ -27,9 +27,9 @@ rules:
     verbs: ["get", "watch", "list"]
 
 ---
-# The binding the chart no longer ships. The subject must stay in step with the
-# chart's ServiceAccount name (`<releaseName>-grafana`); the sidecars mount that
-# SA's token through the projected volume in release.yaml.
+# The binding, since the chart's own is disabled. The subject must stay in step
+# with the chart's ServiceAccount name (`<releaseName>-grafana`); the sidecars
+# mount that SA's token through the projected volume in release.yaml.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

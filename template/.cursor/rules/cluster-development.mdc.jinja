@@ -1,0 +1,28 @@
+---
+description: Always follow the cluster-development skill.
+globs:
+alwaysApply: true
+---
+
+# Cluster development
+
+Before making any change in this repo, read and follow
+`.claude/skills/cluster-development/SKILL.md` — the authoritative workflow for
+this Proxmox + Ansible + Terraform + k3s/Flux cluster. `CLAUDE.md` and
+`AGENTS.md` point at the same skill.
+
+The rules that must hold in every change, restated here because they are the
+ones that cost real damage:
+
+- Never push to the default branch; branch plus merge request, always.
+- Never commit secrets — host tooling uses references, workloads use
+  `ExternalSecret`.
+- Flux owns all of `kubernetes/`: no `kubectl apply`, no `helm upgrade`. Preview
+  with `task flux:lint`, deploy by merging.
+- Kubernetes manifests carry no site literals; `${cluster_...}` substitutions
+  come from the `cluster-config` ConfigMap.
+- Versions are single-sourced in `ansible/inventories/prod/group_vars/all.yml`,
+  followed by `task flux:sync-versions`.
+- Ansible roles ship in the weisssrv.infra collection — change them there and
+  bump the pin, never in this tree.
+- Run `task lint` before opening a merge request.

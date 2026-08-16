@@ -95,7 +95,8 @@ The rules in this repo therefore never hardcode the job. They select
 `job=~"${cluster_node_exporter_job_regex}"`.
 
 **This cluster ships that second job.** `exporters/node-exporter-host.yaml` is a
-selectorless headless `Service` + a hand-maintained `Endpoints` list +
+selectorless headless `Service` + a hand-maintained `EndpointSlice`
+(`discovery.k8s.io/v1`, not the deprecated core/v1 `Endpoints`) +
 a `ServiceMonitor` with `jobLabel: app.kubernetes.io/name`, giving
 `job="node-exporter-host"` over the `:9101` exporters the `node_exporter_host`
 Ansible role installs on the Proxmox hosts, the resolver and relay LXCs, and the

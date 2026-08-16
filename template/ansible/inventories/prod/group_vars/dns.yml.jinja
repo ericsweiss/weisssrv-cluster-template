@@ -24,6 +24,11 @@ adguard_home_admin_password: >-
   {% raw %}{{ lookup('ansible.builtin.env', 'ADGUARD_ADMIN_PASSWORD')
      or undef(hint='ADGUARD_ADMIN_PASSWORD must be set (run via the task wrapper / op run)') }}{% endraw %}
 
+# Declared here (not left to the role default) because
+# playbooks/maintenance/update-applications.yml reads it from a tasks-only play,
+# where role defaults are out of scope.
+adguard_home_install_path: /opt/AdGuardHome
+
 adguard_home_http_port: 3000     # UI + DoH behind the ingress, which terminates TLS
 adguard_home_dns_port: 53
 adguard_home_dot_port: 853
@@ -88,14 +93,11 @@ adguard_home_user_rules: []
 # acme.sh with a DNS-01 challenge issues the wildcard on the primary resolver
 # and pushes it to each target over SSH with a dedicated, from=-pinned key.
 #
-# `acme_certs_enabled` is set PER HOST (on dns-01 in hosts.yml), not here: the
-# role is the certificate authority, so a second resolver running it would issue
-# its own wildcard against the same rate limit and push it to everyone else.
-#
-# The role installs acme.sh, the renewal cron and the distribution channel — it
-# never runs `--issue`. The FIRST wildcard is one manual command on the primary
-# resolver, which the role prints when no certificate exists yet; SETUP.md § 4
-# walks it. Renewals from then on are automatic.
+# `acme_certs_enabled` is set PER HOST (on dns-01 in hosts.yml), not here — a
+# second resolver running it would issue its own wildcard against the same rate
+# limit and push it to everyone else. The role never runs `--issue`: the FIRST
+# wildcard is one manual command it prints when no certificate exists yet
+# (docs/RUNBOOKS.md § Certificates); renewals from then on are automatic.
 acme_certs_domain: {{ internal_domain }}
 acme_certs_email: "{% raw %}{{ admin_email }}{% endraw %}"
 acme_certs_ssh_private_key: >-
@@ -110,30 +112,25 @@ acme_certs_key_from: {{ resolvers[0] }}
 # The AUTHORITY side of the push: the local user whose ~/.ssh holds the
 # distribution private key, and the path the renewal hook reads it from. Written
 # out even though they match the role defaults, because postflight.yml probes
-# this channel and a play sees inventory, never a role's defaults — a
-# `| default(...)` there would make a broken check pass. `ssh_user` on each
-# target below is the login user ON THE TARGET, a different thing.
+# this channel and a play sees inventory, never a role's defaults. `ssh_user` on
+# each target below is the login user ON THE TARGET, a different thing.
 acme_certs_ssh_user: root
 acme_certs_ssh_key_path: /root/.ssh/id_ed25519_certs
 
-# Hosts that receive the wildcard cert. host_key pins the target's SSH host key:
-# the push carries private-key material, so the channel runs with
-# StrictHostKeyChecking=yes and never accept-new. The NAS needs the cert for
-# NFS-over-TLS; the relay for SMTP submission; every replica resolver for DoT.
+# Hosts that receive the wildcard cert — the NAS for NFS-over-TLS, the relay for
+# SMTP submission, every replica resolver for DoT. host_key pins the target's
+# SSH host key: the push carries private-key material, so the channel runs with
+# StrictHostKeyChecking=yes and never accept-new.
 #
-# The pins ship EMPTY on purpose. Every target except the NAS is a container
-# Ansible has not created yet, so its host key does not exist when this file is
-# first rendered. An unpinned entry is filtered out of
-# acme_certs_distribution_targets below rather than aborting the certificate
-# play — so a first deploy runs to completion and simply distributes to nobody.
-# Once the guests are up:
+# The pins ship EMPTY because the guests do not exist at first render; an
+# unpinned entry is filtered out of acme_certs_distribution_targets below rather
+# than aborting the play. `task certs:show-host-keys` prints paste-ready values,
+# and `task infra:verify` fails while any target is still unpinned.
+# docs/RUNBOOKS.md § Certificates.
 #
-#     task certs:show-host-keys     # prints a paste-ready host_key per target
-#
-# paste each value in here and re-run `task dns:deploy`. `task infra:verify`
-# fails while any target is still unpinned, so a forgotten paste is reported
-# rather than silently skipped. Same workflow after a target is rebuilt — its
-# old pin stops matching and the push fails loudly until you re-capture it.
+# The replica addresses come from the upstream_dns_servers answer; the relay and
+# the NAS are read out of the inventory, so re-addressing either host in
+# hosts.yml cannot leave a stale target here.
 _acme_certs_targets:
 {%- for addr in resolvers[1:] %}
   - host: dns-{{ '%02d' | format(loop.index + 1) }}
@@ -142,11 +139,11 @@ _acme_certs_targets:
     host_key: ""
 {%- endfor %}
   - host: {{ smtp_name }}
-    ip: {{ lan_prefix }}.23
+    ip: "{% raw %}{{ hostvars[groups['mail'][0]].ansible_host }}{% endraw %}"
     ssh_user: {{ admin_user }}
     host_key: ""
   - host: {{ nas_name }}
-    ip: {{ lan_prefix }}.11
+    ip: "{% raw %}{{ hostvars[groups['nas'][0]].ansible_host }}{% endraw %}"
     ssh_user: {{ admin_user }}
     host_key: ""
 acme_certs_distribution_targets: >-

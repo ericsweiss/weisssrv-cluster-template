@@ -330,7 +330,6 @@ def fix(path: Path, project: str = LIB_PROJECT, ref_var: str = REF_VAR) -> int:
     return changed
 
 
-# ---------------------------------------------------------------------------
 # Ansible collection pin. A consumer's sibling ansible/requirements.yml installs
 # the SAME library at the SAME tag, but as a Galaxy collection rather than a CI
 # include. Galaxy cannot reference variables.WEISSSRV_LIB_REF any more than

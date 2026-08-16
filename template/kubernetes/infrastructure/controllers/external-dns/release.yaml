@@ -32,6 +32,8 @@ spec:
       retries: 3
       remediateLastFailure: true
   values:
+    # `platform` (sources/priorityclasses.yaml) — outrank apps and CI job pods.
+    priorityClassName: platform
     provider:
       name: cloudflare
     extraArgs:

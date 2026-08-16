@@ -37,12 +37,10 @@ locals {
     # Certificate issuance policy. Losing the CAA set lets ANY CA issue for the
     # domain, so every entry is protected. Add a tag pair per CA you use.
     #
-    # The apex is proxied, so Cloudflare's edge certificate is issued by one of
-    # its Universal SSL partner CAs, not by the CA the cluster uses — both sets
-    # need entries or edge renewal fails. Google Trust Services (pki.goog) and
-    # SSL.com are the two Universal SSL issues today; Cloudflare auto-injects
-    # records for its other partner CAs outside this config. Drop the four
-    # partner entries only if every record here is DNS-only.
+    # The apex is proxied, so Cloudflare's edge certificate comes from one of its
+    # Universal SSL partner CAs, not the CA the cluster uses — both sets need
+    # entries or edge renewal fails. Drop the partner entries only if every
+    # record here is DNS-only.
     caa_issue_letsencrypt = {
       name        = "@"
       type        = "CAA"
@@ -97,11 +95,10 @@ locals {
     # legitimate can be rejected. Protected because silently dropping a
     # `p=reject` DMARC record is a security regression a plan should refuse.
     #
-    # The SMTP relay this repo deploys sends as the INTERNAL domain (system mail
-    # and alerts). Point any sender at this zone and both records must change
-    # first — start at `v=spf1 ~all` / `p=none`, read the aggregate reports, and
-    # tighten back once alignment is clean. Add the DKIM record the sender's
-    # provider gives you at the same time.
+    # The SMTP relay this repo deploys sends as the INTERNAL domain, so nothing
+    # here is affected. Pointing a sender at THIS zone means relaxing both
+    # records and adding DKIM first, then tightening back once alignment is
+    # clean.
     spf = {
       name      = "@"
       type      = "TXT"

@@ -16,10 +16,10 @@ registered instance-wide, that one line gets an arbitrary authenticated user roo
 + DinD execution on your cluster, on a runner that also has SSH reach to your
 hosts. That is a privilege-escalation path into the whole estate.
 
-This is not hypothetical. In the system this template generalizes, the docs
-stated the project-runner requirement while the live registration was
-`instance_type` — and a different project's pipeline was observed executing on
-it. The gap survived because nothing enforced or checked it.
+Nothing in this repository can enforce that — the scope lives in GitLab, not in
+a manifest — and an unchecked one has already gone wrong: in the system this
+template generalizes the docs stated the rule while the live registration was
+`instance_type`, and another project's pipeline ran on it.
 
 **Verify after registering**, and again after any runner re-registration:
 
@@ -36,7 +36,11 @@ policy, and a distinct tag (`tenant-build`). Do not widen this one.
 - **Separate namespace.** The shared runner's namespace-scoped RBAC cannot read
   this runner's token Secret. Namespace separation — not the tag — is what makes
   that true.
-- **Separate ServiceAccount.**
+- **Separate ServiceAccount.** Job pods run as `gitlab-runner-privileged-jobs`
+  (`serviceaccount.yaml`) — no RoleBinding, `automountServiceAccountToken:
+  false` — not the chart-managed manager SA, whose Role can read the runner
+  token Secret and exec into concurrent job pods. A job that genuinely needs the
+  kube-API brings an explicit kubeconfig.
 - **`enforce: privileged` PSS**, because the DinD job pods genuinely require it.
   This is exactly why it must not be the namespace untrusted jobs land in.
 - **`<label-domain>/runner-class` is the TIER, not the tag.** Job pods here are
@@ -60,18 +64,25 @@ The governor is CPU, not memory. Per job, the real cost is roughly: build
 container ~0.9 cpu (the Ansible control process), DinD sidecar ~0.5 cpu, helper
 ~0.1 — about 1.5 cpu, while memory is a few hundred MiB.
 
-Two failure modes to avoid, both observed:
+Two rules follow, and both have a failure mode with no obvious cause:
 
-- **Understated cpu_request** lets the scheduler pack more jobs onto a small node
-  than its cores can run. Task-heavy jobs then inflate 4-7x, because the
-  exec-per-task connection model crawls under CPU starvation.
-- **`concurrent` above the schedulable pool** parks the overflow as *Pending
-  pods*, and pod-Pending time burns the JOB's timeout clock — jobs get killed
-  without ever starting. At or below pool capacity, the overflow waits in
-  GitLab's queue, where that clock does not run.
+- **`cpu_request` must reflect real usage.** Understate it and the scheduler
+  packs more jobs onto a node than its cores can run; task-heavy jobs then take
+  several times as long, because the exec-per-task connection model crawls under
+  CPU starvation.
+- **`concurrent` must stay at or below the schedulable pool.** Above it the
+  overflow parks as *Pending pods*, and pod-Pending time burns the JOB's timeout
+  clock — jobs get killed without ever starting. At or below pool capacity the
+  overflow waits in GitLab's queue, where that clock does not run.
 
 Size `concurrent` to `(CI-eligible cores - co-tenant requests) / 1.5`, and keep
 `requests.cpu` in the ResourceQuota in lockstep.
+
+The shipped values are that formula applied to the roster this cluster was
+generated for: {{ compute_node_count | default(2) | int }} compute {{ 'host' if compute_node_count | default(2) | int == 1 else 'hosts' }} x one 4-core k3s agent each, minus 2 cores for the
+platform pods co-tenanting them (job pods are hard-excluded from the NAS agent,
+so it is not in the pool). Grow the agents or their cores and both numbers must
+be raised by hand — nothing recomputes them after generation.
 
 ## Scheduling
 

@@ -38,11 +38,19 @@ spec:
     crds:
       enabled: false
 
+    prometheusOperator:
+      # `platform` (sources/priorityclasses.yaml). The chart has no global key:
+      # the operator, Prometheus and Alertmanager each read their own. Grafana,
+      # kube-state-metrics and node-exporter are subcharts and stay unclassed —
+      # losing one costs a dashboard, not the platform.
+      priorityClassName: platform
+
     # -------------------------------------------------------------------------
     # Prometheus
     # -------------------------------------------------------------------------
     prometheus:
       prometheusSpec:
+        priorityClassName: platform
         # Runs as nobody (65534); fsGroup makes the PV writable.
         securityContext:
           runAsNonRoot: true
@@ -99,6 +107,7 @@ spec:
     # -------------------------------------------------------------------------
     alertmanager:
       alertmanagerSpec:
+        priorityClassName: platform
         configSecret: alertmanager-config
         resources:
           requests:
@@ -150,13 +159,9 @@ spec:
 
       # The built-in admin account EXISTS but authenticates nothing while the two
       # switches below are set. Its password is an ESO-managed random value,
-      # never the chart default (`prom-operator`, which is public knowledge).
-      #
-      # ONE-SHOT. Grafana consumes GF_SECURITY_ADMIN_PASSWORD only at its FIRST
-      # start against an empty grafana.db, and persistence means there is never a
-      # second first start — so `Grafana SSO` -> admin-password must hold its
-      # FINAL value before this stage first reconciles. Rotating it afterwards is
-      # a vault edit plus `grafana cli admin reset-admin-password`; see
+      # never the chart default. ONE-SHOT: GF_SECURITY_ADMIN_PASSWORD is read
+      # only at FIRST start against an empty grafana.db, so the vault value must
+      # be FINAL before this stage first reconciles. Rotation and break-glass:
       # ../README.md.
       admin:
         existingSecret: observability-secrets
@@ -167,14 +172,12 @@ spec:
         server:
           root_url: https://grafana.${cluster_internal_domain}
 
-        # SSO-ONLY, AND BOTH SETTINGS ARE REQUIRED. disable_login_form removes
-        # the browser form; auth.basic.enabled=false closes the HTTP path —
-        # without it anyone who reaches the ingress can still
-        # `curl -u admin:<password> .../api/...`. Authorization comes from the
-        # OIDC role mapping below. Do NOT set
+        # SSO-ONLY, AND BOTH SETTINGS ARE REQUIRED: disable_login_form removes
+        # the browser form, auth.basic.enabled=false closes the HTTP path that
+        # `curl -u admin:<password>` would otherwise still take. Authorization
+        # comes from the OIDC role mapping below. Do NOT set
         # security.disable_initial_admin_creation — it permanently prevents
-        # recreating the built-in admin. Break-glass and no-IdP procedures:
-        # ../README.md.
+        # recreating the built-in admin. Break-glass: ../README.md.
         auth:
           disable_login_form: true
         auth.basic:
@@ -213,26 +216,20 @@ spec:
       # Dashboard sidecar — discovers ConfigMaps labelled grafana_dashboard in
       # every namespace, so app modules ship their own dashboards.
       #
-      # skipReload on BOTH sidecars follows from the SSO-only posture above. By
-      # default each sidecar POSTs Grafana's /api/admin/provisioning/*/reload
-      # endpoint using the built-in admin account over HTTP basic auth — a path
-      # that no longer exists, so every write would log a 401 and reload nothing.
+      # skipReload on BOTH sidecars follows from the SSO-only posture above: each
+      # otherwise POSTs Grafana's provisioning-reload endpoint as the built-in
+      # admin over HTTP basic auth, a path that is closed, so every write 401s
+      # and reloads nothing. Dashboards need nothing further — Grafana's file
+      # provisioner rescans on its own interval.
       #
-      # Dashboards need nothing further: Grafana's file provisioner rescans the
-      # provisioning directory on its own interval (~10s).
+      # DATASOURCES DO: Grafana reads datasource provisioning files ONLY at
+      # startup, and the Prometheus datasource arrives as a sidecar-discovered
+      # ConfigMap. initDatasources runs the sidecar as an init container so every
+      # datasource file exists before Grafana starts — the chart's required
+      # companion to skipReload.
       #
-      # DATASOURCES DO. Grafana reads datasource provisioning files ONLY at
-      # startup, and the Prometheus datasource itself arrives as a
-      # sidecar-discovered ConfigMap from this chart. Without initDatasources the
-      # sidecar would write that file just after Grafana had already finished
-      # provisioning, and a fresh install would come up with NO datasource until
-      # something restarted the pod. initDatasources adds the sidecar as an
-      # init container so every datasource file exists before Grafana starts —
-      # the chart documents it as the required companion to skipReload.
-      #
-      # `resource: configmap` (the chart default is `both`): with `secrets` gone
-      # from the SA's ClusterRole, a sidecar watching Secrets logs Forbidden
-      # every cycle. Every dashboard and datasource here is a ConfigMap.
+      # `resource: configmap` (chart default is `both`): the SA's ClusterRole has
+      # no `secrets`, so a sidecar watching Secrets logs Forbidden every cycle.
       sidecar:
         dashboards:
           enabled: true
@@ -350,9 +347,8 @@ spec:
           memory: 64Mi
         limits:
           memory: 128Mi
-      # Flux controllers no longer export per-resource readiness
-      # (gotk_reconcile_condition); it comes from kube-state-metrics
-      # customResourceState instead, per the flux2-monitoring-example pattern.
+      # Per-resource Flux readiness comes from kube-state-metrics
+      # customResourceState, not from the controllers themselves.
       rbac:
         extraRules:
           - apiGroups:
@@ -773,7 +769,7 @@ spec:
               # (stale chart cache, missing CRD, failing values render) regardless
               # of error rate — the complement to the rate-based rule above.
               # gotk_resource_info comes from kube-state-metrics
-              # customResourceState; the controllers no longer export readiness.
+              # customResourceState, not from the Flux controllers.
               - alert: FluxResourceNotReady
                 expr: gotk_resource_info{ready="False", suspended!="true"} == 1
                 for: 15m
