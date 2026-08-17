@@ -170,3 +170,67 @@ def test_empty_or_blank_records_fail_closed(ddns, monkeypatch):
             ddns.main()
         assert "DDNS_RECORDS" in str(e.value)
 
+
+def _records_exit(ddns, monkeypatch, records):
+    """main()'s message for a DDNS_RECORDS value, asserted to fail before the
+    first API call: the guards run ahead of IP detection and the zone lookup."""
+    monkeypatch.setattr(ddns, "TOKEN", "t")
+    monkeypatch.setattr(ddns, "ZONE", "zone.invalid")
+    monkeypatch.setattr(ddns, "RECORDS", records)
+    monkeypatch.setattr(
+        ddns, "public_ip", lambda: pytest.fail("reached public_ip() past the guard")
+    )
+    monkeypatch.setattr(
+        ddns, "api", lambda *a, **k: pytest.fail("reached the API past the guard")
+    )
+    with pytest.raises(SystemExit) as e:
+        ddns.main()
+    return str(e.value)
+
+
+def test_records_reject_malformed_entry_shapes(ddns, monkeypatch):
+    """A second colon is swallowed into the flag by `partition`, so
+    `a:false:oops` would read as a well-named record whose flag is not "false" —
+    published THROUGH the proxy, the opposite of what was written. Shape is
+    validated before content."""
+    for bad in ("a.zone.invalid:false:oops", "a.zone.invalid:true:", "::"):
+        assert "not a name[:proxied] pair" in _records_exit(ddns, monkeypatch, bad)
+    # A well-formed sibling does not excuse a malformed one.
+    assert "not a name[:proxied] pair" in _records_exit(
+        ddns, monkeypatch, "ok.zone.invalid:true, bad.zone.invalid:true:oops"
+    )
+
+
+def test_records_reject_a_non_boolean_proxied_flag(ddns, monkeypatch):
+    """Only `false` ever turned the proxy off, so `:no`, `:0` and a bare trailing
+    colon all silently left the record proxied through Cloudflare."""
+    for bad in ("a.zone.invalid:no", "a.zone.invalid:0", "a.zone.invalid:yes",
+                "a.zone.invalid:"):
+        assert "non-boolean proxied flag" in _records_exit(ddns, monkeypatch, bad)
+
+
+def test_records_accept_the_documented_spellings(ddns, monkeypatch):
+    """The shape checks must not tighten the contract the cluster-config default
+    (`<external_domain>:true`) and the omitted-flag form already rely on."""
+    calls = []
+    monkeypatch.setattr(ddns, "TOKEN", "tok")
+    monkeypatch.setattr(ddns, "ZONE", "zone.invalid")
+    monkeypatch.setattr(
+        ddns, "RECORDS", "zone.invalid:true, bare.zone.invalid, up.zone.invalid:FALSE"
+    )
+    monkeypatch.setattr(ddns, "public_ip", lambda: "198.51.100.7")
+    monkeypatch.setattr(
+        ddns, "api", lambda *a, **k: {"success": True, "result": [{"id": "z1"}]}
+    )
+    monkeypatch.setattr(
+        ddns,
+        "update",
+        lambda zone_id, name, current, proxied: calls.append((name, proxied)) or True,
+    )
+    assert ddns.main() == 0
+    assert calls == [
+        ("zone.invalid", True),
+        ("bare.zone.invalid", True),
+        ("up.zone.invalid", False),
+    ]
+

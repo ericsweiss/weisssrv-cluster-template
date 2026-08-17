@@ -24,15 +24,19 @@ HelmRelease still honours `spec.targetNamespace`, falling back to that same
 defaulted namespace.
 
 A namespace is FENCED when it carries a NetworkPolicy with `Ingress` in
-policyTypes and an empty/absent podSelector — i.e. one that selects every pod —
-AND no namespace-wide policy that ALLOWS all ingress (see `_allows_all_ingress`).
+policyTypes and a podSelector that selects every pod — absent, `{}`, or the
+equivalent empty-termed spellings `{matchLabels: {}}` / `{matchExpressions: []}`
+— AND no namespace-wide policy that ALLOWS all ingress (see
+`_allows_all_ingress`).
 An app-scoped policy is deliberately not enough: it fences its own pods and
 leaves every other pod in the namespace open. Neither is a namespace-wide policy
 whose `ingress:` rule names no ports and admits every peer — either by carrying
 neither `from` nor `ports` (`{}`, the API's "from anywhere, on any port") or by
 listing a peer that selects everything (`{}`, `namespaceSelector: {}`,
-`podSelector: {}`). Those shapes satisfy a bare "has an Ingress policyType" test
-while granting exactly what the mandate forbids.
+`podSelector: {}`, or a `/0` `ipBlock` whose except list leaves any address
+admitted). Those
+shapes satisfy a bare "has an Ingress policyType" test while granting exactly
+what the mandate forbids.
 NetworkPolicies are additive, so one such policy defeats every default-deny
 beside it — hence the namespace is reported unfenced even when a real
 `default-deny-ingress` is present too.
@@ -54,6 +58,7 @@ Usage (wired into flux:lint, on the accumulated full corpus):
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import sys
 
 try:
@@ -99,6 +104,89 @@ def _policy_types(spec: dict) -> set[str]:
     return types
 
 
+def _zero_prefix(cidr: object) -> bool:
+    """Whether a CIDR's prefix length is 0 — numerically, so `/00` counts."""
+    _address, separator, prefix_length = str(cidr or "").strip().rpartition("/")
+    try:
+        return separator == "/" and int(prefix_length, 10) == 0
+    except ValueError:
+        return False
+
+
+def _excepts_cover_cidr(excepts: object, cidr: object) -> bool:
+    """True only when the except list leaves NO address of `cidr` admitted.
+
+    Computed by exact subtraction, not by a well-known-ranges heuristic: which
+    space pods live in is a property of the cluster, and this file is vendored
+    into clusters whose pod CIDRs may be CGNAT, public, or IPv6. Unparseable
+    entries do not count toward coverage — an except the API would reject
+    cannot be what closes the namespace, and guessing in its favour would
+    fail open.
+    """
+    try:
+        net = ipaddress.ip_network(str(cidr or "").strip(), strict=False)
+    except ValueError:
+        return False
+    remaining = [net]
+    for raw in excepts if isinstance(excepts, list) else []:
+        try:
+            exc = ipaddress.ip_network(str(raw).strip(), strict=False)
+        except ValueError:
+            continue
+        # Only an except the API would accept may subtract: Kubernetes
+        # requires each entry to be a STRICT subnet of the cidr, so an equal
+        # or out-of-range entry belongs to a policy that never admits — and
+        # letting it erase the network would certify a fence the (rejected)
+        # policy does not provide.
+        if exc.version != net.version or exc == net or not exc.subnet_of(net):
+            continue
+        surviving = []
+        for part in remaining:
+            # CIDRs nest or are disjoint — no partial overlap exists.
+            if part.subnet_of(exc):
+                continue
+            if exc.subnet_of(part):
+                surviving.extend(part.address_exclude(exc))
+            else:
+                surviving.append(part)
+        remaining = surviving
+        if not remaining:
+            return True
+    return not remaining
+
+
+def _selects_all_pods(selector: object) -> bool:
+    """True when a podSelector selects every pod in the namespace.
+
+    Absent and `{}` are the API's spellings of "all pods", but so are
+    `{matchLabels: {}}` and `{matchExpressions: []}` — an EMPTY selector term
+    matches everything, it does not match nothing. A truthiness test on the
+    selector mapping reads those namespace-wide policies as app-scoped, which
+    flips both verdicts this gate hands out: a real default-deny written that
+    way stops counting as a fence, and a wide-open allow written that way
+    stops counting as the policy that defeats one.
+    """
+    if selector is None or selector == {}:
+        return True
+    if not isinstance(selector, dict):
+        return False
+    # Unknown keys before empty terms: a typo like `matchLables:` leaves the
+    # recognised terms empty, and reading that as select-all would let a
+    # policy server-side apply REJECTS act on the verdict.
+    if set(selector) - {"matchLabels", "matchExpressions"}:
+        return False
+    labels = selector.get("matchLabels")
+    exprs = selector.get("matchExpressions")
+    # Typed, not truthy: `matchLabels: []` / `matchExpressions: {}` are
+    # API-invalid — a policy carrying them never applies, so it must neither
+    # count as a fence nor as the wide-open peer that defeats one.
+    if labels is not None and not isinstance(labels, dict):
+        return False
+    if exprs is not None and not isinstance(exprs, list):
+        return False
+    return not (labels or exprs)
+
+
 def _peer_selects_everything(peer: object) -> bool:
     """True when one `from` peer narrows nothing.
 
@@ -108,16 +196,29 @@ def _peer_selects_everything(peer: object) -> bool:
     and `podSelector: {}` every pod. A peer built only from empty selectors —
     or the bare `{}` — therefore admits everything the rule could name, exactly
     like a rule with no `from` at all.
+
+    An `ipBlock` usually narrows, but a zero-length prefix admits every
+    address there is — the spelling the earlier "any ipBlock narrows" reading
+    waved through as a fence-compatible peer. Judged by the PREFIX LENGTH,
+    not by matching `0.0.0.0/0`/`::/0` textually: `/0` covers the whole
+    family whatever the address half spells (`0:0:0:0:0:0:0:0/0`,
+    `10.0.0.0/0`). An `except` list only closes it when it leaves NO address
+    admitted — judged by exact subtraction, never by assuming which ranges a
+    cluster's pods occupy (this file is vendored into clusters whose pod
+    CIDRs may be CGNAT, public, or IPv6). In practice a `/0` ingress peer is
+    therefore wide open unless its excepts reconstruct the whole family.
     """
     if not isinstance(peer, dict):
         return False
-    if peer.get("ipBlock") is not None:
-        return False
+    ip_block = peer.get("ipBlock")
+    if ip_block is not None:
+        if not isinstance(ip_block, dict):
+            return False
+        if not _zero_prefix(ip_block.get("cidr")):
+            return False
+        return not _excepts_cover_cidr(ip_block.get("except"), ip_block.get("cidr"))
     for key in ("namespaceSelector", "podSelector"):
-        selector = peer.get(key)
-        if isinstance(selector, dict) and (
-            selector.get("matchLabels") or selector.get("matchExpressions")
-        ):
+        if not _selects_all_pods(peer.get(key)):
             return False
     return True
 
@@ -193,7 +294,13 @@ def analyze(docs: list[dict]) -> tuple[dict[str, set[str]], set[str]]:
         elif (
             kind == "NetworkPolicy"
             and "Ingress" in _policy_types(spec)
-            and not spec.get("podSelector")
+            # Namespace-wide by SELECTION, not by truthiness: `{matchLabels: {}}`
+            # selects every pod just as `{}` does (_selects_all_pods). At SPEC
+            # level `podSelector` is a REQUIRED field, so absent is not the
+            # all-pods default but a policy the API rejects — it can neither
+            # fence nor defeat.
+            and isinstance(spec.get("podSelector"), dict)
+            and _selects_all_pods(spec.get("podSelector"))
         ):
             # Namespace-wide and ingress-typed: either the fence itself, or the
             # policy that re-opens the namespace despite one.

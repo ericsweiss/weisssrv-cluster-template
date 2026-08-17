@@ -8,8 +8,8 @@ CANONICAL SUITE. The library's own .gitlab-ci.yml uses `local:` includes rather
 than pinning itself, so there is no self-check here. A consumer that vendors
 check-lib-pins.py vendors this file too, and adds only its own smoke test
 asserting the real .gitlab-ci.yml passes — behavioural cases belong here, not in
-a consumer's copy. Those copies are byte-gated: they are registered in
-scripts/vendored-paths.yml and compared by scripts/check-vendored-copies.py.
+a consumer's copy. Those copies are byte-gated: each consumer lists them in
+its scripts/vendored-manifest.yml, compared by scripts/check-vendored-copies.py.
 """
 
 from __future__ import annotations

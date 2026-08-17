@@ -1584,7 +1584,10 @@ def format_json(results: list[ServiceVersion]) -> str:
     Summary semantics: `updates_available` counts ACTIONABLE updates only;
     registry-held updates (held=True) are excluded and counted separately
     in `updates_held`. version-check-ci.py keys its exit code and MR
-    comment off this distinction.
+    comment off this distinction. The same rule holds per service: a held
+    entry reports `update_available: false` (with `held: true` and the newer
+    `latest_version` keeping the hold visible), so no JSON consumer can act
+    on a held update without deliberately parsing the hold.
     """
     data = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -1606,7 +1609,12 @@ def format_json(results: list[ServiceVersion]) -> str:
             "var_name": r.var_name,
             "current_version": r.current_version,
             "latest_version": r.latest_version,
-            "update_available": r.update_available,
+            # A held update is NOT available: every consumer of the per-service
+            # JSON that keys an action off this flag (bump bots, MR comments)
+            # would otherwise need its own `and not held` guard, and the one
+            # that forgets bumps a pin straight through a documented hold. The
+            # hold stays visible through `held: true` + `latest_version`.
+            "update_available": r.update_available and not r.held,
             "source_url": r.source_url,
         }
         if r.error:

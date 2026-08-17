@@ -45,9 +45,11 @@ Two consequences worth stating outright:
   is exactly the surprise this table exists to prevent, so a `lib_ref` default
   bump that crosses a library MAJOR is a template MAJOR. Every place the answer
   lands in a generated repository — CI includes, the collection `version:`, the
-  Terraform module `?ref=`, the Taskfile's `LIB_REF` — is enumerated per
-  consumer in the library's
-  [docs/CONSUMERS.yml](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/CONSUMERS.yml).
+  Terraform module `?ref=`, the Taskfile's `LIB_REF` — derives from that one
+  answer, so a generated cluster is the easy case; the pin sites and their gates
+  are tabulated in the library's
+  [docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md)
+  (§ "Upgrading a consumer"). The library keeps no registry of its consumers.
 
 While the template is **0.x**, a breaking change bumps MINOR rather than cutting
 1.0.0 (semver's pre-1.0 allowance, and the release job's `major_on_zero` input
@@ -69,7 +71,8 @@ tested, not a preference.
 | `v0.2.0` | weisssrv-lib `v0.5.2` |
 | `v0.3.0` | weisssrv-lib `v0.6.2` |
 | `v0.4.0` | weisssrv-lib `v0.7.4` |
-| `main` (unreleased) | weisssrv-lib `v0.7.4` |
+| `v0.5.0` | weisssrv-lib `v0.8.0` |
+| `main` (unreleased) | weisssrv-lib `v0.9.5` |
 
 Rules that keep the table meaningful:
 

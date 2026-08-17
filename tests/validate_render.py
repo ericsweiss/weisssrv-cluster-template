@@ -417,12 +417,13 @@ def check_vendored(render: Path, lib_path: Path | None) -> None:
       release script the same way, and it is the one file here whose drift would
       mis-cut the tag every generated cluster's `copier update` resolves to.
 
-    Plus the library's own registry gate (`_check_registered_copies`). It reads
-    `template/scripts/` rather than the render, so the overlap with the first
-    comparison is deliberate — together they prove the copy is right BEFORE
-    copier touches it and unchanged AFTER. What only the registry can see is the
-    rest: the shared test suite under `tests/`, and the lint profiles this
-    repository deliberately forks, where the silent failure runs the other way
+    Plus this repository's own vendored manifest (`_check_registered_copies`).
+    It reads `template/scripts/` rather than the render, so the overlap with the
+    first comparison is deliberate — together they prove the copy is right
+    BEFORE copier touches it and unchanged AFTER. What only the manifest can see
+    is the rest: the shared test suite under `tests/`, the secret-detection
+    ruleset under `.gitlab/`, and the lint profiles this repository deliberately
+    forks, where the silent failure runs the other way
     (the library moves and the fork never absorbs it).
 
     Both comparisons use the checkout `--lib-path` points at, which CI clones at
@@ -467,36 +468,44 @@ def check_vendored(render: Path, lib_path: Path | None) -> None:
     )
 
 
-CONSUMER = "weisssrv-cluster-template"
+MANIFEST_RELPATH = "scripts/vendored-manifest.yml"
 
 
 def _check_registered_copies(lib_path: Path) -> list[str]:
-    """Run the library's own registry-driven gate over this repository.
+    """Run the library's vendored-copy engine over this repository's manifest.
 
     The scripts/ comparison above walks DIRECTORIES, so it only ever sees copies
-    that live in a scripts/ tree. The registry
-    (weisssrv-lib/scripts/vendored-paths.yml) is the authority on every copy
-    relationship, including the ones no directory walk reaches: the canonical
-    check-lib-pins test suite under tests/, and the lint profiles this repository
-    deliberately FORKS — where the failure is silent in the other direction (the
-    library moves and the fork never absorbs it).
+    that live in a scripts/ tree. This repository's own manifest
+    (scripts/vendored-manifest.yml) is the authority on every copy relationship,
+    including the ones no directory walk reaches: the canonical check-lib-pins
+    test suite under tests/, the secret-detection ruleset under .gitlab/, and the
+    lint profiles this repository deliberately FORKS — where the failure is
+    silent in the other direction (the library moves and the fork never absorbs
+    it).
 
-    Declared in the library rather than here so a file it starts or stops
-    shipping reaches all three consumers' gates at the next bump.
+    The list lives HERE rather than in the library: the library publishes only an
+    offer list (scripts/vendorable-paths.yml) bounding what a manifest may name,
+    and the engine that reads both. Moving a copy inside this repository is
+    therefore an edit to the manifest in the same commit, not a library release.
     """
     checker = lib_path / "scripts" / "check-vendored-copies.py"
-    registry = lib_path / "scripts" / "vendored-paths.yml"
-    if not checker.is_file() or not registry.is_file():
+    manifest = render_cluster.REPO_ROOT / MANIFEST_RELPATH
+    if not checker.is_file():
         return [
-            f"{lib_path} ships no scripts/check-vendored-copies.py + vendored-paths.yml "
-            "— the registry gate cannot run, and it must not silently skip"
+            f"{lib_path} ships no scripts/check-vendored-copies.py — the vendored-copy "
+            "gate cannot run, and it must not silently skip"
+        ]
+    if not manifest.is_file():
+        return [
+            f"{manifest} is missing — this repository's vendored copies would go "
+            "ungated, and the gate must not silently skip"
         ]
     result = _run(
         [
             sys.executable,
             str(checker),
-            "--consumer",
-            CONSUMER,
+            "--manifest",
+            str(manifest),
             "--repo-root",
             str(render_cluster.REPO_ROOT),
             "--lib-path",
@@ -504,7 +513,7 @@ def _check_registered_copies(lib_path: Path) -> list[str]:
         ]
     )
     if result.returncode:
-        return [f"registered copies (weisssrv-lib vendored-paths.yml):\n{result.stdout}{result.stderr}"]
+        return [f"vendored copies ({MANIFEST_RELPATH}):\n{result.stdout}{result.stderr}"]
     return []
 
 

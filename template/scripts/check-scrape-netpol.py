@@ -22,6 +22,7 @@ Usage (wired into flux:lint, on the accumulated full corpus):
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import sys
 
 try:
@@ -43,24 +44,112 @@ def _selects_observability(peer: dict, observability_ns: str) -> bool:
     corpus does not carry, so a selector that adds one cannot be proven to
     match. Refusing to credit it errs toward a visible false-block rather
     than a silent false-allow.
+
+    (`ipBlock` peers are judged by the CALLER across the whole rule: a single
+    `/0` covers one address family only, and the corpus cannot establish the
+    scraper's family — crediting it alone would be the silent false-allow
+    this gate's bias forbids. A rule whose peers cover BOTH families is the
+    explicit spelling of the omitted-`from` rule and is credited there.)
     """
-    nssel = peer.get("namespaceSelector")
-    if nssel is None:
+    # Peer-level keys first: a typo like `podSelecter:` leaves the recognised
+    # fields absent-or-empty, and the shortcut below would credit a peer
+    # server-side apply rejects.
+    if not isinstance(peer, dict) or set(peer) - {"ipBlock", "namespaceSelector", "podSelector"}:
         return False
-    labels = nssel.get("matchLabels") or {}
-    exprs = nssel.get("matchExpressions") or []
+    # A peer combining ipBlock with a selector is API-invalid — it must not
+    # be credited through the selector path either.
+    if peer.get("ipBlock") is not None:
+        return False
+    nssel = peer.get("namespaceSelector")
+    if nssel is None or not isinstance(nssel, dict):
+        return False
+    # Unknown keys never credit: a `matchLables:` typo empties the recognised
+    # terms and would otherwise ride the empty-selector shortcut.
+    if set(nssel) - {"matchLabels", "matchExpressions"}:
+        return False
+    labels = nssel.get("matchLabels")
+    exprs = nssel.get("matchExpressions")
+    # Typed before walked: wrong-typed terms belong to a policy the API
+    # rejects, which proves nothing about the scraper.
+    if labels is not None and not isinstance(labels, dict):
+        return False
+    if exprs is not None and not isinstance(exprs, list):
+        return False
+    labels = labels or {}
+    exprs = exprs or []
+    # An EMPTY namespaceSelector needs no corpus knowledge to prove: `{}` (and
+    # the equivalent `{matchLabels: {}}`) matches every namespace by API
+    # semantics, observability included. But the API ANDs a peer's TWO
+    # selectors, so the shortcut only holds while the peer's podSelector also
+    # narrows nothing — `{namespaceSelector: {}, podSelector: {matchLabels:
+    # {app: other}}}` is an unrelated cross-namespace allow, not proof the
+    # scraper's pods are admitted. (A NAMED-namespace peer with a podSelector
+    # is different: an allow that names observability restricts to the pods
+    # its author means to admit, and whether the scraper carries those labels
+    # is unknowable from the corpus — refusing to credit it would false-block
+    # every tight real-world allow, so the label walk below keeps crediting
+    # those.)
+    if not labels and not exprs:
+        return _selects_all_pods(peer.get("podSelector"))
     name_matched = labels.get(NS_NAME_LABEL) == observability_ns
     extra_requirements = any(k != NS_NAME_LABEL for k in labels)
     for expr in exprs:
+        # The credited requirement must be fully valid: known fields only,
+        # and `values` a real list — a STRING would do substring membership
+        # and credit an expression the API rejects.
+        if not isinstance(expr, dict) or set(expr) - {"key", "operator", "values"}:
+            return False
+        values = expr.get("values")
         if (
             expr.get("key") == NS_NAME_LABEL
             and expr.get("operator") == "In"
-            and observability_ns in (expr.get("values") or [])
+            and isinstance(values, list)
+            and observability_ns in values
         ):
             name_matched = True
         else:
             extra_requirements = True
     return name_matched and not extra_requirements
+
+
+def _rule_ipblocks_cover_both_families(peers: list) -> bool:
+    """True when the rule's unexcepted zero-prefix ipBlock peers span IPv4 AND
+    IPv6 — together they admit every address, the scraper's included,
+    whatever family it speaks. One family alone proves nothing about a
+    scraper whose family the corpus does not carry.
+    """
+    families: set[int] = set()
+    for peer in peers or []:
+        # A single invalid peer rejects the WHOLE policy at the API — two
+        # valid /0 peers beside it must not credit a rule that never applies.
+        if not isinstance(peer, dict) or set(peer) - {"ipBlock", "namespaceSelector", "podSelector"}:
+            return False
+        ip_block = peer.get("ipBlock")
+        # The API rejects a peer combining ipBlock with a selector, and an
+        # `except` of any non-empty-list shape (including the falsey `{}`)
+        # is either narrowing or invalid — none of those may count toward
+        # the credit.
+        if not isinstance(ip_block, dict):
+            continue
+        if peer.get("namespaceSelector") is not None or peer.get("podSelector") is not None:
+            continue
+        # Same rule one level down: an `exept:` typo would read as an
+        # unexcepted block and credit a peer the API rejects.
+        if set(ip_block) - {"cidr", "except"}:
+            continue
+        excepts = ip_block.get("except")
+        if excepts is not None and excepts != []:
+            continue
+        # A real parse, not a `:` sniff: crediting is the fail-OPEN direction
+        # here, so only a cidr the API itself would accept may count —
+        # `garbage/0` must not pass as IPv4.
+        try:
+            net = ipaddress.ip_network(str(ip_block.get("cidr") or "").strip(), strict=False)
+        except ValueError:
+            continue
+        if net.prefixlen == 0:
+            families.add(net.version)
+    return {4, 6} <= families
 
 
 def _policy_types(spec: dict) -> set[str]:
@@ -72,6 +161,36 @@ def _policy_types(spec: dict) -> set[str]:
     if spec.get("egress"):
         types.add("Egress")
     return types
+
+
+def _selects_all_pods(selector: object) -> bool:
+    """True when a podSelector selects every pod in the namespace.
+
+    Absent and `{}` are the API's spellings of "all pods", but so are
+    `{matchLabels: {}}` and `{matchExpressions: []}` — an empty selector term
+    matches everything. The truthiness test this replaces read those
+    namespace-wide policies as app-scoped, so a default-deny spelled that way
+    never registered as restricting the namespace.
+    """
+    if selector is None or selector == {}:
+        return True
+    if not isinstance(selector, dict):
+        return False
+    # Unknown keys before empty terms: a typo like `matchLables:` leaves the
+    # recognised terms empty, and reading that as select-all would let a
+    # policy server-side apply REJECTS act on the verdict.
+    if set(selector) - {"matchLabels", "matchExpressions"}:
+        return False
+    labels = selector.get("matchLabels")
+    exprs = selector.get("matchExpressions")
+    # Typed, not truthy: `matchLabels: []` / `matchExpressions: {}` are
+    # API-invalid, and crediting an invalid policy is the silent false-allow
+    # this gate's bias forbids.
+    if labels is not None and not isinstance(labels, dict):
+        return False
+    if exprs is not None and not isinstance(exprs, list):
+        return False
+    return not (labels or exprs)
 
 
 def _find_monitor_toggles(node, path: str = "") -> list[str]:
@@ -133,7 +252,8 @@ def analyze(
         spec = doc.get("spec") or {}
 
         if kind in MONITOR_KINDS:
-            selector = spec.get("namespaceSelector") or {}
+            selector = spec.get("namespaceSelector")
+            selector = selector if isinstance(selector, dict) else {}
             match_names = selector.get("matchNames") or []
             if match_names:
                 targets = [str(n) for n in match_names]
@@ -159,16 +279,25 @@ def analyze(
             if "Ingress" not in _policy_types(spec):
                 continue
             pod_selector = spec.get("podSelector")
-            namespace_wide = not pod_selector  # {} or absent selects every pod
+            # By SELECTION, not truthiness: `{matchLabels: {}}` is namespace-wide.
+            # spec.podSelector is a REQUIRED field — an absent one is not the
+            # all-pods default but a policy the API rejects.
+            namespace_wide = isinstance(pod_selector, dict) and _selects_all_pods(pod_selector)
             if namespace_wide:
                 restricted.add(ns)
             for rule in spec.get("ingress") or []:
+                # Rule-level keys too: `form:` reads as an omitted `from` —
+                # the allow-all spelling — on a rule the API rejects.
+                if not isinstance(rule, dict) or set(rule) - {"from", "ports"}:
+                    continue
                 peers = rule.get("from")
                 if not peers and namespace_wide:
                     # Omitted `from` and empty `from: []` both mean "every
                     # source" in the API, so the scrape gets through.
                     allowed.add(ns)
                     continue
+                if _rule_ipblocks_cover_both_families(peers):
+                    allowed.add(ns)
                 for peer in peers or []:
                     if _selects_observability(peer, observability_ns):
                         allowed.add(ns)
