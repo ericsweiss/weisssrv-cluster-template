@@ -124,13 +124,13 @@ def _label_key_is_valid(key: object) -> bool:
     if not isinstance(key, str) or not key:
         return False
     prefix, slash, name = key.rpartition("/")
-    if slash and (not prefix or len(prefix) > 253 or not _LABEL_PREFIX.match(prefix)):
+    if slash and (not prefix or len(prefix) > 253 or not _LABEL_PREFIX.fullmatch(prefix)):
         return False
-    return bool(_LABEL_NAME.match(name))
+    return bool(_LABEL_NAME.fullmatch(name))
 
 
 def _label_value_is_valid(value: object) -> bool:
-    return isinstance(value, str) and (value == "" or bool(_LABEL_NAME.match(value)))
+    return isinstance(value, str) and (value == "" or bool(_LABEL_NAME.fullmatch(value)))
 
 
 def _label_selector_is_api_valid(selector: object) -> bool:
