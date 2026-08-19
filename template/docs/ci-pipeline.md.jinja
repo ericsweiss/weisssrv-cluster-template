@@ -24,7 +24,7 @@ sources are unaffected — they fetch over https from `{{ lib_url_ }}`.
 |---|---|---|
 | `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `flux-lint` (library); `version-coverage`, `repo-sync`, `deploy-coverage`, `netpol-parity` (this repo) | mixed |
 | `validate` | `terraform-validate` (library); `deploy-preflight`, `terraform-plan`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan` (this repo) | mixed |
-| `test` | `python-tests` (the cluster invariants in `tests/`) | library |
+| `test` | `python-tests` (the cluster invariants in `tests/`, the library-pin gate and the vendored-copy gate) | library |
 | `security` | `secret_detection` | library |
 | `ai-review` | `pr-agent-review` | library |
 | `gate` | `validation-gate` | this repo |
@@ -77,9 +77,40 @@ arguments: `task flux:lint` carries the `extra_validation` gates and
 Keep the two lists equal when you add a gate — a gate only in CI is a green
 local run followed by a red pipeline.
 
-`scripts/flux-render.sh` is the library's copy, vendored unmodified (CI checks
-it byte-for-byte). The multi-ConfigMap handling lives in the local wrapper
-`scripts/flux-env.sh`, which is what both CI and `task flux:lint` invoke.
+`scripts/flux-render.sh` is the library's copy, vendored unmodified (the
+vendored-copy gate below checks it byte-for-byte). The multi-ConfigMap handling
+lives in the local wrapper `scripts/flux-env.sh`, which is what both CI and
+`task flux:lint` invoke.
+
+### python-tests
+
+Everything under `tests/` runs in this one job, and only the last of them needs
+anything outside the repository:
+
+| Suite | Fails when |
+|---|---|
+| `tests/test_cluster_invariants.py` | a duplicate address or vmid in the inventory, an address outside `cluster_lan_cidr`, a `${placeholder}` no ConfigMap defines, a site literal in `kubernetes/`, or a playbook neither wired to a deploy job nor acknowledged in `scripts/deploy-coverage.conf` |
+| `tests/test_lib_pins.py` | a library pin drifts from `variables.WEISSSRV_LIB_REF` — the collection `version:`, a Terraform `?ref=`, or the Taskfile's `LIB_REF` |
+| `tests/test_cloudflare_ddns.py` | the DDNS CronJob's program would write, or refuse to write, the wrong public record (skipped whole when `dns_backend` is not `cloudflare`) |
+| `tests/test_vendored_byte_identity.py` | a file copied from the library differs from it at the pinned ref, or a declared fork has stopped differing, or the library changed under a fork that never absorbed it |
+
+The vendored-copy gate reads [`scripts/vendored-manifest.yml`](../scripts/vendored-manifest.yml)
+— **this repository's** list of what it copies from `{{ lib_project }}` — and
+runs the library's own `check-vendored-copies.py` engine over it. It covers the
+`scripts/` copies plus the files no listing of that directory reaches: `ruff.toml`,
+`.editorconfig`, `.gitleaks.toml` and `.gitlab/secret-detection-ruleset.toml`,
+each declared a **fork** with the library blob it was last reconciled against.
+
+That is why this job clones the library: `setup_command` fetches it at
+`variables.WEISSSRV_LIB_REF` into `$WEISSSRV_LIB_PATH` with the job token, so a
+private library works as long as it lists this project on its CI/CD job-token
+allowlist. The gate **never skips** — an unreachable checkout fails the job,
+because a copy nobody compares is exactly the drift it exists to catch.
+
+Locally the same suite runs as `task lint:invariants` (part of `task lint`)
+against the `.weisssrv-lib/` checkout `task lib:sync` creates. Refreshing a
+copy is `task lib:sync`, `cp`, review the diff — never an edit in place, which
+the next refresh silently reverts.
 
 ## Prerequisites
 

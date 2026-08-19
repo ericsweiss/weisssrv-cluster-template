@@ -1,0 +1,92 @@
+---
+# This cluster's vendored copies of weisssrv-lib files — the consumer-owned half
+# of the vendored-copy contract. The library's half is its offer list,
+# scripts/vendorable-paths.yml, which bounds what may be listed here; the
+# library itself records nothing about its consumers, which is what lets a
+# GENERATED repository own a manifest at all.
+#
+# Read by the library's scripts/check-vendored-copies.py engine, driven here by
+# tests/test_vendored_byte_identity.py (the `python-tests` CI job and
+# `task lint:invariants`) at the ref variables.WEISSSRV_LIB_REF pins. The
+# library checkout is $WEISSSRV_LIB_PATH (CI clones it there) or the
+# .weisssrv-lib/ checkout `task lib:sync` creates. Two relationships:
+#
+#   vendored — byte-identical to the library at the pin. Drift in either
+#              direction fails; fix upstream and re-vendor, never edit a copy —
+#              a local edit is reverted by the next refresh and reds this gate
+#              meanwhile.
+#   forked   — deliberately divergent. Must still differ (a converged fork
+#              belongs under `vendored`), and `reconciled_sha256` (the library
+#              blob last absorbed) fails the fork when the library side moves —
+#              re-take it here after absorbing the change. `reason:` is
+#              mandatory.
+#
+# Entry forms: a bare string when both repos use the same path, or a mapping
+# with `lib:` and `consumer:` when they differ. Moving a copy inside this
+# repository is an edit to THIS file in the same commit — no library release
+# involved.
+#
+# The refresh loop for a vendored copy: `task lib:sync`, copy the file out of
+# .weisssrv-lib/, review the diff, commit. Adding a copy means adding it here
+# too — an unlisted twin of a library script is caught by
+# tests/test_vendored_byte_identity.py, and a file the library stops shipping is
+# caught at the next pin bump.
+#
+# Two deliberate exclusions. `.yamllint` is unlisted family-wide (every repo in
+# the family carries its own profile under a name the library does not publish),
+# and scripts/ site data — hosts.env, hosts-env-map.yml, version-registry.py,
+# autoscaling-policy.yaml, helm-values-releases.yaml, deploy-coverage.conf,
+# netpol-except.yaml — is configuration this cluster owns, not library code.
+
+vendored:
+  - scripts/check-backup-artifact-apps.py
+  - scripts/check-default-deny-coverage.py
+  - scripts/check-deploy-coverage.sh
+  - scripts/check-doc-links.py
+  - scripts/check-hpa-vpa-invariant.py
+  - scripts/check-lib-pins.py
+  - scripts/check-netpol-except-parity.py
+  - scripts/check-pvc-storageclass.py
+  - scripts/check-scrape-netpol.py
+  - scripts/check-secretstore-scope.py
+  - scripts/check-taskfile.sh
+  - scripts/check-versions.py
+  - scripts/extract-prometheus-config.py
+  - scripts/find-reachable-host.sh
+  - scripts/flux-env.sh
+  - scripts/flux-render.sh
+  - scripts/generate-hosts-env.py
+  - scripts/generate-versions-configmap.py
+  - scripts/kubeconform-skipped.py
+  - scripts/lint-prometheus-config.sh
+  - scripts/resolve-tool.sh
+  - scripts/semantic-release.py
+  - scripts/shell-lib.sh
+  - scripts/validate-helm-values.py
+  - scripts/version-bump-mr.py
+
+# The lint profiles. No directory walk reaches these, and their drift is the
+# quiet kind: the library tightens a rule, this repository never absorbs it, and
+# the local lint keeps passing on the old profile.
+forked:
+  - lib: lint/ruff.toml
+    consumer: ruff.toml
+    reason: >-
+      Same rule selection, cluster-scoped header — it documents that the
+      python-lint job relies on ruff's own config discovery finding this file at
+      the repository root.
+    reconciled_sha256: ccf4e857a9d7e20039ef8f68be7080210e6703d1400c23586ec6f5679e2fbfb2
+  - lib: lint/editorconfig
+    consumer: .editorconfig
+    reason: >-
+      Per-repo file-type sections on a shared base — `[Dockerfile*]` rather than
+      `[Dockerfile]`, to cover per-app Dockerfile suffixes.
+    reconciled_sha256: 911171d9f26ba0bb47300c97a9e46b078d48eb852dfe9a050fbc3c8e41cc2944
+  - lib: lint/gitleaks.toml
+    consumer: .gitleaks.toml
+    reason: Allowlist paths and this cluster's own false-positive anchors.
+    reconciled_sha256: bffbe70c94436f4442aaeecc1f1f5715315fc5908b1486b2198796b9e097ff0d
+  - lib: lint/secret-detection-ruleset.toml
+    consumer: .gitlab/secret-detection-ruleset.toml
+    reason: The passthrough names this cluster's gitleaks config and description.
+    reconciled_sha256: d6413e69a2d8a6f7d0c468d4370a406299894ad9e3fe274eb7f69eb30a7c936d

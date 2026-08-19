@@ -200,12 +200,19 @@ bump, not after — a variable this collection renamed does not raise
 green play.
 
 ```bash
+task lib:sync      # clone weisssrv-lib at the pinned ref into .weisssrv-lib/
 task lint          # yamllint, shellcheck, ruff, doc-links, taskfile-smoke,
                    # lib-pins, version-coverage, repo-sync, netpol-parity,
                    # invariants, ansible-lint, terraform fmt-check + validate,
                    # flux:lint
 task ansible:ping  # every host in the inventory answers
 ```
+
+`task lib:sync` comes first because `lint:invariants` carries the vendored-copy
+gate: it compares every file `scripts/vendored-manifest.yml` lists against the
+library at the pinned ref, and it never skips — with no checkout it fails and
+names this command rather than passing quietly on copies nobody compared. The
+same checkout is what a copy is refreshed FROM when a `lib_ref` bump changes one.
 
 `task lint` runs every job in the CI lint stage except `deploy-coverage` (which
 compares an MR's diff against the deploy jobs' `changes:` lists, so it needs a

@@ -201,6 +201,16 @@ task terraform:init                 # re-fetch the module source, per module
 task lint
 ```
 
+`task lint` is what re-checks the vendored copies at the NEW ref: the
+vendored-copy gate in `tests/` compares every file
+`scripts/vendored-manifest.yml` lists against the refreshed `.weisssrv-lib`
+checkout. A script the bump changed fails it, and the fix is to copy the new
+version out of `.weisssrv-lib/` and review the diff — never to edit the copy.
+A profile listed as a **fork** (`ruff.toml`, `.editorconfig`, `.gitleaks.toml`,
+`.gitlab/secret-detection-ruleset.toml`) fails differently: absorb the library's
+change into the fork, then set that entry's `reconciled_sha256` to the sha the
+failure prints.
+
 Each Terraform module caches its module source in its own `.terraform/`, so
 every one of them needs re-initialising after a ref bump —
 `task lint`'s `terraform:validate` uses a separate cache and will not refresh

@@ -220,6 +220,19 @@ include:
   # mapped to a deploy job or acknowledged in the conf). Deleting or renaming a
   # playbook touches ONLY that tree, so without it the gate is silent on the
   # exact change it exists for.
+  #
+  # test_vendored_byte_identity.py is the one suite here that needs the
+  # library itself: it runs the library's check-vendored-copies.py
+  # engine over scripts/vendored-manifest.yml and never skips, so
+  # `setup_command` clones the library at the pinned ref into
+  # $WEISSSRV_LIB_PATH (the job override below declares the path). The clone
+  # carries the JOB TOKEN rather than being anonymous, so a private library
+  # works too — it must then list this project on its CI/CD job-token
+  # allowlist. `apt_packages: ""` leaves no apt-get to install git, which is
+  # why the FULL python image (which ships it) is not optional here.
+  # `changes:` covers the whole of scripts/ for the same suite: every file
+  # there is a vendored copy or the site data one reads, and an edit to a
+  # vendored .sh must start the job that would catch it.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/test/python-tests.yml
@@ -228,17 +241,23 @@ include:
       image: python:3.13
       apt_packages: ""
       test_dir: "tests"
+      setup_command: 'mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/{{ lib_project }}.git" "$WEISSSRV_LIB_PATH"'
       changes:
         - "tests/**/*"
         - "kubernetes/**/*"
-        - "scripts/**/*.py"
+        - "scripts/**/*"
         - "ansible/requirements.yml"
         - "ansible/inventories/prod/hosts.yml"
         - "ansible/playbooks/**/*"
-        - "scripts/deploy-coverage.conf"
         - ".copier-answers.yml"
         - "Taskfile.yml"
         - "terraform/**/*.tf"
+        # The lint profiles the vendored-copy manifest declares as forks: an
+        # edit to one must run the gate that holds it against the library.
+        - "ruff.toml"
+        - ".editorconfig"
+        - ".gitleaks.toml"
+        - ".gitlab/secret-detection-ruleset.toml"
         - ".gitlab-ci.yml"
 
   - project: {{ lib_project }}
@@ -460,6 +479,20 @@ include:
 # ==============================================================================
 # Local jobs
 # ==============================================================================
+
+# Additive override of the library-generated python-tests job: the checkout path
+# its setup_command writes and tests/test_vendored_byte_identity.py reads.
+# Declared here rather than as an include input because that template exposes no
+# `variables` input. Inside the build directory (not /tmp) so the clone is
+# cleaned up with the workspace.
+python-tests:
+  # Repeats the include's `tags` input rather than inheriting it: a reader (and
+  # the template's render gate) sees only this file, where a job with no tag
+  # would land on the untagged runner. The value is the same on both sides, so
+  # the merge is a no-op.
+  tags: ["{{ runner_tag }}"]
+  variables:
+    WEISSSRV_LIB_PATH: "$CI_PROJECT_DIR/.tmp/weisssrv-lib"
 
 # The version-bump-bot below only reports pins that exist in
 # scripts/version-registry.py. A pin added to all.yml without an entry there is

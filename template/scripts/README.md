@@ -47,9 +47,19 @@ under review. `task lib:sync` clones the library at the pinned ref into
 
 The copies here are **byte-identical** to the library's at the pinned ref, and
 nothing above is forked or excluded from the comparison. That is what makes the
-refresh a mechanical `cp` and a diff review; the library's own gate compares
-them, so a local edit that has to survive belongs upstream in the library, not
-here.
+refresh a mechanical `cp` and a diff review.
+
+What holds them there is this repository's own manifest,
+[`vendored-manifest.yml`](vendored-manifest.yml): it names every library file
+this cluster carries — the scripts above, plus the lint profiles at the
+repository root and `.gitlab/secret-detection-ruleset.toml`, which no listing of
+this directory reaches — and `tests/test_vendored_byte_identity.py` runs the
+library's `check-vendored-copies.py` engine over it in `task lint` and the CI
+`python-tests` job. The list is **this repository's** to edit: the library
+publishes only an offer list of what may be vendored, so adding, moving or
+dropping a copy is a change to that file in the same commit, never a library
+release. A copy that drifts fails the gate, so a local edit that has to survive
+belongs upstream in the library, not here.
 
 Note on `check-default-deny-coverage.py`: it ships one built-in exemption
 (`flux-system`, universal to a Flux cluster), and a freshly generated cluster
@@ -80,6 +90,7 @@ one document for the tools that accept a single ConfigMap path.
 | `helm-values-releases.yaml` | `validate-helm-values.py` | Which HelmReleases are worth a `helm template` round-trip |
 | `deploy-coverage.conf` | `check-deploy-coverage.sh` | Playbooks deliberately not wired to a deploy job, each with a rationale |
 | `netpol-except.yaml` | `check-netpol-except-parity.py` | Egress rules that deliberately carry no peers, each with a rationale |
+| `vendored-manifest.yml` | the library's `check-vendored-copies.py`, via `tests/test_vendored_byte_identity.py` | Which files here (and at the repo root) are library copies, and which are declared forks |
 
 `hosts.env` ships empty: the host roster is the one thing the template cannot
 guess. Until you fill in `ansible/inventories/prod/hosts.yml` and run `task

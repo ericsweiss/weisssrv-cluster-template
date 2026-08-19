@@ -32,13 +32,14 @@ substitution in the shaped fixture and is only visible in a second, unlike one.
 | `version-coverage` | every pin in the rendered vars file has a `scripts/version-registry.py` entry. Both are template output, so an entry added to one `.jinja` and not the other renders a cluster whose weekly bump bot silently never reports that pin | — |
 | `versions-configmap` | the rendered `cluster-versions` ConfigMap matches the rendered vars file — `flux` substitutes FROM the ConfigMap, so a stale value is otherwise a valid render | — |
 | `vendored` | every script in the render's `scripts/` **and** in this repository's own `scripts/` is byte-identical to the library's copy, plus the library's vendored-copy engine (`scripts/check-vendored-copies.py`) run against this repository's own [`scripts/vendored-manifest.yml`](../scripts/vendored-manifest.yml). The own-`scripts/` half is what holds `scripts/semantic-release.py` — the file that cuts the tag a generated cluster's `copier update` resolves to — to the library at the ref the includes pin, and that half refuses to compare at all if those includes and `copier.yml`'s `lib_ref` default disagree. The manifest arm adds the copies no directory walk reaches — the canonical `tests/test_check_lib_pins.py` suite, the secret-detection ruleset under `.gitlab/`, and the lint profiles this repository deliberately forks — and compares them against the same checkout unconditionally (no ref guard: the engine itself announces which tree it compared). The list is consumer-owned — the library publishes only an offer list (`scripts/vendorable-paths.yml`) bounding what the manifest may name, so moving a copy here is an edit to the manifest in the same commit, not a library release | `--lib-path` |
+| `rendered-vendored` | the GENERATED cluster's own vendored-copy gate passes on its render: the library's engine over the render's [`scripts/vendored-manifest.yml`](../template/scripts/vendored-manifest.yml) rooted at the render (every listed copy identical, every declared fork — `ruff.toml`, `.editorconfig`, `.gitleaks.toml`, `.gitlab/secret-detection-ruleset.toml` — still divergent and still reconciled), that the manifest names every rendered script with a library twin, and that `tests/test_vendored_byte_identity.py` renders to read it. The `vendored` check above proves the copies are current *here*; this proves a generated cluster can prove it for *itself*, which is what the consumer-owned manifest bought — the library cannot gate a repository generated after its release | `--lib-path` |
 | `role-opt-ins` | no playbook invokes a `<role>_enabled: false` role without the inventory setting the flag — a role that runs and does nothing, successfully | `--lib-path` |
 | `role-inputs` | every input an invoked role *asserts* and has no **usable** default for is assigned in `inventories/prod`. "Usable" is decided by rendering the default against the inventory, not by reading it: `proxmox_lxc_nameserver` defaults to `{{ dns_servers \| default([]) \| join(' ') }}`, which is non-empty as text and empty as a value the moment `dns_servers` is unset | `--lib-path` |
 | `terraform-validate` | `terraform validate` per module against the library checkout, with each `git::…?ref=` source rewritten to it — otherwise the RELEASED module is what validates | `--lib-path`, `terraform` |
 | `ansible` | `ansible-playbook --syntax-check` on every rendered playbook, with `weisssrv.infra` resolved from the library | `ansible-playbook` |
 
-**`vendored`, `role-opt-ins`, `role-inputs` and `terraform-validate` are
-silently skipped without `--lib-path`** — they read the library's roles,
+**`vendored`, `rendered-vendored`, `role-opt-ins`, `role-inputs` and
+`terraform-validate` are silently skipped without `--lib-path`** — they read the library's roles,
 scripts and Terraform modules, so there is nothing to compare against. The validator prints `skipped (no --lib-path)` for each. A
 local run without it is therefore weaker than CI, which always passes one.
 
@@ -64,7 +65,7 @@ review.
 Requirements: `copier>=9`, `pytest`, `pyyaml` for the pytest suite; plus
 `yamllint`, `terraform`, `kustomize`, `kubeconform` and `ansible-playbook` for
 the validator. Any missing tool is reported by name. `--skip` takes any of
-`yamllint,terraform,flux,cluster-gates,ci-policy,inventory-addresses,version-coverage,versions-configmap,vendored,role-opt-ins,role-inputs,terraform-validate,ansible`
+`yamllint,terraform,flux,cluster-gates,ci-policy,inventory-addresses,version-coverage,versions-configmap,vendored,rendered-vendored,role-opt-ins,role-inputs,terraform-validate,ansible`
 — the same names `validate_render.py --help` prints, and the same order the
 table above lists them in. `test_ci_doc_lists_every_validator_check` holds the
 three together, so a check added to the registry without a row here fails the suite;
@@ -173,8 +174,9 @@ you reopen one, change this list in the same MR.
 - **Not every library script is vendored.** `template/scripts/` carries what a
   generated cluster's tasks and CI jobs actually invoke; the library's
   role-development and matrix-generation tooling stays out. `scripts/README.md`
-  in the render is the inventory, and the library's registry is what gates the
-  copies that do ship.
+  in the render is the human inventory, and the render's own
+  `scripts/vendored-manifest.yml` is the machine-checked one — the copies that
+  do ship are gated in the generated repository, by it, not from here.
 - **Agent guidance ships; agent settings do not.** A generated cluster gets
   `AGENTS.md`, `CLAUDE.md`, the `.claude/` skill and the `.cursor/` rule — all
   prose — but no `.claude/settings.json`. Permissions and hooks are per operator

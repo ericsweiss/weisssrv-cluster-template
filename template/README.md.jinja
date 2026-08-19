@@ -42,7 +42,12 @@ First time only, in this order. Each phase leaves a working state.
    placeholder), the pools and exports in `group_vars/nas.yml`, and the platform
    defaults in `group_vars/all.yml`. Then `task hosts:sync` and
    `task flux:sync-versions`, committing the generated files.
-4. **Gates** — `task lint` and `task ansible:ping` must both be clean.
+4. **Gates** — `task lib:sync`, then `task lint` and `task ansible:ping` must
+   both be clean. `lib:sync` clones weisssrv-lib at `{{ lib_ref }}` into
+   `.weisssrv-lib/`: it is the source the vendored `scripts/` copies are
+   refreshed from, and the checkout the vendored-copy gate inside `task lint`
+   compares them against — that gate never skips, so it fails rather than
+   passing quietly on a machine with no library to compare with.
 5. **Base layer** — `task infra:check`, then `task infra:deploy`, then
    `task infra:verify`. `infra:deploy` runs `site.yml`, which is the only entry
    point that orders the certificate plays before the NAS plays — use it on a

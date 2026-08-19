@@ -517,6 +517,127 @@ def _check_registered_copies(lib_path: Path) -> list[str]:
     return []
 
 
+RENDER_GATE_RELPATH = "tests/test_vendored_byte_identity.py"
+
+
+def check_rendered_vendored(render: Path, lib_path: Path | None) -> None:
+    """The GENERATED cluster's own vendored-copy gate must pass on its render.
+
+    `check_vendored` above proves the copies are current; this proves the
+    generated repository can prove that for itself, from the day it is created.
+    A cluster repository is edited by people who never see this template, and the
+    only thing standing between them and a hand-edited vendored script is the
+    manifest the render ships — which the library cannot supply, because it knows
+    nothing about a repository generated after its release. That is what makes a
+    consumer-owned manifest possible here at all.
+
+    Three arms, in the order their failures matter:
+
+    * the library's engine over the render's `scripts/vendored-manifest.yml`,
+      rooted at the render — every listed copy byte-identical, every declared
+      fork still divergent and still reconciled, and every `lib:` path inside the
+      library's offer list. Compared AT THE RENDER'S OWN PIN
+      (`variables.WEISSSRV_LIB_REF`, which is the `lib_ref` answer), exactly as
+      the shipped gate does, so a library working tree that has moved past the
+      tag the template pins is not reported as drift in the render;
+    * the manifest covers every rendered script that HAS a library twin. The
+      engine cannot see this: it validates what a manifest names, never what it
+      omits, so a script vendored into `template/scripts/` and never registered
+      would ship ungated;
+    * the gate script itself renders. Without it the manifest is a list nobody
+      reads, and the generated pipeline would go green on a drifted copy.
+    """
+    if not lib_path:
+        raise Failure("--lib-path is required to run the render's vendored-copy gate")
+    checker = lib_path / "scripts" / "check-vendored-copies.py"
+    if not checker.is_file():
+        raise Failure(
+            f"{lib_path} ships no scripts/check-vendored-copies.py — the render's "
+            "vendored-copy gate cannot run, and it must not silently skip"
+        )
+    manifest = render / MANIFEST_RELPATH
+    if not manifest.is_file():
+        raise Failure(
+            f"the render ships no {MANIFEST_RELPATH} — every copy it carries from the "
+            "library would go ungated in the generated repository"
+        )
+    if not (render / RENDER_GATE_RELPATH).is_file():
+        raise Failure(
+            f"the render ships {MANIFEST_RELPATH} but no {RENDER_GATE_RELPATH} — nothing "
+            "in the generated repository reads the manifest, so the copies are ungated "
+            "there however correct the list is"
+        )
+
+    ref = (render_cluster.load_ci(render / ".gitlab-ci.yml").get("variables") or {}).get(
+        "WEISSSRV_LIB_REF"
+    )
+    if not ref:
+        raise Failure(
+            "the render declares no variables.WEISSSRV_LIB_REF — the shipped gate reads "
+            "its pin from there, so it would have nothing to compare at"
+        )
+
+    problems: list[str] = []
+    argv = [
+        sys.executable,
+        str(checker),
+        "--manifest",
+        str(manifest),
+        "--repo-root",
+        str(render),
+        "--lib-path",
+        str(lib_path),
+    ]
+    result = _run(argv + ["--ref", str(ref)])
+    if result.returncode:
+        # The engine falls back to the working tree when the ref does not
+        # resolve, so a failure here is drift against whichever tree it names.
+        # Distinguish the case that reads identically and needs the opposite
+        # fix: copies that ARE current with the library's working tree while the
+        # template still pins an older tag — a bump, not a re-vendor.
+        hint = ""
+        if _run(argv).returncode == 0:
+            hint = (
+                f"\nThese copies match the library's working tree exactly, but the render "
+                f"pins {ref}. That is the expected state while a library tag is being cut; "
+                f"resolve it by bumping copier.yml's lib_ref default (and this "
+                f"repository's own includes) once the tag exists — never by re-vendoring "
+                f"backwards."
+            )
+        problems.append(f"the render's {MANIFEST_RELPATH}:\n{result.stdout}{result.stderr}{hint}")
+
+    listed = _run(argv + ["--list"])
+    if listed.returncode:
+        problems.append(f"the render's {MANIFEST_RELPATH} does not parse:\n{listed.stderr}")
+        registered: set[str] = set()
+    else:
+        registered = {
+            Path(parts[1]).name
+            for parts in (line.split("\t") for line in listed.stdout.splitlines())
+            if len(parts) >= 3
+        }
+
+    lib_names = {p.name for p in (lib_path / "scripts").iterdir() if p.is_file()}
+    unregistered = sorted(
+        path.name
+        for path in sorted((render / "scripts").iterdir())
+        if path.is_file()
+        and path.name in lib_names
+        and path.name not in registered
+        and path.suffix not in _SITE_DATA_SUFFIXES
+    )
+    if unregistered:
+        problems.append(
+            f"the render's scripts/ carries library twins that its {MANIFEST_RELPATH} does "
+            f"not name: {', '.join(unregistered)} — they ship to every generated cluster "
+            "ungated. Add them to template/scripts/vendored-manifest.yml."
+        )
+
+    if problems:
+        raise Failure("\n".join(problems))
+    print(f"  rendered vendored gate ok ({len(registered)} copies registered by the render)")
+
+
 def _assert_one_lib_ref() -> list[str]:
     """The template's own pipeline must pin the ref the fixtures resolve to.
 
@@ -1304,6 +1425,7 @@ RENDER_CHECKS = (
 # These take the library checkout as well, so they skip without --lib-path.
 LIB_CHECKS = (
     ("vendored", check_vendored),
+    ("rendered-vendored", check_rendered_vendored),
     ("role-opt-ins", check_role_opt_ins),
     ("role-inputs", check_required_role_inputs),
     ("terraform-validate", check_terraform_validate),

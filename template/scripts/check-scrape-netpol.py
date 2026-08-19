@@ -112,6 +112,40 @@ def _selects_observability(peer: dict, observability_ns: str) -> bool:
     return name_matched and not extra_requirements
 
 
+def _label_selector_is_api_valid(selector: object) -> bool:
+    """Structural validity of a LabelSelector — the COMPLETE check, so the
+    atomicity rule below cannot be dodged one level deeper: known keys, typed
+    terms, string label values, and well-formed matchExpressions entries.
+    Absent (None) is valid; the API rejects everything else malformed."""
+    if selector is None:
+        return True
+    if not isinstance(selector, dict) or set(selector) - {"matchLabels", "matchExpressions"}:
+        return False
+    labels = selector.get("matchLabels")
+    if labels is not None:
+        if not isinstance(labels, dict):
+            return False
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in labels.items()):
+            return False
+    exprs = selector.get("matchExpressions")
+    if exprs is not None:
+        if not isinstance(exprs, list):
+            return False
+        for expr in exprs:
+            if not isinstance(expr, dict) or set(expr) - {"key", "operator", "values"}:
+                return False
+            if not isinstance(expr.get("key"), str):
+                return False
+            if expr.get("operator") not in ("In", "NotIn", "Exists", "DoesNotExist"):
+                return False
+            values = expr.get("values")
+            if values is not None and not (
+                isinstance(values, list) and all(isinstance(v, str) for v in values)
+            ):
+                return False
+    return True
+
+
 def _rule_ipblocks_cover_both_families(peers: list) -> bool:
     """True when the rule's unexcepted zero-prefix ipBlock peers span IPv4 AND
     IPv6 — together they admit every address, the scraper's included,
@@ -120,32 +154,45 @@ def _rule_ipblocks_cover_both_families(peers: list) -> bool:
     """
     families: set[int] = set()
     for peer in peers or []:
-        # A single invalid peer rejects the WHOLE policy at the API — two
-        # valid /0 peers beside it must not credit a rule that never applies.
+        # ATOMICITY: any invalid shape anywhere in the rule rejects the WHOLE
+        # policy at the API, so it disqualifies the credit outright — only a
+        # peer that is VALID but simply not contributing (a selector peer, a
+        # narrowing block) is skipped.
         if not isinstance(peer, dict) or set(peer) - {"ipBlock", "namespaceSelector", "podSelector"}:
             return False
         ip_block = peer.get("ipBlock")
-        # The API rejects a peer combining ipBlock with a selector, and an
-        # `except` of any non-empty-list shape (including the falsey `{}`)
-        # is either narrowing or invalid — none of those may count toward
-        # the credit.
-        if not isinstance(ip_block, dict):
+        if ip_block is None:
+            # A selector peer contributes nothing here — but only a VALID one
+            # may be skipped: a malformed selector rejects the whole policy,
+            # and skipping it would let sibling /0 peers credit a rule that
+            # never applies.
+            if not _label_selector_is_api_valid(
+                peer.get("namespaceSelector")
+            ) or not _label_selector_is_api_valid(peer.get("podSelector")):
+                return False
             continue
-        if peer.get("namespaceSelector") is not None or peer.get("podSelector") is not None:
-            continue
-        # Same rule one level down: an `exept:` typo would read as an
-        # unexcepted block and credit a peer the API rejects.
-        if set(ip_block) - {"cidr", "except"}:
-            continue
+        if (
+            not isinstance(ip_block, dict)
+            or set(ip_block) - {"cidr", "except"}
+            or peer.get("namespaceSelector") is not None
+            or peer.get("podSelector") is not None
+        ):
+            # Wrong type, unknown keys (`exept:`), or the ipBlock+selector
+            # combination — all API-invalid: poison, not skip.
+            return False
         excepts = ip_block.get("except")
-        if excepts is not None and excepts != []:
-            continue
+        if excepts is not None and not isinstance(excepts, list):
+            # `except: {}` and friends are invalid shapes, not narrowing.
+            return False
         # A real parse, not a `:` sniff: crediting is the fail-OPEN direction
         # here, so only a cidr the API itself would accept may count —
         # `garbage/0` must not pass as IPv4.
         try:
             net = ipaddress.ip_network(str(ip_block.get("cidr") or "").strip(), strict=False)
         except ValueError:
+            return False
+        if excepts:
+            # A valid, non-empty except list narrows — skip, don't poison.
             continue
         if net.prefixlen == 0:
             families.add(net.version)

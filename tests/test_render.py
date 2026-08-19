@@ -1018,17 +1018,58 @@ def test_relative_markdown_links_resolve(cluster):
 # --------------------------------------------------------------------------
 
 
+VENDORED_MANIFEST = "scripts/vendored-manifest.yml"
+RENDER_VENDORED_GATE = "tests/test_vendored_byte_identity.py"
+
+
+def _lib_checkout() -> Path | None:
+    """A weisssrv-lib checkout this machine can reach, or None.
+
+    Only `tests/validate_render.py` takes `--lib-path`; this suite has no such
+    argument, so a checkout is discovered the way the RENDER's own gate
+    discovers one — `$WEISSSRV_LIB_PATH` first, then a sibling clone.
+    """
+    candidates = []
+    explicit = os.environ.get("WEISSSRV_LIB_PATH")
+    if explicit:
+        candidates.append(Path(explicit))
+    candidates.append(REPO_ROOT.parent / "weisssrv-lib")
+    for candidate in candidates:
+        if (candidate / "scripts" / "check-vendored-copies.py").is_file():
+            return candidate
+    return None
+
+
 def test_generated_repo_passes_its_own_invariants(cluster):
     tests_dir = cluster.path / "tests"
     # Hard failure, not a skip: this gate's whole value is that a generated
     # cluster runs its own invariants, and a render that stopped shipping tests/
     # would silently switch it off rather than report the regression.
     assert tests_dir.is_dir(), "the render ships no tests/ — this gate ran nothing"
+    gate = tests_dir / RENDER_VENDORED_GATE.split("/")[-1]
+    assert gate.is_file(), (
+        f"the render ships no {RENDER_VENDORED_GATE} — its vendored copies would be "
+        "ungated in the generated repository"
+    )
     env = dict(os.environ)
     # Do not let this run's cache/rootdir config leak into the nested run.
     env.pop("PYTEST_CURRENT_TEST", None)
+    argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(tests_dir)]
+    # The render's vendored-copy gate never skips — it compares against a library
+    # checkout or fails. That is right in a cluster repository and wrong here:
+    # this suite is the structural one, run in a job that clones nothing. So the
+    # checkout is passed through when the machine has one (a local run then
+    # exercises the shipped gate end to end), and the file is deselected by NAME
+    # when it does not. Byte-identity itself is never left to this path:
+    # `validate_render.py`'s `rendered-vendored` check runs the same engine over
+    # the same manifest, and render-validate always has `--lib-path`.
+    lib = _lib_checkout()
+    if lib:
+        env["WEISSSRV_LIB_PATH"] = str(lib)
+    else:
+        argv.append(f"--ignore={gate}")
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(tests_dir)],
+        argv,
         cwd=cluster.path,
         capture_output=True,
         text=True,
@@ -1037,6 +1078,102 @@ def test_generated_repo_passes_its_own_invariants(cluster):
     )
     assert result.returncode == 0, (
         "the generated repository fails its own invariants:\n" + result.stdout + result.stderr
+    )
+
+
+def _manifest_copies(path: Path) -> set[tuple[str, str, str]]:
+    """(kind, consumer path, library path) for every entry in a manifest.
+
+    Deliberately re-parsed here rather than shelled out to the library engine:
+    this suite must run with PyYAML alone, and what it asserts is the manifest's
+    CONTENT, not the byte-identity the engine checks.
+    """
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(doc, dict), f"{path} must contain a mapping"
+    assert not set(doc) - {"vendored", "forked"}, (
+        f"{path} has sections the library engine does not know: "
+        f"{sorted(set(doc) - {'vendored', 'forked'})} — a misspelled one is silently ungated"
+    )
+    copies = set()
+    for kind in ("vendored", "forked"):
+        entries = doc.get(kind) or []
+        assert isinstance(entries, list), f"{path}: `{kind}:` must be a list"
+        for entry in entries:
+            if isinstance(entry, str):
+                copies.add((kind, entry, entry))
+                continue
+            assert isinstance(entry, dict) and entry.get("lib"), (
+                f"{path}: a {kind} entry needs a `lib:` path — got {entry!r}"
+            )
+            copies.add((kind, str(entry.get("consumer") or entry["lib"]), str(entry["lib"])))
+    return copies
+
+
+def test_render_manifest_covers_exactly_the_library_copies_it_ships(cluster):
+    """The generated cluster's manifest must name every library copy it carries.
+
+    The engine validates what a manifest NAMES; it cannot see what one omits, so
+    an unregistered copy ships ungated — the exact failure the gate exists to
+    prevent. This is the omission half, mirroring the smoke test the reference
+    cluster runs against its own manifest, and it holds the two manifests
+    together: a library script vendored into `template/scripts/` is registered
+    HERE (against the template's copy) and THERE (against the render's), and
+    this fails when only one of the two happens.
+
+    Byte-identity is not asserted here — that needs the library, and
+    `validate_render.py`'s `vendored` / `rendered-vendored` checks do it.
+    """
+    manifest = cluster.path / VENDORED_MANIFEST
+    assert manifest.is_file(), (
+        f"the render ships no {VENDORED_MANIFEST} — every file it copies from the "
+        "library would be ungated in the generated repository"
+    )
+    rendered = _manifest_copies(manifest)
+
+    # This repository's own manifest is the authority on which files under
+    # template/ are library copies, and it is itself gated against the library
+    # (validate_render's `vendored` check), so it can stand in for a library
+    # checkout this suite does not have.
+    template_copies = {
+        (kind, consumer[len("template/") :], lib)
+        for kind, consumer, lib in _manifest_copies(REPO_ROOT / VENDORED_MANIFEST)
+        if consumer.startswith("template/scripts/")
+    }
+    missing = sorted(consumer for _kind, consumer, _lib in template_copies - rendered)
+    assert not missing, (
+        "template/scripts/vendored-manifest.yml does not register copies this "
+        f"repository's own manifest declares: {missing} — they ship to every generated "
+        "cluster ungated"
+    )
+
+    # The reverse: a manifest entry is a claim about the render's layout.
+    absent = sorted(
+        consumer
+        for _kind, consumer, _lib in rendered
+        if not (cluster.path / consumer).is_file()
+    )
+    assert not absent, (
+        f"the render's {VENDORED_MANIFEST} names files the render does not ship: {absent}"
+    )
+
+    # And the other way round for `scripts/`: a manifest that claims a file is a
+    # library copy when the template vendors no such thing — site data
+    # registered by mistake — holds that file to bytes it was never taken from.
+    invented = sorted(
+        f"{consumer} (from {lib})"
+        for kind, consumer, lib in rendered - template_copies
+        if kind == "vendored" and consumer.startswith("scripts/")
+    )
+    assert not invented, (
+        f"the render's {VENDORED_MANIFEST} registers copies this repository does not "
+        f"vendor into template/scripts/: {invented}"
+    )
+
+    forks = {consumer for kind, consumer, _lib in rendered if kind == "forked"}
+    assert forks, (
+        f"the render's {VENDORED_MANIFEST} declares no forks — the lint profiles it "
+        "ships (ruff.toml, .editorconfig) are forks of the library's, and dropping "
+        "them from the manifest is how the library moves under them unnoticed"
     )
 
 

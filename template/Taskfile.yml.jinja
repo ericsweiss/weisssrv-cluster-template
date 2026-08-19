@@ -1147,14 +1147,24 @@ tasks:
       - python3 scripts/check-netpol-except-parity.py --config scripts/netpol-except.yaml kubernetes/
 
   lint:invariants:
-    desc: Assert the inventory and Flux wiring hold together (tests/)
+    desc: Assert the inventory, the Flux wiring and the vendored copies hold together (tests/)
     # The inventory is hand-edited, so duplicate addresses and vmids, an address
     # outside lan_cidr and a ${placeholder} with no ConfigMap entry are all one
     # typo away — and every one of them survives yamllint and flux:lint. This is
     # the gate that catches them before a deploy rather than after a push.
+    #
+    # tests/test_vendored_byte_identity.py runs in the same suite and needs the
+    # library checkout `lib:sync` creates — it compares every copy listed in
+    # scripts/vendored-manifest.yml against weisssrv-lib at the pinned ref and
+    # never skips, so it says "run task lib:sync" rather than passing quietly on
+    # a machine that has no library to compare against.
     preconditions:
       - sh: python3 -c "import pytest" 2>/dev/null
         msg: "pytest not installed (pip install pytest pyyaml)"
+      # The three places the gate itself looks, in its order — a precondition
+      # that failed where the gate would have succeeded is a false alarm.
+      - sh: test -n "$WEISSSRV_LIB_PATH" || test -d "{{.LIB_DIR}}/.git" || test -d ../weisssrv-lib
+        msg: "no weisssrv-lib checkout for the vendored-copy gate. Run: task lib:sync"
     cmds:
       - python3 -m pytest tests -q
 

@@ -23,7 +23,7 @@ next to `weisssrv-lib`, `weisssrv-app-template` and a generated cluster, and
 | CI runner `concurrent` or either ResourceQuota | [partials/ci-sizing.jinja](partials/ci-sizing.jinja) — the capacity model for BOTH tiers, imported by all four manifests; `tests/test_render.py` § CI runner sizing holds it to the reference cluster |
 | a backend seam (git / secrets / storage / dns) | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § Backend seams, and weisssrv-lib `docs/EXTENSIBILITY.md` |
 | the library pin | [docs/VERSIONING.md](docs/VERSIONING.md) — the default, the fixture, this repo's `include:` refs and the validated-pair table move in one MR |
-| a vendored script under `scripts/` or `template/scripts/` | [docs/CI.md](docs/CI.md) — these are byte-identical copies of weisssrv-lib's; fix them THERE, tag, re-vendor |
+| a vendored script under `scripts/` or `template/scripts/` | [docs/CI.md](docs/CI.md) — these are byte-identical copies of weisssrv-lib's; fix them THERE, tag, re-vendor. TWO manifests register them: `scripts/vendored-manifest.yml` for this repository's copies, `template/scripts/vendored-manifest.yml` for the ones every generated cluster carries — adding or moving a copy edits both |
 | CI | [docs/CI.md](docs/CI.md) |
 | operator prose | [docs/PRE-SETUP.md](docs/PRE-SETUP.md), [docs/SETUP.md](docs/SETUP.md), [docs/RUNBOOKS.md](docs/RUNBOOKS.md) |
 
