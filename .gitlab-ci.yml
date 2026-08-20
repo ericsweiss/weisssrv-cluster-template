@@ -52,7 +52,7 @@ variables:
   # a literal and scripts/check-lib-pins.py (vendored from the library) fails the
   # pipeline if they drift from it or pin a branch. Bump here, then
   # `scripts/check-lib-pins.py --fix`.
-  WEISSSRV_LIB_REF: "v0.11.0"
+  WEISSSRV_LIB_REF: "v0.12.1"
   COPIER_VERSION: "9.17.0"
   PYYAML_VERSION: "6.0.2"
   YAMLLINT_VERSION: "1.38.0"
@@ -71,7 +71,7 @@ include:
   # Jinja sources, not documents. The render-validate job below yamllints the
   # rendered tree, which is where template/ actually gets covered.
   - project: eric/weisssrv-lib
-    ref: v0.11.0
+    ref: v0.12.1
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: []
@@ -86,7 +86,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.11.0
+    ref: v0.12.1
     file: /ci/lint/python-lint.yml
     inputs:
       tags: []
@@ -105,7 +105,7 @@ include:
   # The shell the template ships is static (no .jinja suffix), so it can be
   # checked in place rather than only after a render.
   - project: eric/weisssrv-lib
-    ref: v0.11.0
+    ref: v0.12.1
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: []
@@ -118,7 +118,7 @@ include:
   # copier.yml schema checks + the full render invariants. Everything in the
   # repository feeds the render, hence the catch-all `changes`.
   - project: eric/weisssrv-lib
-    ref: v0.11.0
+    ref: v0.12.1
     file: /ci/test/python-tests.yml
     inputs:
       tags: []
@@ -132,7 +132,7 @@ include:
   # Self-application: the template ships this gate into every generated cluster,
   # and its own docs carry the same relative cross-links.
   - project: eric/weisssrv-lib
-    ref: v0.11.0
+    ref: v0.12.1
     file: /ci/lint/docs-link-check.yml
     inputs:
       tags: []
@@ -147,7 +147,7 @@ include:
   # freshly generated cluster would be pinned to. Soft-fail: rc 1 is "updates
   # available".
   - project: eric/weisssrv-lib
-    ref: v0.11.0
+    ref: v0.12.1
     file: /ci/maintenance/version-check.yml
     inputs:
       tags: []
@@ -167,13 +167,13 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.11.0
+    ref: v0.12.1
     file: /ci/security/secret-detection.yml
     inputs:
       tags: []
 
   - project: eric/weisssrv-lib
-    ref: v0.11.0
+    ref: v0.12.1
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []
@@ -197,7 +197,7 @@ include:
   # tag on every job here. Policy and the major_on_zero decision:
   # docs/VERSIONING.md.
   - project: eric/weisssrv-lib
-    ref: v0.11.0
+    ref: v0.12.1
     file: /ci/release/semantic-release.yml
     inputs:
       tags: []
