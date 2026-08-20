@@ -12,7 +12,7 @@ data:
   coredns_tailnet_version: 1.14.6
 {%- endif %}
 {%- if git_backend == 'gitlab_selfhosted' %}
-  gitlab_runner_helm_version: 0.91.2
+  gitlab_runner_helm_version: 0.92.0
 {%- endif %}
   helm_chart_versions_alloy: 1.11.1
   helm_chart_versions_cert_manager: v1.21.1
@@ -23,7 +23,7 @@ data:
   helm_chart_versions_loki: 18.9.0
   helm_chart_versions_metallb: 0.15.3
 {%- if gpu == 'nvidia' %}
-  helm_chart_versions_nvidia_device_plugin: 0.19.3
+  helm_chart_versions_nvidia_device_plugin: 0.20.0
 {%- endif %}
   helm_chart_versions_onepassword_connect: 2.4.1
   helm_chart_versions_prometheus_blackbox_exporter: 11.17.2
@@ -43,7 +43,7 @@ data:
   postgresql_version: 18.6-trixie
   registry_cache_version: 3.1.1
 {%- if vpn_tailscale %}
-  tailscale_version: 1.102.2
+  tailscale_version: 1.102.3
 {%- endif %}
 kind: ConfigMap
 metadata:

@@ -189,7 +189,7 @@ alloy_host_version: "1.18.1-1"    # apt package version, not the chart version
 # apt package on every tailnet host (`apt install tailscale=<pin>`), read by
 # playbooks/maintenance/update-applications.yml from a tasks-only play where the
 # role default is out of scope. Distinct from helm_chart_versions.tailscale_operator.
-tailscale_version: "1.102.2"
+tailscale_version: "1.102.3"
 {%- endif %}
 
 k3s_version: "v1.36.3+k3s1"
@@ -233,7 +233,7 @@ helm_chart_versions:
   tailscale_operator: "1.102.2"
 {%- endif %}
 {%- if gpu == 'nvidia' %}
-  nvidia_device_plugin: "0.19.3"
+  nvidia_device_plugin: "0.20.0"
 {%- endif %}
 
 # App-module pins (kubernetes/apps/). Same mechanism, separate block: these move
@@ -257,5 +257,5 @@ coredns_tailnet_version: "1.14.6"
 
 # GitLab Runner chart, shared by both runner tiers.
 # https://gitlab.com/gitlab-org/charts/gitlab-runner/tags
-gitlab_runner_helm_version: "0.91.2"
+gitlab_runner_helm_version: "0.92.0"
 {%- endif %}
