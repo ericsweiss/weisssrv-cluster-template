@@ -65,10 +65,14 @@ locals {
     }
   }
 
-  # One zone per VLAN. Inter-zone traffic is denied by default, so every
-  # allowance is an explicit policy below and nothing depends on rule ORDER,
-  # which this provider cannot set. The LAN stays in the controller's built-in
-  # `Internal` zone; the key here is the zone's display name in the UI.
+  # One zone per VLAN. Traffic BETWEEN custom zones is denied by default, so
+  # every allowance is an explicit policy below and nothing depends on rule
+  # ORDER, which this provider cannot set. The LAN stays in the controller's
+  # built-in `Internal` zone; the key here is the zone's display name in the UI.
+  #
+  # The default-deny is NOT universal: every zone is allowed to the built-in
+  # `Gateway` and `External` zones out of the box, which is why the BLOCK
+  # policies below exist. Any VLAN you add needs its own copy of them.
   zones = {
     iot   = { networks = ["iot"] }
     guest = { networks = ["guest"] }
@@ -100,15 +104,98 @@ locals {
       source      = { zone = "internal" }
       destination = { zone = "iot" }
     },
+
+    # ---- Gateway hardening ----
+    #
+    # UniFi allows every zone -> Gateway by DEFAULT, and on a Cloud Gateway the
+    # console (and therefore the Network application, and therefore the local
+    # admin whose API key rewrites this whole file) is a gateway service on
+    # EVERY VLAN's own gateway address. Anyone with the guest WLAN PSK
+    # otherwise gets an unthrottled login form at https://10.0.40.1.
+    #
+    # tcp only, and only the console ports: DHCP is broadcast before the client
+    # has an address and is unaffected, and ICMP to the gateway stays up for
+    # troubleshooting.
+    {
+      name        = "guest-to-gateway-mgmt"
+      action      = "BLOCK"
+      protocol    = "tcp"
+      logging     = true
+      source      = { zone = "guest" }
+      destination = { zone = "gateway", port = "22,80,443" }
+    },
+    {
+      name        = "iot-to-gateway-mgmt"
+      action      = "BLOCK"
+      protocol    = "tcp"
+      logging     = true
+      source      = { zone = "iot" }
+      destination = { zone = "gateway", port = "22,80,443" }
+    },
+
+    # The gateway also answers DNS on each VLAN's own address, so a client that
+    # ignores DHCP option 6 and falls back to its gateway resolves past the
+    # cluster resolvers entirely. These zones are handed `local.dns_ips` and
+    # need nothing else, so close that path too.
+    {
+      name        = "guest-to-gateway-dns"
+      action      = "BLOCK"
+      protocol    = "tcp_udp"
+      logging     = true
+      source      = { zone = "guest" }
+      destination = { zone = "gateway", port = "53,853" }
+    },
+    {
+      name        = "iot-to-gateway-dns"
+      action      = "BLOCK"
+      protocol    = "tcp_udp"
+      logging     = true
+      source      = { zone = "iot" }
+      destination = { zone = "gateway", port = "53,853" }
+    },
+
+    # ---- DNS containment ----
+    #
+    # DHCP option 6 is a suggestion. Chromecast/Google Home hardware queries
+    # 8.8.8.8 regardless, and most smart TVs ship a vendor resolver — so
+    # without these the VLANs that are supposed to be filtered and logged by
+    # this cluster's resolvers are the ones most likely to bypass them.
+    # Blocking :53 and :853 to External forces `local.dns_ips` or nothing.
+    #
+    # DoH on :443 is NOT covered — it is indistinguishable from ordinary HTTPS
+    # at this layer and closing it needs the IDS/IPS or a blocklist. The LAN
+    # itself is exempt: the resolvers have to reach the internet.
+    {
+      name        = "guest-to-external-dns"
+      action      = "BLOCK"
+      protocol    = "tcp_udp"
+      logging     = true
+      source      = { zone = "guest" }
+      destination = { zone = "external", port = "53,853" }
+    },
+    {
+      name        = "iot-to-external-dns"
+      action      = "BLOCK"
+      protocol    = "tcp_udp"
+      logging     = true
+      source      = { zone = "iot" }
+      destination = { zone = "external", port = "53,853" }
+    },
   ]
 
   # Every SSID is WPA-PSK on 2.4 + 5 GHz — 6 GHz fails WLAN creation on this
   # provider (upstream #406), so enable that band in the UI if you need it.
   # Passphrases arrive as variables from the secret store; nothing here is a
   # literal.
+  #
+  # `cluster_name` is truncated because an 802.11 SSID is at most 32 BYTES and
+  # copier allows a 32-character cluster_name, so an untruncated name plus
+  # `-guest` reaches 38 bytes and is rejected mid-apply, after the networks and
+  # zones are already written.
+  # Rename these to whatever the site should advertise — nothing keys off them.
   wlans = {
     iot = {
-      ssid       = "{{ cluster_name }}-iot"
+      ssid       = "{{ cluster_name[:26] }}-iot"
       network    = "iot"
       passphrase = var.wlan_passphrase_iot
       # ESP32/Kasa-class gear: plain WPA2 with PMF disabled, and no steering of
@@ -118,7 +205,7 @@ locals {
       allow_2ghz_high_perf = true
     }
     guest = {
-      ssid       = "{{ cluster_name }}-guest"
+      ssid       = "{{ cluster_name[:26] }}-guest"
       network    = "guest"
       passphrase = var.wlan_passphrase_guest
       # Guests reach the gateway and the internet, never each other.

@@ -15,15 +15,22 @@ touches the cluster: this is the layer *below* it.
 | `networks.default` | The flat LAN, {{ lan_cidr }}, gateway {{ lan_gateway }}, DHCP {{ lan_prefix }}.170-.254 | Only if your address plan differs from the one the inventory ships |
 | `networks.iot` / `networks.guest` | An EXAMPLE pair of VLANs (30, 40) on 10.0.30.0/24 and 10.0.40.0/24 | **Yes** — they describe a shape, not your site |
 | `zones` | One zone per VLAN; the LAN stays in the built-in `Internal` | Follow the pattern for any VLAN you add |
-| `policies` | DNS out of each VLAN, plus LAN → IoT | **Yes** — each one is an allowance against a default deny |
-| `wlans` | `{{ cluster_name }}-iot` (WPA2, no band steering) and `{{ cluster_name }}-guest` (isolated) | **Yes** — SSIDs and their vault items |
+| `policies` | DNS out of each VLAN, LAN → IoT, and the BLOCKs that close each VLAN's path to the gateway console, to the gateway's own resolver and to external DNS | **Yes** — the ALLOWs are allowances against the zone-to-zone default deny; the BLOCKs exist because zone → Gateway and zone → External are allowed by default, so **any VLAN you add needs its own copy of all three** |
+| `wlans` | `{{ cluster_name[:26] }}-iot` (WPA2, no band steering) and `{{ cluster_name[:26] }}-guest` (isolated) | **Yes** — SSIDs and their vault items |
 | `clients` | Empty — a MAC cannot be derived from an answer | Add reservations as you enumerate the site |
 | `port_forwards` | 80 and 443 to the public ingress VIP {{ metallb_public_vip }} | Add one per service that is not behind Traefik |
 | `site_settings` | The hardened posture pinned explicitly (no unattended firmware upgrades, no "network optimization", UPnP off), IGMP snooping for IoT, IDS in detection-only mode | `ips_mode` once the site has a traffic baseline |
 
-Zone-per-VLAN is the design, not a style: inter-zone traffic is denied by
-default, so every allowance is one visible entry and nothing depends on rule
+Zone-per-VLAN is the design, not a style: traffic between custom zones is denied
+by default, so every allowance is one visible entry and nothing depends on rule
 ORDER — which this provider cannot set at all.
+
+The default-deny stops at the built-in zones. Every zone is allowed to `Gateway`
+and to `External` out of the box, which on a Cloud Gateway means the console
+login form on each VLAN's own gateway address, the gateway's DNS forwarder, and
+any public resolver a device prefers over the ones DHCP hands it. The three
+BLOCK families in `policies` close those paths per VLAN — copy them for every
+VLAN you add, because nothing else will.
 
 ## Before the first apply
 
