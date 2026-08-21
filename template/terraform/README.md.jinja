@@ -1,7 +1,8 @@
 # terraform/
 
-The state that lives *outside* the cluster: the public DNS zone, the SSO object
-inventory{% if vpn_tailscale %}, the tailnet policy{% endif %}{% if use_unifi %}, and the gateway's own networks{% endif %}. Everything
+The state that lives *outside* the cluster: the public DNS zone{% if vpn_tailscale or use_unifi %}, the SSO
+object inventory{% else %} and the SSO
+object inventory{% endif %}{% if vpn_tailscale %}{% if use_unifi %}, the tailnet policy{% else %} and the tailnet policy{% endif %}{% endif %}{% if use_unifi %} and the gateway's own networks{% endif %}. Everything
 inside the cluster is Flux's, and nothing here creates a Kubernetes object.
 
 | Module | Manages | State name | Apply |
@@ -25,10 +26,10 @@ file in the module directory. Upgrading the platform is a ref bump plus a plan.
   independently, and a shared state would serialize unrelated changes.
 - **Commit `.terraform.lock.hcl`.** It pins the exact provider builds; a fresh
   `init` without it can silently pick up a newer patch.
-- **No `-auto-approve` for the SSO{% if vpn_tailscale %}, tailnet{% endif %}{% if use_unifi %} or gateway{% endif %}
-  module.** Those tasks refuse the flag: a bad apply locks users out{% if vpn_tailscale %},
-  severs remote access{% endif %}{% if use_unifi %} or leaves a LAN nobody can reach the console
-  from{% endif %}, and the plan review is the control.
+- **No `-auto-approve` for the SSO{% if vpn_tailscale %}{% if use_unifi %}, tailnet{% else %} or tailnet{% endif %}{% endif %}{% if use_unifi %} or gateway{% endif %}
+  module.** Those tasks refuse the flag: a bad apply locks users out{% if vpn_tailscale %}{% if use_unifi %},
+  severs remote access{% else %} or severs remote access{% endif %}{% endif %}{% if use_unifi %} or leaves a LAN nobody can reach the
+  console from{% endif %}, and the plan review is the control.
 
 ## State backend
 

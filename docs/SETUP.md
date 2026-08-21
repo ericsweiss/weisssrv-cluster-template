@@ -530,12 +530,13 @@ Once the platform is Ready:
    that forward is already declared in `terraform/unifi/networks.tf`, together
    with the gateway's networks, zones and WLANs. It is a fourth module with its
    own state and its own supervised apply, and the console already holds
-   objects it has to adopt: read `terraform/unifi/README.md`, run the imports
-   it lists, then:
+   objects it has to adopt: read `terraform/unifi/README.md`, then init, run
+   the imports it lists (they need an initialized backend), and only then plan:
    ```bash
    task terraform:unifi-init
+   task terraform:unifi-import -- <address> <id>   # once per pre-existing object
    task terraform:unifi-plan     # read every line
-   task terraform:unifi-apply    # refuses -auto-approve on purpose
+   task terraform:unifi-apply    # terminal only, refuses -auto-approve
    ```
    Take a `.unf` backup of the console first and keep a wired path to it open
    until the plan applies clean — this module writes the segmentation the

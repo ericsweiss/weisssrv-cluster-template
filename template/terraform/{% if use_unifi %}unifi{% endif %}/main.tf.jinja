@@ -4,9 +4,22 @@
 module "network" {
   source = "git::{{ lib_url }}//terraform/modules/unifi-network?ref={{ lib_ref }}"
 
-  networks      = local.networks
-  zones         = local.zones
-  policies      = local.policies
+  networks = local.networks
+  zones    = local.zones
+  policies = local.policies
+
+  # Built-in zone DISPLAY NAMES on this console, passed explicitly rather than
+  # inherited from the module defaults: they are locale- and
+  # controller-dependent, `internal` is what every `*-to-dns` policy resolves
+  # against, and a library default change must never repoint a live policy on a
+  # `lib_ref` bump. Confirm them against the console before the first apply
+  # (README § Before the first apply) and edit them HERE if they differ.
+  builtin_zone_names = {
+    internal = "Internal"
+    external = "External"
+    gateway  = "Gateway"
+  }
+
   wlans         = local.wlans
   clients       = local.clients
   port_forwards = local.port_forwards

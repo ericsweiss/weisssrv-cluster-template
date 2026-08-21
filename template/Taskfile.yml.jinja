@@ -1064,6 +1064,45 @@ tasks:
     cmds:
       - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
 
+  terraform:unifi-import:
+    desc: "Adopt one pre-existing console object into state (read-only against the console; writes only Terraform state) — usage: task terraform:unifi-import -- <address> <id>"
+    dir: "{{.TERRAFORM_DIR}}/unifi"
+    env: *tf_unifi_env
+    preconditions: *tf_preconditions
+    cmds:
+      # No import.sh counterpart to authentik's: that root imports a fixed
+      # inventory, while the UniFi ids are read off the live console one object
+      # at a time, so the address and id arrive as CLI_ARGS. Required before the
+      # first apply and after a state loss — an apply with empty state plans
+      # creates against objects that already exist and fails part-way on the
+      # unique-name constraints. The ordered sequence is
+      # terraform/unifi/README.md § Before the first apply.
+      - |
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Usage: task terraform:unifi-import -- <address> <id>"
+          echo "Example: task terraform:unifi-import -- 'module.network.unifi_network.this[\"default\"]' name=Default"
+          exit 1
+        fi
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform import {{.CLI_ARGS}}
+
+  terraform:unifi-state:
+    desc: "Run a `terraform state` subcommand against the gateway module's state — usage: task terraform:unifi-state -- rm 'module.network.unifi_network.this[\"iot\"]'"
+    dir: "{{.TERRAFORM_DIR}}/unifi"
+    env: *tf_unifi_env
+    preconditions: *tf_preconditions
+    cmds:
+      # State-only: `list`, `show` and `rm` never reach the console, but they do
+      # need the HTTP backend credentials this anchor carries, so a bare
+      # `terraform state ...` answers 401 instead. `rm` stops managing an object
+      # and leaves it live — terraform/unifi/README.md § Renaming and removing.
+      - |
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Usage: task terraform:unifi-state -- <subcommand> [args]"
+          echo "Example: task terraform:unifi-state -- rm 'module.network.unifi_network.this[\"iot\"]'"
+          exit 1
+        fi
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform state {{.CLI_ARGS}}
+
   terraform:unifi-apply:
     desc: "SUPERVISED: apply gateway network changes — a bad apply is a LAN you cannot reach the console from"
     dir: "{{.TERRAFORM_DIR}}/unifi"
@@ -1072,14 +1111,29 @@ tasks:
     cmds:
       # Back the controller up (.unf export) before an apply that touches
       # networks or zones; read terraform/unifi/README.md first.
+      #
+      # Stricter than the sibling supervised applies on purpose: this module
+      # owns every VLAN, the zone-based firewall and the SSIDs, so an unreviewed
+      # apply can sever routing to the console itself and recovery is then
+      # physical. Hence a TTY requirement (no pipeline, no `yes |`) and a typed
+      # confirmation on top of the refused flag.
       - |
+        set -eu
+        if [ ! -t 0 ]; then
+          echo "ERROR: terraform:unifi-apply is a supervised operator step; run it from a terminal." >&2
+          exit 2
+        fi
         case " {{.CLI_ARGS}} " in
           *-auto-approve*)
-            echo "Refusing -auto-approve: this apply is supervised. Review the plan and type 'yes'." >&2
+            echo "Refusing -auto-approve: this apply is supervised. Review the plan and confirm at the prompt." >&2
             exit 1
             ;;
         esac
-        {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
+        echo "About to apply terraform/unifi — this rewrites live VLANs, firewall zones/policies and WLANs."
+        printf 'Type "apply" to continue: '
+        read -r confirm
+        [ "$confirm" = "apply" ] || { echo "Aborted."; exit 1; }
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
 {% endraw %}{% endif %}{% raw %}
   terraform:fmt:
     desc: Format every Terraform module

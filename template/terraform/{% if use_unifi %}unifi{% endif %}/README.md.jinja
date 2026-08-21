@@ -19,7 +19,7 @@ touches the cluster: this is the layer *below* it.
 | `wlans` | `{{ cluster_name }}-iot` (WPA2, no band steering) and `{{ cluster_name }}-guest` (isolated) | **Yes** — SSIDs and their vault items |
 | `clients` | Empty — a MAC cannot be derived from an answer | Add reservations as you enumerate the site |
 | `port_forwards` | 80 and 443 to the public ingress VIP {{ metallb_public_vip }} | Add one per service that is not behind Traefik |
-| `site_settings` | IGMP snooping for IoT, IDS in detection-only mode | `ips_mode` once the site has a traffic baseline |
+| `site_settings` | The hardened posture pinned explicitly (no unattended firmware upgrades, no "network optimization", UPnP off), IGMP snooping for IoT, IDS in detection-only mode | `ips_mode` once the site has a traffic baseline |
 
 Zone-per-VLAN is the design, not a style: inter-zone traffic is denied by
 default, so every allowance is one visible entry and nothing depends on rule
@@ -33,17 +33,22 @@ against empty state does not adopt them, it tries to create duplicates.
 1. **Back the controller up.** Export a `.unf` from the console first. This root
    writes the segmentation the console itself is reached over.
 2. **Confirm the built-in zone display names.** `Internal`, `External` and
-   `Gateway` are the defaults the module reads through a data source;
-   capitalisation matters and localised consoles differ. A wrong name fails the
-   plan at the data read, before anything is written.
-3. **Import what exists.** At minimum the built-in network:
+   `Gateway` are what `main.tf` passes as `builtin_zone_names` and the module
+   reads through a data source; capitalisation matters and localised consoles
+   differ. A wrong name fails the plan at the data read, before anything is
+   written — edit the map in `main.tf` if yours differ.
+3. **Import what exists.** `terraform import` needs an initialized backend, so
+   init first; at minimum import the built-in network and the settings object:
    ```bash
-   cd terraform/unifi
-   terraform import 'module.network.unifi_network.this["default"]' name=Default
-   terraform import module.network.unifi_setting.site default
+   task terraform:unifi-init
+   task terraform:unifi-import -- 'module.network.unifi_network.this["default"]' name=Default
+   task terraform:unifi-import -- module.network.unifi_setting.site default
    ```
    WLANs, zones and clients import by id (clients by colon-separated MAC); the
-   full address↔id table is the module's own README.
+   full address↔id table is the module's own README. Run them through the task,
+   not bare `terraform`: the credentials and the `TF_HTTP_*` state-backend auth
+   come from the task's environment, and a bare invocation prompts for the
+   variables and then fails the state read with a 401.
 4. **Read the plan for a `replace`.** A network or a zone carries
    `prevent_destroy`, so a mistyped key fails the plan rather than dropping every
    client on a VLAN. That refusal is the guardrail working — fix the key, do not
@@ -57,7 +62,7 @@ from. Keep a wired path to the gateway open until the post-apply checks pass.
 ```bash
 task terraform:unifi-init
 task terraform:unifi-plan     # read every line
-task terraform:unifi-apply    # refuses -auto-approve on purpose
+task terraform:unifi-apply    # terminal only, refuses -auto-approve, types to confirm
 ```
 
 The scheduled `unifi-drift-plan` CI job is what surfaces a console edit nobody
@@ -86,15 +91,21 @@ A map key is a state address. Rename one with a `moved {}` block; stop managing
 an object with `terraform state rm`, which leaves the live object untouched:
 
 ```bash
-terraform state rm 'module.network.unifi_network.this["iot"]'
+task terraform:unifi-state -- rm 'module.network.unifi_network.this["iot"]'
+# then delete the map entry in networks.tf, and delete the object in the console
 ```
 
 Changing a client reservation is a **replace**, not an update — an in-place
 update of a `unifi_client` fails on this provider:
 
 ```bash
-terraform apply -replace='module.network.unifi_client.this["<key>"]'
+task terraform:unifi-apply -- -replace='module.network.unifi_client.this["<key>"]'
 ```
+
+Both go through a task rather than bare `terraform`: the console credentials,
+the WLAN passphrases and the `TF_HTTP_*` state-backend auth all arrive from the
+task's environment, and without them the command prompts for three secrets and
+then fails the state read with a 401.
 
 ## Credentials
 

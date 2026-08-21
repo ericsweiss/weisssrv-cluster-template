@@ -23,9 +23,10 @@ terraform {
 provider "unifi" {
   api_url = var.unifi_api_url
   api_key = var.unifi_api_key
-  # The console serves its own self-signed certificate on the LAN address this
-  # root talks to, so verification fails on every plan. Nothing here leaves the
-  # LAN; a controller reached over the internet would need a real certificate
-  # and this line removed.
-  allow_insecure = true
+  # Defaults to true because the console serves its own self-signed certificate
+  # on the LAN address this root talks to, so verification fails on every plan.
+  # It is a variable, not a literal: a console that does present a trusted
+  # certificate is `TF_VAR_unifi_allow_insecure=false` away, with no source edit
+  # (see variables.tf).
+  allow_insecure = var.unifi_allow_insecure
 }

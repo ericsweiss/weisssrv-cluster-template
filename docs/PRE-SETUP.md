@@ -564,24 +564,7 @@ Requires:
 
 ---
 
-## 8a. Answers to accept as they come
-
-Not everything copier asks is a decision. `node_exporter_job_regex` looks like
-free text, but its two members name things the template *ships*: `node-exporter`
-is the kube-prometheus chart's own DaemonSet job and `node-exporter-host` is the
-static scrape of the Proxmox hosts and VMs. The node and storage alert rules
-scope themselves to that alternation, so dropping either name leaves those rules
-matching zero series — and a rule that matches nothing never fires, so nothing
-ever tells you the alerts went quiet. Copier now rejects an answer that omits
-either; press enter unless you have added a third exporter source of your own,
-in which case append `|your-job` rather than replacing what is there.
-
-The same goes for `k3s_pod_cidr` and `k3s_service_cidr` (§ 2): the k3s defaults
-are right unless they collide with your LAN.
-
----
-
-## 8b. Optional: gateway networks (`use_unifi`)
+## 8a. Optional: gateway networks (`use_unifi`)
 
 Turn it on if your router is a UniFi console and you want its networks, VLANs,
 firewall zones, WLANs and port forwards to be code rather than console state. It
@@ -591,8 +574,12 @@ exactly as it is.
 
 Before generating you need:
 
-- A **UniFi console** reachable from your workstation on the LAN, on a firmware
-  whose Integration API is enabled (UniFi OS 9 or later).
+- A **UniFi console** reachable from your workstation on the LAN, running
+  **UniFi Network 9.0.108 or later** — the version that can mint an API key
+  under Control Plane → Integrations, which is what this root authenticates
+  with. Check the *Network application* version (Settings → System → Updates),
+  not the UniFi OS version: they are separate streams, and a console on
+  UniFi OS 5.x can be on Network 10.x.
 - A **local admin** on that console, and an **API key** minted for it
   (Control Plane → Integrations). A cloud-only account cannot mint one, and the
   key is what every plan authenticates with — store it as `UniFi Controller` →
@@ -617,6 +604,23 @@ Policy ORDER, mDNS reflection, device adoption, per-port VLAN assignment and
 6 GHz stay console steps at this provider version; they are listed in that
 README so they can be written into your own cut-over runbook rather than
 discovered during one.
+
+---
+
+## 8b. Answers to accept as they come
+
+Not everything copier asks is a decision. `node_exporter_job_regex` looks like
+free text, but its two members name things the template *ships*: `node-exporter`
+is the kube-prometheus chart's own DaemonSet job and `node-exporter-host` is the
+static scrape of the Proxmox hosts and VMs. The node and storage alert rules
+scope themselves to that alternation, so dropping either name leaves those rules
+matching zero series — and a rule that matches nothing never fires, so nothing
+ever tells you the alerts went quiet. Copier now rejects an answer that omits
+either; press enter unless you have added a third exporter source of your own,
+in which case append `|your-job` rather than replacing what is there.
+
+The same goes for `k3s_pod_cidr` and `k3s_service_cidr` (§ 2): the k3s defaults
+are right unless they collide with your LAN.
 
 ---
 
@@ -688,7 +692,8 @@ Network
 
 - [ ] Address plan written down, DHCP pool does not overlap it
 - [ ] Three VIPs reserved and unused
-- [ ] Router port-forward planned to the public ingress VIP
+- [ ] Router port-forward planned to the public ingress VIP — or, with
+      `use_unifi`, declared in `terraform/unifi/networks.tf`
 
 Names and accounts
 
@@ -704,6 +709,10 @@ Names and accounts
 - [ ] Optional: tailnet auth key and OAuth clients, **and the MagicDNS suffix
       noted for `tailnet_dns_suffix`** (no default — copier asks for it and
       rejects the `CHANGEME` placeholder)
+- [ ] Optional (`use_unifi`): local console admin created and an API key minted
+      for it; `UniFi Controller` → `url` and `api-key` in the vault, plus one
+      `WiFi <name>` → `password` item per SSID you will manage
+      (`WiFi IoT` and `WiFi Guest` as shipped); `.unf` console backup exported
 - [ ] Every host-side item from § 4 present in the vault
 - [ ] Every in-cluster item from § 4 present, including `Healthchecks Watchdog`
       and `Grafana SSO` — placeholders are fine **except** `Grafana SSO` →

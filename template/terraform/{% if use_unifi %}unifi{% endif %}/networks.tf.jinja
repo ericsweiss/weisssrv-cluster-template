@@ -55,6 +55,11 @@ locals {
       # `corporate` in a custom zone — which fails the apply with an
       # inconsistent-result error. Guest ISOLATION here is the zone plus
       # `l2_isolation` on the SSID, not the purpose field.
+      #
+      # No `domain_name`, unlike the other two: guests deliberately do not get
+      # the internal search domain, so a short name on this VLAN cannot
+      # accidentally resolve to an internal host. Set it if you want the
+      # opposite.
       subnet = "10.0.40.1/24"
       dhcp   = { start = "10.0.40.50", stop = "10.0.40.249", dns_servers = local.dns_ips }
     }
@@ -138,10 +143,16 @@ locals {
     https = { wan_port = "443", ip = "{{ metallb_public_vip }}", port = "443" }
   }
 
-  # The module's own defaults are the hardened posture (no unattended firmware
-  # upgrades, no "network optimization", UPnP and NAT-PMP off); these two are
-  # the site-specific half.
+  # The hardened posture is pinned here, not inherited from the module
+  # defaults: these are security settings on the site's only gateway, and a
+  # library default flip must not be able to re-enable UPnP or unattended
+  # firmware upgrades on a `lib_ref` bump — an operation reviewed as a template
+  # diff, not as a Terraform plan.
   site_settings = {
+    auto_upgrade         = false
+    network_optimization = false
+    upnp                 = false
+
     igmp_snooping_networks = ["iot"]
     # Detection only. Inline blocking on a gateway nobody has a traffic
     # baseline for yet drops production traffic and reports it as a threat —
