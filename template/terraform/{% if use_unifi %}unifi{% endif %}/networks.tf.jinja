@@ -1,0 +1,151 @@
+# Site data: the networks this gateway serves, the firewall zone each one sits
+# in, the allowances between the zones, and the SSIDs on top. Every map key is a
+# STATE ADDRESS — renaming one plans a destroy, which the module's
+# `prevent_destroy` refuses: rename with a `moved {}` block, stop managing one
+# with `terraform state rm` (README § Renaming and removing).
+#
+# EDIT ME BEFORE THE FIRST APPLY. Only the `default` network, the DNS servers
+# and the port forwards are derived from your answers; the VLANs, zones,
+# policies and SSIDs below are a WORKED EXAMPLE of the segmentation this module
+# is for, not a description of your site. The controller also already holds
+# objects these entries have to ADOPT rather than duplicate — README § Before
+# the first apply is the import list.
+locals {
+  # The resolvers this cluster builds, handed out by every DHCP scope. Changing
+  # a resolver's address is one edit here plus the `upstream_dns_servers`
+  # answer, and the policies below reference this list rather than repeating it.
+  dns_ips = [{% for server in upstream_dns_servers.split() %}"{{ server }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+
+  networks = {
+    # The controller's built-in network, which is this cluster's flat LAN: no
+    # VLAN id, and `name = "Default"` is what its `terraform import` matches on.
+    # `subnet` is GATEWAY form — the host part is the gateway address, so this
+    # is {{ lan_cidr }} with the gateway on {{ lan_gateway }}.
+    default = {
+      name        = "Default"
+      subnet      = "{{ lan_gateway }}/{{ lan_cidr.split('/')[1] }}"
+      domain_name = "{{ internal_domain }}"
+      # The top of the LAN, matching the address plan the starter inventory
+      # ships (docs/PRE-SETUP.md § Network plan). It must not overlap the bands
+      # hosts.yml composes (.11-.19 hosts, .21-.23 resolvers and relay,
+      # .31-.39 k3s servers, .41-.49 k3s agents), the three VIPs, or any static
+      # guest you add later.
+      dhcp = { start = "{{ lan_prefix }}.170", stop = "{{ lan_prefix }}.254", dns_servers = local.dns_ips }
+    }
+
+    # EXAMPLE. Pick ranges that overlap neither {{ lan_cidr }} nor the k3s pod
+    # and service ranges ({{ k3s_pod_cidr }}, {{ k3s_service_cidr }}), and give
+    # each one a VLAN id your switch fabric actually tags.
+    iot = {
+      name        = "IoT"
+      vlan        = 30
+      subnet      = "10.0.30.1/24"
+      domain_name = "{{ internal_domain }}"
+      # Multicast (casting, discovery) stays on the ports that asked for it
+      # rather than flooding the segment.
+      igmp_snooping = true
+      dhcp          = { start = "10.0.30.50", stop = "10.0.30.249", dns_servers = local.dns_ips }
+    }
+
+    guest = {
+      name = "Guest"
+      vlan = 40
+      # `purpose` stays the default `corporate`: the controller's `guest`
+      # purpose only sticks inside its own Hotspot zone, and rewrites itself to
+      # `corporate` in a custom zone — which fails the apply with an
+      # inconsistent-result error. Guest ISOLATION here is the zone plus
+      # `l2_isolation` on the SSID, not the purpose field.
+      subnet = "10.0.40.1/24"
+      dhcp   = { start = "10.0.40.50", stop = "10.0.40.249", dns_servers = local.dns_ips }
+    }
+  }
+
+  # One zone per VLAN. Inter-zone traffic is denied by default, so every
+  # allowance is an explicit policy below and nothing depends on rule ORDER,
+  # which this provider cannot set. The LAN stays in the controller's built-in
+  # `Internal` zone; the key here is the zone's display name in the UI.
+  zones = {
+    iot   = { networks = ["iot"] }
+    guest = { networks = ["guest"] }
+  }
+
+  # `zone` names a `zones` key or one of the built-in short names (`internal`,
+  # `external`, `gateway`) — one namespace, resolved together. `name` is the
+  # state address, so it is unique and a rename replaces the policy.
+  policies = [
+    {
+      # Without this an IoT device gets a DHCP lease naming resolvers it cannot
+      # reach, and every name lookup on the segment times out.
+      name        = "iot-to-dns"
+      protocol    = "tcp_udp"
+      source      = { zone = "iot" }
+      destination = { zone = "internal", ips = local.dns_ips, port = "53" }
+    },
+    {
+      name        = "guest-to-dns"
+      protocol    = "tcp_udp"
+      source      = { zone = "guest" }
+      destination = { zone = "internal", ips = local.dns_ips, port = "53" }
+    },
+    {
+      # Administration and casting from the LAN into the IoT segment. The
+      # reverse stays closed: an IoT device reaches the LAN for DNS and nothing
+      # else, which is the whole point of putting it on its own VLAN.
+      name        = "lan-to-iot"
+      source      = { zone = "internal" }
+      destination = { zone = "iot" }
+    },
+  ]
+
+  # Every SSID is WPA-PSK on 2.4 + 5 GHz — 6 GHz fails WLAN creation on this
+  # provider (upstream #406), so enable that band in the UI if you need it.
+  # Passphrases arrive as variables from the secret store; nothing here is a
+  # literal.
+  wlans = {
+    iot = {
+      ssid       = "{{ cluster_name }}-iot"
+      network    = "iot"
+      passphrase = var.wlan_passphrase_iot
+      # ESP32/Kasa-class gear: plain WPA2 with PMF disabled, and no steering of
+      # capable clients off 2.4 GHz. Transition mode is what those radios fail
+      # to associate against.
+      wpa3                 = false
+      allow_2ghz_high_perf = true
+    }
+    guest = {
+      ssid       = "{{ cluster_name }}-guest"
+      network    = "guest"
+      passphrase = var.wlan_passphrase_guest
+      # Guests reach the gateway and the internet, never each other.
+      l2_isolation = true
+    }
+  }
+
+  # Fixed-IP reservations, keyed by identity string. Empty because a MAC cannot
+  # be derived from an answer: add
+  # `{ mac = "aa:bb:cc:dd:ee:ff", name = "...", fixed_ip = "10.0.30.10", network = "iot" }`
+  # entries as you enumerate the site. Colon-separated MACs only — the import
+  # path rejects any other separator — and CHANGING an existing reservation is
+  # `terraform apply -replace=...`, never an in-place update (upstream #428).
+  clients = {}
+
+  # The public ingress VIP is the forward a generated cluster always needs:
+  # Traefik terminates both ports and routes every public hostname by SNI and
+  # Host header, so no other service needs one of its own. Source restriction
+  # belongs in the policies above and in each host's own firewall, not here.
+  port_forwards = {
+    http  = { wan_port = "80", ip = "{{ metallb_public_vip }}", port = "80" }
+    https = { wan_port = "443", ip = "{{ metallb_public_vip }}", port = "443" }
+  }
+
+  # The module's own defaults are the hardened posture (no unattended firmware
+  # upgrades, no "network optimization", UPnP and NAT-PMP off); these two are
+  # the site-specific half.
+  site_settings = {
+    igmp_snooping_networks = ["iot"]
+    # Detection only. Inline blocking on a gateway nobody has a traffic
+    # baseline for yet drops production traffic and reports it as a threat —
+    # move to "ips" after the site has burned in.
+    ips_mode = "ids"
+  }
+}

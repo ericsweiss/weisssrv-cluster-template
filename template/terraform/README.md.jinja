@@ -1,7 +1,7 @@
 # terraform/
 
 The state that lives *outside* the cluster: the public DNS zone, the SSO object
-inventory{% if vpn_tailscale %}, and the tailnet policy{% endif %}. Everything
+inventory{% if vpn_tailscale %}, the tailnet policy{% endif %}{% if use_unifi %}, and the gateway's own networks{% endif %}. Everything
 inside the cluster is Flux's, and nothing here creates a Kubernetes object.
 
 | Module | Manages | State name | Apply |
@@ -9,7 +9,8 @@ inside the cluster is Flux's, and nothing here creates a Kubernetes object.
 | `cloudflare/` | Zone settings + the records external-dns cannot own | `cloudflare` | `task terraform:apply` |
 {% if vpn_tailscale %}| `tailscale/` | Tailnet ACL, SSH rules, route auto-approvers, Split-DNS | `tailscale` | supervised |
 {% endif %}| `authentik/` | OIDC/proxy/SAML providers, applications, groups, bindings | `authentik` | supervised |
-
+{% if use_unifi %}| `unifi/` | Gateway networks and VLANs, firewall zones and policies, WLANs, port forwards | `unifi` | supervised |
+{% endif %}
 Each root module is a thin consumer: the resources, defaults and guardrails come
 from a `weisssrv-lib//terraform/modules/<name>` module pinned by `?ref=` in its
 `main.tf`, and the site data — records, policy, object inventory — is a separate
@@ -24,9 +25,10 @@ file in the module directory. Upgrading the platform is a ref bump plus a plan.
   independently, and a shared state would serialize unrelated changes.
 - **Commit `.terraform.lock.hcl`.** It pins the exact provider builds; a fresh
   `init` without it can silently pick up a newer patch.
-- **No `-auto-approve` for the SSO{% if vpn_tailscale %} or tailnet{% endif %}
-  module.** Those tasks refuse the flag: a bad apply locks users out{% if vpn_tailscale %} or
-  severs remote access{% endif %}, and the plan review is the control.
+- **No `-auto-approve` for the SSO{% if vpn_tailscale %}, tailnet{% endif %}{% if use_unifi %} or gateway{% endif %}
+  module.** Those tasks refuse the flag: a bad apply locks users out{% if vpn_tailscale %},
+  severs remote access{% endif %}{% if use_unifi %} or leaves a LAN nobody can reach the console
+  from{% endif %}, and the plan review is the control.
 
 ## State backend
 
@@ -66,8 +68,9 @@ error, not a Terraform one.
 | `deploy-terraform` | manual on `main` | Applies **that saved plan**, not a fresh one |
 {% if vpn_tailscale %}| `tailscale-drift-plan` | schedule, and `main` on tailscale changes | Read-only plan, advisory |
 {% endif %}| `authentik-drift-plan` | schedule, and `main` on authentik changes | Read-only plan, advisory |
-
-The drift plans exist because both supervised modules are applied by hand: a
+{% if use_unifi %}| `unifi-drift-plan` | schedule, and `main` on unifi changes | Read-only plan, advisory; needs LAN reach to the console |
+{% endif %}
+The drift plans exist because every supervised module is applied by hand: a
 console hot-fix would otherwise sit undetected until someone happened to run a
 plan. They exit 2 on a non-empty diff and are `allow_failure: true`, so drift
 shows as a warning rather than a broken pipeline.

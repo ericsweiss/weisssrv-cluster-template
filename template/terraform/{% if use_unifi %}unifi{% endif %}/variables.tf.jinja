@@ -1,0 +1,48 @@
+variable "unifi_api_url" {
+  description = "Base URL of the UniFi console, no /api path (1Password item 'UniFi Controller', field 'url')"
+  type        = string
+  default     = "https://{{ lan_gateway }}"
+
+  validation {
+    condition     = can(regex("^https://[a-z0-9.-]+$", var.unifi_api_url))
+    error_message = "unifi_api_url must be a bare https:// origin with no path or trailing slash."
+  }
+}
+
+variable "unifi_api_key" {
+  description = "UniFi API key for a LOCAL admin (1Password item 'UniFi Controller', field 'api-key')"
+  type        = string
+  sensitive   = true
+
+  # No default: an unset key must fail the plan, not authenticate as nobody.
+  validation {
+    condition     = length(var.unifi_api_key) >= 16
+    error_message = "unifi_api_key is empty or implausibly short. The terraform:unifi-* tasks and the unifi-drift-plan job inject it from the secret store — a renamed item or field resolves to an empty string, which fails at the first data read with an authentication error that names nothing."
+  }
+}
+
+# One variable per WLAN, each read from the same vault item the passphrase lives
+# in. A map would be one variable, but one `op://` reference cannot carry a map,
+# so a WLAN added to networks.tf gets a variable here, an env line in the
+# Taskfile's tf_unifi_env anchor, and an export in the unifi-drift-plan job.
+variable "wlan_passphrase_iot" {
+  description = "Passphrase for the IoT SSID (1Password item 'WiFi IoT', field 'password')"
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = length(var.wlan_passphrase_iot) >= 8 && length(var.wlan_passphrase_iot) <= 63
+    error_message = "wlan_passphrase_iot must be 8-63 characters (WPA-PSK). A sensitive value's diff is hidden, so an empty one would silently reset the SSID's key."
+  }
+}
+
+variable "wlan_passphrase_guest" {
+  description = "Passphrase for the guest SSID (1Password item 'WiFi Guest', field 'password')"
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = length(var.wlan_passphrase_guest) >= 8 && length(var.wlan_passphrase_guest) <= 63
+    error_message = "wlan_passphrase_guest must be 8-63 characters (WPA-PSK). A sensitive value's diff is hidden, so an empty one would silently reset the SSID's key."
+  }
+}

@@ -1,0 +1,111 @@
+# terraform/unifi
+
+The {{ cluster_name }} gateway's own state: networks and VLANs, firewall zones
+and the policies between them, WLANs, client reservations, WAN port forwards and
+the site-wide hardening switches — applied through
+`weisssrv-lib//terraform/modules/unifi-network` at the ref pinned in `main.tf`.
+
+`networks.tf` is the inventory and the only file you normally edit. Nothing here
+touches the cluster: this is the layer *below* it.
+
+## What ships, and what you must change
+
+| Entry | Ships as | Change it? |
+|---|---|---|
+| `networks.default` | The flat LAN, {{ lan_cidr }}, gateway {{ lan_gateway }}, DHCP {{ lan_prefix }}.170-.254 | Only if your address plan differs from the one the inventory ships |
+| `networks.iot` / `networks.guest` | An EXAMPLE pair of VLANs (30, 40) on 10.0.30.0/24 and 10.0.40.0/24 | **Yes** — they describe a shape, not your site |
+| `zones` | One zone per VLAN; the LAN stays in the built-in `Internal` | Follow the pattern for any VLAN you add |
+| `policies` | DNS out of each VLAN, plus LAN → IoT | **Yes** — each one is an allowance against a default deny |
+| `wlans` | `{{ cluster_name }}-iot` (WPA2, no band steering) and `{{ cluster_name }}-guest` (isolated) | **Yes** — SSIDs and their vault items |
+| `clients` | Empty — a MAC cannot be derived from an answer | Add reservations as you enumerate the site |
+| `port_forwards` | 80 and 443 to the public ingress VIP {{ metallb_public_vip }} | Add one per service that is not behind Traefik |
+| `site_settings` | IGMP snooping for IoT, IDS in detection-only mode | `ips_mode` once the site has a traffic baseline |
+
+Zone-per-VLAN is the design, not a style: inter-zone traffic is denied by
+default, so every allowance is one visible entry and nothing depends on rule
+ORDER — which this provider cannot set at all.
+
+## Before the first apply
+
+A controller that has ever been configured already holds these objects. An apply
+against empty state does not adopt them, it tries to create duplicates.
+
+1. **Back the controller up.** Export a `.unf` from the console first. This root
+   writes the segmentation the console itself is reached over.
+2. **Confirm the built-in zone display names.** `Internal`, `External` and
+   `Gateway` are the defaults the module reads through a data source;
+   capitalisation matters and localised consoles differ. A wrong name fails the
+   plan at the data read, before anything is written.
+3. **Import what exists.** At minimum the built-in network:
+   ```bash
+   cd terraform/unifi
+   terraform import 'module.network.unifi_network.this["default"]' name=Default
+   terraform import module.network.unifi_setting.site default
+   ```
+   WLANs, zones and clients import by id (clients by colon-separated MAC); the
+   full address↔id table is the module's own README.
+4. **Read the plan for a `replace`.** A network or a zone carries
+   `prevent_destroy`, so a mistyped key fails the plan rather than dropping every
+   client on a VLAN. That refusal is the guardrail working — fix the key, do not
+   remove the lifecycle block.
+
+## Apply is supervised
+
+A bad apply is not a failed pipeline, it is a LAN you cannot reach the console
+from. Keep a wired path to the gateway open until the post-apply checks pass.
+
+```bash
+task terraform:unifi-init
+task terraform:unifi-plan     # read every line
+task terraform:unifi-apply    # refuses -auto-approve on purpose
+```
+
+The scheduled `unifi-drift-plan` CI job is what surfaces a console edit nobody
+reconciled: it plans read-only, exits 2 on a non-empty diff and is
+`allow_failure: true`, so drift shows as a warning rather than a broken
+pipeline. It reaches the console over the LAN, so it only says anything useful
+on a runner that can.
+
+## What the console still owns
+
+The provider cannot reach these at the pinned version, so they are UI steps —
+and none of them shows up as drift here:
+
+- **Policy order**, and **mDNS reflection** per network.
+- **Devices and ports**: adoption, per-port native and tagged VLANs, PoE. The
+  port map for a segmented site is a documented physical layout, not code.
+- **6 GHz**, which fails WLAN creation through this provider.
+
+Write the port map and the adoption steps into a runbook next to this file when
+you cut over — the module's README lists the whole set with the upstream issue
+numbers.
+
+## Renaming and removing
+
+A map key is a state address. Rename one with a `moved {}` block; stop managing
+an object with `terraform state rm`, which leaves the live object untouched:
+
+```bash
+terraform state rm 'module.network.unifi_network.this["iot"]'
+```
+
+Changing a client reservation is a **replace**, not an update — an in-place
+update of a `unifi_client` fails on this provider:
+
+```bash
+terraform apply -replace='module.network.unifi_client.this["<key>"]'
+```
+
+## Credentials
+
+| Item | Field | Used for |
+|---|---|---|
+| `UniFi Controller` | `url` | the console origin (`https://{{ lan_gateway }}` by default) |
+| `UniFi Controller` | `api-key` | API key of a LOCAL admin — a cloud-only account cannot mint one |
+| `WiFi IoT` | `password` | the IoT SSID's passphrase |
+| `WiFi Guest` | `password` | the guest SSID's passphrase |
+| `Git Terraform State Token` | `credential` | the GitLab state backend |
+
+Every WLAN you add needs its own variable in `variables.tf`, its own line in the
+Taskfile's `tf_unifi_env` anchor and its own export in the `unifi-drift-plan`
+job — a variable with no value fails the plan, which is the intended behaviour.

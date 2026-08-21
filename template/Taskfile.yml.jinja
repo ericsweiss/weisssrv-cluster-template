@@ -1032,7 +1032,55 @@ tasks:
             ;;
         esac
         {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
+{% endraw %}{% if use_unifi %}{% raw %}
+  # --- Gateway networks and VLANs (own state name; SUPERVISED apply) ---
+  terraform:unifi-init:
+    desc: Initialize the gateway network module
+    dir: "{{.TERRAFORM_DIR}}/unifi"
+    # The anchor is shared by unifi-plan and unifi-apply, so all three tasks see
+    # the same credentials. One line per WLAN passphrase the root declares — a
+    # variable with no value fails the plan, which is the intent.
+    env: &tf_unifi_env
+      TF_VAR_unifi_api_url: {% endraw %}{{ secret_ref('UniFi Controller', 'url') }}{% raw %}
+      TF_VAR_unifi_api_key: {% endraw %}{{ secret_ref('UniFi Controller', 'api-key') }}{% raw %}
+      TF_VAR_wlan_passphrase_iot: {% endraw %}{{ secret_ref('WiFi IoT', 'password') }}{% raw %}
+      TF_VAR_wlan_passphrase_guest: {% endraw %}{{ secret_ref('WiFi Guest', 'password') }}{% raw %}
+      TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/unifi"
+      TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/unifi/lock"
+      TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/unifi/lock"
+      TF_HTTP_USERNAME: "terraform"
+      TF_HTTP_PASSWORD: {% endraw %}{{ secret_ref('Git Terraform State Token', 'credential') }}{% raw %}
+      TF_HTTP_LOCK_METHOD: "POST"
+      TF_HTTP_UNLOCK_METHOD: "DELETE"
+    preconditions: *tf_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform init {{.CLI_ARGS}}
 
+  terraform:unifi-plan:
+    desc: Plan gateway network changes (read-only diff against the live console)
+    dir: "{{.TERRAFORM_DIR}}/unifi"
+    env: *tf_unifi_env
+    preconditions: *tf_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
+
+  terraform:unifi-apply:
+    desc: "SUPERVISED: apply gateway network changes — a bad apply is a LAN you cannot reach the console from"
+    dir: "{{.TERRAFORM_DIR}}/unifi"
+    env: *tf_unifi_env
+    preconditions: *tf_preconditions
+    cmds:
+      # Back the controller up (.unf export) before an apply that touches
+      # networks or zones; read terraform/unifi/README.md first.
+      - |
+        case " {{.CLI_ARGS}} " in
+          *-auto-approve*)
+            echo "Refusing -auto-approve: this apply is supervised. Review the plan and type 'yes'." >&2
+            exit 1
+            ;;
+        esac
+        {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
+{% endraw %}{% endif %}{% raw %}
   terraform:fmt:
     desc: Format every Terraform module
     dir: "{{.TERRAFORM_DIR}}"

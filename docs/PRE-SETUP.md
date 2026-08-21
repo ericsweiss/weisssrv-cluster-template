@@ -335,6 +335,8 @@ items.
 | `Authentik Terraform Token` | `credential` | the `terraform:authentik-init` / `-plan` / `-apply` tasks — created after Authentik is up |
 | `Tailscale Auth Key` | `credential` | enrolling hosts, only with `vpn_tailscale` |
 | `Tailscale OAuth` | `client id`, `credential` | the `terraform:tailscale-init` / `-plan` / `-apply` tasks, only with `vpn_tailscale` |
+| `UniFi Controller` | `url`, `api-key` | the `terraform:unifi-init` / `-plan` / `-apply` tasks, only with `use_unifi` |
+| `WiFi IoT`, `WiFi Guest` | `password` | the WLAN passphrases that root applies, one item per SSID, only with `use_unifi` |
 
 `Loki Push Auth` deserves a call-out: it is in the `env:` block of
 `infra:deploy`, `dns:deploy` and `storage:deploy`, so a missing item fails all
@@ -576,6 +578,45 @@ in which case append `|your-job` rather than replacing what is there.
 
 The same goes for `k3s_pod_cidr` and `k3s_service_cidr` (§ 2): the k3s defaults
 are right unless they collide with your LAN.
+
+---
+
+## 8b. Optional: gateway networks (`use_unifi`)
+
+Turn it on if your router is a UniFi console and you want its networks, VLANs,
+firewall zones, WLANs and port forwards to be code rather than console state. It
+is the one optional module that manages something **below** the cluster: nothing
+in the generated tree depends on it, and answering false leaves your router
+exactly as it is.
+
+Before generating you need:
+
+- A **UniFi console** reachable from your workstation on the LAN, on a firmware
+  whose Integration API is enabled (UniFi OS 9 or later).
+- A **local admin** on that console, and an **API key** minted for it
+  (Control Plane → Integrations). A cloud-only account cannot mint one, and the
+  key is what every plan authenticates with — store it as `UniFi Controller` →
+  `api-key`, alongside `url` (`https://<gateway address>`).
+- One vault item per SSID you intend to manage, each with a `password` field.
+  The shipped example expects `WiFi IoT` and `WiFi Guest`; rename them in
+  `terraform/unifi/variables.tf`, the Taskfile's `tf_unifi_env` anchor and the
+  `unifi-drift-plan` job together if you use other titles.
+- A **`.unf` backup** of the console taken before the first apply, and a wired
+  path to the gateway kept open while you run it. This root writes the
+  segmentation the console itself is reached over, so the apply is supervised
+  and refuses `-auto-approve`.
+
+What generates is a **worked example**, not your site: the flat LAN comes from
+your answers, and two VLANs (IoT and guest), their zones, policies and SSIDs
+show the shape. Edit `terraform/unifi/networks.tf` before planning, and import
+what the console already holds — an apply against empty state creates
+duplicates rather than adopting. The generated `terraform/unifi/README.md` is
+the import list and the checklist.
+
+Policy ORDER, mDNS reflection, device adoption, per-port VLAN assignment and
+6 GHz stay console steps at this provider version; they are listed in that
+README so they can be written into your own cut-over runbook rather than
+discovered during one.
 
 ---
 

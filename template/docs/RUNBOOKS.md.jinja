@@ -198,7 +198,8 @@ task lib:sync                       # refresh .weisssrv-lib, the vendored script
 task terraform:init                 # re-fetch the module source, per module
 {% if vpn_tailscale %}task terraform:tailscale-init
 {% endif %}task terraform:authentik-init
-task lint
+{% if use_unifi %}task terraform:unifi-init
+{% endif %}task lint
 ```
 
 `task lint` is what re-checks the vendored copies at the NEW ref: the

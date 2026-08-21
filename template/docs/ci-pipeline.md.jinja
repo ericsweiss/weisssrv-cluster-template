@@ -23,7 +23,7 @@ sources are unaffected — they fetch over https from `{{ lib_url_ }}`.
 | Stage | Jobs | Source |
 |---|---|---|
 | `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `flux-lint` (library); `version-coverage`, `repo-sync`, `deploy-coverage`, `netpol-parity` (this repo) | mixed |
-| `validate` | `terraform-validate` (library); `deploy-preflight`, `terraform-plan`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan` (this repo) | mixed |
+| `validate` | `terraform-validate` (library); `deploy-preflight`, `terraform-plan`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan`{% if use_unifi %}, `unifi-drift-plan`{% endif %} (this repo) | mixed |
 | `test` | `python-tests` (the cluster invariants in `tests/`, the library-pin gate and the vendored-copy gate) | library |
 | `security` | `secret_detection` | library |
 | `ai-review` | `pr-agent-review` | library |
@@ -168,7 +168,9 @@ The five Ansible deploy jobs are abbreviated below by their suffix — `base`,
 {% if vpn_tailscale %}| `Tailscale OAuth` → `client id`, `credential` | `tailscale-drift-plan` |
 {% endif %}| `Authentik Terraform Token` → `credential` | `authentik-drift-plan` |
 | `<App> SSO` → the OIDC client secret | `authentik-drift-plan`, one per application |
-
+{% if use_unifi %}| `UniFi Controller` → `url`, `api-key` | `unifi-drift-plan` |
+| `WiFi IoT` / `WiFi Guest` → `password` | `unifi-drift-plan`, one per WLAN |
+{% endif %}
 `deploy-ansible-base` runs `site.yml`, the whole host stack, so it reads the
 union of what the group jobs do.
 

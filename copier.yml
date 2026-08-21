@@ -796,6 +796,18 @@ gpu:
     No GPU: none
     NVIDIA (VFIO passthrough): nvidia
 
+use_unifi:
+  type: bool
+  help: >-
+    Manage a UniFi gateway as code: a terraform/unifi root (networks and VLANs,
+    firewall zones and the policies between them, WLANs, port forwards, site
+    hardening), its supervised task set, and a read-only drift-plan CI job.
+    Requires a UniFi console reachable on the LAN and an API key for a LOCAL
+    admin (see PRE-SETUP). The generated site data is a worked EXAMPLE you edit
+    before the first apply — nothing else in the cluster depends on it, and off
+    leaves your router exactly as it is.
+  default: false
+
 # --------------------------------------------------------------------------
 # Library pin
 # --------------------------------------------------------------------------
@@ -821,7 +833,7 @@ lib_ref:
     sources. Use a RELEASE TAG (vX.Y.Z) — the library's include contract is
     explicit that a branch is never a valid pin, and a branch deleted after
     merge takes every include, module source and collection install with it.
-  default: "v0.12.1"
+  default: "v0.13.0"
   validator: >-
     {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
     lib_ref must be a release TAG of the form vX.Y.Z (e.g. v1.2.3). A branch is

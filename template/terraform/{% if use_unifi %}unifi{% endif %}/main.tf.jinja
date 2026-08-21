@@ -1,0 +1,14 @@
+# The network, zone, policy, WLAN and port-forward shapes and their guardrails
+# come from the library at a pinned ref; the inventory of what this site
+# actually runs is networks.tf.
+module "network" {
+  source = "git::{{ lib_url }}//terraform/modules/unifi-network?ref={{ lib_ref }}"
+
+  networks      = local.networks
+  zones         = local.zones
+  policies      = local.policies
+  wlans         = local.wlans
+  clients       = local.clients
+  port_forwards = local.port_forwards
+  site_settings = local.site_settings
+}
