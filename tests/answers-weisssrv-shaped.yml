@@ -1,6 +1,6 @@
 ---
 # Answer fixture for the render tests: the same SHAPE as the reference cluster
-# (flat /24 LAN, split-horizon domains, three VIPs, both optional modules on)
+# (flat /24 LAN, split-horizon domains, three VIPs, every optional module on)
 # with placeholder identity. No real host, domain or credential appears here —
 # the render tests assert that none of the reference cluster's values survive
 # into a generated repository.
@@ -46,7 +46,7 @@ smtp_host: smtp-relay.lan.example.com
 # scrape of the Proxmox hosts (matches copier.yml's default).
 node_exporter_job_regex: node-exporter|node-exporter-host
 
-# Both optional modules ON: their conditional branches are the ones a
+# Every optional module ON: their conditional branches are the ones a
 # defaults-only render would never reach.
 vpn_tailscale: true
 # A real-SHAPED suffix, not the CHANGEME sentinel: the question's validator
@@ -55,6 +55,8 @@ vpn_tailscale: true
 # remote access with nothing failing to say so.
 tailnet_dns_suffix: tail1a2b3c.ts.net
 gpu: nvidia
+# The gateway root and its drift-plan job, which exist only under this answer.
+use_unifi: true
 
 # The library is the one upstream this fixture legitimately names. `lib_ref` is
 # deliberately unanswered so the render inherits copier.yml's release-tag default.

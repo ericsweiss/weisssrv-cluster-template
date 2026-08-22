@@ -7,7 +7,7 @@
 #
 # Every answer here is therefore deliberately UNLIKE its counterpart in the
 # other fixture — different LAN, different domains, different names, different
-# vault, different runner tag — and both optional modules are OFF, which is the
+# vault, different runner tag — and every optional module is OFF, which is the
 # other half of the coverage (the `{% if %}` branches the shaped fixture never
 # takes). test_render_b_carries_no_fixture_a_values asserts that nothing from
 # fixture A survives into this render.
@@ -57,13 +57,15 @@ smtp_host: postmark.internal.brinemoor.test
 # the rules naming it would match no series).
 node_exporter_job_regex: node-exporter|node-exporter-host|hostwatch
 
-# Both optional modules OFF — the branches the shaped fixture never renders.
+# Every optional module OFF — the branches the shaped fixture never renders.
 vpn_tailscale: false
 # Never asked here (vpn_tailscale is false), but answered anyway so the fixture
 # covers the whole question set — and answered UNLIKE fixture A's, like every
 # other value in this file.
 tailnet_dns_suffix: tail9z8y7x.ts.net
 gpu: none
+# No terraform/unifi directory, no unifi-drift-plan job, no unifi tasks.
+use_unifi: false
 
 lib_url: https://git.ericsweiss.com/eric/weisssrv-lib.git
 lib_project: eric/weisssrv-lib

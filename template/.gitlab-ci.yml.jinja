@@ -1292,7 +1292,49 @@ authentik-drift-plan:
     - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
       changes:
         - "terraform/authentik/**/*"
-
+{% if use_unifi %}
+# Read-only drift plan for the gateway's own segmentation. The apply is `task
+# terraform:unifi-apply`, which refuses to run non-interactively, so this job is
+# the only thing that notices a console edit. Exit-code, allow_failure and rule
+# handling as in authentik-drift-plan above.
+#
+# It reaches the console over the LAN, so it reports drift only on a runner that
+# can — a runner elsewhere fails the plan at the first data read, which is
+# advisory here rather than a broken pipeline.
+#
+# Add a TF_VAR_ line here for every WLAN passphrase variable the root declares:
+# a missing one fails the plan, which is the intended behaviour, not drift.
+unifi-drift-plan:
+  stage: validate
+  extends: [.terraform-http-backend, .terraform-git-credential]
+  needs: []
+  tags: ["{{ runner_tag }}"]
+  image:
+    name: hashicorp/terraform:1.15
+    entrypoint: [""]
+  variables:
+    TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/unifi"
+    TF_HTTP_LOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/unifi/lock"
+    TF_HTTP_UNLOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/unifi/lock"
+  before_script:
+    - !reference [.install-1password-alpine, before_script]
+  script:
+    - cd terraform/unifi
+    - terraform init -lockfile=readonly
+    - |
+      export TF_VAR_unifi_api_url=$({{ secret_read("UniFi Controller", "url") }})
+      export TF_VAR_unifi_api_key=$({{ secret_read("UniFi Controller", "api-key") }})
+      export TF_VAR_wlan_passphrase_iot=$({{ secret_read("WiFi IoT", "password") }})
+      export TF_VAR_wlan_passphrase_guest=$({{ secret_read("WiFi Guest", "password") }})
+      terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $OP_SERVICE_ACCOUNT_TOKEN'
+    # No merge_request_event rule: this job reads every WLAN passphrase.
+    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+      changes:
+        - "terraform/unifi/**/*"
+{% endif %}
 # ==============================================================================
 # VERIFY STAGE — read-only, runs after the deploy stage whatever it did.
 # ==============================================================================

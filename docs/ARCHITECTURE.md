@@ -18,7 +18,8 @@ is **pulled** by Flux. The boundary is deliberate and absolute:
   kubernetes/ ◀──pull── Flux controllers in the cluster
                        (reconciled continuously; git is the only input)
 
-  terraform/ ───push──▶ things outside both: public DNS, tailnet policy, SSO objects
+  terraform/ ───push──▶ things outside both: public DNS, tailnet policy, SSO
+                       objects, and the gateway's own networks
 ```
 
 Consequences worth internalising:
@@ -461,7 +462,7 @@ between a fork and a contribution.
 │   ├── requirements.yml        weisssrv.infra pinned at lib_ref
 │   ├── inventories/prod/       hosts.yml + group_vars/ — the site's data
 │   └── playbooks/              site, base, dns, storage, k3s, proxmox-*, maintenance/
-├── terraform/                  DNS zone, tailnet ACL, SSO objects
+├── terraform/                  DNS zone, tailnet ACL, SSO objects, gateway networks
 ├── kubernetes/
 │   ├── clusters/<name>/        Flux entrypoint, stage Kustomizations, tenants/
 │   ├── components/             reusable kustomize components

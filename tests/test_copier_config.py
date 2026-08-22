@@ -63,6 +63,7 @@ REQUIRED_QUESTIONS = {
     "vpn_tailscale",
     "tailnet_dns_suffix",
     "gpu",
+    "use_unifi",
     "lib_url",
     "lib_ref",
     "lib_project",

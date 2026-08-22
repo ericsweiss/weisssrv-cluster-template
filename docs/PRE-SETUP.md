@@ -335,6 +335,8 @@ items.
 | `Authentik Terraform Token` | `credential` | the `terraform:authentik-init` / `-plan` / `-apply` tasks — created after Authentik is up |
 | `Tailscale Auth Key` | `credential` | enrolling hosts, only with `vpn_tailscale` |
 | `Tailscale OAuth` | `client id`, `credential` | the `terraform:tailscale-init` / `-plan` / `-apply` tasks, only with `vpn_tailscale` |
+| `UniFi Controller` | `url`, `api-key` | the `terraform:unifi-init` / `-plan` / `-apply` tasks, only with `use_unifi` |
+| `WiFi IoT`, `WiFi Guest` | `password` | the WLAN passphrases that root applies, one item per SSID, only with `use_unifi` |
 
 `Loki Push Auth` deserves a call-out: it is in the `env:` block of
 `infra:deploy`, `dns:deploy` and `storage:deploy`, so a missing item fails all
@@ -562,7 +564,50 @@ Requires:
 
 ---
 
-## 8a. Answers to accept as they come
+## 8a. Optional: gateway networks (`use_unifi`)
+
+Turn it on if your router is a UniFi console and you want its networks, VLANs,
+firewall zones, WLANs and port forwards to be code rather than console state. It
+is the one optional module that manages something **below** the cluster: nothing
+in the generated tree depends on it, and answering false leaves your router
+exactly as it is.
+
+Before generating you need:
+
+- A **UniFi console** reachable from your workstation on the LAN, running
+  **UniFi Network 9.0.108 or later** — the version that can mint an API key
+  under Control Plane → Integrations, which is what this root authenticates
+  with. Check the *Network application* version (Settings → System → Updates),
+  not the UniFi OS version: they are separate streams, and a console on
+  UniFi OS 5.x can be on Network 10.x.
+- A **local admin** on that console, and an **API key** minted for it
+  (Control Plane → Integrations). A cloud-only account cannot mint one, and the
+  key is what every plan authenticates with — store it as `UniFi Controller` →
+  `api-key`, alongside `url` (`https://<gateway address>`).
+- One vault item per SSID you intend to manage, each with a `password` field.
+  The shipped example expects `WiFi IoT` and `WiFi Guest`; rename them in
+  `terraform/unifi/variables.tf`, the Taskfile's `tf_unifi_env` anchor and the
+  `unifi-drift-plan` job together if you use other titles.
+- A **`.unf` backup** of the console taken before the first apply, and a wired
+  path to the gateway kept open while you run it. This root writes the
+  segmentation the console itself is reached over, so the apply is supervised
+  and refuses `-auto-approve`.
+
+What generates is a **worked example**, not your site: the flat LAN comes from
+your answers, and two VLANs (IoT and guest), their zones, policies and SSIDs
+show the shape. Edit `terraform/unifi/networks.tf` before planning, and import
+what the console already holds — an apply against empty state creates
+duplicates rather than adopting. The generated `terraform/unifi/README.md` is
+the import list and the checklist.
+
+Policy ORDER, mDNS reflection, device adoption, per-port VLAN assignment and
+6 GHz stay console steps at this provider version; they are listed in that
+README so they can be written into your own cut-over runbook rather than
+discovered during one.
+
+---
+
+## 8b. Answers to accept as they come
 
 Not everything copier asks is a decision. `node_exporter_job_regex` looks like
 free text, but its two members name things the template *ships*: `node-exporter`
@@ -647,7 +692,8 @@ Network
 
 - [ ] Address plan written down, DHCP pool does not overlap it
 - [ ] Three VIPs reserved and unused
-- [ ] Router port-forward planned to the public ingress VIP
+- [ ] Router port-forward planned to the public ingress VIP — or, with
+      `use_unifi`, declared in `terraform/unifi/networks.tf`
 
 Names and accounts
 
@@ -663,6 +709,10 @@ Names and accounts
 - [ ] Optional: tailnet auth key and OAuth clients, **and the MagicDNS suffix
       noted for `tailnet_dns_suffix`** (no default — copier asks for it and
       rejects the `CHANGEME` placeholder)
+- [ ] Optional (`use_unifi`): local console admin created and an API key minted
+      for it; `UniFi Controller` → `url` and `api-key` in the vault, plus one
+      `WiFi <name>` → `password` item per SSID you will manage
+      (`WiFi IoT` and `WiFi Guest` as shipped); `.unf` console backup exported
 - [ ] Every host-side item from § 4 present in the vault
 - [ ] Every in-cluster item from § 4 present, including `Healthchecks Watchdog`
       and `Grafana SSO` — placeholders are fine **except** `Grafana SSO` →

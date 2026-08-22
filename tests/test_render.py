@@ -66,8 +66,8 @@ def answers_b() -> dict:
 
 @pytest.fixture(scope="session")
 def rendered_b(tmp_path_factory) -> Path:
-    """A second render from deliberately unlike answers, with both optional
-    modules off — see tests/answers-unlike.yml for why it is not optional."""
+    """A second render from deliberately unlike answers, with every optional
+    module off — see tests/answers-unlike.yml for why it is not optional."""
     scratch = tmp_path_factory.mktemp("render-b")
     return render_cluster.render(scratch, answers=ANSWERS_B, dest_name="render-b")
 
@@ -158,7 +158,7 @@ def test_no_unrendered_jinja_statements(cluster):
     dashboards and Prometheus annotations, so neither is evidence of a leak.
 
     Runs against both fixtures: the `{% if %}` branches the shaped fixture never
-    takes (both optional modules off) still have to render.
+    takes (every optional module off) still have to render.
     """
     root = cluster.path
     scoped = [
@@ -739,6 +739,52 @@ def test_documented_tasks_exist(cluster, rendered, rendered_b):
     assert not missing, "documentation names tasks no generated Taskfile defines:\n  " + "\n  ".join(
         missing
     )
+
+
+# The two prose lists in template/terraform/README.md.jinja that grow an item
+# per optional Terraform module, as (regex, what it enumerates) pairs.
+_CONJUNCTION_LISTS = (
+    (re.compile(r"cluster: (.+?)\. Everything"), "the modules this directory holds"),
+    (re.compile(r"for the (.+?) module\.\*\*"), "the modules that refuse -auto-approve"),
+    (re.compile(r"a bad apply (.+?), and the plan review"), "what a bad apply costs"),
+)
+
+
+def test_terraform_readme_reads_under_every_optional_module_combination():
+    """The prose lists in template/terraform/README.md.jinja must keep their
+    conjunction whichever optional modules are on.
+
+    Each `{% if %}` adds an item to a comma list, so the "or"/"and" has to sit
+    on the LAST emitted branch, not on a fixed one. Neither fixture catches a
+    misplaced one: answers-weisssrv-shaped turns every optional module on and
+    answers-unlike turns every one off, so the mixed combinations — the likely
+    real-world ones — are rendered nowhere else.
+    """
+    src = (_TEMPLATE_ROOT / "template" / "terraform" / "README.md.jinja").read_text(
+        encoding="utf-8"
+    )
+    template = jinja2.Environment().from_string(src)
+    checked = 0
+    for tailscale in (True, False):
+        for unifi in (True, False):
+            text = " ".join(
+                template.render(
+                    vpn_tailscale=tailscale, use_unifi=unifi, git_host="git.example.com"
+                ).split()
+            )
+            for pattern, what in _CONJUNCTION_LISTS:
+                match = pattern.search(text)
+                assert match, f"{what}: pattern {pattern.pattern!r} no longer matches"
+                items = [item.strip() for item in match.group(1).split(",")]
+                checked += 1
+                if len(items) > 1:
+                    last = items[-1]
+                    joined = last.startswith(("or ", "and ")) or " or " in last or " and " in last
+                    assert joined, (
+                        f"vpn_tailscale={tailscale} use_unifi={unifi}: {what} renders as a "
+                        f"comma list with no conjunction: {match.group(1)!r}"
+                    )
+    assert checked == 12, "a prose list stopped being examined"
 
 
 def test_ci_doc_lists_every_validator_check():

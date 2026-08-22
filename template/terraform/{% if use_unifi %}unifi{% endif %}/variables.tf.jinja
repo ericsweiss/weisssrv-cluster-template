@@ -1,0 +1,58 @@
+variable "unifi_api_url" {
+  description = "Base URL of the UniFi console, no /api path (1Password item 'UniFi Controller', field 'url')"
+  type        = string
+  default     = "https://{{ lan_gateway }}"
+
+  validation {
+    # A port is allowed on purpose: a self-hosted UniFi Network Application
+    # answers on :8443, and a DR bootstrap against a console reached through an
+    # SSH tunnel (https://127.0.0.1:8443) is exactly what `terraform import`
+    # needs when the management VLAN is not routable from your machine yet.
+    condition     = can(regex("^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$", var.unifi_api_url))
+    error_message = "unifi_api_url must be a bare https:// host with an optional port, and no path or trailing slash — the SDK appends the API path itself."
+  }
+}
+
+variable "unifi_allow_insecure" {
+  description = "Skip TLS verification against the console. True by default: the console serves its own self-signed certificate on the LAN address this root talks to, and there is no name to issue a real certificate for. Set it false once the console presents a certificate your machine trusts — every plan sends the API key and, on a WLAN change, the pre-shared keys over this session."
+  type        = bool
+  default     = true
+}
+
+variable "unifi_api_key" {
+  description = "UniFi API key for a LOCAL admin (1Password item 'UniFi Controller', field 'api-key')"
+  type        = string
+  sensitive   = true
+
+  # No default: an unset key must fail the plan, not authenticate as nobody.
+  validation {
+    condition     = length(var.unifi_api_key) >= 16
+    error_message = "unifi_api_key is empty or implausibly short. The terraform:unifi-* tasks and the unifi-drift-plan job inject it from the secret store — a renamed item or field resolves to an empty string, which fails at the first data read with an authentication error that names nothing."
+  }
+}
+
+# One variable per WLAN, each read from the same vault item the passphrase lives
+# in. A map would be one variable, but one `op://` reference cannot carry a map,
+# so a WLAN added to networks.tf gets a variable here, an env line in the
+# Taskfile's tf_unifi_env anchor, and an export in the unifi-drift-plan job.
+variable "wlan_passphrase_iot" {
+  description = "Passphrase for the IoT SSID (1Password item 'WiFi IoT', field 'password')"
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[\\x20-\\x7e]{8,63}$", var.wlan_passphrase_iot))
+    error_message = "wlan_passphrase_iot must be 8-63 printable ASCII characters (WPA-PSK counts octets and allows printable ASCII only). A sensitive value's diff is hidden, so an empty one would silently reset the SSID's key."
+  }
+}
+
+variable "wlan_passphrase_guest" {
+  description = "Passphrase for the guest SSID (1Password item 'WiFi Guest', field 'password')"
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("^[\\x20-\\x7e]{8,63}$", var.wlan_passphrase_guest))
+    error_message = "wlan_passphrase_guest must be 8-63 printable ASCII characters (WPA-PSK counts octets and allows printable ASCII only). A sensitive value's diff is hidden, so an empty one would silently reset the SSID's key."
+  }
+}

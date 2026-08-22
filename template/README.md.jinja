@@ -71,8 +71,16 @@ First time only, in this order. Each phase leaves a working state.
    repository, then `task flux:bootstrap`.
 8. **Publish** — `task terraform:init` (once per module, per checkout — the
    state lives in a remote backend and `plan` refuses to run without it), then
-   `task terraform:plan` and `task terraform:apply`. Forward `443/tcp` to
-   `{{ metallb_public_vip }}` and register CI runners.
+   `task terraform:plan` and `task terraform:apply`.
+{%- if use_unifi %} The `443/tcp` forward to `{{ metallb_public_vip }}` is
+   declared in `terraform/unifi`, together with the gateway's networks and
+   WLANs: import what the console already holds, then
+   `task terraform:unifi-init`, `task terraform:unifi-plan` and
+   `task terraform:unifi-apply` (read `terraform/unifi/README.md` first).
+   Register CI runners.
+{%- else %} Forward `443/tcp` to `{{ metallb_public_vip }}` and register CI
+   runners.
+{%- endif %}
 9. **Single sign-on** — the platform is green but nothing can be signed into
    yet: Grafana is SSO-only and its identity provider is this cluster's own
    Authentik, freshly deployed and empty. Run the one-time
@@ -125,7 +133,7 @@ ansible/
   requirements.yml           the platform collection, pinned
   inventories/prod/          this cluster's hosts, groups and per-host facts
   playbooks/                 site, base, dns, storage, k3s, maintenance/
-terraform/                   public DNS{% if vpn_tailscale %}, tailnet policy{% endif %}, SSO objects
+terraform/                   public DNS{% if vpn_tailscale %}, tailnet policy{% endif %}, SSO objects{% if use_unifi %}, gateway networks{% endif %}
 kubernetes/
   clusters/{{ cluster_name }}/  Flux entrypoint and the stage Kustomizations
   infrastructure/            sources → crds → controllers → configs → observability

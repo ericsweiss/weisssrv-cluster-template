@@ -155,6 +155,7 @@ checks live there. Summary:
 | `vpn_tailscale` | `false` | Overlay VPN: host role, operator, ACL module |
 | `tailnet_dns_suffix` | *(none — asked)* | Asked only with `vpn_tailscale`; MagicDNS suffix, rejected if left at the `CHANGEME` placeholder |
 | `gpu` | `none` | `nvidia` adds VFIO prep, driver + container toolkit, device plugin; GPU telemetry is a documented add-on, **not shipped** (`kubernetes/infrastructure/observability/README.md`) |
+| `use_unifi` | `false` | Manages a UniFi gateway as code: `terraform/unifi`, its supervised tasks, a drift-plan job. The generated site data is a worked example to edit |
 | `lib_url` / `lib_ref` | upstream URL / a release tag (default in `copier.yml`) | weisssrv-lib source and pin for collection, CI includes, TF modules |
 | `lib_project` | path part of `lib_url` | GitLab project path for `include: project:` (instance-local) |
 | `ci_runner_tag` / `ci_cpu_selector` | `infrastructure` / `<internal_domain>/cpu=modern` | Runner tag and the secret-detection CPU pin |
@@ -201,6 +202,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | DNS | Cloudflare | Terraform zone module, external-dns, ACME DNS-01 |
 | Ingress | Traefik + cert-manager | `infrastructure/controllers`, `infrastructure/configs` |
 | Overlay VPN | Tailscale (`vpn_tailscale`) | host role, operator, ACL module |
+| Gateway / VLANs | UniFi (`use_unifi`) | `terraform/unifi`, the `unifi-drift-plan` job — off by default, and nothing in the cluster depends on it |
 | SSO | Authentik | `apps/authentik`, `terraform/authentik` |
 
 Where a seam is selectable it is a copier question that accepts only the values

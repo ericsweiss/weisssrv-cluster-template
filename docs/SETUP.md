@@ -526,7 +526,22 @@ Once the platform is Ready:
    ```
    The SSO module (`terraform/authentik`) is the third one; it comes after the
    identity provider exists, in step 4.
-3. **Router** — forward `443/tcp` to `metallb_public_vip`.
+3. **Router** — forward `443/tcp` to `metallb_public_vip`. With `use_unifi`
+   that forward is already declared in `terraform/unifi/networks.tf`, together
+   with the gateway's networks, zones and WLANs. It is a fourth module with its
+   own state and its own supervised apply, and the console already holds
+   objects it has to adopt: read `terraform/unifi/README.md`, then init, run
+   the imports it lists (they need an initialized backend), and only then plan:
+   ```bash
+   task terraform:unifi-init
+   task terraform:unifi-import -- <address> <id>   # once per pre-existing object
+   task terraform:unifi-plan     # read every line
+   task terraform:unifi-apply    # terminal only, refuses -auto-approve
+   ```
+   Take a `.unf` backup of the console first and keep a wired path to it open
+   until the plan applies clean — this module writes the segmentation the
+   console itself is reached over. Without `use_unifi` the forward is a manual
+   step in your router's UI.
 4. **Single sign-on** — the platform is green but nobody can sign in to
    anything yet. Grafana ships SSO-only (no login form, no basic auth) and its
    OIDC endpoints point at `auth.<internal_domain>` — this cluster's own
