@@ -41,8 +41,8 @@ variable "wlan_passphrase_iot" {
   sensitive   = true
 
   validation {
-    condition     = length(var.wlan_passphrase_iot) >= 8 && length(var.wlan_passphrase_iot) <= 63
-    error_message = "wlan_passphrase_iot must be 8-63 characters (WPA-PSK). A sensitive value's diff is hidden, so an empty one would silently reset the SSID's key."
+    condition     = can(regex("^[\\x20-\\x7e]{8,63}$", var.wlan_passphrase_iot))
+    error_message = "wlan_passphrase_iot must be 8-63 printable ASCII characters (WPA-PSK counts octets and allows printable ASCII only). A sensitive value's diff is hidden, so an empty one would silently reset the SSID's key."
   }
 }
 
@@ -52,7 +52,7 @@ variable "wlan_passphrase_guest" {
   sensitive   = true
 
   validation {
-    condition     = length(var.wlan_passphrase_guest) >= 8 && length(var.wlan_passphrase_guest) <= 63
-    error_message = "wlan_passphrase_guest must be 8-63 characters (WPA-PSK). A sensitive value's diff is hidden, so an empty one would silently reset the SSID's key."
+    condition     = can(regex("^[\\x20-\\x7e]{8,63}$", var.wlan_passphrase_guest))
+    error_message = "wlan_passphrase_guest must be 8-63 printable ASCII characters (WPA-PSK counts octets and allows printable ASCII only). A sensitive value's diff is hidden, so an empty one would silently reset the SSID's key."
   }
 }
