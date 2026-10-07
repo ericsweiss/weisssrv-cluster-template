@@ -1,9 +1,7 @@
 ---
-# VPA policies for the observability stack.
-#   Auto    — components that tolerate eviction.
-#   Initial — Grafana (single replica; resize on natural restarts only).
-#   Off     — Prometheus / Alertmanager / Loki: stateful, hand-tuned requests in
-#             their HelmReleases; the VPA records recommendations without acting.
+# VPA policies for the observability stack. Auto where eviction is tolerable,
+# Initial for single-replica Grafana, Off for the stateful stores. maxAllowed.memory
+# tracks the container's declared limit except where a policy says inline why not.
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
@@ -13,10 +11,14 @@ spec:
   updatePolicy: {updateMode: Auto}
   resourcePolicy:
     containerPolicies:
+      # RequestsOnly with maxAllowed == the 64Mi limit in
+      # exporters/blackbox-exporter.yaml, so that limit stays the OOM ceiling
+      # instead of being rescaled with the request.
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 256Mi}
+        maxAllowed: {cpu: 200m, memory: 64Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -27,10 +29,14 @@ spec:
   updatePolicy: {updateMode: Auto}
   resourcePolicy:
     containerPolicies:
+      # RequestsOnly with maxAllowed == the 384Mi limit in
+      # kube-prometheus-stack/release.yaml, so that limit stays the OOM ceiling
+      # instead of being rescaled with the request.
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 64Mi}
-        maxAllowed: {cpu: 500m, memory: 512Mi}
+        maxAllowed: {cpu: 500m, memory: 384Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -41,10 +47,14 @@ spec:
   updatePolicy: {updateMode: Auto}
   resourcePolicy:
     containerPolicies:
+      # RequestsOnly with maxAllowed == the 384Mi limit in
+      # kube-prometheus-stack/release.yaml: its working set scales with object
+      # count, so only the request moves and that limit stays the ceiling.
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 64Mi}
         maxAllowed: {cpu: 300m, memory: 384Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -55,10 +65,19 @@ spec:
   updatePolicy: {updateMode: Auto}
   resourcePolicy:
     containerPolicies:
-      - containerName: "*"
+      # PER-CONTAINER bounds, not a "*" catch-all: RequestsOnly moves the
+      # REQUEST, and a request above a container's fixed limit is an invalid pod.
+      # maxAllowed.memory is each alloy/release.yaml limit; the CPU caps are headroom.
+      - containerName: alloy
         minAllowed: {cpu: 25m, memory: 64Mi}
-        maxAllowed: {cpu: 500m, memory: 512Mi}
+        maxAllowed: {cpu: 500m, memory: 256Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
+      - containerName: config-reloader
+        minAllowed: {cpu: 10m, memory: 32Mi}
+        maxAllowed: {cpu: 50m, memory: 128Mi}
+        controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -87,10 +106,20 @@ spec:
   updatePolicy: {updateMode: Initial}
   resourcePolicy:
     containerPolicies:
-      - containerName: "*"
+      # RequestsOnly with maxAllowed.memory == the declared 1Gi limit: only the
+      # request moves, so the limit stays the ceiling.
+      - containerName: grafana
         minAllowed: {cpu: 25m, memory: 64Mi}
         maxAllowed: {cpu: 1, memory: 1Gi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
+      # The dashboard/datasource sidecars carry their own 256Mi limit, and a
+      # request above a container's limit is an invalid pod.
+      - containerName: "*"
+        minAllowed: {cpu: 10m, memory: 32Mi}
+        maxAllowed: {cpu: 100m, memory: 256Mi}
+        controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -102,14 +131,20 @@ spec:
   # StatefulSet leaves it ConfigUnsupported with no recommendations recorded.
   targetRef: {apiVersion: monitoring.coreos.com/v1, kind: Prometheus, name: kube-prometheus-stack-prometheus}
   updatePolicy: {updateMode: "Off"}
-  # maxAllowed.memory sits ABOVE the pod's hand-tuned limit on purpose: this VPA
-  # is recording-only, and capping the recommendation at the current limit would
-  # hide the true need exactly when Prometheus outgrows it.
   resourcePolicy:
     containerPolicies:
-      - containerName: "*"
+      # maxAllowed.memory tracks the pod's 4Gi limit with headroom: this VPA is
+      # recording-only, so a cap at the current limit would hide the true need
+      # exactly when Prometheus outgrows it.
+      - containerName: prometheus
         minAllowed: {cpu: 100m, memory: 512Mi}
         maxAllowed: {cpu: 2, memory: 6Gi}
+        controlledResources: [cpu, memory]
+      # config-reloader and any future sidecar must not inherit the main
+      # container's floor; the cap is the reloader's 96Mi limit (release.yaml).
+      - containerName: "*"
+        minAllowed: {cpu: 10m, memory: 32Mi}
+        maxAllowed: {cpu: 100m, memory: 96Mi}
         controlledResources: [cpu, memory]
 ---
 apiVersion: autoscaling.k8s.io/v1
@@ -121,9 +156,15 @@ spec:
   updatePolicy: {updateMode: "Off"}
   resourcePolicy:
     containerPolicies:
+      # maxAllowed.memory == each container's declared limit in release.yaml, so
+      # the recommendation cannot exceed its ceiling; the CPU caps are headroom.
+      - containerName: alertmanager
+        minAllowed: {cpu: 25m, memory: 64Mi}
+        maxAllowed: {cpu: 200m, memory: 128Mi}
+        controlledResources: [cpu, memory]
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 256Mi}
+        maxAllowed: {cpu: 100m, memory: 96Mi}
         controlledResources: [cpu, memory]
 ---
 apiVersion: autoscaling.k8s.io/v1
@@ -135,7 +176,13 @@ spec:
   updatePolicy: {updateMode: "Off"}
   resourcePolicy:
     containerPolicies:
-      - containerName: "*"
+      # maxAllowed.memory is each container's declared limit in loki/release.yaml.
+      - containerName: loki
         minAllowed: {cpu: 50m, memory: 128Mi}
         maxAllowed: {cpu: 1, memory: 2Gi}
+        controlledResources: [cpu, memory]
+      # loki-sc-rules (the rules sidecar) and anything else in the pod.
+      - containerName: "*"
+        minAllowed: {cpu: 10m, memory: 32Mi}
+        maxAllowed: {cpu: 200m, memory: 256Mi}
         controlledResources: [cpu, memory]

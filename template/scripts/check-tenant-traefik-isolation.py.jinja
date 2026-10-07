@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Fail the first tenant onboarding while Traefik still allows cross-namespace refs.
+Tenants hold full traefik.io write, so a cross-namespace ref lets one route to
+another namespace's Service. Exit 0 clean, 1 findings, 2 vacuous.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - environment guard
+    print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
+    raise SystemExit(2) from None
+
+REPO = Path(__file__).resolve().parent.parent
+TENANTS_KUSTOMIZATION = "kubernetes/clusters/{{ cluster_name }}/tenants/kustomization.yaml"
+TRAEFIK_RELEASE = "kubernetes/infrastructure/controllers/traefik/release.yaml"
+
+# The one resource that is always present: the shared tenant RBAC, not a tenant.
+BASELINE = {"tenant-crd-editor.yaml"}
+
+
+class Vacuous(Exception):
+    """The gate could not inspect its subject — exit 2, never a silent pass."""
+
+
+def _read(path: Path, root: Path) -> str:
+    """Read one of the gate's inputs, or exit 2 through Vacuous."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise Vacuous(f"{path.relative_to(root)}: {exc}") from exc
+
+
+def tenant_resources(path: Path, root: Path) -> list[str]:
+    try:
+        doc = yaml.safe_load(_read(path, root)) or {}
+    except yaml.YAMLError as exc:
+        raise Vacuous(f"{path.relative_to(root)}: {exc}") from exc
+    return [str(r) for r in doc.get("resources") or []]
+
+
+def allows_cross_namespace(path: Path, root: Path) -> bool | None:
+    """The provider setting, or None when no HelmRelease here declares values —
+    a missing values block leaves the question unanswerable, not answered."""
+    answered = False
+    try:
+        docs = list(yaml.safe_load_all(_read(path, root)))
+    except yaml.YAMLError as exc:
+        raise Vacuous(f"{path.relative_to(root)}: {exc}") from exc
+    for doc in docs:
+        if not doc or doc.get("kind") != "HelmRelease":
+            continue
+        values = (doc.get("spec") or {}).get("values")
+        if not isinstance(values, dict):
+            continue
+        answered = True
+        providers = values.get("providers") or {}
+        if (providers.get("kubernetesCRD") or {}).get("allowCrossNamespace"):
+            return True
+    return False if answered else None
+
+
+def check(root: Path = REPO) -> list[str]:
+    kustomization = root / TENANTS_KUSTOMIZATION
+    release = root / TRAEFIK_RELEASE
+    for path in (kustomization, release):
+        if not path.is_file():
+            return [f"{path.relative_to(root)} is missing — this gate no longer binds"]
+
+    resources = tenant_resources(kustomization, root)
+    if not resources:
+        return [f"{TENANTS_KUSTOMIZATION} lists no resources — has the tenant wiring moved?"]
+
+    allows = allows_cross_namespace(release, root)
+    if allows is None:
+        return [
+            f"{TRAEFIK_RELEASE} declares no HelmRelease spec.values — this gate "
+            "can no longer read the provider setting"
+        ]
+
+    tenants = [r for r in resources if r not in BASELINE]
+    if not tenants or not allows:
+        return []
+
+    return [
+        f"{TENANTS_KUSTOMIZATION} onboards {', '.join(tenants)} while "
+        f"{TRAEFIK_RELEASE} still sets providers.kubernetesCRD.allowCrossNamespace: "
+        "true. tenant-crd-editor grants tenants full traefik.io write, so that "
+        "tenant can route to another namespace's Service or Middleware. Work the "
+        "tenant onboarding checklist first: scope the CRD provider per-tenant, "
+        "or set allowCrossNamespace: false."
+    ]
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--repo", type=Path, default=REPO)
+    args = ap.parse_args(argv)
+
+    try:
+        problems = check(args.repo)
+    except Vacuous as exc:
+        print(f"check-tenant-traefik-isolation inspected nothing: {exc}", file=sys.stderr)
+        print(
+            "    Fix: Flux would reject the file — make it parse, or move it out "
+            "of the tree.",
+            file=sys.stderr,
+        )
+        return 2
+    if problems:
+        print("check-tenant-traefik-isolation: FAILED", file=sys.stderr)
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
+        return 1
+    print("check-tenant-traefik-isolation: OK")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

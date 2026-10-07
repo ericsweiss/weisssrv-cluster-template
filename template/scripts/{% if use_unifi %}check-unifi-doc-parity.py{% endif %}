@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Assert docs/unifi-network.md § Site settings still says what terraform/unifi sets.
+
+Each `site_settings` key must match exactly one doc row whose first backticked
+Value equals the module input. Both files are read from git; no API call.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+DOC = "docs/unifi-network.md"
+MAIN_TF = "terraform/unifi/networks.tf"
+SECTION = "Site settings"
+
+ASSIGNMENT = re.compile(r"^\s*([a-z0-9_]+)\s*=\s*(.+?)\s*$")
+BACKTICKED = re.compile(r"`([^`]+)`")
+
+
+class Vacuous(Exception):
+    """The gate could not inspect its subject — exit 2, never a silent pass."""
+
+
+def normalize(value: str) -> str:
+    """One spelling for a value however either side writes it."""
+    value = value.strip().rstrip(",").strip()
+    if value.startswith("[") and value.endswith("]"):
+        items = [normalize(i) for i in value[1:-1].split(",") if i.strip()]
+        return ",".join(items)
+    return value.strip().strip('"').strip("'")
+
+
+def terraform_settings(text: str) -> dict[str, str]:
+    """The `site_settings = { ... }` map, comments dropped."""
+    start = text.find("site_settings")
+    if start < 0:
+        raise Vacuous(f"{MAIN_TF} declares no site_settings map")
+    body = text[text.index("{", start) + 1 :]
+    settings: dict[str, str] = {}
+    depth = 0
+    for line in body.splitlines():
+        stripped = line.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        if depth == 0 and stripped.startswith("}"):
+            break
+        match = ASSIGNMENT.match(stripped)
+        delta = stripped.count("{") - stripped.count("}")
+        # A nested map's opening line assigns no documentable value, so only a
+        # brace-balanced line at depth 0 is a setting.
+        if match and depth == 0 and delta == 0:
+            settings[match.group(1)] = normalize(match.group(2))
+        depth += delta
+    if not settings:
+        raise Vacuous(f"{MAIN_TF}: site_settings parsed empty")
+    return settings
+
+
+def doc_rows(text: str) -> list[tuple[str, str]]:
+    """(Setting cell, first backticked Value) for every § Site settings row."""
+    lines = text.splitlines()
+    heading = next(
+        (i for i, line in enumerate(lines) if line.startswith("#") and SECTION in line),
+        None,
+    )
+    if heading is None:
+        raise Vacuous(f"{DOC} has no '{SECTION}' heading")
+    rows = []
+    for line in lines[heading + 1 :]:
+        if line.startswith("#"):
+            break
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 2 or set(cells[0]) <= set("-: "):
+            continue
+        if cells[0].lower() == "setting":
+            continue
+        values = BACKTICKED.findall(cells[1])
+        rows.append((cells[0], normalize(values[0]) if values else ""))
+    if not rows:
+        raise Vacuous(f"{DOC} § {SECTION} has no table rows")
+    return rows
+
+
+def check(root: Path) -> tuple[list[str], int]:
+    try:
+        settings = terraform_settings((root / MAIN_TF).read_text())
+        rows = doc_rows((root / DOC).read_text())
+    except OSError as exc:
+        raise Vacuous(f"could not read a side of the comparison: {exc}") from exc
+
+    problems = []
+    for key, tf_value in sorted(settings.items()):
+        matches = [row for row in rows if key in row[0]]
+        if not matches:
+            problems.append(
+                f"{MAIN_TF} sets {key} = {tf_value!r}, which no {DOC} § {SECTION} row names"
+            )
+            continue
+        if len(matches) > 1:
+            problems.append(
+                f"{key} matches {len(matches)} {DOC} rows "
+                f"({', '.join(m[0] for m in matches)}) — the Setting cells are ambiguous"
+            )
+            continue
+        setting, doc_value = matches[0]
+        if doc_value != tf_value:
+            problems.append(
+                f"{DOC} row {setting!r} documents {doc_value!r} but "
+                f"{MAIN_TF} sets {key} = {tf_value!r}"
+            )
+    return problems, len(settings)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="docs/unifi-network.md <-> terraform/unifi parity")
+    parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parent.parent))
+    args = parser.parse_args(argv)
+    root = Path(args.repo_root)
+
+    try:
+        problems, inspected = check(root)
+    except Vacuous as exc:
+        print(f"check-unifi-doc-parity inspected nothing: {exc}", file=sys.stderr)
+        return 2
+    if problems:
+        print("The UniFi doc § Site settings has drifted from terraform/unifi:", file=sys.stderr)
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
+        return 1
+    print(f"{DOC} § {SECTION} agrees with {MAIN_TF} ({inspected} settings).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

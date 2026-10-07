@@ -1,13 +1,7 @@
 ---
-# Nightly logical backup of the bundled PostgreSQL. The data volume is only a
-# crash-consistent block snapshot; this adds a restorable logical dump (gzipped
-# plain SQL, DROP-if-exists) on a file-walkable NFS dataset, which is what the
-# offsite backup can actually pick up.
-#
-# Restore: gunzip -c <file> | psql -h authentik-postgresql -U authentik authentik
-#
-# Runs at 02:30 UTC. Add spec.timeZone if you need it aligned with local
-# overnight maintenance windows, and stagger it against your other dump jobs.
+# Nightly logical backup of the bundled PostgreSQL to the file-walkable NFS
+# dataset the offsite tier can pick up (the data PV alone is a crash-consistent
+# block snapshot). Schedule, retention and restore: README.md.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -18,6 +12,9 @@ metadata:
     app.kubernetes.io/component: backup
 spec:
   schedule: "30 2 * * *"
+  # Local time, so the window lines up with the host's own overnight jobs rather
+  # than the controller's default UTC.
+  timeZone: ${cluster_timezone}
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 3600
   successfulJobsHistoryLimit: 3
@@ -26,6 +23,9 @@ spec:
     spec:
       backoffLimit: 2
       activeDeadlineSeconds: 1800
+      # Bounds how long a failed Job object keeps KubeJobFailed firing after the
+      # next run has already succeeded, while leaving a half-day to inspect it.
+      ttlSecondsAfterFinished: 43200
       template:
         metadata:
           labels:
@@ -56,16 +56,17 @@ spec:
               args:
                 - |
                   set -o pipefail
-                  # NetworkPolicy ipset propagation to remote nodes lags pod
-                  # creation by ~5-15s: a fresh job pod's first SYN is silently
-                  # dropped at the database node. A job that dials the instant it
-                  # starts loses that race on every backoff attempt, so wait —
-                  # bounded — until the server is actually reachable.
+                  # NetworkPolicy ipset propagation lags pod creation by 5-15s,
+                  # so a fresh job pod's first SYN is dropped at the database
+                  # node. Wait, bounded, until the server is reachable.
                   for i in $(seq 1 30); do
                     if pg_isready -q; then break; fi
                     if [ "$i" = 30 ]; then echo "postgres unreachable after 150s" >&2; exit 1; fi
                     sleep 5
                   done
+                  # Sweep .tmp files from crashed runs; the retention glob only
+                  # sees *.sql.gz.
+                  rm -f /backups/authentik-*.sql.gz.tmp
                   ts="$(date +%Y%m%d-%H%M%S)"
                   out="/backups/authentik-$ts.sql.gz"
                   echo "pg_dump $PGDATABASE -> $out"
@@ -99,9 +100,12 @@ spec:
                 capabilities:
                   drop: ["ALL"]
               resources:
+                # The tmp emptyDir's sizeLimit is the cap; this request is what
+                # ranks the pod by its own usage under node pressure.
                 requests:
                   cpu: 50m
                   memory: 64Mi
+                  ephemeral-storage: 64Mi
                 limits:
                   memory: 256Mi
               volumeMounts:
@@ -114,4 +118,7 @@ spec:
               persistentVolumeClaim:
                 claimName: authentik-pg-dump
             - name: tmp
-              emptyDir: {}
+              emptyDir:
+                # HOME for pg_dump; the dump itself streams to the backups PVC.
+                # Over sizeLimit the kubelet evicts the pod.
+                sizeLimit: 64Mi

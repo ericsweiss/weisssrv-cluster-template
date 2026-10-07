@@ -1,10 +1,7 @@
 ---
-# Harden the built-in `default` namespace. It carries only Services/IngressRoutes
-# for non-Kubernetes backends (no pods), but without PSA labels and a
-# default-deny a pod accidentally deployed there would be unguarded. Neither
-# control affects Services or IngressRoutes, so routing is untouched.
-#
-# prune disabled: Flux must never try to delete a built-in namespace.
+# Harden the built-in `default` namespace. It holds no pods here, so PSA labels
+# plus a default-deny cost nothing and guard a pod deployed there by accident.
+# Flux never prunes it.
 apiVersion: v1
 kind: Namespace
 metadata:

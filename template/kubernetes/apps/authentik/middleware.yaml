@@ -23,15 +23,9 @@ spec:
       - X-authentik-meta-app
 
 ---
-# Identical to authentik-auth, PLUS `Authorization` in authResponseHeaders.
-#
-# Traefik DELETES every listed header from the client request and re-adds it only
-# if the auth response carries it — so putting `Authorization` on the SHARED
-# middleware above would strip client-sent credentials (API keys, basic auth) on
-# every route that uses it. Attach this variant ONLY to routes whose upstream
-# expects the injected credentials (a proxy provider with basic_auth_enabled);
-# those upstreams validate the injected header against their own local users, so
-# the double login disappears while direct access still needs the real password.
+# TRAP: Traefik deletes every authResponseHeaders entry from the client request
+# and re-adds it only from the outpost response. Attach this variant only to
+# proxy providers with basic_auth_enabled, never the shared authentik-auth.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:

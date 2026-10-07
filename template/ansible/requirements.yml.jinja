@@ -16,4 +16,9 @@ collections:
   - name: community.general
     version: ">=12.2.0,<13.0.0"
 
+  # Not a collection dependency - used directly by the integration-test molecule
+  # scenarios (docker_container / docker_network / docker_login).
+  - name: community.docker
+    version: ">=4.3.0,<5.0.0"
+
 roles: []

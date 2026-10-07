@@ -9,6 +9,10 @@ metadata:
 spec:
   interval: 30m
   releaseName: authentik
+  # The chart omits .spec.replicas while server.autoscaling is on and injects no
+  # webhook caBundle, so drift detection is safe here.
+  driftDetection:
+    mode: enabled
   # Upgrades run PostgreSQL schema migrations that routinely take 5-10 minutes.
   # Flux's 5m default would trigger remediation mid-migration.
   timeout: 15m
@@ -30,15 +34,12 @@ spec:
     remediation:
       retries: 3
       remediateLastFailure: true
-  # Image tags are substituted by the apps Kustomization's postBuild. Inline refs
-  # (rather than valuesFrom) avoid Flux's cross-namespace limit:
-  # HelmRelease.spec.valuesFrom[].namespace is not supported, so a referenced
-  # ConfigMap would have to live in this namespace. (chart sourceRef DOES support
-  # cross-namespace, which is why it points at flux-system.)
+  # Image tags substituted from the cluster-versions ConfigMap. Values stay
+  # inline: HelmRelease.spec.valuesFrom has no namespace field, so a referenced
+  # ConfigMap would have to live in this namespace.
   values:
-    # No canonical-domain value: the chart has none, and the OIDC issuer and
-    # redirect URLs derive from the request Host — so both the internal and the
-    # external hostname work without further config.
+    # Canonical origin: the OIDC issuer is always the EXTERNAL host, even for
+    # internal-only apps (AUTHENTIK_WEB__BASE_URL in server.env/worker.env).
     authentik:
       email:
         host: ${cluster_smtp_host}
@@ -60,10 +61,9 @@ spec:
         password: ""  # from existingSecret
 
     server:
-      # Chart-native HPA rather than a standalone one: with server.autoscaling on,
-      # the chart omits .spec.replicas from the Deployment, so a helm upgrade
-      # cannot reset it and churn against the HPA. CPU is owned here; vpa.yaml
-      # scopes the server to memory only so the two never contend.
+      # Chart-native HPA: with server.autoscaling on the chart omits
+      # .spec.replicas, so a helm upgrade cannot churn against the HPA. CPU is
+      # owned here; vpa.yaml scopes the server to memory only.
       autoscaling:
         enabled: true
         minReplicas: 2
@@ -75,11 +75,8 @@ spec:
               target:
                 type: Utilization
                 averageUtilization: 75
-        # Damp HPA flap: the server idles well under the trip point, but
-        # sub-minute login bursts and background task reconciles cross it. Without
-        # a stabilization window it jumps to max dozens of times a day and parks
-        # there long enough to flap KubeHpaMaxedOut. Genuine sustained load still
-        # scales out.
+        # Stabilization windows damp flap from sub-minute login bursts and
+        # background task reconciles; sustained load still scales out.
         behavior:
           scaleUp:
             stabilizationWindowSeconds: 120
@@ -109,6 +106,11 @@ spec:
         tag: "${authentik_version}"
 
       env:
+        # Base URL (scheme+host only): advisory in 2026.8, REQUIRED from 2026.11.
+        # The canonical origin is the EXTERNAL issuer host — the OIDC issuer is
+        # always auth.<external> even for internal-only apps.
+        - name: AUTHENTIK_WEB__BASE_URL
+          value: "https://auth.${cluster_external_domain}"
         - name: AUTHENTIK_SECRET_KEY
           valueFrom:
             secretKeyRef:
@@ -138,7 +140,7 @@ spec:
           cpu: 200m
           memory: 1Gi
         limits:
-          memory: 1Gi
+          memory: 1536Mi
 
       affinity:
         podAntiAffinity:
@@ -204,6 +206,11 @@ spec:
         failureThreshold: 30
 
       env:
+        # Base URL (scheme+host only): advisory in 2026.8, REQUIRED from 2026.11.
+        # The canonical origin is the EXTERNAL issuer host — the OIDC issuer is
+        # always auth.<external> even for internal-only apps.
+        - name: AUTHENTIK_WEB__BASE_URL
+          value: "https://auth.${cluster_external_domain}"
         - name: AUTHENTIK_SECRET_KEY
           valueFrom:
             secretKeyRef:
@@ -238,6 +245,27 @@ spec:
       enabled: true
       image:
         tag: "${postgresql_version}"
+      # postgres_exporter sidecar; its only scrape is the chart-rendered
+      # ServiceMonitor, its ingress allow is in networkpolicy.yaml. extraEnvVars
+      # re-point it at the `authentik` role (the subchart hardcodes `postgres`).
+      metrics:
+        enabled: true
+        serviceMonitor:
+          enabled: true
+          interval: 30s
+        extraEnvVars:
+          - name: DATA_SOURCE_USER
+            value: authentik
+          - name: DATA_SOURCE_PASS_FILE
+            value: /opt/bitnami/postgresql/secrets/postgresql-password
+          - name: DATA_SOURCE_URI
+            value: 127.0.0.1:5432/authentik?sslmode=disable
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            memory: 128Mi
       auth:
         username: authentik
         database: authentik

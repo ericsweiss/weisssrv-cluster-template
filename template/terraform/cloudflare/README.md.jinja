@@ -6,6 +6,22 @@ The shape comes from `weisssrv-lib//terraform/modules/cloudflare-zone` at the
 pinned ref in `main.tf`; the record inventory is `dns.tf`, and it is the only
 file you normally edit.
 
+## Zone settings
+
+`main.tf` pins the zone's posture: strict TLS to the origin, always-use-HTTPS,
+a 1.2 minimum TLS version, aggressive caching with a four-hour browser TTL, and
+HSTS for one year.
+
+HSTS is sent with `include_subdomains`, so it covers every name in the zone, not
+only the ones this cluster serves. A browser that has seen one response refuses
+plain HTTP for all of them until `max_age` expires. Backing that out means
+setting `max_age = 0`, applying, and then waiting for the pins already issued to
+run out. Preload stays off, which keeps the zone out of the browser preload
+list.
+
+Answer `external_domain` with a zone this cluster owns outright. This root also
+publishes the apex records, the CAA set and a `p=reject` mail policy for it.
+
 ## Running it
 
 ```bash
@@ -33,6 +49,15 @@ helper, a `~/.netrc` entry, or an SSH module source).
 Adding a service record by hand here is how the two controllers start fighting:
 external-dns owns a name for as long as its IngressRoute exists.
 
+## Record map keys
+
+Each key in the `dns_records` map in `dns.tf` is the record's Terraform state
+address, and the per-record flags decide which resource it becomes.
+`protected = true` routes it to a resource carrying `lifecycle.prevent_destroy`.
+`content_managed_externally = true` stops Terraform diffing `content`, for a
+record whose value another controller owns. Renaming a key or flipping a flag
+plans a destroy-create, so read the next section first.
+
 ## Destroy protection
 
 `protected = true` on a record means the module routes it to a resource carrying
@@ -42,9 +67,41 @@ or a security regression — the apex, any name carrying SSH or a VPN endpoint,
 and the whole CAA set.
 
 Because `lifecycle` blocks cannot take variables, the flag selects a *resource
-address*, so flipping it plans a destroy and create. Add a `moved {}` block for
-the change, and if the record is leaving `protected`, apply its removal from the
-protected set first — `prevent_destroy` blocks the destroy half.
+address*: clearing it re-addresses the record from
+`cloudflare_record.protected["<key>"]` to `cloudflare_record.this["<key>"]`,
+which Terraform plans as a destroy and `prevent_destroy` refuses. Clearing the
+flag on its own is the blocked step, so there are two paths.
+
+- **Un-protecting a record you are keeping.** In one change, set
+  `protected = false` AND add a root
+  `moved { from = module.zone.cloudflare_record.protected["<key>"] to = module.zone.cloudflare_record.this["<key>"] }`.
+  `moved` re-addresses state instead of destroying, so the apply is clean. Keep
+  the `moved {}` block after the apply. It is the permanent record of the old
+  state address, and removing one is a change of its own with its own plan and
+  apply.
+- **Deleting a record.** Do the un-protect change first, then drop the map entry
+  in a second one: the record is an ordinary `cloudflare_record.this` by then
+  and the destroy applies.
+
+`prevent_destroy` does not block in-place updates. The CI apply refuses any saved
+plan that deletes a resource. When the deletion is the reviewed intent, re-run
+the manual `deploy-terraform` job with the job variable `ALLOW_DNS_DELETE=1`.
+
+Pointing a real sender at this zone is the same kind of two-step: relax `spf`
+and `dmarc` and add DKIM first, then tighten both back once alignment is clean.
+An `rua` address outside this zone also needs
+`{{ external_domain }}._report._dmarc` TXT `"v=DMARC1"` published in the RUA
+domain (RFC 7489) before reporters will send; drop `rua` if you do not control
+that domain.
+
+## First apply
+
+A fresh apply publishes `apex_seed_ip` (TEST-NET-1) until the DDNS CronJob's
+next run, so the site is dark with a clean plan. Trigger the first run:
+
+```bash
+kubectl -n cloudflare-ddns create job --from=cronjob/cloudflare-ddns ddns-seed
+```
 
 ## Credentials
 
@@ -56,7 +113,7 @@ protected set first — `prevent_destroy` blocks the destroy half.
 
 Keep the in-cluster DNS token (cert-manager, external-dns) as a *separate* item
 with DNS:Edit + Zone:Read only. Zone Settings:Edit is what lets a token turn off
-strict TLS for the whole domain.
+strict TLS for the whole domain; strict TLS and HSTS are asserted in `main.tf`.
 
 ## Changing DNS provider
 
@@ -65,4 +122,4 @@ is in this directory plus two consumers: the cert-manager `ClusterIssuer`'s
 DNS-01 solver and the external-dns HelmRelease. A new backend needs a module
 with the same three inputs (`zone_name`, credentials, a `records` map), an
 issuer solver block, and an external-dns provider block —
-The template's [ARCHITECTURE.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/ARCHITECTURE.md) records the seam.
+The cluster template's `docs/ARCHITECTURE.md` records the seam.

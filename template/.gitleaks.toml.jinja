@@ -1,21 +1,20 @@
-# gitleaks allowlist for the {{ cluster_name }} cluster repository.
-#
-# Reached from GitLab's secret_detection job via the passthrough in
+# gitleaks allowlist for the {{ cluster_name }} cluster repository. GitLab's
+# secret_detection job reaches it through the passthrough in
 # .gitlab/secret-detection-ruleset.toml, which GitLab loads from that fixed path.
-#
-# `useDefault = true` is REQUIRED — without it gitleaks loads only the rules
-# defined in this file (which has none), disabling all detection.
 
 title = "{{ cluster_name }} allowlist"
 
 [extend]
+# Without this gitleaks loads only the rules defined here, and there are none.
 useDefault = true
 
 [[allowlists]]
 description = "{{ cluster_name }} false positives"
 regexes = [
+{%- if secrets_backend == 'onepassword' %}
   # 1Password reference URIs — not secrets, just pointers to vault items.
   '''op://[A-Za-z0-9_ /-]+''',
+{%- endif %}
   # Documentation placeholders like [your-cloudflare-api-token].
   '''\[your-[a-z0-9-]+\]''',
   # Documentation placeholders written as <angle-bracket> tokens — a literal
@@ -24,13 +23,13 @@ regexes = [
   # Test/fixture tokens — anchored at start of token so a real secret prefixed
   # with "prodtestkey_…" or similar can't be silenced.
   '''^(test|fake|dummy|example)[-_]?(password|token|key|secret)[A-Za-z0-9_-]*''',
+{%- if secrets_backend == 'onepassword' %}
   # Published supply-chain pins the CI templates verify downloaded key material
-  # against (1Password's apt GPG fingerprint and its apk public key's sha256).
-  # Both are public by construction but trip gitleaks' generic-api-key entropy
-  # rule. Listed as exact values, so rotating a pinned key forces this allowlist
-  # to be reviewed alongside it rather than silently covering the new material.
+  # against. Exact values, so rotating a pinned key forces a review here rather
+  # than silently covering the new material.
   '''^3FEF9748469ADBE15DA7CA80AC2D62742012EA22$''',
   '''^0e88171d9f8b7630763f70cbf69f2a01b4ba8ea1d8e79487f59c162db255eb84$''',
+{%- endif %}
 ]
 
 paths = [
@@ -39,4 +38,21 @@ paths = [
   # dummy keys and are not ours to scan.
   '''\.ansible-home/''',
   '''ansible_collections/''',
+  # Terraform module/provider cache (gitignored) — third-party.
+  '''\.terraform/''',
+  # Byte-compiled fixtures: the compiled form loses the shape the anchors match.
+  '''__pycache__/''',
+]
+
+# Synthetic key material in this repository's own tests, matched by CONTENT so
+# the files holding it stay in scope for every other rule.
+[[allowlists]]
+description = "{{ cluster_name }} synthetic test fixtures"
+regexes = [
+  # cert-distribution molecule — mock acme.sh private keys.
+  '''MIIEvgIBADANBgkqhkiGTestPrivateKey''',
+  # scripts/test_collect_state_lib.py — redaction-suite inputs, patterns not credentials.
+  '''^glpat-abc123def456$''',
+  '''^glrt-AbC_123-xyz$''',
+  '''7the8keymaterial''',
 ]

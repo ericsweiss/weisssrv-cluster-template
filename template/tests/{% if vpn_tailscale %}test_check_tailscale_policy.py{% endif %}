@@ -1,0 +1,73 @@
+"""Tests that check-tailscale-policy.py fails on an undeclared tag or a route drift.
+
+The policy is applied supervised against the live tailnet, where a wrong file
+severs tailnet SSH to the whole cluster, so both semantic arms must be able to fire.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from conftest import load_script
+
+gate = load_script("check-tailscale-policy.py")
+
+GOOD = (
+    '{\n'
+    '  // comment with a https:// url\n'
+    '  "groups": {"group:admins": ["a@example.com"]},\n'
+    '  "tagOwners": {"tag:router": ["a@example.com"]},\n'
+    '  "acls": [{"action": "accept", "src": ["group:admins"],\n'
+    '            "dst": ["tag:router:22,443"]}],\n'
+    '  "ssh": [],\n'
+    '  "autoApprovers": {"routes": {"10.9.0.0/24": ["tag:router"]}},\n'
+    '}\n'
+)
+
+
+def _tree(tmp_path: Path, policy: str = GOOD) -> Path:
+    (tmp_path / gate.POLICY).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / gate.POLICY).write_text(policy, encoding="utf-8")
+    for rel in gate.INVENTORY_VAR_DIRS:
+        (tmp_path / rel).mkdir(parents=True, exist_ok=True)
+    # A directory-per-group file must be read like a flat one.
+    nested = tmp_path / gate.INVENTORY_VAR_DIRS[0] / "proxmox" / "routes.yml"
+    nested.parent.mkdir(parents=True, exist_ok=True)
+    nested.write_text('tailscale_advertise_routes:\n  - "10.9.0.0/24"\n', encoding="utf-8")
+    return tmp_path
+
+
+def test_a_complete_policy_passes(tmp_path: Path) -> None:
+    assert gate.check(_tree(tmp_path)) == []
+
+
+def test_an_undeclared_tag_is_reported(tmp_path: Path) -> None:
+    """Mutation case: a tag with no tagOwners entry is rejected by the API."""
+    root = _tree(tmp_path, GOOD.replace("tag:router:22,443", "tag:typo:22,443"))
+    assert any("tag:typo" in p for p in gate.check(root))
+
+
+def test_a_route_drift_is_reported(tmp_path: Path) -> None:
+    """Mutation case: a route the inventory advertises but nothing approves
+    leaves the subnet router waiting for a manual approval forever."""
+    root = _tree(tmp_path, GOOD.replace('"10.9.0.0/24": ', '"10.0.0.0/8": '))
+    assert any("autoApprovers.routes" in p for p in gate.check(root))
+
+
+@pytest.mark.parametrize("bad", ["[]}", '"tag:router"}', "[42]}"])
+def test_an_unusable_approver_list_is_reported(tmp_path: Path, bad: str) -> None:
+    root = _tree(tmp_path, GOOD.replace('["tag:router"]}', bad))
+    assert any("approver" in p for p in gate.check(root))
+
+
+def test_a_missing_policy_exits_2_not_1(tmp_path: Path) -> None:
+    """rc 1 would read as a policy the gate judged unsafe; nothing was read."""
+    assert gate.main(["--repo", str(tmp_path)]) == 2
+
+
+def test_an_unparsable_inventory_var_file_is_an_operator_error(tmp_path: Path) -> None:
+    var_dir = tmp_path / gate.INVENTORY_VAR_DIRS[0]
+    var_dir.mkdir(parents=True)
+    (var_dir / "routes.yml").write_text("tailscale_advertise_routes: [\n", encoding="utf-8")
+    with pytest.raises(gate.OperatorError):
+        gate.advertised_routes(tmp_path)

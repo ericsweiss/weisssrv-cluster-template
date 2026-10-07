@@ -1,14 +1,10 @@
 ---
-# Site policy data for scripts/check-netpol-except-parity.py (--config).
-#
-# The canonical except-lists and fence networks are the library's built-ins —
-# declaring either key REPLACES the built-in set wholesale, so this file declares
-# neither and every `0.0.0.0/0` egress peer in kubernetes/ must match
-# `lan-fence` or `reserved-full` exactly, in order.
-#
-# unrestricted_egress_ok: the egress rules that deliberately carry NO peers, i.e.
-# allow egress everywhere. A rule not listed here that omits `to:` is the
-# accidental version of the same edit and fails the gate.
+# Site data for scripts/check-netpol-except-parity.py (--config). The canonical
+# except-lists and fence networks come from the vendored gate's built-ins; only
+# `unrestricted_egress_ok` is site data, and its built-in allowlist is empty.
+
+# Each entry is an egress rule that deliberately carries NO peers. A rule that
+# omits `to:` without an entry here is the accidental version of the same edit.
 unrestricted_egress_ok:
   flux-system/allow-egress: >-
     shipped verbatim inside the upstream gotk-components manifest `flux

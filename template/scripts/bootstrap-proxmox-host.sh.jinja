@@ -1,0 +1,230 @@
+{#- SECRETS SEAM: partials/secrets.jinja is the one home for the backend-aware
+    reference the usage example prints. -#}
+{%- import "partials/secrets.jinja" as secrets with context -%}
+#!/usr/bin/env bash
+# Bootstrap a fresh Proxmox host for Ansible management: create the admin user
+# with passwordless sudo and deploy an SSH public key.
+
+set -euo pipefail
+
+HOST="${1:-}"
+SSH_PUBLIC_KEY="${2:-}"
+DEFAULT_ADMIN_USER='{{ admin_user }}'
+ADMIN_USER="${3:-$DEFAULT_ADMIN_USER}"
+
+if [ -z "$HOST" ] || [ -z "$SSH_PUBLIC_KEY" ]; then
+    cat <<USAGE
+Usage: $0 <host-address> '<ssh-public-key>' [user]
+
+Examples:
+  $0 192.0.2.11 "\$(cat ~/.ssh/id_ed25519.pub)"
+{%- if secrets_backend == 'onepassword' %}
+  $0 192.0.2.11 "\$({{ secrets.secret_read('SSH Key', 'public key') }})"
+{%- endif %}
+
+The user defaults to {{ admin_user }}, the admin_user this repository was
+generated with. This script will:
+  1. Install sudo if the image lacks it
+  2. Create the user with passwordless sudo
+  3. Set a console password for the user
+  4. Append the SSH public key to its authorized_keys
+  5. Verify SSH and sudo access
+USAGE
+    exit 1
+fi
+
+case "$ADMIN_USER" in
+    root|*[!a-z0-9_-]*|"")
+        echo "ERROR: '$ADMIN_USER' is not a usable admin username" >&2
+        exit 1
+        ;;
+esac
+
+echo "Bootstrapping Proxmox host $HOST for user '$ADMIN_USER'"
+read -r -p "Continue? (y/N) " -n 1 REPLY
+echo
+case "$REPLY" in
+    y|Y) ;;
+    *) echo "Aborted."; exit 1 ;;
+esac
+
+echo
+echo "=== Console password for '$ADMIN_USER' ==="
+read -r -s -p "Password: " ADMIN_PASSWORD
+echo
+read -r -s -p "Confirm password: " ADMIN_PASSWORD_CONFIRM
+echo
+
+if [ "$ADMIN_PASSWORD" != "$ADMIN_PASSWORD_CONFIRM" ]; then
+    echo "ERROR: passwords do not match" >&2
+    exit 1
+fi
+if [ -z "$ADMIN_PASSWORD" ]; then
+    echo "ERROR: password cannot be empty" >&2
+    exit 1
+fi
+
+# base64 so a password containing $, `, quotes or backslashes cannot be
+# interpreted as shell by the remote heredoc.
+ADMIN_PASSWORD_B64=$(printf '%s' "$ADMIN_PASSWORD" | base64)
+SSH_KEY_B64=$(printf '%s' "$SSH_PUBLIC_KEY" | base64)
+
+echo
+echo "=== Step 1: creating '$ADMIN_USER' on $HOST (root password prompt follows) ==="
+
+# CRITICAL: the heredoc is unquoted so the base64 values expand LOCALLY, keeping
+# both secrets out of process arguments on either machine. Every remote variable
+# must therefore be escaped (\$) or it expands here instead of on the target.
+# shellcheck disable=SC2087
+ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "root@${HOST}" bash << REMOTE_SCRIPT
+set -euo pipefail
+
+ADMIN_USER="$ADMIN_USER"
+ADMIN_PASSWORD_B64="$ADMIN_PASSWORD_B64"
+
+if ! command -v sudo >/dev/null 2>&1; then
+    echo "Installing sudo..."
+    # Only the files this run disabled are restored, so a pre-existing
+    # .disabled file is left alone.
+    DISABLED_BY_US=()
+    restore_repos() {
+        for disabled_file in "\${DISABLED_BY_US[@]}"; do
+            if [ -f "\$disabled_file" ]; then
+                mv "\$disabled_file" "\${disabled_file%.disabled}" || true
+            fi
+        done
+    }
+    trap restore_repos EXIT
+
+    disable_repo_file() {
+        local repo_file="\$1" disabled_file="\$1.disabled"
+        if [ -e "\$disabled_file" ]; then
+            echo "ERROR: refusing to overwrite \$disabled_file" >&2
+            exit 1
+        fi
+        if mv "\$repo_file" "\$disabled_file" 2>/dev/null; then
+            DISABLED_BY_US+=("\$disabled_file")
+        fi
+    }
+
+    # Enterprise repos need a subscription, so apt-get update fails against
+    # them. Both the legacy .list and the .sources shapes are disabled for the
+    # duration and restore_repos puts them back.
+    for repo_file in /etc/apt/sources.list.d/pve-enterprise.list \\
+                     /etc/apt/sources.list.d/ceph.list; do
+        if [ -f "\$repo_file" ]; then
+            disable_repo_file "\$repo_file"
+        fi
+    done
+    for sources_file in /etc/apt/sources.list.d/*.sources; do
+        if [ -f "\$sources_file" ] && grep -q "enterprise.proxmox.com" "\$sources_file" 2>/dev/null; then
+            disable_repo_file "\$sources_file"
+        fi
+    done
+
+    set +e
+    APT_OUTPUT=\$(apt-get update 2>&1)
+    APT_RC=\$?
+    set -e
+    if [ \$APT_RC -ne 0 ]; then
+        if echo "\$APT_OUTPUT" | grep -qE "enterprise.proxmox.com|ceph.com.*enterprise"; then
+            echo "Note: enterprise repos failed (subscription required) - continuing"
+        else
+            echo "ERROR: apt-get update failed:" >&2
+            echo "\$APT_OUTPUT" >&2
+            exit 1
+        fi
+    fi
+    apt-get install -y sudo
+fi
+
+if ! id "\$ADMIN_USER" >/dev/null 2>&1; then
+    useradd -m -s /bin/bash "\$ADMIN_USER"
+    echo "Created user '\$ADMIN_USER'"
+else
+    echo "User '\$ADMIN_USER' already exists"
+fi
+
+ADMIN_PASSWORD=\$(echo "\$ADMIN_PASSWORD_B64" | base64 -d)
+echo "\$ADMIN_USER:\$ADMIN_PASSWORD" | chpasswd
+unset ADMIN_PASSWORD
+echo "Console password set"
+
+grep -q "^sudo:" /etc/group || groupadd sudo
+usermod -aG sudo "\$ADMIN_USER"
+
+# CRITICAL: visudo -cf BEFORE install. A syntax error anywhere in sudoers locks
+# every sudo user out of the host, and this is the only admin path in. Both
+# rules go to /etc/sudoers.d, so neither is an unvalidated append.
+install_sudoers() {
+    local rule="\$1" dest="\$2" tmp
+    tmp=\$(mktemp)
+    printf '%s\\n' "\$rule" > "\$tmp"
+    if ! visudo -cf "\$tmp"; then
+        rm -f "\$tmp"
+        echo "ERROR: refusing to install an invalid \$dest" >&2
+        exit 1
+    fi
+    install -m 0440 -o root -g root "\$tmp" "\$dest"
+    rm -f "\$tmp"
+}
+
+install_sudoers '%sudo   ALL=(ALL:ALL) ALL' /etc/sudoers.d/00-sudo-group
+install_sudoers "\$ADMIN_USER ALL=(ALL) NOPASSWD: ALL" "/etc/sudoers.d/\$ADMIN_USER"
+echo "Passwordless sudo configured"
+
+install -d -m 0700 -o "\$ADMIN_USER" -g "\$ADMIN_USER" "/home/\$ADMIN_USER/.ssh"
+REMOTE_SCRIPT
+
+echo
+echo "=== Step 2: deploying the SSH public key ==="
+
+# shellcheck disable=SC2087
+ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "root@${HOST}" bash << DEPLOY_KEY
+set -euo pipefail
+
+ADMIN_USER="$ADMIN_USER"
+SSH_KEY=\$(echo "$SSH_KEY_B64" | base64 -d)
+AUTH="/home/\$ADMIN_USER/.ssh/authorized_keys"
+
+# CRITICAL: append if absent, never truncate — the host may carry other admin
+# keys, and losing them locks everyone else out.
+touch "\$AUTH"
+if grep -qxF "\$SSH_KEY" "\$AUTH"; then
+    echo "SSH key already present (no change)"
+else
+    printf '%s\n' "\$SSH_KEY" >> "\$AUTH"
+    echo "SSH key appended"
+fi
+chmod 0600 "\$AUTH"
+chown "\$ADMIN_USER:\$ADMIN_USER" "\$AUTH"
+echo "Authorized keys now present: \$(grep -c '^[^#[:space:]]' "\$AUTH")"
+DEPLOY_KEY
+
+echo
+echo "=== Step 3: verifying SSH and sudo as '$ADMIN_USER' ==="
+
+if ! ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 \
+        "${ADMIN_USER}@${HOST}" true; then
+    echo "ERROR: SSH access as '$ADMIN_USER' failed." >&2
+    echo "  Check the agent (ssh-add -l) and /home/$ADMIN_USER/.ssh permissions." >&2
+    exit 1
+fi
+
+# Tolerate a non-zero exit so a misconfigured remote sudo does not abort under
+# set -e before the diagnostic below runs.
+REMOTE_WHOAMI=$(ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=10 \
+    "${ADMIN_USER}@${HOST}" "sudo whoami" 2>&1) || true
+if [ "$REMOTE_WHOAMI" != "root" ]; then
+    echo "ERROR: sudo check returned '$REMOTE_WHOAMI' instead of 'root'" >&2
+    exit 1
+fi
+
+cat <<DONE
+
+Bootstrap COMPLETE for $HOST
+
+Next:
+  1. Add the host to ansible/inventories/prod/hosts.yml and run task hosts:sync
+  2. task infra:base -- --limit <hostname>
+DONE

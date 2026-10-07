@@ -1,10 +1,7 @@
 ---
-# External Secrets Operator. Provider selection happens per-store, not here —
-# see infrastructure/configs/cluster-secret-store.yaml.
-#
-# CRDs ship as chart templates gated by installCRDs (not a crds/ directory), so
-# Flux's crds policy has no effect; the resource-policy annotation is what stops
-# an uninstall or rollback cascading into every ExternalSecret.
+# External Secrets Operator; provider selection is per-store, in
+# infrastructure/configs/cluster-secret-store.yaml. CRDs ship as chart
+# templates, so the resource-policy annotation is what keeps them installed.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -22,8 +19,11 @@ spec:
         namespace: flux-system
       interval: 12h
   install:
-    remediation:
-      retries: 3
+    # RetryOnFailure, not the default RemediateOnFailure: install remediation
+    # remediates by uninstalling, which cascade-deletes the ESO CRDs and CRs.
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
   upgrade:
     remediation:
       retries: 3
@@ -41,17 +41,18 @@ spec:
         helm.sh/resource-policy: keep
     replicaCount: 2
     leaderElect: true
-    affinity:
-      podAntiAffinity:
-        preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                  - key: app.kubernetes.io/name
-                    operator: In
-                    values: [external-secrets]
-              topologyKey: kubernetes.io/hostname
+    # CRITICAL: DoNotSchedule, not a preferred rule. With both replicas on one
+    # node the pdb.yaml minAvailable: 1 refuses the second eviction and a kured
+    # drain never finishes. matchLabelKeys keeps a rollout unblocked.
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        matchLabelKeys:
+          - pod-template-hash
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: external-secrets
     webhook:
       replicaCount: 2
       priorityClassName: platform
@@ -61,17 +62,15 @@ spec:
           memory: 64Mi
         limits:
           memory: 128Mi
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchExpressions:
-                    - key: app.kubernetes.io/name
-                      operator: In
-                      values: [external-secrets-webhook]
-                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          matchLabelKeys:
+            - pod-template-hash
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: external-secrets-webhook
     certController:
       replicaCount: 2
       priorityClassName: platform
@@ -81,17 +80,15 @@ spec:
           memory: 64Mi
         limits:
           memory: 128Mi
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchExpressions:
-                    - key: app.kubernetes.io/name
-                      operator: In
-                      values: [external-secrets-cert-controller]
-                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          matchLabelKeys:
+            - pod-template-hash
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: external-secrets-cert-controller
     resources:
       requests:
         cpu: 50m

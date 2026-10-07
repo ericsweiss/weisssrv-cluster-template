@@ -1,0 +1,154 @@
+{#- SECRETS SEAM: partials/secrets.jinja is the one home. The vault here is
+    go-task's {{.OP_VAULT}} so `task secrets:show`, which reads the Taskfile tree
+    as text, matches the variable. -#}
+{%- import "partials/secrets.jinja" as secrets with context -%}
+{%- set secret_runner = secrets.secret_runner -%}
+{%- macro secret_ref(item, field) -%}{{ secrets.secret_ref(item, field, vault='{{.OP_VAULT}}') }}{%- endmacro -%}
+# https://taskfile.dev
+# Rolling OS, application and k3s updates, plus the tracked-pin bumps.
+version: '3'
+
+{% raw -%}
+# Anchors aliased by the tasks below. YAML anchors do not cross files, so each
+# namespace file carries the precondition list it uses.
+x-preconditions:
+  op: &op_preconditions
+    - sh: command -v ansible-playbook
+      msg: "ansible-playbook not installed. pip install ansible, then: task ansible:install-collections"
+    - sh: command -v op
+      msg: "1Password CLI not installed: https://developer.1password.com/docs/cli/get-started/"
+    # `op account list`, not `op whoami`: with the desktop-app integration
+    # whoami reports "not signed in" in the non-interactive shell Task uses
+    # here.
+    - sh: op account list 2>/dev/null
+      msg: "1Password CLI not authenticated. Run: eval $(op signin)"
+  # The version tasks need the vault but not Ansible: `op run` also exits 1 when
+  # unauthenticated, which the 0-or-1 rc convention would read as "up to date".
+  check_versions: &check_versions_preconditions
+    - sh: command -v op
+      msg: "1Password CLI not installed: https://developer.1password.com/docs/cli/get-started/"
+    - sh: op account list 2>/dev/null
+      msg: "1Password CLI not authenticated. Run: eval $(op signin)"
+
+tasks:
+  # The host-touching updates run through maintenance-run-with-verify.sh:
+  # scripts/post-maintenance-verify.sh then runs whatever the playbook's
+  # outcome, so no run reports success on a cluster the health report fails.
+  update-packages:
+    desc: Rolling OS package updates across all hosts (interactive)
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - bash {{.ROOT_DIR}}/scripts/maintenance-run-with-verify.sh ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-packages.yml {{.CLI_ARGS}}
+
+  update-applications:
+    desc: Update the host-level applications to their pinned versions
+    dir: "{{.ANSIBLE_DIR}}"
+    # Anchor shared by the update-full variants so they cannot drift on secrets.
+    env: &maintenance_env
+      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
+      SMTP_RELAY_USER: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'username') }}{% raw %}
+      SMTP_RELAY_PASSWORD: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'password') }}{% raw %}
+      ADGUARD_ADMIN_PASSWORD: {% endraw %}{{ secret_ref('AdGuard Home', 'password') }}{% raw %}
+      ACME_SSH_PRIVATE_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'private key') }}{% raw %}
+      ACME_SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'public key') }}{% raw %}
+{% endraw %}{% if vpn_tailscale %}      TAILSCALE_AUTH_KEY: {{ secret_ref('Tailscale Auth Key', 'credential') }}
+{% endif %}{% raw %}    preconditions: *op_preconditions
+    cmds:
+      - bash {{.ROOT_DIR}}/scripts/maintenance-run-with-verify.sh {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-applications.yml {{.CLI_ARGS}}
+
+  update-full:
+    desc: OS packages plus applications, rolling and interactive
+    dir: "{{.ANSIBLE_DIR}}"
+    env: *maintenance_env
+    preconditions: *op_preconditions
+    cmds:
+      - bash {{.ROOT_DIR}}/scripts/maintenance-run-with-verify.sh {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-full.yml {{.CLI_ARGS}}
+
+  update-full-auto:
+    desc: OS packages plus applications, rolling with automatic reboots
+    dir: "{{.ANSIBLE_DIR}}"
+    env: *maintenance_env
+    preconditions: *op_preconditions
+    cmds:
+      - bash {{.ROOT_DIR}}/scripts/maintenance-run-with-verify.sh {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-full.yml -e auto_reboot=true {{.CLI_ARGS}}
+
+  update-k3s-nodes:
+    desc: Rolling k3s binary upgrade (cordon, upgrade, restart, uncordon)
+    dir: "{{.ANSIBLE_DIR}}"
+    env:
+      K3S_TOKEN: {% endraw %}{{ secret_ref('K3s Cluster Token', 'credential') }}{% raw %}
+      K3S_AGENT_TOKEN: {% endraw %}{{ secret_ref('K3s Agent Token', 'credential') }}{% raw %}
+    preconditions: *op_preconditions
+    cmds:
+      - bash {{.ROOT_DIR}}/scripts/maintenance-run-with-verify.sh {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-k3s-nodes.yml {{.CLI_ARGS}}
+
+  check-versions:
+    desc: Report available updates for every tracked pin (scripts/version-registry.py)
+    env: &version_env
+      GITHUB_TOKEN: {% endraw %}{{ secret_ref('GitHub Token', 'credential') }}{% raw %}
+    preconditions: *check_versions_preconditions
+    cmds:
+      # The script's own rc travels out-of-band in a temp file so it can be told
+      # apart from the secret runner's. An empty file means the runner failed
+      # before the script exited, and 0-or-1 must NOT be applied to that.
+      - |
+        rc_file=$(mktemp)
+        trap 'rm -f "$rc_file"' EXIT
+        {% endraw %}{{ secret_runner() }}{% raw %} sh -c 'python3 ./scripts/check-versions.py {{.CLI_ARGS}}; echo $? > '"$rc_file" || true
+        rc=$(cat "$rc_file" 2>/dev/null || true)
+        if [ -z "$rc" ]; then
+          echo "ERROR: check-versions.py did not run to completion (secret runner / interpreter failure above)" >&2
+          exit 2
+        fi
+        # 0 = up to date, 1 = updates available.
+        [ "$rc" -le 1 ] || exit "$rc"
+
+  check-versions-json:
+    desc: The same report as JSON
+    env: *version_env
+    preconditions: *check_versions_preconditions
+    cmds:
+      # Same out-of-band rc handling as check-versions; stdout stays pure JSON.
+      - |
+        rc_file=$(mktemp)
+        trap 'rm -f "$rc_file"' EXIT
+        {% endraw %}{{ secret_runner() }}{% raw %} sh -c 'python3 ./scripts/check-versions.py --json {{.CLI_ARGS}}; echo $? > '"$rc_file" || true
+        rc=$(cat "$rc_file" 2>/dev/null || true)
+        if [ -z "$rc" ]; then
+          echo "ERROR: check-versions.py did not run to completion (secret runner / interpreter failure above)" >&2
+          exit 2
+        fi
+        [ "$rc" -le 1 ] || exit "$rc"
+
+  update-version:
+    desc: "Bump one tracked pin and regenerate the ConfigMap (SERVICE=<name>)"
+    vars:
+      SERVICE: '{{.SERVICE | default ""}}'
+    env: *version_env
+    cmds:
+      - |
+        if [ -z "{{.SERVICE}}" ]; then
+          echo "Usage: task maintenance:update-version SERVICE=<name>"
+          {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py --list
+          exit 1
+        fi
+        {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py --update "{{.SERVICE}}"
+      - task: :flux:sync-versions
+      - echo "Pins updated. Commit all.yml + the versions ConfigMap and raise an MR."
+
+  update-all-versions:
+    desc: Bump every outdated tracked pin and regenerate the ConfigMap
+    env: *version_env
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py --update-all
+      - task: :flux:sync-versions
+      - echo "Pins updated. Commit all.yml + the versions ConfigMap and raise an MR."
+
+  update-cluster:
+    desc: Full cluster update pass — k3s nodes, then version pins
+    cmds:
+      - task: update-k3s-nodes
+      - task: check-versions
+      - task: update-all-versions
+      - 'echo "Commit and push so Flux reconciles the new versions, then run task flux:status"'
+{%- endraw %}

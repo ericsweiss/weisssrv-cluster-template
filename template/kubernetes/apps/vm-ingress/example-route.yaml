@@ -1,8 +1,6 @@
 # TEMPLATE — copy, edit, rename, then add YOUR file to kustomization.yaml.
 # Not reconciled as-is: the address below is a placeholder.
-#
-# Four things vary per backend: the name, the backend address, the port, and the
-# hostname. Everything else is the pattern.
+# Per backend, four things vary: name, backend address, port, hostname.
 ---
 # 1. Selectorless ClusterIP Service — nothing populates its endpoints
 #    automatically, which is the point.
@@ -39,14 +37,9 @@ endpoints:
     conditions:
       ready: true
 ---
-# 3. IngressRoute. This one is internal-only: lan-tailscale-only keeps it off the
-#    public internet. For a public route, drop that middleware, add the
-#    external-dns target annotation, and switch to the external wildcard secret —
-#    and put an auth middleware in front unless the backend authenticates well on
-#    its own.
-#
-#    scheme: https + serversTransport are for an HTTPS backend; drop both lines
-#    for a plain HTTP one.
+# 3. IngressRoute, internal-only via lan-tailscale-only. A public route drops
+#    that middleware, adds the external-dns target annotation, uses the external
+#    wildcard secret and an auth middleware. HTTP backend: drop scheme/transport.
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -69,8 +62,6 @@ spec:
           scheme: https
           serversTransport: vm-tls-wildcard
   tls:
-    # Issued into THIS namespace by certificate.yaml — enable that file alongside
-    # this one. (cert-manager writes the Secret into the Certificate's own
-    # namespace; Traefik only reads Secrets from the route's namespace.) Use the
-    # external wildcard for a public route.
+    # Issued into THIS namespace by certificate.yaml: Traefik only reads
+    # Secrets from the route's namespace. Public routes use the external one.
     secretName: internal-wildcard-tls

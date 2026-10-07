@@ -17,10 +17,17 @@ CDN and your image churn is low, this is extra moving parts for no gain.
 
 One Deployment, one container in proxy mode, one ClusterIP:
 
-- `:5000` — registry API. Reachable only from the CI runner namespace.
+- `:5000` — registry API. Reachable only from the `gitlab-runner-privileged`
+  namespace; the shared runner is not admitted. Set your consumer namespace in
+  `networkpolicy.yaml`.
 - `:5001` — debug listener serving `/metrics`. Reachable only from the
   Prometheus pod (the debug listener also serves `/debug` endpoints, so
   admitting the whole observability namespace would over-share).
+
+A ServiceMonitor scrapes `:5001` and a PrometheusRule raises `RegistryCacheDown`
+(warning) when the Deployment has no available replica or the endpoint stops
+answering for 15m. `docs/RUNBOOKS.md` § Registry pull-through cache is the
+procedure.
 
 Storage is a node-local `emptyDir` with a hard cap: the cache re-warms after any
 restart, so there is nothing to back up and nothing to mount. Exceeding the cap
@@ -65,6 +72,6 @@ TLS is unaffected: SNI and cert validation still use the hostname.
 ## Disable
 
 Remove `- registry-cache` from `kubernetes/apps/kustomization.yaml` and push.
-Flux prunes the namespace and everything in it. Nothing else depends on it — a
-cache outage is slower pulls, not an outage, which is why its alert (if you add
-one) should be `warning`.
+Flux prunes the namespace and everything in it. Nothing else depends on it.
+Removing it also removes its `RegistryCacheDown` alert; a cache outage is slower
+pulls, not an outage, which is why that alert is `warning`.

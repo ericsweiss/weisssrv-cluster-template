@@ -1,0 +1,32 @@
+---
+# Settles the apt/dpkg state a fresh systemd container starts with, then
+# confirms systemd is up. Included from a scenario's converge pre_tasks.
+
+- name: Fix any interrupted dpkg state
+  ansible.builtin.command:
+    cmd: dpkg --configure -a
+  register: dpkg_repair
+  failed_when: false
+  changed_when: false
+
+# Opportunistic repair, so a failure is not fatal — but a silent one resurfaces
+# as an unrelated apt error later in the converge.
+- name: Report a failed dpkg repair
+  ansible.builtin.debug:
+    msg: "dpkg --configure -a failed (rc={{ dpkg_repair.rc }}): {{ dpkg_repair.stderr }}"
+  when: dpkg_repair.rc != 0
+
+# lock_timeout is the bounded wait for a background apt run holding the dpkg
+# lock. The test image has no `fuser`, so a fuser wait loop exits immediately.
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 120
+  changed_when: false
+
+- name: Wait for systemd to be ready
+  ansible.builtin.wait_for:
+    path: /run/systemd/system
+    state: present
+    timeout: 30

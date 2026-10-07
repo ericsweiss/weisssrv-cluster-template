@@ -1,0 +1,36 @@
+---
+# Shared apt-upgrade phase: refresh the cache, report what is upgradable, safe
+# upgrade with autoclean/autoremove. Included by _apt-upgrade-and-reboot.yml
+# and by update-packages.yml. Optional var: apt_upgrade_phase_label.
+
+- name: Display the host being updated
+  ansible.builtin.debug:
+    msg: "{{ apt_upgrade_phase_label | default('Updating packages on ' ~ inventory_hostname) }}"
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 0
+
+- name: Check for available updates
+  ansible.builtin.command: apt list --upgradable
+  register: upgradable_packages
+  changed_when: false
+
+- name: Display available updates
+  ansible.builtin.debug:
+    msg: "{{ upgradable_packages.stdout_lines }}"
+  when: upgradable_packages.stdout_lines | length > 1
+
+- name: Upgrade packages (safe upgrade)
+  ansible.builtin.apt:
+    upgrade: safe
+    autoclean: true
+    autoremove: true
+  register: apt_upgrade
+
+- name: Display the upgrade summary
+  ansible.builtin.debug:
+    msg:
+      - "Packages upgraded: {{ apt_upgrade.changed }}"
+      - "{{ apt_upgrade.stdout_lines | default([]) }}"

@@ -20,8 +20,6 @@ spec:
   path: ./kubernetes/infrastructure/controllers
   prune: true
   wait: true
-  # optional:false — see infrastructure-sources.yaml for why only that stage
-  # tolerates a miss.
   postBuild:
     substituteFrom:
       - kind: ConfigMap

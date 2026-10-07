@@ -1,10 +1,7 @@
 ---
-# Initial for the stateless server/worker (resize on natural restarts, never
-# evict a live identity provider); Off for PostgreSQL (recommendations only —
-# apply by hand in release.yaml).
-#
-# The server is MEMORY-ONLY: its CPU is owned by the chart-native HPA, so the VPA
-# must leave CPU alone or the two thrash against each other.
+# Initial for the stateless server and worker, so a live identity provider is
+# never evicted; Off for PostgreSQL, recommendations only. The server is
+# memory-only: the chart-native HPA owns its CPU.
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
@@ -15,9 +12,12 @@ spec:
   updatePolicy: {updateMode: Initial}
   resourcePolicy:
     containerPolicies:
+      # RequestsOnly: maxAllowed.memory tracks the fixed limit in release.yaml -
+      # move both in the same commit.
       - containerName: "*"
+        controlledValues: RequestsOnly
         minAllowed: {memory: 256Mi}
-        maxAllowed: {memory: 2Gi}
+        maxAllowed: {memory: 1536Mi}
         controlledResources: [memory]
 ---
 apiVersion: autoscaling.k8s.io/v1
@@ -30,7 +30,11 @@ spec:
   updatePolicy: {updateMode: Initial}
   resourcePolicy:
     containerPolicies:
+      # Same shape as the server: maxAllowed.memory equals release.yaml's
+      # hand-set memory limit, so move both together. The worker sets no CPU
+      # limit, so the CPU cap is request headroom only.
       - containerName: "*"
+        controlledValues: RequestsOnly
         minAllowed: {cpu: 25m, memory: 256Mi}
         maxAllowed: {cpu: 1, memory: 1536Mi}
         controlledResources: [cpu, memory]

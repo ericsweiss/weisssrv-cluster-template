@@ -1,0 +1,104 @@
+---
+# promtool unit tests for the local 15m AlertmanagerClusterFailedToSendAlerts,
+# whose hold separates a transient receiver timeout from a broken delivery path.
+rule_files:
+  - rules.yaml
+# The failure rates are constant, so 5m ticks separate the 15m pending/firing
+# boundary as well as 1m ones, at a fifth of the evaluations.
+evaluation_interval: 5m
+tests:
+  # One isolated failure: over the 1% ratio, but not for a full 15m.
+  - interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", integration="webhook", reason="clientError"}'
+        values: '0+0x20 1+0x60'
+      - series: 'alertmanager_notifications_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", integration="webhook"}'
+        values: '0+2x80'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AlertmanagerClusterFailedToSendAlerts
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: AlertmanagerClusterFailedToSendAlerts
+        exp_alerts: []
+
+  # Every notification to the webhook receiver fails, continuously.
+  - interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", integration="webhook", reason="clientError"}'
+        values: '0+1x90'
+      - series: 'alertmanager_notifications_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", integration="webhook"}'
+        values: '0+1x90'
+    alert_rule_test:
+      # Inside the 15m hold.
+      - eval_time: 12m
+        alertname: AlertmanagerClusterFailedToSendAlerts
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: AlertmanagerClusterFailedToSendAlerts
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: observability
+              service: kube-prometheus-stack-alertmanager
+              integration: webhook
+
+  # One replica's webhook path fails while its peer is clean. The inner `> 0`
+  # drops the clean replica, so min() still sees the broken one.
+  - interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", pod="alertmanager-kube-prometheus-stack-alertmanager-0", integration="webhook", reason="clientError"}'
+        values: '0+1x90'
+      - series: 'alertmanager_notifications_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", pod="alertmanager-kube-prometheus-stack-alertmanager-0", integration="webhook"}'
+        values: '0+1x90'
+      - series: 'alertmanager_notifications_failed_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", pod="alertmanager-kube-prometheus-stack-alertmanager-1", integration="webhook", reason="clientError"}'
+        values: '0+0x90'
+      - series: 'alertmanager_notifications_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", pod="alertmanager-kube-prometheus-stack-alertmanager-1", integration="webhook"}'
+        values: '0+1x90'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: AlertmanagerClusterFailedToSendAlerts
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: observability
+              service: kube-prometheus-stack-alertmanager
+              integration: webhook
+
+  # The 1% ratio pinned from both sides in one case: a sustained 1.25% failure
+  # rate must fire, a sustained 0.83% one must not.
+  - interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", integration="webhook", reason="clientError"}'
+        values: '0+1x90'
+      - series: 'alertmanager_notifications_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", integration="webhook"}'
+        values: '0+80x90'
+      - series: 'alertmanager_notifications_failed_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", integration="email", reason="clientError"}'
+        values: '0+1x90'
+      - series: 'alertmanager_notifications_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", integration="email"}'
+        values: '0+120x90'
+    alert_rule_test:
+      # Inside the 15m hold.
+      - eval_time: 12m
+        alertname: AlertmanagerClusterFailedToSendAlerts
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: AlertmanagerClusterFailedToSendAlerts
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: observability
+              service: kube-prometheus-stack-alertmanager
+              integration: webhook
+
+  # Healthy delivery: no failures at all.
+  - interval: 1m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", integration="email", reason="clientError"}'
+        values: '0+0x90'
+      - series: 'alertmanager_notifications_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", service="kube-prometheus-stack-alertmanager", integration="email"}'
+        values: '0+3x90'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: AlertmanagerClusterFailedToSendAlerts
+        exp_alerts: []

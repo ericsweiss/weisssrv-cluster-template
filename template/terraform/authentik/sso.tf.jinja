@@ -1,11 +1,6 @@
 # Site data: which applications exist, who may reach them, and how each one
-# authenticates. Every map key is a STATE ADDRESS — renaming one is a
-# destroy+create, which the module's `prevent_destroy` refuses: rename with a
-# `moved {}` block, remove with `terraform state rm` (README § Renaming and
-# removing).
-#
-# Users are never managed here. Only group membership is, so every username in
-# `groups[*].users` must already exist in authentik.
+# authenticates. Every map key is a STATE ADDRESS: rename or remove one per
+# README.md, Renaming and removing. Users are never managed here, only groups.
 locals {
   # OIDC applications. The key is the provider's default client_id, so the app's
   # own configuration must use the same string.
@@ -18,25 +13,45 @@ locals {
     }
   }
 
-  # Client secrets come in as variables (injected from the secret store by the
-  # terraform:authentik-* tasks) so this file stays non-sensitive. Pass one for
-  # every app that keeps its own copy: a provider with no entry gets a
-  # server-generated secret that exists only in state. The null filter is for
-  # genuinely optional providers — a required variable can never be null here.
+  # Client secrets arrive as variables (injected by the terraform:authentik-*
+  # tasks) so this file stays non-sensitive. A provider with no entry gets a
+  # server-generated secret that exists only in state. Items: README.md.
   oauth2_client_secrets = {
     for key, secret in {
       grafana = var.oauth2_client_secret_grafana
     } : key => secret if secret != null
   }
 
-  # Forward-auth for applications with no OIDC support. The outpost gates the
-  # request and can inject a basic-auth pair from the user's attributes. An
-  # entry is `{ name, external_host }` plus the optional basic-auth attributes;
-  # `external_host` must be EXACTLY the hostname of the IngressRoute carrying
-  # the forward-auth middleware. Full attribute set: the module's variables.tf.
+  # Forward-auth for applications with no OIDC support. `external_host` must be
+  # EXACTLY the hostname of the IngressRoute carrying the forward-auth
+  # middleware. Full attribute set: the module's variables.tf.
   proxy_providers = {}
 
   saml_providers = {}
+
+  # Provider identity, pinned rather than inherited (main.tf). The grant list is
+  # the browser flow only: `password` (ROPC) bypasses MFA and `implicit`/`hybrid`
+  # return bearer tokens in the URL fragment.
+  oauth2_grant_types = ["authorization_code", "refresh_token"]
+
+  # Assigned to every OAuth2 provider, in the order the API stores them - a
+  # reordered list is a diff. `custom:<key>` names a custom_scope_mappings entry.
+  oauth2_scope_mappings = [
+    "goauthentik.io/providers/oauth2/scope-openid",
+    "goauthentik.io/providers/oauth2/scope-email",
+    "goauthentik.io/providers/oauth2/scope-profile",
+  ]
+
+  # Managed ids only, ordered the same way; there is no SAML `custom:` form.
+  saml_property_mappings = [
+    "goauthentik.io/providers/saml/name",
+    "goauthentik.io/providers/saml/email",
+    "goauthentik.io/providers/saml/username",
+    "goauthentik.io/providers/saml/uid",
+    "goauthentik.io/providers/saml/groups",
+    "goauthentik.io/providers/saml/upn",
+    "goauthentik.io/providers/saml/ms-windowsaccountname",
+  ]
 
   # Scope mappings this cluster authors, referenced as `custom:<key>` in a
   # provider's `scope_mappings` list — order matters, the API stores it. Example
@@ -70,7 +85,6 @@ locals {
 
   # The embedded outpost serves the proxy providers. null leaves it alone; going
   # back to null once managed DESTROYS it (detach with `terraform state rm`).
-  # Managed it is `{ proxy_provider_keys = [...] }`, ORDERED — append at the end,
-  # and a proxy provider missing from the list serves 404 from the outpost.
+  # Managed it is an ORDERED `{ proxy_provider_keys = [...] }`; a missing key 404s.
   embedded_outpost = null
 }

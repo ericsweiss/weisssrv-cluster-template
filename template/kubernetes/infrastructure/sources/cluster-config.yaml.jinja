@@ -1,24 +1,8 @@
 ---
-{%- set n_compute = compute_node_count | default(2) | int %}
-{%- set resolvers = upstream_dns_servers.split() %}
-{%- set pve_hosts = [nas_host.split('.')[0]] %}
-{%- for i in range(1, n_compute + 1) %}
-{%- set _ = pve_hosts.append('pve-node-%02d' | format(i)) %}
-{%- endfor %}
-{%- set n_srv = 3 if pve_hosts | length >= 3 else 1 %}
-# Cluster identity, addressing and backend names for Flux postBuild
-# substitution — the sibling of cluster-versions. Every stage after sources
-# substitutes from BOTH, which is why no manifest under kubernetes/ contains a
-# literal domain, VIP or CIDR.
-#
-# Filled once by copier from the answers file; regenerate it from the Ansible
-# inventory later if you prefer (keep the key names either way — they are a
-# contract with every manifest in this tree). Renaming a key does NOT fail the
-# build: Flux and envsubst both render an unknown ${placeholder} as an EMPTY
-# STRING. `tests/test_cluster_invariants.py` is what catches that.
-#
-# Key names must match the Flux postBuild identifier grammar
-# [A-Za-z_][A-Za-z0-9_]* and must not collide with a cluster-versions key.
+{%- from "partials/roster.jinja" import resolvers, pve_hosts, k3s_server_ips with context %}
+# Cluster identity, addressing and backend names for Flux postBuild substitution;
+# every stage after sources substitutes from this and cluster-versions. Keys are a
+# contract: StrictPostBuildSubstitutions fails the reconcile on an unknown one.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -38,11 +22,8 @@ data:
   cluster_node_label_domain: "{{ internal_domain }}"
 
   cluster_lan_cidr: "{{ lan_cidr }}"
-  cluster_pod_cidr: "{{ k3s_pod_cidr | default('10.42.0.0/16') }}"
-  cluster_service_cidr: "{{ k3s_service_cidr | default('10.43.0.0/16') }}"
-  # CGNAT range (RFC 6598) that Tailscale allocates from — a constant, kept here
-  # so ingress allowlists stay declarative.
-  cluster_tailnet_cidr: "100.64.0.0/10"
+  cluster_pod_cidr: "{{ k3s_pod_cidr }}"
+  cluster_service_cidr: "{{ k3s_service_cidr }}"
 
   # `cluster_api_vip` is what the manifests read; `cluster_k3s_api_vip` is the
   # reserved longer spelling, kept so a manifest written with the k3s_ segment
@@ -51,42 +32,19 @@ data:
   cluster_k3s_api_vip: "{{ k3s_api_vip }}"
   # Pod egress to the apiserver must allow the SERVER NODE IPs, not the VIP:
   # kube-proxy DNATs the in-cluster API VIP before NetworkPolicy evaluation.
-  # Widened to the LAN because the server roster is inventory data rather than a
-  # copier answer — narrow it to the server /32s if you generate this file from
-  # the inventory.
+  # Widened to the LAN because the server roster is inventory data, not an answer.
   cluster_apiserver_egress_cidr: "{{ lan_cidr }}"
 
-  # etcd scrape targets for kube-prometheus-stack's kubeEtcd component (k3s
-  # serves etcd metrics on :2381 with `etcd-expose-metrics`, which the k3s role
-  # sets on every server). Enabling that component is also what enables the
-  # UPSTREAM etcd alert rules — quorum loss, leader flapping, DB growth, fsync
-  # latency — on the one component whose failure loses the cluster.
-  #
-  # A JSON FLOW SEQUENCE, not a plain string, and that is load-bearing: Helm
-  # needs a real YAML list, while Flux postBuild (and envsubst) substitute TEXT.
-  # Inlined as `endpoints: ${cluster_etcd_endpoints}` this parses as a list; a
-  # space-separated string would silently become a single bogus endpoint.
-  #
-  # Seeded from the k3s server addresses the starter inventory generates.
-  # RE-ADDRESS THE SERVERS AND CHANGE THIS TOO — stale entries surface as
-  # etcd targets that are permanently down, not as silence.
-  cluster_etcd_endpoints: '[{% for j in range(1, n_srv + 1) %}"{{ lan_prefix }}.{{ 30 + j }}"{{ ", " if not loop.last }}{% endfor %}]'
+  # etcd scrape targets for kubeEtcd, from the starter inventory's servers —
+  # re-address a server and change this too. A JSON FLOW SEQUENCE is load-bearing:
+  # Helm needs a real list where Flux substitutes text.
+  cluster_etcd_endpoints: '[{% for ip in k3s_server_ips %}"{{ ip }}"{{ ", " if not loop.last }}{% endfor %}]'
 
-  # Scrape targets for the HOST node-exporters (port 9101, the `node_exporter_host`
-  # role) — the machines the in-cluster DaemonSet cannot see. Consumed by
-  # observability/exporters/node-exporter-host.yaml as the `endpoints:` list of a
-  # hand-written EndpointSlice, so this is the same JSON FLOW SEQUENCE trick as
-  # cluster_etcd_endpoints: a real YAML list is required where Flux only
-  # substitutes text. `conditions.ready` is explicit — a slice with no controller
-  # behind it has nobody to fill it in, and Prometheus skips a not-ready address.
-  #
-  # Seeded from the starter inventory's roster: the bare-metal hosts, the
-  # resolver and relay LXCs, and the k3s servers. The k3s AGENTS are
-  # deliberately absent — the in-cluster DaemonSet already scrapes them on 9100,
-  # so listing them here would produce two series per agent under different
-  # jobs. Add an app VM when it grows a textfile collector worth alerting on.
-  cluster_node_exporter_host_addresses: '[{% for host in pve_hosts %}{"addresses": ["{{ lan_prefix }}.{{ 11 + loop.index0 }}"], "conditions": {"ready": true}}, {% endfor %}{% for addr in resolvers %}{"addresses": ["{{ addr }}"], "conditions": {"ready": true}}, {% endfor %}{"addresses": ["{{ lan_prefix }}.23"], "conditions": {"ready": true}}{% for j in range(1, n_srv + 1) %}, {"addresses": ["{{ lan_prefix }}.{{ 30 + j }}"], "conditions": {"ready": true}}{% endfor %}]'
-{%- if storage_backend | default('zfs') == 'zfs' %}
+  # Scrape targets for the HOST node-exporters on :9101 — the hosts, resolver and
+  # relay LXCs, and the k3s servers, each with an explicit conditions.ready.
+  # Agents are absent: the in-cluster DaemonSet already scrapes them on 9100.
+  cluster_node_exporter_host_addresses: '[{% for host in pve_hosts %}{"addresses": ["{{ lan_prefix }}.{{ 11 + loop.index0 }}"], "conditions": {"ready": true}}, {% endfor %}{% for addr in resolvers %}{"addresses": ["{{ addr }}"], "conditions": {"ready": true}}, {% endfor %}{"addresses": ["{{ lan_prefix }}.23"], "conditions": {"ready": true}}{% for ip in k3s_server_ips %}, {"addresses": ["{{ ip }}"], "conditions": {"ready": true}}{% endfor %}]'
+{%- if storage_backend == 'zfs' %}
 
   # Scrape targets for zfs_exporter (port 9134, the `zfs_exporter` role), which
   # the storage playbook installs on the NAS node. Same EndpointSlice flow
@@ -95,17 +53,25 @@ data:
 {%- endif %}
 
   # Scrape targets for unbound_exporter (port 9167, the `unbound_exporter` role),
-  # one per resolver the DNS playbook builds. Prometheus derives
-  # instance=<ip>:9167 per address, so the two resolvers stay distinguishable
-  # from a single Service.
+  # one per resolver the DNS playbook builds.
   cluster_unbound_exporter_addresses: '[{% for addr in resolvers %}{"addresses": ["{{ addr }}"], "conditions": {"ready": true}}{{ ", " if not loop.last }}{% endfor %}]'
 
-  # Gate for OffsiteBackupStale's absent() arm — a METRIC NAME, not a boolean,
-  # because Flux substitutes text and `${...}` is only valid PromQL inside a
-  # quoted string. "up" is the OFF position (always has series, so the arm can
-  # never fire); set it to restic_offsite_last_success_timestamp_seconds in the
-  # SAME change that flips `restic_offsite_enabled` true.
+  # Gate for OffsiteBackupStale's absent() arm — a METRIC NAME, not a boolean:
+  # Flux substitutes text and `${...}` is only valid PromQL inside a string.
+  # "up" is the OFF position; RUNBOOKS.md § Backups and restore has the flip.
   cluster_offsite_backup_probe_metric: "up"
+
+  # Same gate for the two other local tiers. "up" is the OFF position; point each
+  # at its own metric in the change that turns the tier on.
+  # archive: nas_storage_archive_backup_enabled -> archive_backup_last_success_timestamp_seconds
+  cluster_archive_backup_probe_metric: "up"
+  # vzdump: proxmox_backup_vzdump_jobs -> vzdump_backup_last_success_timestamp_seconds
+  cluster_vzdump_probe_metric: "up"
+
+  # The per-app dump tier ships ON (nas_storage_backup_artifact_apps is
+  # populated), so its gate is armed: BackupArtifactStale must notice a
+  # collector that stops emitting.
+  cluster_backup_artifact_probe_metric: "backup_artifact_last_mtime_seconds"
 
   cluster_metallb_public_vip: "{{ metallb_public_vip }}"
   cluster_metallb_internal_vip: "{{ metallb_internal_vip }}"
@@ -115,52 +81,57 @@ data:
   cluster_acme_email: "{{ admin_email }}"
 
   # Secrets backend: the ClusterSecretStore every ExternalSecret references. The
-  # else-branch subscripts an empty mapping to hand `mandatory` an undefined
-  # value, the same seam the Taskfile's secret_ref() macro uses: an unimplemented
-  # backend FAILS THE RENDER instead of emitting an empty store name, which every
-  # ExternalSecret would then reference as `name: ""`.
+  # else-branch hands `mandatory` an undefined value, so an unimplemented
+  # backend FAILS THE RENDER instead of emitting `name: ""`.
   cluster_secret_store: "{{ 'onepassword-cluster' if secrets_backend == 'onepassword' else {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no ClusterSecretStore — add a branch to cluster_secret_store in cluster-config.yaml.jinja') }}"
 {%- if secrets_backend == 'onepassword' %}
   cluster_secrets_vault: "{{ onepassword_vault }}"
 {%- endif %}
 
+  # The provider Deployment SecretsProviderDown watches. Same fail-the-render
+  # seam as cluster_secret_store above.
+  cluster_secrets_provider_namespace: "{{ 'external-secrets' if secrets_backend == 'onepassword' else {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no secrets-provider namespace — add a branch to cluster_secrets_provider_namespace in cluster-config.yaml.jinja') }}"
+  cluster_secrets_provider_deployment: "{{ 'onepassword-connect' if secrets_backend == 'onepassword' else {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no secrets-provider Deployment — add a branch to cluster_secrets_provider_deployment in cluster-config.yaml.jinja') }}"
+
   cluster_git_host: "{{ git_host }}"
-  # Prefix every alert's runbook_url gets. The repository is named cluster_name
-  # (see copier.yml's git_namespace help) — the same composition the Taskfile's
-  # flux bootstrap target and Terraform state project use, so a 3am alert link
-  # and the repo Flux actually reconciles from can never drift apart.
+  # Prefix for every alert's runbook_url. The `/-/blob/` shape is GitLab's; a
+  # GitHub forge needs `/blob/`. Forge seam:
+  # https://github.com/ericsweiss/weisssrv-cluster-template/blob/main/docs/ARCHITECTURE.md
   cluster_runbook_base_url: "https://{{ git_host }}/{{ git_namespace }}/{{ cluster_name }}/-/blob/main/docs"
 
-  # Host-side services the platform talks to. These come from the copier ANSWERS
-  # (nas_host, smtp_host, upstream_dns_servers), which also drive the Ansible
-  # inventory — to move the NAS, the relay or a resolver, change the answer, or
-  # change this file and hosts.yml together. Editing one alone splits the two
-  # layers apart silently.
-  cluster_nas_host: "{{ nas_host | default('pve-nas-01.' ~ internal_domain) }}"
-  cluster_smtp_host: "{{ smtp_host | default('smtp-relay.' ~ internal_domain) }}"
-  cluster_alert_email: "{{ alert_email | default(admin_email) }}"
-  # LAN resolvers the in-cluster forwarders point at, space-separated — one per
-  # address in the upstream_dns_servers answer.
-  cluster_upstream_dns_servers: "{{ upstream_dns_servers | default(lan_prefix ~ '.21 ' ~ lan_prefix ~ '.22') }}"
-  # Alternation of every Prometheus job the host/DaemonSet node-exporters
-  # register under. Add labels, never replace them (copier.yml
-  # node_exporter_job_regex).
-  # The fallback must stay equal to copier.yml's default. `node-exporter` alone
-  # is the value that validator exists to REJECT: dropping node-exporter-host
-  # leaves every host rule matching zero series, and a rule that matches nothing
-  # never fires — the one failure mode here that is completely silent.
-  cluster_node_exporter_job_regex: "{{ node_exporter_job_regex | default('node-exporter|node-exporter-host') }}"
+  # Host-side services, from the copier answers that also drive the Ansible
+  # inventory. Moving one means changing the answer, or this file and hosts.yml
+  # together — editing one alone splits the two layers apart silently.
+  cluster_nas_host: "{{ nas_host }}"
+  cluster_smtp_host: "{{ smtp_host }}"
+  cluster_alert_email: "{{ alert_email }}"
+  # Alternation of every job the host and DaemonSet node-exporters register
+  # under; add members, never replace them. Dropping node-exporter-host
+  # silences every host rule.
+  cluster_node_exporter_job_regex: "{{ node_exporter_job_regex }}"
 {%- if vpn_tailscale %}
+
+  # CGNAT range (RFC 6598) that Tailscale allocates from — a constant, kept here
+  # so ingress allowlists stay declarative. Emitted only with the module: without
+  # it a manifest referencing it fails the reconcile under strict substitution.
+  cluster_tailnet_cidr: "100.64.0.0/10"
 
   # MagicDNS suffix of your tailnet, from the Tailscale admin console DNS page.
   # The tailnet resolver hands out CNAMEs into it, so a wrong value silently
   # breaks remote access to internal names.
-  cluster_tailnet_dns_suffix: "{{ tailnet_dns_suffix | default('CHANGEME.ts.net') }}"
+  cluster_tailnet_dns_suffix: "{{ tailnet_dns_suffix }}"
+
+  # LAN resolvers the tailnet override zone forwards to, space-separated — one
+  # per address in the upstream_dns_servers answer.
+  cluster_upstream_dns_servers: "{{ upstream_dns_servers }}"
 {%- endif %}
+
+  # Site timezone, mirrored from `timezone` in group_vars/all.yml. Container TZ
+  # env values and CronJob spec.timeZone read it instead of a literal.
+  cluster_timezone: "{{ timezone }}"
 {%- if dns_backend == 'cloudflare' %}
 
-  # Records the DDNS CronJob keeps pointed at the current public IPv4.
-  # Comma-separated "<name>:<proxied-on-create>"; add hostnames that must bypass
-  # the Cloudflare proxy (large uploads, non-HTTP ports) as ":false".
+  # WAN A records the cloudflare-ddns CronJob owns, as `label[:proxied]` pairs;
+  # `@` is the apex and proxied defaults to true.
   cluster_ddns_records: "{{ external_domain }}:true"
 {%- endif %}

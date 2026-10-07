@@ -1,44 +1,18 @@
 ---
-# This cluster's vendored copies of weisssrv-lib files — the consumer-owned half
-# of the vendored-copy contract. The library's half is its offer list,
-# scripts/vendorable-paths.yml, which bounds what may be listed here; the
-# library itself records nothing about its consumers, which is what lets a
-# GENERATED repository own a manifest at all.
-#
-# Read by the library's scripts/check-vendored-copies.py engine, driven here by
-# tests/test_vendored_byte_identity.py (the `python-tests` CI job and
-# `task lint:invariants`) at the ref variables.WEISSSRV_LIB_REF pins. The
-# library checkout is $WEISSSRV_LIB_PATH (CI clones it there) or the
-# .weisssrv-lib/ checkout `task lib:sync` creates. Two relationships:
-#
-#   vendored — byte-identical to the library at the pin. Drift in either
-#              direction fails; fix upstream and re-vendor, never edit a copy —
-#              a local edit is reverted by the next refresh and reds this gate
-#              meanwhile.
-#   forked   — deliberately divergent. Must still differ (a converged fork
-#              belongs under `vendored`), and `reconciled_sha256` (the library
-#              blob last absorbed) fails the fork when the library side moves —
-#              re-take it here after absorbing the change. `reason:` is
-#              mandatory.
-#
-# Entry forms: a bare string when both repos use the same path, or a mapping
-# with `lib:` and `consumer:` when they differ. Moving a copy inside this
-# repository is an edit to THIS file in the same commit — no library release
-# involved.
-#
-# The refresh loop for a vendored copy: `task lib:sync`, copy the file out of
-# .weisssrv-lib/, review the diff, commit. Adding a copy means adding it here
-# too — an unlisted twin of a library script is caught by
-# tests/test_vendored_byte_identity.py, and a file the library stops shipping is
-# caught at the next pin bump.
-#
-# Two deliberate exclusions. `.yamllint` is unlisted family-wide (every repo in
-# the family carries its own profile under a name the library does not publish),
-# and scripts/ site data — hosts.env, hosts-env-map.yml, version-registry.py,
-# autoscaling-policy.yaml, helm-values-releases.yaml, deploy-coverage.conf,
-# netpol-except.yaml — is configuration this cluster owns, not library code.
-
+# Vendored copies of weisssrv-lib files, checked byte-identical at the pinned ref
+# by tests/test_vendored_byte_identity.py. Entry forms, the refresh loop and the
+# `forked:` rules (must differ; `reason` + `reconciled_sha256`): docs/ci-pipeline.md.
 vendored:
+  # The shared molecule scaffolding. No directory walk reaches it: the walk
+  # covers scripts/ only.
+  - lib: ansible_collections/weisssrv/infra/molecule-shared/prepare-common.yml
+    consumer: ansible/molecule/prepare-common.yml
+  - lib: ansible_collections/weisssrv/infra/molecule-shared/tasks/container-warmup.yml
+    consumer: ansible/molecule/tasks/container-warmup.yml
+  - lib: ansible_collections/weisssrv/infra/molecule-shared/tasks/prepare-apt-disable.yml
+    consumer: ansible/molecule/tasks/prepare-apt-disable.yml
+  - lib: ansible_collections/weisssrv/infra/molecule-shared/tasks/prepare-base.yml
+    consumer: ansible/molecule/tasks/prepare-base.yml
   - scripts/check-backup-artifact-apps.py
   - scripts/check-default-deny-coverage.py
   - scripts/check-deploy-coverage.sh
@@ -59,11 +33,16 @@ vendored:
   - scripts/generate-versions-configmap.py
   - scripts/kubeconform-skipped.py
   - scripts/lint-prometheus-config.sh
+  - scripts/molecule-retry.sh
   - scripts/resolve-tool.sh
+  - scripts/sanitize-junit-expected-failures.py
   - scripts/semantic-release.py
   - scripts/shell-lib.sh
   - scripts/validate-helm-values.py
   - scripts/version-bump-mr.py
+  # A script the library's working tree has but the pinned ref does not joins
+  # this list at the next bump; registering it now reds the byte-identity gate.
+  # The library's scripts/vendorable-paths.yml at the pin is the offer list.
 
 # The lint profiles. No directory walk reaches these, and their drift is the
 # quiet kind: the library tightens a rule, this repository never absorbs it, and
@@ -82,6 +61,14 @@ forked:
       Per-repo file-type sections on a shared base — `[Dockerfile*]` rather than
       `[Dockerfile]`, to cover per-app Dockerfile suffixes.
     reconciled_sha256: 911171d9f26ba0bb47300c97a9e46b078d48eb852dfe9a050fbc3c8e41cc2944
+  - lib: lint/pre-commit-config.yaml
+    consumer: .pre-commit-config.yaml
+    reason: >-
+      Reworded header, `--unsafe` note, a yamllint hook pointed at
+      lint/yamllint-relaxed.yml, a local block running this cluster's
+      tool-light gates, and the whitespace hooks excluded from scripts/; the
+      upstream hook set and the pinned revs are the library's.
+    reconciled_sha256: 39e7c3a5fbc7d2185ad73c436cbba736cae1e2b2b88f7f50387f041cbd87323c
   - lib: lint/gitleaks.toml
     consumer: .gitleaks.toml
     reason: Allowlist paths and this cluster's own false-positive anchors.
@@ -90,3 +77,18 @@ forked:
     consumer: .gitlab/secret-detection-ruleset.toml
     reason: The passthrough names this cluster's gitleaks config and description.
     reconciled_sha256: d6413e69a2d8a6f7d0c468d4370a406299894ad9e3fe274eb7f69eb30a7c936d
+  - lib: lint/yamllint-relaxed.yml
+    consumer: lint/yamllint-relaxed.yml
+    reason: >-
+      Cluster-scoped header plus an ignore block for local .terraform module
+      checkouts; the rules are the library's. It is what pre-commit, the
+      yaml-lint job and `task lint` all point at. Kept at lint/, not the
+      repo-root `.yamllint` the library documents, so ansible-lint cannot
+      discover it and replace its yaml rule.
+    reconciled_sha256: 7fcb8f02aadf68b97cd334a69a889c8cd87ac4796927c086bf77702a247ae2d5
+  - lib: lint/gitattributes
+    consumer: .gitattributes
+    reason: >-
+      Header wording, and no `*.j2` sections: no file in this cluster is an
+      Ansible template.
+    reconciled_sha256: 413609da908e54a6c037e041b595ed2e269afbcaa268671fd56094813154ff09

@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""Assert every tenant wiring file carries the confinement it is supposed to.
+Each omitted piece fails OPEN: Pod Security labels, namespace caps, the
+ServiceAccount and RoleBindings, the store conditions, the landing namespace.
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import posixpath
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - environment guard
+    print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
+    raise SystemExit(2) from None
+
+TENANTS_DIR = "kubernetes/clusters/{{ cluster_name }}/tenants"
+AGGREGATOR = "kustomization.yaml"
+# Applied unconditionally and bound by every tenant, so it is not a tenant file.
+SHARED = {"tenant-crd-editor.yaml"}
+FLUX_NAMESPACE = "flux-system"
+STORE_KIND = "ClusterSecretStore"
+# The corpus gates reach only the stage paths, never this tree, so a tenant's
+# own store is scoped here or nowhere.
+SCOPE_GATE = Path(__file__).resolve().parent / "check-secretstore-scope.py"
+REQUIRED_DEPENDENCY = "infrastructure-configs"
+SOURCE_KIND = "GitRepository"
+REQUIRED_ROLES = ("admin", "tenant-crd-editor")
+# A tenant pins its own image versions, so only cluster identity is required.
+# cluster-versions is allowed beside it for a tenant that does want the pins.
+REQUIRED_SUBSTITUTE_SOURCES = ("cluster-config",)
+ALLOWED_SUBSTITUTE_SOURCES = (*REQUIRED_SUBSTITUTE_SOURCES, "cluster-versions")
+REQUIRED_NS_LABELS = (
+    "fluxcd.io/tenant",
+    "pod-security.kubernetes.io/enforce",
+    "pod-security.kubernetes.io/warn",
+    "pod-security.kubernetes.io/audit",
+)
+# The tenant's `admin` RoleBinding places no ceiling on what it may request, so
+# both caps are part of the wiring rather than a nicety.
+REQUIRED_CAPS = ("ResourceQuota", "LimitRange")
+# Kinds with no namespace of their own; everything else lands somewhere.
+CLUSTER_SCOPED_KINDS = frozenset(
+    {
+        "Namespace",
+        "ClusterRole",
+        "ClusterRoleBinding",
+        "ClusterSecretStore",
+        "ClusterExternalSecret",
+        "ClusterIssuer",
+        "PriorityClass",
+        "CustomResourceDefinition",
+    }
+)
+
+
+class Vacuous(Exception):
+    """The gate could not inspect its subject — exit 2, never a silent pass."""
+
+
+def _tenants_dir(root: Path) -> Path:
+    base = root / TENANTS_DIR
+    if not base.is_dir():
+        raise Vacuous(f"{TENANTS_DIR} is not a directory")
+    return base
+
+
+def tenant_files(root: Path) -> list[Path]:
+    base = _tenants_dir(root)
+    return sorted(
+        p for p in (*base.glob("*.yaml"), *base.glob("*.yml"))
+        if p.name != AGGREGATOR and p.name not in SHARED
+    )
+
+
+def subjects(root: Path, listed: set[str]) -> list[Path]:
+    """Every tenant file Kustomize applies, plus every one on disk.
+
+    Kustomize takes any suffix, so the subject is what the aggregator lists, not
+    what one glob finds; an unlisted file on disk still trips "not listed".
+    """
+    base = _tenants_dir(root)
+    applied = {
+        base / r for r in (listed - SHARED - {AGGREGATOR}) if (base / r).is_file()
+    }
+    return sorted(applied | set(tenant_files(root)))
+
+
+def _normalized(name: str) -> str:
+    """kustomize reads `./acme.yaml` and `acme.yaml` as the same resource."""
+    return posixpath.normpath(name)
+
+
+def listed_resources(root: Path) -> set[str]:
+    """The aggregator's `resources`, or exit 2: it is what the subject scan is."""
+    path = _tenants_dir(root) / AGGREGATOR
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise Vacuous(f"{AGGREGATOR} unreadable: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise Vacuous(f"{AGGREGATOR} is not a mapping, so it lists no resources")
+    return {_normalized(str(r)) for r in (doc.get("resources") or [])}
+
+
+def _of_kind(docs: list, kind: str) -> list[dict]:
+    return [d for d in docs if isinstance(d, dict) and d.get("kind") == kind]
+
+
+def _condition_admits():
+    """ESO condition matching, loaded from the corpus gate that owns it.
+
+    The sibling has a hyphenated name and a `__main__` guard, so loading it by
+    path does not run its main().
+    """
+    spec = importlib.util.spec_from_file_location("check_secretstore_scope", SCOPE_GATE)
+    if spec is None or spec.loader is None:
+        raise Vacuous(f"{SCOPE_GATE.name} must sit next to this script")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    matcher = getattr(module, "_condition_admits", None)
+    if matcher is None:
+        raise Vacuous(f"{SCOPE_GATE.name} no longer exports the ESO condition matcher")
+    return matcher
+
+
+def _store_problems(docs: list, rel: str, namespace, labels: dict) -> list[str]:
+    """A tenant-owned ClusterSecretStore is scoped to the tenant namespace alone."""
+    problems = []
+    admits = None
+    for store in _of_kind(docs, STORE_KIND):
+        name = ((store.get("metadata") or {}).get("name")) or "?"
+        conditions = ((store.get("spec") or {}).get("conditions")) or []
+        if not conditions:
+            problems.append(
+                f"{rel}: {STORE_KIND} {name} has no spec.conditions — a cluster-scoped "
+                "store is referenceable from every namespace, so any ExternalSecret in "
+                "the cluster can read its vault"
+            )
+            continue
+        if not namespace:
+            continue
+        if admits is None:
+            admits = _condition_admits()
+        if not any(admits(c, namespace, labels) for c in conditions):
+            problems.append(
+                f"{rel}: {STORE_KIND} {name} conditions do not admit the tenant "
+                f"namespace {namespace} — its ExternalSecrets never sync"
+            )
+        wider = sorted(
+            {str(n) for c in conditions for n in (c.get("namespaces") or [])} - {namespace}
+        )
+        loose = sorted(
+            {
+                key
+                for c in conditions
+                for key in ("namespaceRegexes", "namespaceSelector")
+                if c.get(key) is not None
+            }
+        )
+        if wider or loose:
+            reach = ", ".join(wider + loose)
+            problems.append(
+                f"{rel}: {STORE_KIND} {name} reaches past the tenant namespace "
+                f"{namespace} ({reach}) — a tenant owns one namespace, so its store "
+                "is scoped to that namespace alone"
+            )
+    return problems
+
+
+def _caps_problems(docs: list, rel: str) -> list[str]:
+    """Both namespace caps are declared, or the tenant quota is unbounded."""
+    problems = []
+    for kind in REQUIRED_CAPS:
+        if not _of_kind(docs, kind):
+            problems.append(
+                f"{rel}: declares no {kind} — the tenant's admin RoleBinding places "
+                "no ceiling on what its pods may request"
+            )
+    return problems
+
+
+def _placement_problems(docs: list, rel: str, namespace) -> list[str]:
+    """Every namespaced document sits in the tenant namespace or flux-system.
+
+    The root kustomization applies this file with no targetNamespace, so a
+    document that names no namespace lands in `default`, outside the tenant.
+    """
+    problems = []
+    for doc in docs:
+        kind = str(doc.get("kind") or "?")
+        if kind in CLUSTER_SCOPED_KINDS:
+            continue
+        name = ((doc.get("metadata") or {}).get("name")) or "?"
+        where = (doc.get("metadata") or {}).get("namespace")
+        if not where:
+            problems.append(
+                f"{rel}: {kind} {name} names no metadata.namespace, so it lands in "
+                "`default` rather than the tenant namespace"
+            )
+        elif where not in {namespace, FLUX_NAMESPACE} and namespace:
+            problems.append(
+                f"{rel}: {kind} {name} sits in namespace {where}, which is neither "
+                f"the tenant namespace {namespace} nor {FLUX_NAMESPACE}"
+            )
+    return problems
+
+
+def check_file(path: Path, rel: str, listed: set[str],
+               root: Path | None = None) -> list[str]:
+    problems = []
+    try:
+        docs = [
+            d for d in yaml.safe_load_all(path.read_text(encoding="utf-8"))
+            if isinstance(d, dict)
+        ]
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        return [f"{rel}: unparseable YAML ({exc.__class__.__name__})"]
+
+    if _normalized(rel.removeprefix(f"{TENANTS_DIR}/")) not in listed:
+        problems.append(
+            f"{rel}: not listed in {AGGREGATOR} resources — Kustomize does not "
+            "auto-discover, so this tenant is never applied"
+        )
+
+    namespaces = _of_kind(docs, "Namespace")
+    namespace = None
+    labels: dict = {}
+    if not namespaces:
+        problems.append(f"{rel}: declares no Namespace")
+    else:
+        namespace = (namespaces[0].get("metadata") or {}).get("name")
+        labels = (namespaces[0].get("metadata") or {}).get("labels") or {}
+        for label in REQUIRED_NS_LABELS:
+            if label not in labels:
+                problems.append(f"{rel}: namespace {namespace} has no {label} label")
+
+    problems += _caps_problems(docs, rel)
+    problems += _placement_problems(docs, rel, namespace)
+    problems += _store_problems(docs, rel, namespace, labels)
+
+    kustomizations = _of_kind(docs, "Kustomization")
+    kustomizations = [k for k in kustomizations if "kustomize.toolkit" in str(k.get("apiVersion"))]
+    if not kustomizations:
+        problems.append(f"{rel}: declares no Flux Kustomization")
+        return problems
+    spec = kustomizations[0].get("spec") or {}
+
+    service_account = spec.get("serviceAccountName")
+    if not service_account:
+        problems.append(
+            f"{rel}: Kustomization has no serviceAccountName — it would reconcile "
+            "as kustomize-controller's own cluster-admin"
+        )
+    if spec.get("prune") is not True:
+        problems.append(f"{rel}: Kustomization does not set prune: true")
+    target = spec.get("targetNamespace")
+    if not target:
+        problems.append(f"{rel}: Kustomization has no targetNamespace")
+    elif namespace and target != namespace:
+        problems.append(
+            f"{rel}: Kustomization targetNamespace {target!r} is not the tenant "
+            f"namespace {namespace!r}"
+        )
+    problems += _substitute_problems(spec, rel)
+    problems += _source_problems(docs, rel, spec)
+    problems += _path_problems(rel, spec, root)
+    depends = {str((d or {}).get("name")) for d in (spec.get("dependsOn") or [])}
+    if REQUIRED_DEPENDENCY not in depends:
+        problems.append(
+            f"{rel}: Kustomization does not dependOn {REQUIRED_DEPENDENCY} — on a "
+            "fresh bootstrap it applies before the platform CRDs exist"
+        )
+
+    if service_account:
+        accounts = {
+            (m.get("name"), m.get("namespace"))
+            for m in ((d.get("metadata") or {}) for d in _of_kind(docs, "ServiceAccount"))
+        }
+        if (service_account, FLUX_NAMESPACE) not in accounts:
+            problems.append(
+                f"{rel}: no ServiceAccount {service_account} in {FLUX_NAMESPACE} — "
+                "kustomize-controller impersonates it from its own namespace"
+            )
+        problems += _rolebinding_problems(docs, rel, service_account, namespace)
+    return problems
+
+
+def _substitute_problems(spec: dict, rel: str) -> list[str]:
+    """Flux substitutes nothing a Kustomization does not ask for, so a tenant
+    without both ConfigMaps applies its ${...} placeholders literally."""
+    entries = {
+        str(entry["name"]): entry
+        for entry in ((spec.get("postBuild") or {}).get("substituteFrom") or [])
+        if isinstance(entry, dict) and entry.get("name")
+    }
+    problems = []
+    for name in REQUIRED_SUBSTITUTE_SOURCES:
+        if name not in entries:
+            problems.append(
+                f"{rel}: Kustomization does not substituteFrom ConfigMap {name} — "
+                "its ${...} placeholders would be applied literally"
+            )
+    for name in sorted(entries):
+        if name in ALLOWED_SUBSTITUTE_SOURCES and entries[name].get("optional") is not False:
+            problems.append(
+                f"{rel}: substituteFrom ConfigMap {name} is not optional: false — "
+                "a missing ConfigMap would apply ${...} placeholders literally"
+            )
+    return problems
+
+
+def _source_problems(docs: list, rel: str, spec: dict) -> list[str]:
+    """The Kustomization must reconcile the tenant's own repository.
+
+    A Kustomization with no sourceRef reconciles nothing; one naming this
+    cluster's own GitRepository applies this repo under the tenant account.
+    """
+    source = spec.get("sourceRef") or {}
+    name = source.get("name")
+    if not name:
+        return [
+            f"{rel}: Kustomization has no sourceRef.name — it reconciles no "
+            "tenant repository"
+        ]
+    if source.get("kind") != SOURCE_KIND:
+        return [
+            f"{rel}: Kustomization sourceRef.kind is {source.get('kind')!r}, not "
+            f"{SOURCE_KIND}"
+        ]
+    namespace = source.get("namespace") or FLUX_NAMESPACE
+    if namespace != FLUX_NAMESPACE:
+        return [
+            f"{rel}: Kustomization sourceRef.namespace is {namespace!r}; the "
+            f"tenant source lives in {FLUX_NAMESPACE} beside the Kustomization"
+        ]
+    sources = {
+        ((d.get("metadata") or {}).get("name"),
+         (d.get("metadata") or {}).get("namespace"))
+        for d in _of_kind(docs, SOURCE_KIND)
+    }
+    if (name, FLUX_NAMESPACE) not in sources:
+        return [
+            f"{rel}: no {SOURCE_KIND} {name} in {FLUX_NAMESPACE} — the tenant's "
+            "own source is declared in its wiring file, so this reference "
+            "either points at another tenant's repo or at nothing"
+        ]
+    return []
+
+
+def _path_problems(rel: str, spec: dict, root: Path | None) -> list[str]:
+    """`spec.path` must stay inside the tenant repository.
+
+    The path is resolved in the tenant's checkout, so a name that is also a
+    directory here means it was aimed at this cluster's own tree.
+    """
+    raw = spec.get("path")
+    if not raw:
+        return [
+            f"{rel}: Kustomization has no spec.path — it reconciles the tenant "
+            "repository root, every manifest in it included"
+        ]
+    path = posixpath.normpath(str(raw).lstrip("/"))
+    if path == ".." or path.startswith("../"):
+        return [
+            f"{rel}: Kustomization spec.path {raw!r} climbs above the tenant "
+            "repository root"
+        ]
+    if root is not None and (root / path).is_dir():
+        return [
+            f"{rel}: Kustomization spec.path {raw!r} is a directory of this "
+            "cluster repo — the tenant ServiceAccount would reconcile the "
+            "cluster's own manifests into the tenant namespace"
+        ]
+    return []
+
+
+def _rolebinding_problems(docs: list, rel: str, account: str, namespace) -> list[str]:
+    problems = []
+    for role in REQUIRED_ROLES:
+        bound = [
+            b
+            for b in _of_kind(docs, "RoleBinding")
+            if (b.get("roleRef") or {}).get("name") == role
+            and any(
+                s.get("kind") == "ServiceAccount"
+                and s.get("name") == account
+                and s.get("namespace") == FLUX_NAMESPACE
+                for s in (b.get("subjects") or [])
+            )
+        ]
+        if not bound:
+            problems.append(
+                f"{rel}: no RoleBinding grants {role} to {FLUX_NAMESPACE}/{account}"
+            )
+            continue
+        if namespace and all(
+            (b.get("metadata") or {}).get("namespace") != namespace for b in bound
+        ):
+            problems.append(
+                f"{rel}: the {role} RoleBinding is not in the tenant namespace {namespace}"
+            )
+    return problems
+
+
+def check(root: Path) -> list[str]:
+    listed = listed_resources(root)
+    problems = []
+    for path in subjects(root, listed):
+        problems += check_file(path, path.relative_to(root).as_posix(), listed, root=root)
+    for resource in sorted(listed - SHARED):
+        if not (root / TENANTS_DIR / resource).exists():
+            problems.append(
+                f"{TENANTS_DIR}/{AGGREGATOR} lists {resource}, which does not exist"
+            )
+    return problems
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Tenant wiring completeness")
+    parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parent.parent))
+    args = parser.parse_args(argv)
+    root = Path(args.repo_root)
+
+    try:
+        listed = listed_resources(root)
+        count = len(subjects(root, listed))
+        if not count:
+            # An empty tree is only a fact when the aggregator agrees. A resource
+            # it lists that the subject scan never reached would otherwise leave
+            # this gate printing OK having inspected nothing.
+            unseen = sorted(listed - SHARED - {AGGREGATOR})
+            if unseen:
+                raise Vacuous(
+                    f"{TENANTS_DIR}/{AGGREGATOR} lists {', '.join(unseen)}, which "
+                    "the tenant-file scan did not reach"
+                )
+            print("check-tenant-wiring: no tenant onboarded, and none listed.")
+            return 0
+        problems = check(root)
+    except (Vacuous, OSError, UnicodeDecodeError) as exc:
+        print(f"check-tenant-wiring inspected nothing: {exc}", file=sys.stderr)
+        return 2
+    if problems:
+        print("Tenant wiring is incomplete:", file=sys.stderr)
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
+        return 1
+    print(f"Tenant wiring OK ({count} tenant file(s) in {TENANTS_DIR}).")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

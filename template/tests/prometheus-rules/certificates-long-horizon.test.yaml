@@ -1,0 +1,102 @@
+---
+# The multi-day cert holds: CertRenewalFailedProlonged (72h) and
+# CertDistributionTargetFailed (25h), plus CertRenewalStale, whose 75d budget is
+# reached with a backdated gauge. 30m keeps those horizons cheap.
+rule_files:
+  - rules.yaml
+evaluation_interval: 30m
+tests:
+  # Continuous renewal failure: silent through the third day, critical after.
+  - interval: 30m
+    input_series:
+      - series: 'cert_renewal_last_run_success{instance="192.0.2.11:9101"}'
+        values: '0+0x160'
+    alert_rule_test:
+      - eval_time: 71h
+        alertname: CertRenewalFailedProlonged
+        exp_alerts: []
+      - eval_time: 73h
+        alertname: CertRenewalFailedProlonged
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: '192.0.2.11:9101'
+
+  # A renewal that recovers before the third day resets the hold, not escalates.
+  - interval: 30m
+    input_series:
+      - series: 'cert_renewal_last_run_success{instance="192.0.2.11:9101"}'
+        values: '0+0x120 1+0x40'
+    alert_rule_test:
+      - eval_time: 73h
+        alertname: CertRenewalFailedProlonged
+        exp_alerts: []
+
+  # CertRenewalStale: the gauge is a timestamp, so a negative start value is a
+  # renewal that far before the harness clock. 76d of lag fires after the hold.
+  - interval: 30m
+    input_series:
+      - series: 'cert_renewal_last_success_timestamp_seconds{instance="192.0.2.11:9101"}'
+        values: '-6566400+0x8'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CertRenewalStale
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: CertRenewalStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: '192.0.2.11:9101'
+
+  # A cycle that renewed 60 days ago is healthy, which pins the 75d threshold
+  # from below: lowering it past the issuance cycle reds this arm.
+  - interval: 30m
+    input_series:
+      - series: 'cert_renewal_last_success_timestamp_seconds{instance="192.0.2.11:9101"}'
+        values: '-5184000+0x8'
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: CertRenewalStale
+        exp_alerts: []
+
+  # Per-target: one dead host fires alone and names itself, while the target
+  # beside it stays silent. The 24h arm sits inside the hold, so dropping
+  # `for:` reds this case.
+  - interval: 30m
+    input_series:
+      - series: 'cert_distribution_target_last_run_success{instance="192.0.2.11:9101", host="nas"}'
+        values: '0+0x60'
+      - series: 'cert_distribution_target_last_run_success{instance="192.0.2.11:9101", host="smtp"}'
+        values: '1+0x60'
+    alert_rule_test:
+      - eval_time: 24h
+        alertname: CertDistributionTargetFailed
+        exp_alerts: []
+      - eval_time: 26h
+        alertname: CertDistributionTargetFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: '192.0.2.11:9101'
+              host: nas
+
+  # A target the next check installs the cert on, 23h in, never fires.
+  - interval: 30m
+    input_series:
+      - series: 'cert_distribution_target_last_run_success{instance="192.0.2.11:9101", host="nas"}'
+        values: '0+0x46 1+0x14'
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: CertDistributionTargetFailed
+        exp_alerts: []
+
+  # Every target holds the current certificate: silent.
+  - interval: 30m
+    input_series:
+      - series: 'cert_distribution_target_last_run_success{instance="192.0.2.11:9101", host="nas"}'
+        values: '1+0x60'
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: CertDistributionTargetFailed
+        exp_alerts: []

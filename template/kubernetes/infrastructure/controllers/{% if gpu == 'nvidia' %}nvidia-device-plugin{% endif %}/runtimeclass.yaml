@@ -1,8 +1,7 @@
 ---
-# Maps to the containerd runtime handler k3s generates when it finds
-# nvidia-container-runtime on the GPU node's PATH (installed by the Ansible k3s
-# role). Pods that need the GPU set runtimeClassName: nvidia so the NVIDIA
-# runtime injects the driver and devices.
+# Maps to the containerd runtime handler k3s generates when nvidia-container-
+# runtime is on the GPU node's PATH. Pods needing the GPU set
+# runtimeClassName: nvidia so the NVIDIA runtime injects driver and devices.
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:

@@ -1,14 +1,9 @@
 ---
-# Keeps the external zone's A records pointed at the site's current public IPv4
-# (residential connections do not hold a static address).
-#
-# Which records it manages comes from cluster-config (cluster_ddns_records), NOT
-# from this file. Records are also created/updated by Terraform and by
-# external-dns; the three owners must stay on disjoint record NAMES.
-#
-# The program is cloudflare-ddns.py in this directory, mounted from the
-# configMapGenerator in kustomization.yaml — a real file so ruff and a unit test
-# can reach it, which an inlined heredoc would not be.
+# CRITICAL: keeps the external zone's A records on the site's current public
+# IPv4. Terraform and external-dns also write this zone, so the three owners
+# must stay on disjoint record NAMES or they will fight.
+# The record list comes from cluster-config (cluster_ddns_records).
+# The program is cloudflare-ddns.py here, mounted by the configMapGenerator.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -16,6 +11,10 @@ metadata:
   namespace: cloudflare-ddns
 spec:
   schedule: "*/5 * * * *"
+  # Without a deadline the controller counts missed schedules back from
+  # lastScheduleTime and stops scheduling for good past 100 of them; it also
+  # bounds how late a missed run may start.
+  startingDeadlineSeconds: 120
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 3
   concurrencyPolicy: Forbid
@@ -23,9 +22,8 @@ spec:
     spec:
       activeDeadlineSeconds: 300
       ttlSecondsAfterFinished: 3600
-      # Default 6 retries would queue six failing pods inside one 5-minute
-      # window during an API outage; two rides out a blip and leaves the
-      # failure visible.
+      # Two retries ride out an API blip without queuing six failing pods
+      # inside one 5-minute window, and leave the failure visible.
       backoffLimit: 2
       template:
         spec:

@@ -1,0 +1,52 @@
+{%- import "partials/secrets.jinja" as secrets with context -%}
+# Cluster access and the local toolchain
+
+## Kubernetes
+
+The kubeconfig is fetched from the cluster, never committed — `.gitignore`
+covers `kubeconfig`, `*.kubeconfig` and `.kube/`. `task` wrappers set
+`KUBECONFIG` themselves, so prefer `task flux:status` and friends over a bare
+`kubectl` with an ambient context.
+
+Read-only verification is `kubectl get`, `describe`, `logs` and `top`. Anything
+mutating under `kubernetes/` is Flux's job: the only exceptions are
+`task flux:dev-apply -- <path>`, which the next reconcile reverts, and the two
+bootstrap Secrets.
+
+The API is reached through a virtual address that fails over between the server
+nodes. If it is down, a server node's own address is the fallback.
+
+## Secrets
+
+Host-side tooling resolves a reference at run time; nothing is written to disk.
+With this cluster's backend a reference reads
+`{{ secrets.secret_ref('<item>', '<field>') }}`, and a single value is fetched
+with `{{ secrets.secret_read('<item>', '<field>') }}`. Every task that needs one
+declares it in its own `env:` block and runs the command through
+`{{ secrets.secret_runner() }}`, which is why `task secrets:show` can print the
+whole host-side inventory.
+
+In-cluster, workloads read a Secret produced by an `ExternalSecret`: the item
+TITLE is `remoteRef.key` and the field is `remoteRef.property`.
+
+## SSH
+
+Hosts are reached as `{{ admin_user }}` with passwordless sudo. An agent that
+pins a signing agent can fail intermittently when that agent is locked, so a
+scripted connection names its key explicitly instead.
+
+## Local toolchain
+
+`pip install -r requirements.txt` installs the pinned Python side: Ansible,
+ansible-lint, Molecule, pytest, ruff, yamllint and PyYAML. Beyond that:
+
+- `task lib:sync` clones weisssrv-lib at the pinned ref into the local checkout
+  the vendored-copy gate compares against. That gate never skips, so `task lint`
+  fails rather than passing quietly without it.
+- `kustomize`, `kubeconform`, `flux` and `helm` for `task flux:lint`.
+- `promtool` and `amtool` for `task lint:prometheus-config`.
+- Docker and a matching architecture for the integration scenarios.
+- `pre-commit install` once per clone for the local backstop.
+
+Every task's preconditions name the tool it is missing, so run the task and read
+the message rather than guessing.

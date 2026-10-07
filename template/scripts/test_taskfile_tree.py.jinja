@@ -1,0 +1,367 @@
+"""Cover scripts/taskfile_tree.py and the invariants it makes checkable.
+
+Task names come from taskfile_tree.load_tasks(). The app gate asserts every
+kubernetes/apps namespace owning a workload has operator tasks or an exemption.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import textwrap
+from pathlib import Path
+
+import pytest
+import yaml
+
+from taskfile_tree import include_paths, load_tasks, task_names, taskfile_paths
+
+REPO = Path(__file__).resolve().parent.parent
+APPS = REPO / "kubernetes" / "apps"
+MODULE = REPO / "scripts" / "taskfile_tree.py"
+
+# App namespaces exempt from `<ns>:status` / `:logs` / `:restart`, with why.
+# Adopt an app with an operator workflow and it needs taskfiles/<ns>.yml instead.
+NO_OPS_TASKS = {
+    "registry-cache": "pull-through cache with no operator workflow; flux:status covers it, and its credential rotation is a flux:rotate-secret arm",
+{%- if vpn_tailscale %}
+    "tailnet-dns": "a CoreDNS sidecar for the tailnet; nothing to inspect per-app",
+{%- endif %}
+}
+
+OPS_VERBS = ("status", "logs", "restart")
+
+
+def _namespace_of(app_dir: Path) -> str | None:
+    manifest = app_dir / "namespace.yaml"
+    if not manifest.is_file():
+        return None
+    for doc in yaml.safe_load_all(manifest.read_text(encoding="utf-8")):
+        if isinstance(doc, dict) and doc.get("kind") == "Namespace":
+            return doc.get("metadata", {}).get("name")
+    return None
+
+
+def _app_namespaces_with_workloads() -> dict[str, str]:
+    """{namespace: app directory name} for every app shipping its own workload.
+
+    Top-level kind only, so a VPA targetRef naming a Deployment does not count.
+    A HelmRelease-only app is out of scope: its workloads are the chart's.
+    """
+    found: dict[str, str] = {}
+    for app_dir in sorted(p for p in APPS.iterdir() if p.is_dir()):
+        namespace = _namespace_of(app_dir)
+        if not namespace:
+            continue
+        for manifest in sorted(app_dir.rglob("*.yaml")):
+            docs = yaml.safe_load_all(manifest.read_text(encoding="utf-8"))
+            if any(
+                isinstance(doc, dict) and doc.get("kind") in {"Deployment", "StatefulSet"}
+                for doc in docs
+            ):
+                found[namespace] = app_dir.name
+                break
+    assert found, f"no app under {APPS} ships a namespace.yaml with a workload"
+    return found
+
+
+def test_the_module_under_test_is_where_the_suite_expects_it():
+    assert MODULE.is_file(), f"{MODULE} is missing"
+
+
+def test_load_tasks_covers_the_whole_include_tree():
+    tasks = load_tasks()
+    assert "lint" in tasks, "the root Taskfile's own tasks are missing"
+    assert "flux:lint" in tasks, "included namespaces are missing"
+    assert len(tasks) > 60, f"the include walk resolved only {len(tasks)} tasks"
+
+
+def test_every_include_target_exists():
+    missing = sorted(str(p) for p in include_paths().values() if not p.is_file())
+    assert not missing, f"includes: names files that do not exist: {missing}"
+
+
+def _taskfile_candidates() -> set[Path]:
+    """Every namespace file under taskfiles/, either YAML suffix."""
+    return {
+        p for suffix in ("yml", "yaml") for p in (REPO / "taskfiles").glob(f"*.{suffix}")
+    }
+
+
+def test_every_taskfile_on_disk_is_included():
+    """A taskfiles/<ns>.yml no include names is inert: `task --list` omits it."""
+    included = {p.resolve() for p in include_paths().values()}
+    orphans = sorted(
+        str(p.relative_to(REPO))
+        for p in _taskfile_candidates()
+        if p.resolve() not in included
+    )
+    assert not orphans, f"taskfiles no root include reaches: {orphans}"
+
+
+def _references_of(body: dict) -> list[str]:
+    """Every task name a body names, from both `cmds:` and `deps:`."""
+    refs = []
+    for cmd in body.get("cmds") or []:
+        if isinstance(cmd, dict) and isinstance(cmd.get("task"), str):
+            refs.append(cmd["task"])
+    for dep in body.get("deps") or []:
+        if isinstance(dep, str):
+            refs.append(dep)
+        elif isinstance(dep, dict) and isinstance(dep.get("task"), str):
+            refs.append(dep["task"])
+    return refs
+
+
+def test_every_task_reference_resolves():
+    """A `- task:` or `deps:` entry naming nothing is a runtime failure go-task
+    only reports when the task is invoked, so the tree is walked here instead."""
+    tasks = load_tasks()
+    dangling = [
+        f"{name} -> {ref}"
+        for name, body in tasks.items()
+        for ref in _references_of(body)
+        if ref not in tasks
+    ]
+    assert not dangling, "task references that resolve to nothing: " + ", ".join(sorted(dangling))
+
+
+# A script path a dir-scoped task would resolve against its own `dir:`.
+UNANCHORED_SCRIPT = re.compile(r"^\s*(?:bash |sh )?scripts/[A-Za-z0-9_./-]+\.(?:sh|py)\b")
+
+
+def _unanchored_script_refs(tasks: dict[str, dict]) -> list[str]:
+    """Bare `scripts/...` commands inside a task that sets its own `dir:`."""
+    found = []
+    for name, body in tasks.items():
+        if not body.get("dir"):
+            continue
+        for cmd in body.get("cmds") or []:
+            text = cmd if isinstance(cmd, str) else cmd.get("cmd") if isinstance(cmd, dict) else None
+            if not isinstance(text, str):
+                continue
+            for line in text.splitlines():
+                if UNANCHORED_SCRIPT.match(line):
+                    found.append(f"{name}: {line.strip()}")
+    return found
+
+
+def test_dir_scoped_tasks_anchor_their_script_paths():
+    """go-task runs a cmd with the task's `dir:` as cwd, so a bare
+    `scripts/x.sh` resolves under that dir and exits 127. Use the ROOT_DIR var."""
+    unanchored = _unanchored_script_refs(load_tasks())
+    assert not unanchored, (
+        "script references in a dir-scoped task that are not ROOT_DIR-anchored: "
+        + ", ".join(sorted(unanchored))
+    )
+
+
+def test_an_unanchored_script_in_a_dir_scoped_task_is_caught():
+    """Mutation case: the anchor gate must fail on a bare scripts/ reference."""
+    mutated = {
+        "terraform:apply": {"dir": "terraform/unifi", "cmds": ["scripts/guard.sh apply"]},
+        "lint": {"cmds": ["scripts/guard.sh apply"]},
+    }
+    assert _unanchored_script_refs(mutated) == ["terraform:apply: scripts/guard.sh apply"]
+
+
+def test_task_names_hides_internal_helpers():
+    names = task_names()
+    assert "_app:status" not in names
+    assert "flux:lint" in names
+
+
+def test_taskfile_paths_lists_the_root_first():
+    paths = taskfile_paths()
+    assert paths[0].name == "Taskfile.yml"
+    assert len(paths) > 5
+
+
+def _missing_ops_tasks(names: set[str], found: dict[str, str] | None = None) -> list[str]:
+    """`<ns>:<verb> (app)` for every app namespace short of the three verbs."""
+    found = _app_namespaces_with_workloads() if found is None else found
+    return sorted(
+        f"{namespace}:{verb} ({app})"
+        for namespace, app in found.items()
+        if namespace not in NO_OPS_TASKS
+        for verb in OPS_VERBS
+        if f"{namespace}:{verb}" not in names
+    )
+
+
+def test_every_app_namespace_with_a_workload_has_ops_tasks():
+    missing = _missing_ops_tasks(task_names())
+    assert not missing, (
+        "kubernetes/apps namespaces with a workload missing the `<ns>:status` / "
+        "`:logs` / `:restart` tasks: "
+        + ", ".join(missing)
+        + "\n\nAdd taskfiles/<ns>.yml (status/logs/restart via the _app:* "
+        "templates), or record the namespace in NO_OPS_TASKS with a reason."
+    )
+
+
+def test_a_namespace_short_of_logs_and_restart_is_reported():
+    """Mutation case: `<ns>:status` alone must not satisfy the gate."""
+    assert _missing_ops_tasks({"demo:status"}, {"demo": "demo-app"}) == [
+        "demo:logs (demo-app)",
+        "demo:restart (demo-app)",
+    ]
+
+
+def test_the_app_walk_sees_the_real_namespaces():
+    """Guard the collector: a rule that stopped matching would exempt everything."""
+    found = _app_namespaces_with_workloads()
+    assert "registry-cache" in found, found
+
+
+def test_no_ops_exemption_still_names_a_live_namespace():
+    stale = sorted(set(NO_OPS_TASKS) - set(_app_namespaces_with_workloads()))
+    assert not stale, f"NO_OPS_TASKS names namespaces that no longer exist: {stale}"
+
+
+def test_every_exemption_carries_a_reason():
+    for namespace, reason in NO_OPS_TASKS.items():
+        assert len(reason.split()) >= 8, f"{namespace} needs a real reason, not {reason!r}"
+
+
+@pytest.fixture()
+def fake_tree(tmp_path: Path) -> Path:
+    (tmp_path / "taskfiles").mkdir()
+    (tmp_path / "Taskfile.yml").write_text(
+        textwrap.dedent(
+            """\
+            version: '3'
+            includes:
+              flux: taskfiles/flux.yml
+            tasks:
+              lint:
+                cmds:
+                  - task: flux:lint
+            """
+        )
+    )
+    (tmp_path / "taskfiles" / "flux.yml").write_text(
+        textwrap.dedent(
+            """\
+            version: '3'
+            tasks:
+              lint:
+                deps: [helper, ':lint']
+                cmds:
+                  - task: :lint
+              helper:
+                internal: true
+                cmds:
+                  - echo hi
+            """
+        )
+    )
+    return tmp_path
+
+
+def test_references_are_qualified_from_both_directions(fake_tree: Path):
+    tasks = load_tasks(fake_tree)
+    assert set(tasks) == {"lint", "flux:lint", "flux:helper"}
+    assert tasks["lint"]["cmds"][0]["task"] == "flux:lint"
+    # `:lint` from inside a namespace is the ROOT lint, not flux:lint.
+    assert tasks["flux:lint"]["cmds"][0]["task"] == "lint"
+    assert tasks["flux:lint"]["deps"] == ["flux:helper", "lint"]
+    assert task_names(fake_tree) == {"lint", "flux:lint"}
+
+
+def test_a_dangling_reference_is_caught(fake_tree: Path):
+    """Mutation case: the resolver gate must fail when a reference goes stale."""
+    (fake_tree / "taskfiles" / "flux.yml").write_text(
+        textwrap.dedent(
+            """\
+            version: '3'
+            tasks:
+              lint:
+                cmds:
+                  - task: :renamed-away
+            """
+        )
+    )
+    tasks = load_tasks(fake_tree)
+    dangling = [
+        cmd["task"]
+        for body in tasks.values()
+        for cmd in body.get("cmds") or []
+        if isinstance(cmd, dict) and cmd.get("task") not in tasks
+    ]
+    assert dangling == ["renamed-away"]
+
+
+# A `scripts/...` command in run position with no interpreter in front: the
+# kernel reads its shebang, so a lost exec bit is rc=126 when the task runs.
+DIRECT_SCRIPT = re.compile(
+    r"(?:^|\$\(|`|;|\||&&|\|\|)\s*(?:\./)?(scripts/[A-Za-z0-9_./-]+\.(?:sh|py))\b"
+)
+
+
+def _cmd_texts(body: dict) -> list[str]:
+    """Every shell string a task body carries: cmds, preconditions, status."""
+    texts: list[str] = []
+    for cmd in body.get("cmds") or []:
+        if isinstance(cmd, str):
+            texts.append(cmd)
+        elif isinstance(cmd, dict) and isinstance(cmd.get("cmd"), str):
+            texts.append(cmd["cmd"])
+    for pre in body.get("preconditions") or []:
+        if isinstance(pre, str):
+            texts.append(pre)
+        elif isinstance(pre, dict) and isinstance(pre.get("sh"), str):
+            texts.append(pre["sh"])
+    for check in body.get("status") or []:
+        if isinstance(check, str):
+            texts.append(check)
+    return texts
+
+
+def _directly_invoked_scripts(tasks: dict[str, dict]) -> dict[str, str]:
+    """{script path: a task that runs it} for every interpreter-less call."""
+    found: dict[str, str] = {}
+    for name, body in tasks.items():
+        for text in _cmd_texts(body):
+            for line in text.splitlines():
+                if line.strip().startswith("#"):
+                    continue
+                for match in DIRECT_SCRIPT.finditer(line):
+                    found.setdefault(match.group(1), name)
+    return found
+
+
+def test_directly_invoked_scripts_are_executable():
+    """An interpreter-less command relies on the exec bit and the shebang: a
+    mode regression is rc=126 the first time the task runs."""
+    invoked = _directly_invoked_scripts(load_tasks())
+    assert invoked, "no interpreter-less script invocation found — the gate reads nothing"
+    broken = sorted(
+        f"{path} ({task})"
+        for path, task in invoked.items()
+        if not (REPO / path).is_file() or not os.access(REPO / path, os.X_OK)
+    )
+    assert not broken, (
+        "scripts run without an interpreter that are missing or not executable: "
+        + ", ".join(broken)
+        + " — chmod +x them, or call them through bash/python3."
+    )
+
+
+def test_an_interpreter_prefix_takes_a_script_out_of_scope():
+    """Mutation case: the collector must see the bare call and skip the
+    interpreted one, in every run position the tree uses."""
+    mutated = {
+        "collect-state": {"cmds": ["./scripts/collect-state.sh --json"]},
+        "bare": {"cmds": ["scripts/gate.sh --fix"]},
+        "substitution": {"cmds": ["HOST=$(scripts/find.sh a b) || exit 1"]},
+        "chained": {"cmds": ["mkdir -p out && scripts/gen.py > out/x"]},
+        "interpreted": {"cmds": ["python3 scripts/check-versions.py", "bash scripts/x.sh"]},
+        "prose": {"cmds": ["# falls back to a default (scripts/check-versions.py)."]},
+    }
+    assert _directly_invoked_scripts(mutated) == {
+        "scripts/collect-state.sh": "collect-state",
+        "scripts/gate.sh": "bare",
+        "scripts/find.sh": "substitution",
+        "scripts/gen.py": "chained",
+    }

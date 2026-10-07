@@ -1,0 +1,20 @@
+---
+# Catches the reaper's invisible failure: a partial sweep exits 0 and says so
+# only in its "BUDGET STOP" log line, whose baseline is zero — hence `> 0`. The
+# 25h window spans a day of scheduled sweeps.
+groups:
+  - name: runner-reaper
+    interval: 5m
+    rules:
+      - alert: GitlabRunnerReaperPartialSweep
+        expr: sum(count_over_time({namespace="gitlab-runner-reaper"} |= "BUDGET STOP" [25h])) > 0
+        for: 15m
+        labels: { severity: warning, component: ci }
+        annotations:
+          summary: "Runner reaper hit its budget without finishing a sweep in the last 25h"
+          description: >-
+            gitlab-runner-reaper logged a BUDGET STOP: it exited cleanly without
+            reaping every runner namespace, so orphan CI pods and Secrets are
+            accumulating against the namespace quota. Read the CronJob logs for
+            the namespaces it skipped.
+          runbook_url: "${cluster_runbook_base_url}/ci-pipeline.md#runner-reaper-partial-sweep"

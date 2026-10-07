@@ -1,0 +1,152 @@
+"""Coverage for check-tailnet-dns-parity.py.
+
+The live tree agrees, so it proves nothing about failure: each arm builds a
+fixture repo, and every drift case must FAIL.
+"""
+from __future__ import annotations
+
+import textwrap
+from pathlib import Path
+
+import pytest
+from conftest import REPO, load_script
+
+gate = load_script("check-tailnet-dns-parity.py")
+
+DOMAIN = "lan.example.test"
+INGRESS_VIP = "10.1.2.101"
+
+CONFIG = textwrap.dedent(
+    f"""\
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: cluster-config
+    data:
+      cluster_internal_domain: "{DOMAIN}"
+      cluster_metallb_internal_vip: "{INGRESS_VIP}"
+      cluster_nas_host: "nas-01.{DOMAIN}"
+    """
+)
+
+HOSTS = textwrap.dedent(
+    """\
+    all:
+      children:
+        nas:
+          hosts:
+            nas-01:
+              ansible_host: 10.1.2.10
+    """
+)
+
+REWRITES = textwrap.dedent(
+    """\
+    _dns_service_rewrites:
+      - domain: "dns.{{ internal_domain }}"
+        answer: "10.1.2.21"
+      - domain: "k3s.{{ internal_domain }}"
+        answer: "{{ k3s_api_vip }}"
+      - domain: "grafana.{{ internal_domain }}"
+        answer: "{{ metallb_internal_vip }}"
+    """
+)
+
+
+def corefile(zone: str) -> str:
+    """A Corefile whose override zone lists `zone`, ahead of the CNAME zone."""
+    return textwrap.dedent(
+        f"""\
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: tailnet-dns-corefile
+        data:
+          Corefile: |
+            {zone} {{
+                forward . 10.1.2.21
+            }}
+
+            ${{cluster_internal_domain}} {{
+                forward . 10.1.2.21
+            }}
+        """
+    )
+
+
+def make_repo(tmp_path: Path, zone: str, *, config: str = CONFIG) -> Path:
+    (tmp_path / "kubernetes/infrastructure/sources").mkdir(parents=True)
+    (tmp_path / "kubernetes/infrastructure/sources/cluster-config.yaml").write_text(config)
+    (tmp_path / "kubernetes/apps/tailnet-dns").mkdir(parents=True)
+    (tmp_path / "kubernetes/apps/tailnet-dns/configmap.yaml").write_text(corefile(zone))
+    (tmp_path / "ansible/inventories/prod/group_vars").mkdir(parents=True)
+    (tmp_path / "ansible/inventories/prod/hosts.yml").write_text(HOSTS)
+    (tmp_path / "ansible/inventories/prod/group_vars/dns.yml").write_text(REWRITES)
+    return tmp_path
+
+
+IN_STEP = "${cluster_nas_host} dns.${cluster_internal_domain} k3s.${cluster_internal_domain}"
+
+
+def test_the_live_tree_agrees():
+    assert gate.check(REPO) == []
+
+
+def test_a_fixture_in_step_passes(tmp_path):
+    assert gate.main(["--repo-root", str(make_repo(tmp_path, IN_STEP))]) == 0
+
+
+def test_a_direct_answer_missing_from_the_zone_fails(tmp_path):
+    root = make_repo(tmp_path, "${cluster_nas_host} dns.${cluster_internal_domain}")
+    problems = gate.check(root)
+    assert len(problems) == 1
+    assert problems[0].startswith("k3s has a direct answer")
+    assert gate.main(["--repo-root", str(root)]) == 1
+
+
+def test_an_ingress_fronted_name_in_the_zone_fails(tmp_path):
+    root = make_repo(tmp_path, f"{IN_STEP} grafana.${{cluster_internal_domain}}")
+    problems = gate.check(root)
+    assert len(problems) == 1
+    assert "internal ingress VIP" in problems[0]
+
+
+def test_a_name_with_no_rewrite_at_all_fails(tmp_path):
+    root = make_repo(tmp_path, f"{IN_STEP} ghost.${{cluster_internal_domain}}")
+    assert "neither an inventory host nor a rewrite" in gate.check(root)[0]
+
+
+def test_an_exempted_direct_answer_passes(tmp_path, monkeypatch):
+    monkeypatch.setitem(gate.EXEMPT, "k3s", "no tailnet consumer reaches the API")
+    root = make_repo(tmp_path, "${cluster_nas_host} dns.${cluster_internal_domain}")
+    assert gate.check(root) == []
+
+
+def test_a_declared_strict_route_may_stay_in_the_zone(tmp_path, monkeypatch):
+    monkeypatch.setitem(gate.STRICT_ROUTES, "grafana", "chained with a source-IP allowlist")
+    root = make_repo(tmp_path, f"{IN_STEP} grafana.${{cluster_internal_domain}}")
+    assert gate.check(root) == []
+
+
+def test_an_empty_rewrite_list_is_not_a_clean_run(tmp_path):
+    root = make_repo(tmp_path, IN_STEP)
+    (root / "ansible/inventories/prod/group_vars/dns.yml").write_text("_dns_service_rewrites: []\n")
+    with pytest.raises(gate.GateError):
+        gate.check(root)
+    assert gate.main(["--repo-root", str(root)]) == 2
+
+
+def test_a_corefile_with_no_override_zone_is_not_a_clean_run(tmp_path):
+    root = make_repo(tmp_path, "${cluster_internal_domain}")
+    with pytest.raises(gate.GateError, match="override-zone"):
+        gate.check(root)
+
+
+def test_a_cluster_config_without_the_domain_is_not_a_clean_run(tmp_path):
+    root = make_repo(
+        tmp_path,
+        IN_STEP,
+        config="apiVersion: v1\nkind: ConfigMap\ndata:\n  cluster_metallb_internal_vip: \"x\"\n",
+    )
+    with pytest.raises(gate.GateError, match="cluster_internal_domain"):
+        gate.check(root)

@@ -25,11 +25,13 @@ two or more compute nodes. Fewer nodes work, with caveats noted below.
 ### Cluster shape
 
 - **Three hosts minimum** if you want the k3s control plane to tolerate a node
-  failure: the template lays out three server VMs holding an etcd quorum, and
-  putting two of them on the same host defeats it. The shipped default is
-  `compute_node_count: 2`, which reaches three hosts by placing **one etcd
-  member on the storage node** — so budget that node for a 2 vCPU / 6 GB server
-  VM plus a 4 vCPU / 8 GB agent on top of its ZFS ARC.
+  failure: at `compute_node_count` 2 or more the template lays out three server
+  VMs holding an etcd quorum, and putting two of them on the same host defeats
+  it. At 1 it lays out one server, and the control plane does not survive
+  losing that host. The shipped default is `compute_node_count: 2`, which
+  reaches three hosts by placing **one etcd member on the storage node** — so
+  budget that node for a 2 vCPU / 6 GB server VM plus a 4 vCPU / 8 GB agent on
+  top of its ZFS ARC.
 
   The storage node carries `k3s-srv-01` at **every** `compute_node_count`: the
   generator walks the host list starting at the storage node, so raising the
@@ -55,7 +57,8 @@ different one would have to bring.
 
 Create the ZFS pools **by hand, before Ansible runs**. Nothing in the generated
 repository creates or destroys a pool — that is deliberate; Ansible only sets
-properties, creates datasets and zvols, and mounts things.
+properties, creates zvols, and mounts things. The declared datasets are created
+once, from the same inventory, by `task disaster-recovery:storage-bootstrap`.
 
 The template expects up to four pool roles on the storage node. Pool *names* are
 inventory values you choose; the roles are:
@@ -123,7 +126,7 @@ before you start; the answers marked → become copier answers.
 
 This is the plan the **starter inventory actually ships with**, so copying it
 means the generated `hosts.yml` needs re-addressing only if you disagree with
-it. The blocks are contiguous and, deliberately, all sit below the VIPs:
+it. The guest blocks are contiguous and all sit below the VIPs:
 
 ```
 x.x.x.1          router
@@ -136,9 +139,13 @@ x.x.x.41-.49     k3s agent VMs
 x.x.x.50-.99     application guests you add later
 x.x.x.100        public ingress VIP        ← metallb_public_vip
 x.x.x.101        internal ingress VIP      ← metallb_internal_vip
+x.x.x.102-.160   free — spare VIPs or extra guests
 x.x.x.161        Kubernetes API VIP        ← k3s_api_vip
 x.x.x.170-.254   DHCP pool and workstations
 ```
+
+The API VIP sits at `.161` because the copier placeholder composes it there;
+any free address outside the reserved bands and the DHCP pool works.
 
 Two of those blocks are composed from `compute_node_count`: the compute hosts
 from `.12` up, and one k3s agent per Proxmox host from `.41` up. Their bands are
@@ -266,15 +273,15 @@ op account add --address my.1password.com --email you@example.com
 eval "$(op signin)"
 
 # Create the vault that will hold this cluster's items → onepassword_vault
-op vault create Homelab
+op vault create <onepassword_vault>
 
 # Connect server credentials. The server NAME IS LOAD-BEARING: the generated
 # `task flux:bootstrap-secrets` looks for `<cluster_name>-connect` and mints its
 # own token against it. Use exactly this form.
-op connect server create <cluster_name>-connect --vaults Homelab
+op connect server create <cluster_name>-connect --vaults <onepassword_vault>
 
 # CI service account, scoped read-only to the same vault
-op service-account create ci --vault Homelab:read_items
+op service-account create ci --vault <onepassword_vault>:read_items
 ```
 
 `op connect server create` writes **`1password-credentials.json`** into the
@@ -302,10 +309,9 @@ run` hard-fails the whole task, and an `ExternalSecret` sits in
 
 The names below are exactly what the generated repository asks for. Create the
 items with these titles, or rename both sides — the references live in
-`ansible/inventories/prod/group_vars/all.yml`, `Taskfile.yml` and the
-`ExternalSecret` manifests. `task secrets:show` in the generated repository
-prints the live list (references only, never values) if you ever need to
-re-derive it.
+`Taskfile.yml`, `.gitlab-ci.yml` and the `ExternalSecret` manifests.
+`task secrets:show` in the generated repository prints the live list
+(references only, never values) if you ever need to re-derive it.
 
 Note the two 1Password quirks the field names reflect: a Login item's fields are
 `username` and `password`, and an API Credential item's secret field is
@@ -327,6 +333,7 @@ items.
 | `Samba NAS User` | `password` | SMB access to the NAS |
 | `K3s Cluster Token` | `credential` | server node join |
 | `K3s Agent Token` | `credential` | agent join — worker-only, so a compromised agent cannot register a server |
+| `K3s Kubeconfig` | `kubeconfig` | the `cluster-verify` CI job — a **base64** kubeconfig: `base64 < ~/.kube/config-k3s` after `task k3s:kubeconfig` |
 | `Loki Push Auth` | `username`, `password` | host-side Alloy pushing journald through the ingress |
 | `1Password Connect` | `token` | the boot-time ZFS key fetch (`task zfs:encrypt`) |
 | `Git Access Token` | `credential` | `task flux:bootstrap` — needs `api`, `read_repository`, `write_repository` |
@@ -393,14 +400,21 @@ Four items cannot exist until the thing that issues them exists, so create them
 as the bring-up reaches them: `GitLab Runner` and `GitLab Runner Privileged`
 (registration tokens, from the GitLab project), `Authentik Terraform Token`
 (minted in Authentik after it is running), and `Registry Cache Upstream` (your
-registry account). Until then, those workloads stay in `SecretSyncError`, which
-is loud and harmless.
+registry account). Until then those workloads stay in `SecretSyncError`, and the
+Deployments among them never get their Secret, so the kube-prometheus-stack
+defaults `KubeDeploymentReplicasMismatch` and `KubePodNotReady` fire for each
+one. `registry-cache` adds its own `RegistryCacheDown` alert, which fires 15
+minutes after bootstrap and keeps firing until the item exists. Silence these,
+or drop `- registry-cache` from `kubernetes/apps/kustomization.yaml`, until you
+have the credentials.
 
 Generate every random value with something like `openssl rand -base64 32` and
 paste it in; do not invent memorable ones. Encrypted-pool passphrases are not in
 this list: the boot-time key load reaches Connect with the `1Password Connect`
 token above, and each pool's passphrase item is named by your own
-`zfs_encryption` inventory settings.
+`zfs_encryption` inventory settings. Create a second vault for those passphrase
+items alone — `zfs_encryption_connect_vault` names it, and the host-side token
+can read everything in the vault its Connect server was granted.
 
 > One value deserves special care: if you enable offsite backups, the backup
 > repository password can never be rotated and its loss makes every offsite copy
@@ -447,7 +461,7 @@ You need, before generating:
 
 ---
 
-## 5a. Library access
+## 6. Library access
 
 The generated repository is not self-contained: it consumes **weisssrv-lib** in
 four places, and three of them run from *your workstation*, not from CI. Decide
@@ -484,20 +498,13 @@ git ls-remote <lib_url> 'refs/tags/<lib_ref>*'   # must print a SHA
 Role variables, the CI templates' inputs and what a `lib_ref` bump can break are
 documented in the library, not here. The generated tree carries **no**
 `ansible/roles/` at all — every play addresses `weisssrv.infra.<role>`, so the
-inventory you write in SETUP § 2 is written against these:
-
-| What | Where in weisssrv-lib |
-|---|---|
-| Per-role variables and behaviour | [role READMEs](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) |
-| The inventory-wide variables every role aliases | [collection README](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/README.md) |
-| Variable renames and newly asserted inputs across refs | [MIGRATING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/MIGRATING.md) |
-| CI template inputs | [docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md) |
-| What a `lib_ref` bump can break | [docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md) |
-| Which roles are a backend rather than a seam | [docs/EXTENSIBILITY.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/EXTENSIBILITY.md) |
+inventory you write in SETUP § 2 is written against the library's role READMEs.
+[ARCHITECTURE.md](ARCHITECTURE.md) § Where the platform is documented is the
+table of which library document owns what.
 
 ---
 
-## 6. Host access
+## 7. Host access
 
 Ansible does not bootstrap itself. On **every Proxmox node**, before the first
 playbook:
@@ -526,7 +533,9 @@ provisions them with cloud-init and the key from the vault.
 
 ---
 
-## 7. Optional: overlay VPN (`vpn_tailscale`)
+## 8. Optional modules
+
+### Overlay VPN (`vpn_tailscale`)
 
 Enable it if you want remote administration without exposing SSH or the Proxmox
 UI. It requires, before generation:
@@ -549,9 +558,7 @@ UI. It requires, before generation:
 With it disabled, remote access is your own problem and the firewall rules that
 would have trusted the tailnet simply are not generated.
 
----
-
-## 8. Optional: GPU (`gpu: nvidia`)
+### GPU (`gpu: nvidia`)
 
 Requires:
 
@@ -562,9 +569,7 @@ Requires:
 - Awareness that the first apply is disruptive: the host binds the card to VFIO
   and reboots.
 
----
-
-## 8a. Optional: gateway networks (`use_unifi`)
+### Gateway networks (`use_unifi`)
 
 Turn it on if your router is a UniFi console and you want its networks, VLANs,
 firewall zones, WLANs and port forwards to be code rather than console state. It
@@ -607,7 +612,7 @@ discovered during one.
 
 ---
 
-## 8b. Answers to accept as they come
+## 9. Answers to accept as they come
 
 Not everything copier asks is a decision. `node_exporter_job_regex` looks like
 free text, but its two members name things the template *ships*: `node-exporter`
@@ -615,16 +620,32 @@ is the kube-prometheus chart's own DaemonSet job and `node-exporter-host` is the
 static scrape of the Proxmox hosts and VMs. The node and storage alert rules
 scope themselves to that alternation, so dropping either name leaves those rules
 matching zero series — and a rule that matches nothing never fires, so nothing
-ever tells you the alerts went quiet. Copier now rejects an answer that omits
+ever tells you the alerts went quiet. Copier rejects an answer that omits
 either; press enter unless you have added a third exporter source of your own,
 in which case append `|your-job` rather than replacing what is there.
 
 The same goes for `k3s_pod_cidr` and `k3s_service_cidr` (§ 2): the k3s defaults
 are right unless they collide with your LAN.
 
+`k3s_image_gc_high_threshold` is the same kind of answer. It is the root-filesystem
+percentage at which the kubelet starts deleting unused images, and the
+KubeletImageGCIneffective alert is rendered from the same number, so the two can
+never disagree. The default of 70 suits a 64G node root disk. Raise it only if
+yours are large enough that the headroom left above it is still tens of
+gigabytes. Copier caps it at 79, because DiskUsageWarning fires at 80 and its
+inhibit rule would then mute KubeletImageGCIneffective every time it fired.
+
+`compose_app_guests` is empty unless you already run single-VM docker-compose
+guests beside the cluster. It is the roster `task collect-state` walks for
+compose status, and optionally each guest's health endpoint, nginx certificate
+and backup freshness. Every entry needs `host`, `label` and `compose_dir`; the
+other five keys are optional and each one you leave out drops its section of the
+report. Adding a guest later is an edit to `scripts/collect-state.sh`, so
+answering `[]` now costs nothing.
+
 ---
 
-## 9. Workstation tooling
+## 10. Workstation tooling
 
 `task lint` in the generated repository is the authoritative completeness check:
 every gate names the binary it is missing in its precondition message. The list
@@ -637,12 +658,16 @@ brew install hashicorp/tap/terraform
 brew install --cask 1password-cli
 brew install kubernetes-cli fluxcd/tap/flux
 # the gates task lint runs that the list above does not cover:
-brew install kustomize kubeconform gettext shellcheck helm
+brew install kustomize kubeconform gettext shellcheck helm tflint coreutils
 pip install ansible-lint yamllint pyyaml ruff
 
-# Debian/Ubuntu: pipx install copier; apt install kubectl-equivalents, shellcheck,
-#   gettext-base; pip install ansible-lint yamllint pyyaml ruff; the rest from each
-#   project's instructions
+# Debian/Ubuntu: apt ships only some of these.
+#   pipx install 'copier>=9.15.0'
+#   apt install ansible curl jq shellcheck gettext-base coreutils
+#   pip install ansible-lint yamllint pyyaml ruff
+#   kubectl from the pkgs.k8s.io apt repository; task, terraform, op, helm,
+#   flux, kustomize, kubeconform and tflint from their own release pages or
+#   vendor apt repositories — Debian packages none of them at a usable version.
 ```
 
 `gettext` is for `envsubst`, which `flux:lint` uses to expand `${cluster_...}`
@@ -652,11 +677,27 @@ value-heavy HelmReleases with `helm template` to validate them against each
 chart's schema, so it also wants network access the first time (`helm repo
 add`/`update`). `ansible-lint` and `yamllint` are the lint stage's
 first two steps, and `ruff` is `lint:ruff` — the same check the CI python-lint
-job runs over `scripts/` and `tests/`.
+job runs over `scripts/` and `tests/`. `tflint` is `terraform:tflint`, which
+catches the deprecated syntax and unused declarations `terraform validate` lets
+through.
+
+`curl` is how `task flux:install-cli` fetches the pinned flux release. macOS
+ships it; a minimal Debian image does not.
 
 Not required for `task lint`, but required by the gate you run after touching
 alert rules (`task lint:prometheus-config`): **`promtool`** and **`amtool`**,
 which ship in the Prometheus and Alertmanager release tarballs.
+
+`task collect-state` needs a wall-clock backstop for its SSH probes:
+**`timeout`** on Linux, or **`gtimeout`** from `brew install coreutils` on
+macOS. The task refuses to run without one — without it every probe runs
+unbounded and one wedged host hangs the whole run.
+
+`task ansible:test` runs the integration stacks under molecule, which needs
+**`molecule`** and **`molecule-plugins[docker]`** (`pip install`) and a running
+Docker. Both are checked by the task's preconditions; the
+`molecule-plugins[docker]` driver is not, so a missing driver fails inside
+molecule rather than in a precondition message.
 
 `ansible-galaxy` comes with Ansible; the generated repository wraps it as
 `task ansible:install-collections`, which is the first command to run after
@@ -668,7 +709,7 @@ collection's declared floor), Terraform 1.x within the range each generated
 
 ---
 
-## 10. Pre-flight checklist
+## 11. Pre-flight checklist
 
 Hardware and OS
 
@@ -726,7 +767,7 @@ Library and tooling
       prints a SHA
 - [ ] `lib_project` decided — the library exists on the GitLab instance your
       pipelines run on, or you plan to vendor the CI templates
-- [ ] Workstation tooling from § 9 installed, including the `task lint` gates
+- [ ] Workstation tooling from § 10 installed, including the `task lint` gates
       (kustomize, kubeconform, gettext, helm, shellcheck, yamllint, ansible-lint,
       ruff)
 

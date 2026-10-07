@@ -1,11 +1,8 @@
 # Policies for the shared (non-privileged) runner namespace. Nothing here serves
 # traffic, so ingress is denied outright by the netpol-baseline component.
 ---
-# Namespace-wide default-deny EGRESS. The label-scoped allows below are additive,
-# so this makes any pod WITHOUT one of those labels fail closed. Without it, a job
-# could use its namespace RBAC (pods:create) to spawn an auxiliary pod carrying no
-# runner-class label, and that pod would get unrestricted egress — defeating the
-# internet-only containment of job pods.
+# Namespace-wide default-deny EGRESS: the label-scoped allows below are
+# additive, so any pod without a runner-class label fails closed.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -16,16 +13,9 @@ spec:
   policyTypes:
     - Egress
 ---
-# Manager: long-polls GitLab and talks to the kube-API to spawn job pods.
-#
-# Two recurring traps encoded here:
-#  * kube-proxy DNATs the in-cluster API VIP to a real server node BEFORE
-#    NetworkPolicy evaluation, so the rule must allow the SERVER NODE range on
-#    6443. A rule on the API VIP never matches the packet actually sent (it
-#    blocked both managers when these policies first applied; conntrack grace
-#    masked it for a while).
-#  * The ingress VIP is allowed BOTH as an ipBlock (pre-DNAT) and via the traefik
-#    namespace (post-DNAT) — neither form alone is guaranteed to match.
+# Manager: long-polls GitLab and talks to the kube-API to spawn job pods. The
+# apiserver rule targets the server node range and the ingress VIP is allowed
+# both as ipBlock and as namespace, because kube-proxy DNATs before policy.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -65,13 +55,25 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+    # Public :443, as the privileged manager has: registry and object-storage
+    # callbacks GitLab may redirect to. A GitLab reached directly on the LAN
+    # instead of through this cluster's ingress needs its own rule here.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
 ---
-# Job pods run untrusted project code: full internet for package pulls, but
-# nothing on the LAN or cluster networks beyond DNS, the kube-API (for jobs
-# bringing their own kubeconfig — the job SA itself is token-less) and GitLab via
-# the internal ingress. The except list is RFC-reserved space, deliberately NOT
-# derived from this cluster's LAN CIDR: it must exclude every private range, not
-# just the one this cluster happens to use.
+# Job pods run untrusted project code: full internet, but on the LAN and
+# cluster networks only DNS, the kube-API and GitLab through internal ingress.
+# The except list is every RFC-private range, not just this cluster's CIDR.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

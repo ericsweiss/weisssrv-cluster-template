@@ -1,0 +1,31 @@
+---
+# App alert, so it ships beside the app rather than in the kube-prometheus-stack
+# values. Prometheus discovers rules in every namespace.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: registry-cache
+  namespace: registry-cache
+spec:
+  groups:
+    - name: registry-cache
+      rules:
+        # A cache outage degrades rather than breaks: pulls fall back to the
+        # upstream registry. Every arm yields {namespace}, so one outage is one
+        # series and one notification group.
+        - alert: RegistryCacheDown
+          expr: >-
+            min by (namespace) (kube_deployment_status_replicas_available{namespace="registry-cache", deployment="registry-cache"}) == 0
+            or sum by (namespace) (absent(kube_deployment_status_replicas_available{namespace="registry-cache", deployment="registry-cache"})) > 0
+            or sum by (namespace) (absent(up{namespace="registry-cache", service="registry-cache"})) > 0
+            or min by (namespace) (up{namespace="registry-cache", service="registry-cache"}) == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#registry-pull-through-cache'
+            summary: 'Registry pull-through cache is down or unscrapable'
+            description: >-
+              The registry-cache Deployment has 0 available replicas, or its
+              :5001 metrics endpoint stopped answering, for 15m. Image pulls
+              cold-fetch from the upstream registry until it returns.

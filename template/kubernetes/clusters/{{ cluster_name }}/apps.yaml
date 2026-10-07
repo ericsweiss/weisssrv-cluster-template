@@ -1,11 +1,7 @@
 ---
-# Workloads (one directory per app).
-#
-# dependsOn infrastructure-configs, NOT observability: apps wait for the
-# platform chain (sources -> crds -> controllers -> configs) but never on
-# observability health. Trade-off: on a truly-fresh bootstrap an app that ships
-# a ServiceMonitor/PodMonitor retries until the crds stage's CRDs land — which
-# it already has, since crds runs first.
+# Workloads, one directory per app. dependsOn infrastructure-configs, not
+# observability: apps wait for the platform chain (sources -> crds ->
+# controllers -> configs) and run parallel to the observability stage.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
@@ -14,7 +10,8 @@ metadata:
 spec:
   interval: 10m
   retryInterval: 1m
-  timeout: 15m
+  # Headroom over the slowest release this stage waits on (authentik, 15m).
+  timeout: 25m
   dependsOn:
     - name: infrastructure-configs
   sourceRef:
@@ -23,8 +20,6 @@ spec:
   path: ./kubernetes/apps
   prune: true
   wait: true
-  # optional:false — see infrastructure-sources.yaml for why only that stage
-  # tolerates a miss.
   postBuild:
     substituteFrom:
       - kind: ConfigMap

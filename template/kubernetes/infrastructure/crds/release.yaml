@@ -1,19 +1,22 @@
 ---
-# The monitoring.coreos.com CRDs, installed in their own stage BEFORE the
-# controllers stage: on a fresh cluster the Traefik chart renders a
-# ServiceMonitor and hard-fails when that API is absent, and the CRDs otherwise
-# only arrive with kube-prometheus-stack two stages later.
-#
-# This chart ships the CRDs as Helm-owned templates, so kube-prometheus-stack
-# must NOT also ship them (crds.enabled:false there).
+# The monitoring.coreos.com CRDs, in their own stage before controllers: the
+# Traefik chart renders a ServiceMonitor and hard-fails without them. This
+# chart owns them, so kube-prometheus-stack sets crds.enabled false.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
   name: prometheus-operator-crds
   namespace: prometheus-operator-crds
+  annotations:
+    # Pruning this release would `helm uninstall` it and take every
+    # monitoring.coreos.com CRD — and every CR — with it.
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   interval: 30m
   releaseName: prometheus-operator-crds
+  # Revert out-of-band edits; the repo rule lives in traefik/release.yaml.
+  driftDetection:
+    mode: enabled
   timeout: 10m
   chart:
     spec:
@@ -25,11 +28,20 @@ spec:
         namespace: flux-system
       interval: 12h
   install:
-    remediation:
-      retries: 3
+    # RetryOnFailure, not the default RemediateOnFailure: a failed install
+    # otherwise remediates by uninstalling, which cascade-deletes every
+    # monitoring.coreos.com CRD and CR.
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
   upgrade:
     remediation:
       retries: 3
       remediateLastFailure: true
-  # Values left at chart defaults: all CRDs enabled, matching the set
-  # kube-prometheus-stack expects.
+  values:
+    # Keeps the CRDs through any helm uninstall of this release, the protection
+    # cert-manager gets from crds.keep and ESO from crds.annotations. All CRDs
+    # stay enabled (chart default), matching what kube-prometheus-stack expects.
+    crds:
+      annotations:
+        helm.sh/resource-policy: keep

@@ -1,49 +1,31 @@
 ---
-# This repository's vendored copies of weisssrv-lib files — the consumer-owned
-# half of the vendored-copy contract. The library's half is its offer list,
-# scripts/vendorable-paths.yml, which bounds what may be listed here; the
-# library itself records nothing about its consumers.
-#
-# Read by the library's scripts/check-vendored-copies.py engine, driven here by
-# tests/validate_render.py (`_check_registered_copies`) against the library
-# checkout `--lib-path` points at — the ref copier.yml's `lib_ref` default
-# names. Two relationships:
-#
-#   vendored — byte-identical to the library at the pin. Drift in either
-#              direction fails; fix upstream and re-vendor, never edit a copy.
-#   forked   — deliberately divergent. Must still differ (a converged fork
-#              belongs under `vendored`), and `reconciled_sha256` (the library
-#              blob last absorbed) fails the fork when the library side moves —
-#              re-take it here after absorbing the change. `reason:` is
-#              mandatory.
-#
-# Entry forms: a bare string when both repos use the same path, or a mapping
-# with `lib:` and `consumer:` when they differ. Moving a copy inside this
-# repository is an edit to THIS file in the same commit — no library release
-# involved.
-#
-# TWO copy sets are listed, and both matter. The unprefixed paths are what this
-# repository runs on ITSELF (its own scripts/, its own lint profiles, its own
-# secret-detection ruleset); the `template/`-prefixed ones are rendered into
-# every generated cluster. They drift separately, so a re-vendor of one is not
-# a re-vendor of the other, and a file present in only one set is listed once —
-# that asymmetry is real (this repository runs no deploy-coverage gate on
-# itself, and a generated cluster ships no secret-detection ruleset of its own).
-#
-# Two deliberate exclusions, both because there are no comparable bytes to
-# compare: template/.gitleaks.toml.jinja is a Jinja SOURCE
-# (`{{ cluster_name }}` interpolation), not a copy of lint/gitleaks.toml; and
-# the .yamllint profiles are unlisted family-wide, not just here.
+# Vendored copies of weisssrv-lib files: `vendored` = byte-identical (fix
+# upstream), `forked` = divergent, needing `reason:` and `reconciled_sha256:`.
+# Contract: weisssrv-lib docs/SCRIPTS.md; entry forms: docs/VERSIONING.md.
 
 vendored:
   # --- copies this repository runs on itself ---
+  # No directory walk reaches this one: the walks cover scripts/ trees only.
+  - lib: lint/gitattributes
+    consumer: .gitattributes
   - scripts/check-doc-links.py
   - scripts/check-lib-pins.py
   - scripts/semantic-release.py
-  # The check-lib-pins suite is canonical in the library: a consumer that
-  # vendors the script vendors its tests and adds only its own smoke test.
+  # The check-lib-pins suite is canonical in the library. This repository
+  # vendors it because its own pipeline is where the rewriter runs; a generated
+  # cluster carries the script plus its own smoke test, matching weisssrv.
   - tests/test_check_lib_pins.py
   # --- copies rendered into the generated cluster ---
+  # The shared molecule scaffolding. No directory walk reaches it: the walks
+  # cover scripts/ trees only.
+  - lib: ansible_collections/weisssrv/infra/molecule-shared/prepare-common.yml
+    consumer: template/ansible/molecule/prepare-common.yml
+  - lib: ansible_collections/weisssrv/infra/molecule-shared/tasks/container-warmup.yml
+    consumer: template/ansible/molecule/tasks/container-warmup.yml
+  - lib: ansible_collections/weisssrv/infra/molecule-shared/tasks/prepare-apt-disable.yml
+    consumer: template/ansible/molecule/tasks/prepare-apt-disable.yml
+  - lib: ansible_collections/weisssrv/infra/molecule-shared/tasks/prepare-base.yml
+    consumer: template/ansible/molecule/tasks/prepare-base.yml
   - lib: scripts/check-backup-artifact-apps.py
     consumer: template/scripts/check-backup-artifact-apps.py
   - lib: scripts/check-default-deny-coverage.py
@@ -84,48 +66,89 @@ vendored:
     consumer: template/scripts/kubeconform-skipped.py
   - lib: scripts/lint-prometheus-config.sh
     consumer: template/scripts/lint-prometheus-config.sh
+  - lib: scripts/molecule-retry.sh
+    consumer: template/scripts/molecule-retry.sh
   - lib: scripts/resolve-tool.sh
     consumer: template/scripts/resolve-tool.sh
+  - lib: scripts/sanitize-junit-expected-failures.py
+    consumer: template/scripts/sanitize-junit-expected-failures.py
   - lib: scripts/semantic-release.py
     consumer: template/scripts/semantic-release.py
   - lib: scripts/shell-lib.sh
     consumer: template/scripts/shell-lib.sh
+  # Absent from the pinned ref, so registering one now reds the gate; each joins
+  # this list at the next pin bump: check-comment-length.py,
+  # cluster-config-value.sh, flux-child-kustomizations.py.
   - lib: scripts/validate-helm-values.py
     consumer: template/scripts/validate-helm-values.py
   - lib: scripts/version-bump-mr.py
     consumer: template/scripts/version-bump-mr.py
-  # No directory walk reaches this one: the ruleset this repository's OWN
-  # pipeline loads is byte-identical to the library's, unlike weisssrv's.
+  # No directory walk reaches this one: the ruleset this repository's own
+  # pipeline loads is byte-identical to the library's.
   - lib: lint/secret-detection-ruleset.toml
     consumer: .gitlab/secret-detection-ruleset.toml
 
 forked:
   - lib: lint/ruff.toml
     consumer: ruff.toml
-    reason: Narrower target set than the library profile.
+    reason: >-
+      Repo-scoped header only; target-version and rule selection are the
+      library's.
     reconciled_sha256: ccf4e857a9d7e20039ef8f68be7080210e6703d1400c23586ec6f5679e2fbfb2
   - lib: lint/gitleaks.toml
     consumer: .gitleaks.toml
     reason: Allowlist paths and fixture anchors are per-repo.
     reconciled_sha256: bffbe70c94436f4442aaeecc1f1f5715315fc5908b1486b2198796b9e097ff0d
+  - lib: lint/yamllint-relaxed.yml
+    consumer: lint/yamllint-relaxed.yml
+    reason: >-
+      Repo-scoped header, plus a document-start note for the Jinja sources under
+      template/. The rules are the library's. Kept at lint/, not the repo-root
+      `.yamllint` the library documents, to match the generated cluster.
+    reconciled_sha256: 7fcb8f02aadf68b97cd334a69a889c8cd87ac4796927c086bf77702a247ae2d5
   - lib: lint/editorconfig
     consumer: .editorconfig
     reason: Per-repo file-type sections on a shared base.
     reconciled_sha256: 911171d9f26ba0bb47300c97a9e46b078d48eb852dfe9a050fbc3c8e41cc2944
-  # The tenant-side lint profiles, the same split as the scripts above: the root
-  # pair is what this repository lints ITSELF with, these two are what a
-  # generated cluster gets. Listing only one half left the other unguarded — the
-  # library tightens lint/ruff.toml, the root copy reds and gets reconciled, and
-  # every cluster generated afterwards silently stays on the old profile.
+  - lib: lint/pre-commit-config.yaml
+    consumer: .pre-commit-config.yaml
+    reason: >-
+      Template-repo hook set on a shared base: the template/ tree is excluded
+      from the YAML hooks, and the library's local check-taskfile hook is
+      dropped because this repository ships no Taskfile.
+    reconciled_sha256: 39e7c3a5fbc7d2185ad73c436cbba736cae1e2b2b88f7f50387f041cbd87323c
+  # The tenant-side lint profiles; the root copies above are what this
+  # repository lints itself with. Both halves are listed so a library change
+  # cannot reconcile one and leave generated clusters on the old profile.
   - lib: lint/ruff.toml
     consumer: template/ruff.toml
     reason: >-
       Same rule selection, tenant-scoped header — it documents that the
       generated cluster relies on ruff's own config discovery.
     reconciled_sha256: ccf4e857a9d7e20039ef8f68be7080210e6703d1400c23586ec6f5679e2fbfb2
+  - lib: lint/pre-commit-config.yaml
+    consumer: template/.pre-commit-config.yaml
+    reason: >-
+      Reworded header, `--unsafe` note, a yamllint hook pointed at
+      lint/yamllint-relaxed.yml, and the whitespace hooks excluded from
+      scripts/; the hook set and the pinned revs are the library's.
+    reconciled_sha256: 39e7c3a5fbc7d2185ad73c436cbba736cae1e2b2b88f7f50387f041cbd87323c
   - lib: lint/editorconfig
     consumer: template/.editorconfig
     reason: >-
       Tenant file-type sections on a shared base — `[Dockerfile*]` rather than
       `[Dockerfile]`, to cover the per-app Dockerfile suffixes.
     reconciled_sha256: 911171d9f26ba0bb47300c97a9e46b078d48eb852dfe9a050fbc3c8e41cc2944
+  - lib: lint/yamllint-relaxed.yml
+    consumer: template/lint/yamllint-relaxed.yml
+    reason: >-
+      Cluster-scoped header; the rules are the library's. This is the copy every
+      generated cluster lints on, kept out of ansible-lint's discovery path: a
+      repo-root `.yamllint` replaces its yaml rule and disables fix mode.
+    reconciled_sha256: 7fcb8f02aadf68b97cd334a69a889c8cd87ac4796927c086bf77702a247ae2d5
+  - lib: lint/gitattributes
+    consumer: template/.gitattributes
+    reason: >-
+      Header wording, and no `*.j2` sections: nothing a generated cluster ships
+      is an Ansible template.
+    reconciled_sha256: 413609da908e54a6c037e041b595ed2e269afbcaa268671fd56094813154ff09

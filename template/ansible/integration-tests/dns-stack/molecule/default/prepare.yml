@@ -1,0 +1,45 @@
+---
+# DNS Stack Integration Test - Prepare
+# Shared container init, then configure systemd-resolved to not bind port 53
+
+- name: Import shared container prepare
+  ansible.builtin.import_playbook: ../../../_shared/prepare.yml
+
+- name: Prepare - DNS Stack Environment
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Create systemd-resolved config directory
+      ansible.builtin.file:
+        path: /etc/systemd/resolved.conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Configure systemd-resolved to not bind port 53
+      ansible.builtin.copy:
+        dest: /etc/systemd/resolved.conf.d/no-dns-stub.conf
+        content: |
+          [Resolve]
+          DNSStubListener=no
+        owner: root
+        group: root
+        mode: "0644"
+
+    # Best-effort: the unit is absent in some base images. Releasing :53 is not
+    # optional, so the wait below is authoritative — AdGuard cannot bind without it.
+    - name: Restart systemd-resolved
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted
+        daemon_reload: true
+      failed_when: false
+
+    - name: Wait for systemd-resolved to release port 53
+      ansible.builtin.wait_for:
+        port: 53
+        state: stopped
+        timeout: 30

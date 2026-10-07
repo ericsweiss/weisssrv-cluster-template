@@ -8,12 +8,9 @@ module "network" {
   zones    = local.zones
   policies = local.policies
 
-  # Built-in zone DISPLAY NAMES on this console, passed explicitly rather than
-  # inherited from the module defaults: they are locale- and
-  # controller-dependent, `internal` is what every `*-to-dns` policy resolves
-  # against, and a library default change must never repoint a live policy on a
-  # `lib_ref` bump. Confirm them against the console before the first apply
-  # (README § Before the first apply) and edit them HERE if they differ.
+  # Built-in zone DISPLAY NAMES on this console: locale- and controller-dependent,
+  # so they are passed explicitly and never inherited from the module defaults,
+  # where a default change would repoint a live policy. README § Before the first apply.
   builtin_zone_names = {
     internal = "Internal"
     external = "External"

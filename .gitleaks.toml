@@ -1,9 +1,8 @@
-# gitleaks allowlist for weisssrv-cluster-template, reached from GitLab's
-# secret_detection job via the passthrough in
-# .gitlab/secret-detection-ruleset.toml.
-#
-# `useDefault = true` is REQUIRED — without it gitleaks loads only the rules
-# defined in this file (which has none), disabling all detection.
+# gitleaks allowlist, reached from GitLab's secret_detection job via the
+# passthrough in .gitlab/secret-detection-ruleset.toml.
+
+# `useDefault = true` is required: without it gitleaks loads only this file's
+# rules, which are none, and all detection is off.
 
 title = "weisssrv-cluster-template allowlist"
 
@@ -17,18 +16,15 @@ regexes = [
   '''op://[A-Za-z0-9_ /-]+''',
   # Documentation placeholders like [your-cloudflare-api-token].
   '''\[your-[a-z0-9-]+\]''',
-  # Documentation placeholders written as <angle-bracket> tokens, e.g. the
-  # `curl -u admin:<password>` example in the observability README. A literal
-  # <…> is never real credential material.
-  '''<[a-z][a-z0-9_-]*>''',
+  # Documentation placeholders written as <angle-bracket> tokens. Anchored to
+  # the whole token, so a real secret containing <word> is still reported.
+  '''^<[a-z][a-z0-9_-]*>$''',
   # Test/fixture tokens — anchored at start of token so a real secret prefixed
   # with "prodtestkey_…" or similar can't be silenced.
   '''^(test|fake|dummy|example)[-_]?(password|token|key|secret)[A-Za-z0-9_-]*''',
-  # Published supply-chain pins the CI templates verify downloaded key material
-  # against (1Password's apt GPG fingerprint and its apk public key's sha256).
-  # Both are public by construction but trip gitleaks' generic-api-key entropy
-  # rule. Listed as exact values, so rotating a pinned key forces this allowlist
-  # to be reviewed alongside it rather than silently covering the new material.
+  # Published supply-chain pins the CI templates verify key material against:
+  # a 1Password apt GPG fingerprint and an apk public key sha256. Exact values,
+  # so rotating a pinned key forces a review here.
   '''^3FEF9748469ADBE15DA7CA80AC2D62742012EA22$''',
   '''^0e88171d9f8b7630763f70cbf69f2a01b4ba8ea1d8e79487f59c162db255eb84$''',
 ]
@@ -38,4 +34,19 @@ paths = [
   # tree by the ansible-lint flow) — third-party test fixtures are full of
   # dummy keys and are not ours to scan.
   '''\.ansible-home/''',
+  # Byte-compiled fixtures: the compiled form loses the shape the anchors match.
+  '''__pycache__/''',
+]
+
+# Synthetic key material from this repository's own tests, matched by CONTENT so
+# the files holding it stay in scope for every other rule.
+[[allowlists]]
+description = "weisssrv-cluster-template synthetic test fixtures"
+regexes = [
+  # cert-distribution molecule — mock acme.sh private keys.
+  '''MIIEvgIBADANBgkqhkiGTestPrivateKey''',
+  # template/scripts/test_collect_state_lib.py — redaction-suite inputs.
+  '''^glpat-abc123def456$''',
+  '''^glrt-AbC_123-xyz$''',
+  '''7the8keymaterial''',
 ]

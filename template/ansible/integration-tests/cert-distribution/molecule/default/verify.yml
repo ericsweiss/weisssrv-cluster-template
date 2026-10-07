@@ -1,0 +1,333 @@
+---
+# Certificate distribution integration test - verify.
+# acme_certs installation plus the SSH-delivered bundle on each receiver.
+
+- name: Verify - Certificate Server
+  hosts: cert_servers
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../../../../inventories/prod/group_vars/all.yml
+
+  tasks:
+    # acme.sh Installation Verification
+    - name: Check acme.sh is installed
+      ansible.builtin.stat:
+        path: /root/.acme.sh/acme.sh
+      register: acme_sh
+
+    - name: Assert acme.sh is installed
+      ansible.builtin.assert:
+        that:
+          - acme_sh.stat.exists
+          - acme_sh.stat.executable
+        fail_msg: "acme.sh not installed"
+        success_msg: "acme.sh is installed"
+
+    - name: Check acme.sh account configuration
+      ansible.builtin.stat:
+        path: /root/.acme.sh/account.conf
+      register: acme_account
+
+    - name: Log acme.sh account status
+      ansible.builtin.debug:
+        msg: "acme.sh account configured: {{ acme_account.stat.exists }}"
+
+    # Certificate Files Verification
+    - name: Check certificate directories exist
+      ansible.builtin.stat:
+        path: "/root/.acme.sh/{{ item.domain }}"
+      register: cert_dirs
+      loop: "{{ mock_cert_domains }}"
+
+    - name: Assert certificate directories exist
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isdir
+        fail_msg: "Certificate directory missing for {{ item.item.domain }}"
+        success_msg: "Certificate directory exists for {{ item.item.domain }}"
+      loop: "{{ cert_dirs.results }}"
+
+    - name: Check certificate files exist
+      ansible.builtin.stat:
+        path: "/root/.acme.sh/{{ item.domain }}/fullchain.cer"
+      register: cert_files
+      loop: "{{ mock_cert_domains }}"
+
+    - name: Assert certificate files exist
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.size > 0
+        fail_msg: "Certificate file missing for {{ item.item.domain }}"
+        success_msg: "Certificate exists for {{ item.item.domain }}"
+      loop: "{{ cert_files.results }}"
+
+    - name: Check private key files exist
+      ansible.builtin.stat:
+        path: "/root/.acme.sh/{{ item.domain }}/{{ item.domain }}.key"
+      register: key_files
+      loop: "{{ mock_cert_domains }}"
+
+    - name: Assert private key files exist
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.mode == '0600'
+        fail_msg: "Private key missing or wrong permissions for {{ item.item.domain }}"
+        success_msg: "Private key exists with correct permissions for {{ item.item.domain }}"
+      loop: "{{ key_files.results }}"
+
+    # SSH Key Setup Verification (matches role output)
+    - name: Check SSH private key for distribution
+      ansible.builtin.stat:
+        path: /home/{{ admin_user }}/.ssh/id_ed25519_certs
+      register: ssh_key
+
+    - name: Assert SSH distribution key exists
+      ansible.builtin.assert:
+        that:
+          - ssh_key.stat.exists
+          - ssh_key.stat.mode == '0600'
+        fail_msg: "SSH distribution key not created or wrong permissions"
+        success_msg: "SSH distribution key exists with correct permissions"
+
+    - name: Check SSH public key for distribution
+      ansible.builtin.stat:
+        path: /home/{{ admin_user }}/.ssh/id_ed25519_certs.pub
+      register: ssh_pubkey
+
+    - name: Assert SSH public key exists
+      ansible.builtin.assert:
+        that:
+          - ssh_pubkey.stat.exists
+          - ssh_pubkey.stat.mode == '0644'
+        fail_msg: "SSH distribution public key not created or wrong permissions"
+        success_msg: "SSH distribution public key exists"
+
+    # The library role owns the reload script's filename, so it is discovered
+    # here rather than spelled out.
+    - name: Locate the reload script the role installed
+      ansible.builtin.find:
+        paths: /usr/local/sbin
+        patterns: "*cert-reload.sh"
+        file_type: file
+      register: reload_script_found
+
+    - name: Assert exactly one reload script was installed
+      ansible.builtin.assert:
+        that:
+          - reload_script_found.files | length == 1
+        fail_msg: "acme_certs installed no single /usr/local/sbin/*cert-reload.sh"
+        success_msg: "reload script installed"
+
+    - name: Check cert reload script
+      ansible.builtin.stat:
+        path: "{{ (reload_script_found.files | first).path }}"
+      register: reload_script
+
+    - name: Assert reload script exists
+      ansible.builtin.assert:
+        that:
+          - reload_script.stat.exists
+          - reload_script.stat.executable
+          - reload_script.stat.mode == '0700'
+        fail_msg: "Cert reload script not created or not executable"
+        success_msg: "Cert reload script exists and is executable"
+
+    - name: Read reload script content
+      ansible.builtin.command: "cat {{ (reload_script_found.files | first).path }}"
+      register: reload_script_content
+      changed_when: false
+
+    - name: Assert reload script contains distribution targets
+      ansible.builtin.assert:
+        that:
+          - "'cert-client-01' in reload_script_content.stdout"
+          - "'cert-client-02' in reload_script_content.stdout"
+        fail_msg: "Reload script missing distribution target hostnames"
+        success_msg: "Reload script contains all distribution targets"
+
+    - name: Assert reload script dispatches sudo targets through the receiver
+      ansible.builtin.assert:
+        that:
+          - "'push_target_receiver' in reload_script_content.stdout"
+          - "'CERT-RECEIVE-BUNDLE-BOUNDARY' in reload_script_content.stdout"
+        fail_msg: "Reload script is not using the forced-command receiver path"
+        success_msg: "Reload script pipes the bundle to the forced-command receiver"
+
+- name: Verify - Certificate Clients
+  hosts: cert_clients
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../../../../inventories/prod/group_vars/all.yml
+
+  tasks:
+    # Certificate Directory Verification
+    - name: Check certificate directory exists
+      ansible.builtin.stat:
+        path: /etc/ssl/certs/wildcard
+      register: client_cert_dir
+
+    - name: Assert certificate directory exists
+      ansible.builtin.assert:
+        that:
+          - client_cert_dir.stat.exists
+          - client_cert_dir.stat.isdir
+        fail_msg: "Certificate directory not created"
+        success_msg: "Certificate directory exists"
+
+    # Distributed Certificate Verification
+    - name: Check for distributed fullchain certificate
+      ansible.builtin.stat:
+        path: /etc/ssl/certs/wildcard/fullchain.pem
+      register: client_fullchain
+
+    - name: Assert fullchain certificate was distributed
+      ansible.builtin.assert:
+        that:
+          - client_fullchain.stat.exists
+          - client_fullchain.stat.size > 0
+          - client_fullchain.stat.mode == '0644'
+        fail_msg: "Fullchain certificate not distributed or wrong permissions (expected 0644)"
+        success_msg: "Fullchain certificate distributed with correct permissions"
+
+    - name: Check for distributed private key
+      ansible.builtin.stat:
+        path: /etc/ssl/certs/wildcard/privkey.pem
+      register: client_privkey
+
+    - name: Assert private key was distributed
+      ansible.builtin.assert:
+        that:
+          - client_privkey.stat.exists
+          - client_privkey.stat.size > 0
+          - client_privkey.stat.mode == '0600'
+        fail_msg: "Private key not distributed or wrong permissions (expected 0600)"
+        success_msg: "Private key distributed with correct permissions"
+
+    - name: Verify certificate content is valid (contains BEGIN CERTIFICATE)
+      ansible.builtin.command: grep -q "BEGIN CERTIFICATE" /etc/ssl/certs/wildcard/fullchain.pem
+      register: cert_content_check
+      changed_when: false
+
+    - name: Assert certificate content is valid
+      ansible.builtin.assert:
+        that:
+          - cert_content_check.rc == 0
+        fail_msg: "Distributed certificate does not contain valid PEM content"
+        success_msg: "Distributed certificate contains valid PEM content"
+
+    - name: Verify private key content is valid (contains BEGIN)
+      ansible.builtin.command: grep -q "BEGIN" /etc/ssl/certs/wildcard/privkey.pem
+      register: key_content_check
+      changed_when: false
+
+    - name: Assert private key content is valid
+      ansible.builtin.assert:
+        that:
+          - key_content_check.rc == 0
+        fail_msg: "Distributed private key does not contain valid PEM content"
+        success_msg: "Distributed private key contains valid PEM content"
+
+    # SSH Connectivity Verification
+    - name: Check SSH service is running
+      ansible.builtin.systemd:
+        name: ssh
+        state: started
+      check_mode: true
+      register: ssh_service
+
+    - name: Assert SSH service is active
+      ansible.builtin.assert:
+        that:
+          - ssh_service.status.ActiveState == "active"
+        fail_msg: "SSH service not running"
+        success_msg: "SSH service is running"
+
+    # The role rewrites the key comment to "cert distribution (<authority>)".
+    # grep -F keeps the parentheses literal and the match exact, so a key with
+    # the wrong provenance cannot satisfy the assert.
+    - name: Check authorized_keys for cert distribution key
+      ansible.builtin.command: >-
+        grep -cF "cert distribution ({{ groups['cert_servers'] | first }})"
+        /home/{{ admin_user }}/.ssh/authorized_keys
+      register: authorized_key_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert cert distribution key is authorized
+      ansible.builtin.assert:
+        that:
+          - authorized_key_check.rc == 0
+          - authorized_key_check.stdout | int > 0
+        fail_msg: "cert-distribution pubkey missing from {{ admin_user }}'s authorized_keys"
+        success_msg: "cert-distribution key present in authorized_keys ({{ authorized_key_check.stdout }})"
+
+    # Forced-command receiver hardening verification
+    - name: Check the forced-command receiver was deployed
+      ansible.builtin.stat:
+        path: /usr/local/sbin/cert-receive
+      register: receiver_bin
+
+    - name: Assert the receiver exists, is root-owned and 0500
+      ansible.builtin.assert:
+        that:
+          - receiver_bin.stat.exists
+          - receiver_bin.stat.mode == '0500'
+          - receiver_bin.stat.pw_name == 'root'
+        fail_msg: "cert-receive receiver missing or wrong perms (expected root:root 0500)"
+        success_msg: "cert-receive receiver present (root:root 0500)"
+
+    - name: Check the cert-receive sudoers drop-in was deployed
+      ansible.builtin.stat:
+        path: /etc/sudoers.d/cert-receive
+      register: receiver_sudoers
+
+    - name: Assert the sudoers drop-in exists with 0440
+      ansible.builtin.assert:
+        that:
+          - receiver_sudoers.stat.exists
+          - receiver_sudoers.stat.mode == '0440'
+        fail_msg: "cert-receive sudoers drop-in missing or wrong perms"
+        success_msg: "cert-receive sudoers drop-in present (0440)"
+
+    # The key must be pinned to the forced command and stripped of
+    # shell/pty/forwarding — never a login shell.
+    - name: Read the cert-distribution authorized_keys line
+      ansible.builtin.command: >-
+        grep -F "cert distribution ({{ groups['cert_servers'] | first }})"
+        /home/{{ admin_user }}/.ssh/authorized_keys
+      register: authorized_key_line
+      changed_when: false
+
+    - name: Assert the key is locked to the forced-command receiver
+      ansible.builtin.assert:
+        that:
+          - "'command=\"sudo /usr/local/sbin/cert-receive\"' in authorized_key_line.stdout"
+          - "'restrict' in authorized_key_line.stdout"
+        fail_msg: "cert-distribution key is NOT restricted to the forced-command receiver"
+        success_msg: "cert-distribution key is locked to command=...cert-receive,restrict"
+
+    # The receiver installs only a cert it validated (parse, notAfter, key
+    # match, wildcard SAN, chain to a truststore CA), so a real X.509 landing
+    # here proves the forced-command path ran end to end.
+    - name: The distributed cert is a real, unexpired X.509
+      ansible.builtin.command: >-
+        openssl x509 -in /etc/ssl/certs/wildcard/fullchain.pem -noout -checkend 0
+      changed_when: false
+
+    - name: Read the distributed cert's SAN
+      ansible.builtin.command: >-
+        openssl x509 -in /etc/ssl/certs/wildcard/fullchain.pem -noout -ext subjectAltName
+      register: distributed_cert_san
+      changed_when: false
+
+    - name: Assert the distributed cert carries a wildcard SAN
+      ansible.builtin.assert:
+        that:
+          - "'DNS:*.' in distributed_cert_san.stdout"
+        fail_msg: "Distributed cert has no wildcard SAN"
+        success_msg: "Distributed cert is a valid wildcard cert"

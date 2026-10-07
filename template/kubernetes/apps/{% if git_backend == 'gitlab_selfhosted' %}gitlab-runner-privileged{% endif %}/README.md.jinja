@@ -17,9 +17,7 @@ registered instance-wide, that one line gets an arbitrary authenticated user roo
 hosts. That is a privilege-escalation path into the whole estate.
 
 Nothing in this repository can enforce that — the scope lives in GitLab, not in
-a manifest — and an unchecked one has already gone wrong: in the system this
-template generalizes the docs stated the rule while the live registration was
-`instance_type`, and another project's pipeline ran on it.
+a manifest — so verify it by hand after every registration.
 
 **Verify after registering**, and again after any runner re-registration:
 
@@ -79,7 +77,7 @@ Size `concurrent` to `(CI-eligible cores - co-tenant requests) / 1.5`, and keep
 `requests.cpu` in the ResourceQuota in lockstep.
 
 The shipped values are that formula applied to the roster this cluster was
-generated for: {{ compute_node_count | default(2) | int }} compute {{ 'host' if compute_node_count | default(2) | int == 1 else 'hosts' }} x one 4-core k3s agent each, minus 2 cores for the
+generated for: {{ compute_node_count | int }} compute {{ 'host' if compute_node_count | int == 1 else 'hosts' }} x one 4-core k3s agent each, minus 2 cores for the
 platform pods co-tenanting them (job pods are hard-excluded from the NAS agent,
 so it is not in the pool). Grow the agents or their cores and both numbers must
 be raised by hand — nothing recomputes them after generation.

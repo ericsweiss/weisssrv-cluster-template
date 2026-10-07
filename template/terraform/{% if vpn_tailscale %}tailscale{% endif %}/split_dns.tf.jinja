@@ -1,30 +1,12 @@
 # Site data: which domains tailnet clients resolve through which nameserver.
-#
-# Empty is the correct starting value. Add the entry only after the resolver
-# device is registered and `tailscale status` shows it — the module resolves a
-# `device_hostname` at PLAN time, so an entry naming a device that does not
-# exist yet fails the plan for everyone.
-#
-# The map is a required module input with no default precisely so that an unset
-# value is an error rather than a silently planned destroy of live Split-DNS.
-#
-# There is no destroy guard on these entries (unlike the ACL resource): removing
-# a key plans a destroy that takes the domain out of tailnet resolution, and
-# nothing refuses it. Treat a destroy in a Split-DNS plan as a stop sign.
+# `{}` is the correct starting value; adding an entry is a two-phase change
+# (README.md § Two-phase Split-DNS).
 locals {
   split_dns = {}
 
-  # Adopting the console-created entry, in this order — `terraform import`
-  # requires the address to exist in configuration, so the map comes first:
-  #
-  #   1. Uncomment the entry below.
-  #   2. terraform import 'module.tailnet.tailscale_dns_split_nameservers.this["{{ internal_domain }}"]' {{ internal_domain }}
-  #   3. Plan. It must be clean before you apply.
-  #
+  # Phase B: uncomment, then terraform import (README.md § Two-phase Split-DNS).
+
   # split_dns = {
   #   "{{ internal_domain }}" = { device_hostname = "ts-dns" }
   # }
-  #
-  # `device_hostname` derives the 100.x address at plan time, so a rebuilt
-  # resolver self-heals; a literal `nameservers = [...]` list does not.
 }

@@ -15,9 +15,13 @@ generate → inventory → gates → base infra → k3s → Flux → publish
 ## 1. Generate
 
 ```bash
-pipx install copier          # or: pip install --user copier
+pipx install 'copier>=9.15.0'   # or: uv tool install 'copier>=9.15.0'
 copier copy https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
 ```
+
+9.15.0 is the release that resolves the `_envops.undefined` setting `copier.yml`
+renders with, and `_min_copier_version` refuses an older client. That refusal
+comes before anything is written, so pin the install rather than discover it.
 
 Copier prompts for each answer, validating as it goes: addresses must sit inside
 your LAN prefix, the two domains must differ, the three VIPs must be distinct.
@@ -40,13 +44,19 @@ before handing off to copier. The console script is `weisssrv-new-project`;
 `new-cluster` is a subcommand of it and takes **two** positionals — the template
 source and the destination:
 
+Install the wrapper, substituting the library release you will answer for
+`lib_ref` (its default is in `copier.yml`):
+
 ```bash
-pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@vX.Y.Z#subdirectory=cli'  # vX.Y.Z = the release you'll answer for lib_ref (default in copier.yml)
+pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@vX.Y.Z#subdirectory=cli'
+```
+
+```bash
 weisssrv-new-project new-cluster \
   https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
 ```
 
-Both blocks above are runnable as written, which is why neither passes
+Both *generation* commands above are runnable as written, which is why neither passes
 `--vcs-ref`: copier resolves an unpinned VCS source to the template's **latest
 release tag**, falling back to the branch tip only if the template has cut none.
 Add the flag from the table to pin an older release, and only with a tag that
@@ -71,6 +81,10 @@ git remote add origin git@<git_host>:<git_namespace>/<cluster_name>.git
 Do not push yet. Flux bootstrap (phase 5) will want to commit to this repository
 too, and it is easier to push once the tree is real.
 
+Run `pre-commit install` once in the new repository. It runs the secret scan and
+yamllint before each commit, which is the last local gate before a credential
+reaches a remote.
+
 `.copier-answers.yml` at the root records what you answered and which template
 ref produced the tree. Keep it committed — `copier update` reads it.
 
@@ -84,7 +98,7 @@ This is the one part no template can generate: your host roster.
 ansible/inventories/prod/
 ├── hosts.yml          nodes, groups, addresses, VM/CT ids, per-guest zvols
 └── group_vars/
-    ├── all.yml        platform defaults, secret references and version pins
+    ├── all.yml        platform defaults and version pins
     ├── proxmox.yml    hypervisor-wide settings
     ├── nas.yml        ZFS pools, datasets, NFS exports, Samba, backups
     ├── dns.yml        resolver settings
@@ -96,7 +110,11 @@ There is **no `host_vars/` directory** in the generated tree, and you do not nee
 one to bring a cluster up: the starter roster carries per-host facts inline on
 each host entry in `hosts.yml`. Create `host_vars/<host>.yml` later only if a
 single host accumulates enough of its own facts to be worth splitting out —
-Ansible picks it up automatically.
+Ansible picks it up automatically. Creating `host_vars/<host>.yml` also means
+adding that exact path to the matching `deploy-*` job's `changes:` list in
+`.gitlab-ci.yml`, or an entry with a reason in `scripts/deploy-coverage.conf`.
+The `deploy-coverage` gate credits named paths only, so the `host_vars/**/*`
+glob does not cover it and the pipeline fails until the path is listed.
 
 Work through, in order:
 
@@ -125,28 +143,30 @@ Work through, in order:
    on the relay play. The credentials beside it come from the vault, not this
    file.
 5. **`group_vars/all.yml`** — check the platform defaults copier filled in
-   (domains, addresses, timezone, admin user), the `secrets:` references, and
-   the version pins. Versions are single-sourced here; nothing else in the
-   repository names a version.
+   (domains, addresses, timezone, admin user) and the version pins. Versions are
+   single-sourced here; nothing else in the repository names a version.
 
 Then regenerate the derived files and commit them alongside:
 
 ```bash
-task hosts:sync           # inventory → scripts/hosts.env, consumed by the shell tooling
-task flux:sync-versions   # group_vars versions → kubernetes/.../versions-configmap.yaml
+task hosts:sync                    # inventory → scripts/hosts.env, consumed by the shell tooling
+task flux:sync-versions            # group_vars versions → kubernetes/.../versions-configmap.yaml
+task flux:sync-host-log-staleness  # inventory alloy_host hosts → kubernetes/.../loki/host-log-staleness.yaml
 ```
 
-Both outputs are drift-gated, locally by `task lint:repo-sync` (part of
+All three outputs are drift-gated, locally by `task lint:repo-sync` (part of
 `task lint`) and in CI by the `repo-sync` job: each regenerates the file from its
-source and diffs, so a hand-edited or stale output fails. Never hand-edit
-either.
+source and diffs, so a hand-edited or stale output fails. Never hand-edit any of
+them.
 
-That gate is also why these two commands belong **here** rather than later.
+That gate is also why these three commands belong **here** rather than later.
 `scripts/hosts.env` ships as an inert placeholder — every list empty, so a task
 that iterates one stops with an explicit message instead of SSHing somewhere
 wrong — and a placeholder is by definition out of sync with the roster. Until you
 run `task hosts:sync`, § 3's `task lint` reports exactly that, naming the command
-to run.
+to run. `kubernetes/infrastructure/observability/loki/host-log-staleness.yaml`
+ships the cluster-wide arm only, for the same reason, so `task lint` names it too
+until `task flux:sync-host-log-staleness` has run.
 
 ### The site-values ConfigMap
 
@@ -162,15 +182,38 @@ does not reintroduce the old one. See
 
 **One key needs narrowing by hand once the roster is real.** Copier ships
 `cluster_apiserver_egress_cidr` as your whole LAN, because the k3s server
-addresses live in the inventory rather than in a copier answer. Once `hosts.yml`
-names your servers, replace it with their `/32`s so the API-server egress
-allowance stops being LAN-wide:
+addresses live in the inventory rather than in a copier answer. The key holds
+one CIDR, which Flux substitutes into a single `cidr:` field. A comma-separated
+list of server addresses there renders an invalid NetworkPolicy and stops the
+platform reconciling, so in the ConfigMap narrow it only to a subnet that still
+covers every server. Servers at `.31`, `.32` and `.33` straddle a `/27`
+boundary, so the smallest single block holding all three is:
 
 ```yaml
-cluster_apiserver_egress_cidr: "192.168.0.31/32,192.168.0.32/32,192.168.0.33/32"
+cluster_apiserver_egress_cidr: "192.168.0.0/26"
 ```
 
-It must list the **server node addresses**, never the API VIP — kube-proxy
+To allow the servers and nothing else, spell one `ipBlock` per server in the
+policies themselves:
+
+```yaml
+      - to:
+          - ipBlock:
+              cidr: 192.168.0.31/32
+          - ipBlock:
+              cidr: 192.168.0.32/32
+          - ipBlock:
+              cidr: 192.168.0.33/32
+```
+
+Five rules repeat the key, and all five need the same edit:
+`kubernetes/components/netpol-egress-apiserver/allow-egress-apiserver.yaml`,
+`kubernetes/apps/authentik/networkpolicy.yaml`, both rules in
+`kubernetes/apps/gitlab-runner/networkpolicy.yaml`, and
+`kubernetes/apps/gitlab-runner-privileged/networkpolicy.yaml`. The two runner
+files exist only when your git backend is self-hosted GitLab.
+
+The peers must be the **server node addresses**, never the API VIP — kube-proxy
 rewrites the destination before NetworkPolicy is evaluated, so allowing the VIP
 allows nothing.
 
@@ -285,7 +328,12 @@ export CF_Token='<credential>' CF_Account_ID='<account id>'
 /root/.acme.sh/acme.sh --issue --dns dns_cf --server letsencrypt \
   --keylength ec-256 -d '<internal_domain>' -d '*.<internal_domain>'
 
-# 4. Second pass. Installs the cert locally, distributes it to every pinned
+# 4. Create the datasets group_vars/nas.yml declares, inside the pools you made
+#    by hand. nas_storage fails loudly on a missing dataset; it never creates
+#    one. INTERACTIVE, first run only.
+task disaster-recovery:storage-bootstrap
+
+# 5. Second pass. Installs the cert locally, distributes it to every pinned
 #    target, and lands the storage server.
 task infra:deploy
 ```
@@ -305,12 +353,13 @@ the same dependency:
 |---|---|---|
 | 1 | `task infra:base -- --limit proxmox` | users, SSH hardening, packages, timezone on the bare-metal hosts — limited to them because no container exists yet |
 | 2 | `task dns:deploy` | provisions the resolver containers, then the validating recursive resolver and the filtering frontend, then acme.sh + the renewal cron + the cert push channel, then the secondary sync |
-| 3 | `task infra:deploy -- --limit mail` | provisions the SMTP relay container, its base config **and its Postfix config** — the last of which is written against a certificate that has not landed yet and is corrected by step 6. **Do not skip it or move it later:** it is a certificate distribution target, and step 4 can only pin the host key of a host that exists |
+| 3 | `task infra:deploy -- --limit mail` | provisions the SMTP relay container, its base config **and its Postfix config** — the last of which is written against a certificate that has not landed yet and is corrected by step 7. **Do not skip it or move it later:** it is a certificate distribution target, and step 4 can only pin the host key of a host that exists |
 | 4 | the certificate step above | pin the host keys, issue the wildcard once, re-run `task dns:deploy` to distribute it |
-| 5 | `task storage:deploy` | NFS-over-TLS, ZFS properties and datasets, exports, Samba, backups, exporters |
-| 6 | `task infra:deploy` | everything else site.yml carries, plus the re-run that makes the relay's Postfix config work against the now-distributed certificate: Proxmox host config, firewall, host metrics and log shipping |
-| 7 | `task proxmox:ha` | HA rules, resource pools, replication jobs |
-| 8 | `task infra:verify` | post-deploy verification across all of the above |
+| 5 | `task disaster-recovery:storage-bootstrap` | INTERACTIVE, first run only: creates the declared datasets inside the hand-created pools. RUNBOOKS § Storage in your generated repository is the full procedure |
+| 6 | `task storage:deploy` | NFS-over-TLS, ZFS *properties* (the datasets must already exist), exports, Samba, backups, exporters |
+| 7 | `task infra:deploy` | everything else site.yml carries, plus the re-run that makes the relay's Postfix config work against the now-distributed certificate: Proxmox host config, firewall, host metrics and log shipping |
+| 8 | `task proxmox:ha` | HA rules, resource pools, replication jobs |
+| 9 | `task infra:verify` | post-deploy verification across all of the above |
 
 The two-pass path at the top of this section gets step 3 for free — its first
 pass is `site.yml` minus the storage host, which provisions the resolvers *and*
@@ -336,7 +385,7 @@ Notes on that table, because each one has bitten someone:
   and starts Postfix regardless. What you get from step 3 is a container with an
   address and an SSH host key — which is all step 4 needs — plus a submission
   service (587, `smtpd_tls_security_level: encrypt`) that cannot complete a TLS
-  handshake **until step 6 re-runs against the distributed certificate**. Local
+  handshake **until step 7 re-runs against the distributed certificate**. Local
   mail queues rather than bouncing in the meantime, so nothing is lost. The
   two-pass path at the top of this section behaves identically, which is why it
   needs no equivalent caveat. `task mail:deploy` exists for redeploying the
@@ -364,28 +413,52 @@ not an answer: declare `zfs_encryption_pools` — a list of `{name, item, field}
 naming the vault item holding each pool's passphrase — in `group_vars/nas.yml`,
 or in `host_vars/<host>.yml` if more than one host in the `proxmox` group has
 encrypted pools. The playbook runs against every Proxmox host and activates only
-where that list is non-empty. The
+where that list is non-empty.
+
+Set `zfs_encryption_connect_vault` beside it, naming a vault that holds the pool
+passphrases and nothing else: the token the boot units carry can read every item
+in whatever vault its Connect server was granted, and that token sits on the
+host's disk. Re-vaulting order is grant the Connect *server* the new vault, mint
+the token, set the variable, converge, prove a real key load, then revoke the
+old token — a token cannot reach a vault its server was not granted. The
 [`zfs_encryption` role README](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles/zfs_encryption)
-documents the rest of the variables, including scoping the token to a dedicated
-vault.
+documents the rest of the variables.
 
 ---
 
 ## 5. Kubernetes nodes (Ansible)
 
 ```bash
-task k3s:provision-vms      # cloud-init VMs on Proxmox: three servers, one agent per compute node
+task k3s:provision-vms      # cloud-init VMs: three servers at the default count, one agent per Proxmox host
 task k3s:deploy             # base config, then k3s + kube-vip, then labels and taints
 task k3s:kubeconfig         # fetch admin kubeconfig
 export KUBECONFIG=~/.kube/config-k3s
 kubectl get nodes
 ```
 
+The first server in `k3s_servers` carries `k3s_bootstrap_new_cluster: true`,
+which is what lets it run `cluster-init`. Delete that line from the inventory
+once the nodes are `Ready`. Left set, a later rebuild of that host starts a new
+cluster instead of rejoining the quorum the other servers still hold. With a
+single-server roster there is no quorum to rejoin, so the line is harmless
+there.
+
 The task writes `~/.kube/config-k3s` — that exact name, not one derived from the
 cluster name — with the server address rewritten to the API VIP. Export it
 before anything else in this section: if `KUBECONFIG` points at a path that does
 not exist, `kubectl` silently falls back to your default context, and every
 check below (plus `task flux:bootstrap-secrets`) targets the wrong cluster.
+
+Store that kubeconfig in the vault too, base64-encoded:
+
+```bash
+base64 < ~/.kube/config-k3s
+```
+
+Paste the output into the `K3s Kubeconfig` item's `kubeconfig` field, listed in
+PRE-SETUP § 4. The `cluster-verify` CI job reads it to reach the cluster. Without
+it, the first pipeline on `main` that touches `kubernetes/` or a deploy path
+fails in `before_script`.
 
 Expect every node `Ready`, and the API VIP to answer:
 
@@ -449,16 +522,20 @@ This reads the git token from the vault, installs the Flux controllers, commits
 their manifests to `kubernetes/clusters/<cluster_name>/flux-system/`, and creates
 the `GitRepository` plus the top-level `Kustomization` that watches this repo.
 
-> **The first pipeline's `flux-lint` job is expected to fail, once.** It builds
-> the cluster root, which lists `flux-system/` — and `flux-system/`'s
-> kustomization names `gotk-components.yaml` and `gotk-sync.yaml`, which
-> `flux bootstrap` has not written yet. The local `task flux:lint` guards
-> exactly this case and prints "cluster root skipped"; the library's CI job runs
-> the same build without the guard, so the push above is the one window where
-> the two disagree. Bootstrap commits both files, and the next pipeline is
-> green. Most operators never see it — PRE-SETUP § 5 notes that the runners are
-> themselves in-cluster workloads, so the first pipelines usually queue rather
-> than run.
+> **Two jobs on the first pipeline are expected to fail, once: `flux-lint` and
+> `cluster-verify`.** `flux-lint` builds the cluster root, which lists
+> `flux-system/` — and `flux-system/`'s kustomization names
+> `gotk-components.yaml` and `gotk-sync.yaml`, which `flux bootstrap` has not
+> written yet. The local `task flux:lint` guards exactly this case and prints
+> "cluster root skipped"; the library's CI job runs the same build without the
+> guard, so the push above is the one window where the two disagree.
+> `cluster-verify` fails for the same reason from the other side: it server-side
+> dry-runs every stage and reconciles Flux, and neither the stage CRDs nor the
+> Flux control plane exists until `task flux:bootstrap` runs, so expect a page of
+> dry-run rejections. Bootstrap writes both files and installs the controllers,
+> so both jobs are green on the next pipeline. Most operators never see either —
+> PRE-SETUP § 5 notes that the runners are themselves in-cluster workloads, so
+> the first pipelines usually queue rather than run.
 
 ### 6c. Watch it converge
 
@@ -471,6 +548,20 @@ Reconciliation walks the stage graph — sources, then CRDs, then controllers, t
 configs, then observability and applications in parallel. A fresh bootstrap
 takes several minutes; charts are pulled, certificates are issued over DNS-01,
 and the ingress controller cannot be Ready before MetalLB assigns it an address.
+
+While the DNS token scope and the split-horizon names are still unproven, point
+`cluster-config`'s `cluster_issuer` at `letsencrypt-staging` and confirm the
+wildcard Certificates reach Ready. Then switch it back to `letsencrypt-prod` and
+delete the staging Secrets. Let's Encrypt rate-limits failed validations (5 per
+hour) and duplicate certificates (5 per week), so a first-boot misconfiguration
+locks a new cluster out for hours.
+
+A generated cluster has **no default StorageClass** — k3s local-storage is
+disabled — so every PV is static and a PVC that omits `storageClassName` stays
+Pending. A chart that provisions its own needs `storageClassName: ""` or the
+chart's `-` sentinel. kube-apiserver audit logging is on by default; the log is
+node-local journald and is not shipped to Loki, and changing that costs a
+rolling control-plane restart.
 
 Verify the platform is actually serving:
 
@@ -544,7 +635,8 @@ Once the platform is Ready:
    step in your router's UI.
 4. **Single sign-on** — the platform is green but nobody can sign in to
    anything yet. Grafana ships SSO-only (no login form, no basic auth) and its
-   OIDC endpoints point at `auth.<internal_domain>` — this cluster's own
+   OIDC endpoints point at `auth.<external_domain>`, the one issuer host every
+   consumer uses — this cluster's own
    Authentik, which Flux has just deployed with no objects in it. Bring it up
    before you hand the cluster to anyone.
 
@@ -721,6 +813,7 @@ it.
 | Cert push fails with a host-key error | the target was rebuilt, or its pin is still empty — `task certs:show-host-keys`, paste into `_acme_certs_targets`, re-run `task dns:deploy` |
 | `nfs_tls` on the NAS: cert/key missing | the wildcard has not been issued or has not reached that host — § 4's certificate step |
 | Grafana redirects to a login you cannot pass | the OIDC objects, the groups or the client secret — § 7 step 4; the break-glass admin is in the same step |
+| `nas_storage` fails with `DATASET_MISSING` | the declared datasets were never created — run `task disaster-recovery:storage-bootstrap`, then re-run `task storage:deploy` |
 | Literal `${cluster_...}` in a live object | the ConfigMap is missing a key, or the Kustomization does not substitute from it |
 
 Day-two operations, upgrades and incident procedures continue in

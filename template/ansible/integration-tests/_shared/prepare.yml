@@ -1,0 +1,6 @@
+---
+# Shared prepare playbook for the integration-test scenarios; the systemd, apt
+# and temp-dir setup lives once in ansible/molecule/prepare-common.yml. A
+# scenario with extra prep imports this and appends its own play.
+- name: Prepare the integration-test containers
+  ansible.builtin.import_playbook: ../../molecule/prepare-common.yml

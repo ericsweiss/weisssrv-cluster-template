@@ -1,35 +1,27 @@
 ---
 # ansible-lint configuration. https://ansible.readthedocs.io/projects/lint/configuring/
-#
-# `profile: production` is not just a severity dial — it also decides WHICH
-# rules run. With no profile at all ansible-lint enables its opt-in rules too,
-# and `run-once` then fires on every legitimate `run_once:` in playbooks/, so a
-# freshly generated repository would fail its own lint gate on day one.
-#
-# Location matters: ansible-lint walks UP from its working directory, so this
-# file at the repository root is found both by the CI job (cwd = repo root,
-# targets `ansible/`) and by `task ansible:lint` (cwd = `ansible/`).
+
+# Must stay at the repo root: ansible-lint discovers this file by walking UP
+# from its working directory, so both callers find it - the CI job (cwd = repo
+# root) and `task ansible:lint` (cwd = `ansible/`).
+
+# The profile also selects WHICH rules run: without one, opt-in rules such as
+# run-once[task] fire on every deliberate `run_once:`.
 profile: production
 
 exclude_paths:
   - .cache/
   - .venv/
   - venv/
-  # `task lib:sync` checkout — the library lints itself upstream.
+  # `task lib:sync` checkout - the library lints itself upstream.
   - .weisssrv-lib/
-  # Where ansible-galaxy installs weisssrv.infra. Without these, ansible-lint
-  # reports the LIBRARY's findings against a repository that does not own them.
-  # .ansible-home/ is the CI job's ANSIBLE_HOME, inside the project directory
-  # ansible-lint walks; the other two cover a local install.
+  # ansible-galaxy install targets for weisssrv.infra - same reason.
   - .ansible-home/
   - ansible_collections/
   - ansible/ansible_collections/
 
-# No skip_list on purpose. `var-naming[no-role-prefix]` fires only from inside a
-# role (its vars/defaults, a `roles:` or include_role `vars:` block, or a
-# set_fact/register within one), and this repository owns no roles — every role
-# it runs comes from the weisssrv.infra collection, excluded above. Add the skip
-# only if an `ansible/roles/` tree appears here.
+# No skip_list: var-naming[no-role-prefix] fires only from inside a role, and
+# this repository owns none. Add the skip if an `ansible/roles/` tree appears.
 
-# Let ansible-lint resolve the collection dependencies it needs to check FQCNs.
+# Resolve collection dependencies, so the FQCN checks can see them.
 offline: false

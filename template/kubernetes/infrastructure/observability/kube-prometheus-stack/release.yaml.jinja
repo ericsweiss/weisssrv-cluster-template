@@ -1,0 +1,1789 @@
+{#- Only two things are interpolated: the kubelet image-gc watermark, which must
+    equal the one group_vars/k3s.yml gives the kubelet, and the storage_backend gate
+    on the ZFSPool rules. The alert annotations are Go templates Jinja must not touch. -#}
+{% raw %}---
+# kube-prometheus-stack — Prometheus, Alertmanager, Grafana, node-exporter and
+# kube-state-metrics. Chart version and every site value are substituted at
+# reconcile time (cluster-versions / cluster-config ConfigMaps).
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kube-prometheus-stack
+  namespace: observability
+spec:
+  interval: 30m
+  releaseName: kube-prometheus-stack
+  # CRD install and Prometheus startup can take several minutes.
+  timeout: 15m
+  chart:
+    spec:
+      chart: kube-prometheus-stack
+      version: "${helm_chart_versions_kube_prometheus_stack}"
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+        namespace: flux-system
+      interval: 12h
+  install:
+    # The monitoring.coreos.com CRDs are owned by the infrastructure-crds stage.
+    # crds.enabled:false stops this chart shipping copies, crds:Skip stops Helm
+    # managing them.
+    crds: Skip
+    remediation:
+      retries: 3
+  upgrade:
+    crds: Skip
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    crds:
+      enabled: false
+
+    prometheusOperator:
+      # `platform` from sources/priorityclasses.yaml, set per component: the
+      # chart has no global key. The subcharts stay unclassed, where losing a
+      # pod costs a dashboard rather than the platform.
+      priorityClassName: platform
+      # The chart ships `resources: {}`, so without this the operator has no OOM
+      # ceiling at all — its paired VPA is RequestsOnly and cannot introduce a
+      # limit where the pod has none.
+      resources:
+        requests:
+          cpu: 25m
+          memory: 96Mi
+        limits:
+          memory: 384Mi
+      # Feeds both the Prometheus and the Alertmanager config-reloader sidecars,
+      # which the chart ships with no requests and no OOM ceiling.
+      prometheusConfigReloader:
+        resources:
+          requests:
+            cpu: 10m
+            memory: 48Mi
+          limits:
+            memory: 96Mi
+
+    # -------------------------------------------------------------------------
+    # Prometheus
+    # -------------------------------------------------------------------------
+    prometheus:
+      prometheusSpec:
+        priorityClassName: platform
+        # Pins the operator default so a chart bump cannot move `for:` semantics.
+        evaluationInterval: 30s
+        # Runs as nobody (65534); fsGroup makes the PV writable.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65534
+          runAsGroup: 65534
+          fsGroup: 65534
+
+        # Pinned to the storage node, where the statically-provisioned TSDB
+        # volume lives (storage.yaml).
+        nodeSelector:
+          ${cluster_node_label_domain}/nas: "true"
+        tolerations:
+          - key: ${cluster_node_label_domain}/nas
+            operator: Equal
+            value: "true"
+            effect: PreferNoSchedule
+
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: ""
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 150Gi
+              volumeName: prometheus-data
+
+        # retentionSize bounds persisted blocks only — the WAL, the head being
+        # flushed and compaction scratch consume more on top. Hold it well under
+        # the PV size so those non-block costs have room.
+        retention: 365d
+        retentionSize: 120GB
+
+        # The static-target exporters ship hand-written discovery.k8s.io/v1
+        # EndpointSlices, not core/v1 Endpoints. The operator's default
+        # Endpoints role finds no targets for them.
+        serviceDiscoveryRole: EndpointSlice
+
+        # Discover ServiceMonitors, PodMonitors and PrometheusRules in ALL
+        # namespaces, so an app module ships its own without editing this file.
+        serviceMonitorSelectorNilUsesHelmValues: false
+        serviceMonitorNamespaceSelector: {}
+        podMonitorSelectorNilUsesHelmValues: false
+        podMonitorNamespaceSelector: {}
+        ruleSelectorNilUsesHelmValues: false
+        ruleNamespaceSelector: {}
+
+        # VPA is Off for Prometheus (recording-only) — these are hand-tuned.
+        resources:
+          requests:
+            cpu: 200m
+            memory: 2Gi
+          limits:
+            memory: 4Gi
+
+    # -------------------------------------------------------------------------
+    # Alertmanager
+    # -------------------------------------------------------------------------
+    alertmanager:
+      # Two replicas gossip silences and the notification log over emptyDir, so
+      # a restart does not re-notify every firing alert. The chart's soft
+      # podAntiAffinity spreads them; the PDB stops a kured reboot evicting both.
+      podDisruptionBudget:
+        enabled: true
+        minAvailable: 1
+      alertmanagerSpec:
+        replicas: 2
+        priorityClassName: platform
+        configSecret: alertmanager-config
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            memory: 128Mi
+
+    # -------------------------------------------------------------------------
+    # Grafana
+    # -------------------------------------------------------------------------
+    grafana:
+      # Ingress is a Traefik IngressRoute (ingress/).
+      ingress:
+        enabled: false
+
+      # Replaced by the configmaps-only pair in grafana-rbac.yaml. Not
+      # `useExistingClusterRole`: it keeps the chart's binding and rewrites only
+      # its roleRef, which the RBAC API forbids.
+      rbac:
+        create: false
+
+      # Only the sidecars talk to the apiserver; they get the token back through
+      # the projected volume below. extraContainerVolumes, NOT extraVolumes —
+      # the latter renders a projected volume silently as an emptyDir.
+      automountServiceAccountToken: false
+      extraContainerVolumes:
+        - name: sidecar-kube-api-access
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+
+      # Break-glass account: it authenticates nothing while the switches below
+      # are set. ONE-SHOT — the password is read only at first start against an
+      # empty grafana.db, so the vault value must be final by then (../README.md).
+      admin:
+        existingSecret: observability-secrets
+        userKey: grafana-admin-user
+        passwordKey: grafana-admin-password
+
+      grafana.ini:
+        server:
+          root_url: https://grafana.${cluster_internal_domain}
+
+        # SSO-only needs BOTH: disable_login_form removes the browser form and
+        # auth.basic.enabled=false closes `curl -u`. Do NOT set
+        # disable_initial_admin_creation — it blocks break-glass permanently.
+        auth:
+          disable_login_form: true
+        auth.basic:
+          enabled: false
+
+        analytics:
+          check_for_updates: false
+          check_for_plugin_updates: false
+          reporting_enabled: false
+          feedback_links_enabled: false
+
+      # OIDC via the cluster's identity provider. grafana-users maps to Viewer
+      # and grafana-admins to Admin; create both groups in the IdP. Every OIDC
+      # consumer uses the same issuer host, or tokens fail cross-app.
+      env:
+        GF_AUTH_GENERIC_OAUTH_ENABLED: "true"
+        GF_AUTH_GENERIC_OAUTH_NAME: "SSO"
+        GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP: "true"
+        GF_AUTH_GENERIC_OAUTH_SCOPES: "openid profile email"
+        GF_AUTH_GENERIC_OAUTH_AUTH_URL: "https://auth.${cluster_external_domain}/application/o/authorize/"
+        GF_AUTH_GENERIC_OAUTH_TOKEN_URL: "https://auth.${cluster_external_domain}/application/o/token/"
+        GF_AUTH_GENERIC_OAUTH_API_URL: "https://auth.${cluster_external_domain}/application/o/userinfo/"
+        GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH: "contains(groups, 'grafana-admins') && 'Admin' || contains(groups, 'grafana-users') && 'Viewer' || ''"
+        GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT: "true"
+
+      envValueFrom:
+        GF_AUTH_GENERIC_OAUTH_CLIENT_ID:
+          secretKeyRef:
+            name: observability-secrets
+            key: grafana-oidc-client-id
+        GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
+          secretKeyRef:
+            name: observability-secrets
+            key: grafana-oidc-client-secret
+
+      # Dashboard and datasource sidecars over all namespaces. skipReload: the
+      # provisioning-reload endpoint is closed under SSO-only auth.
+      # `resource: configmap`: the SA's ClusterRole has no `secrets`.
+      sidecar:
+        # Covers grafana-sc-dashboard and grafana-sc-datasources; the chart
+        # ships both with no requests and no OOM ceiling.
+        resources:
+          requests:
+            cpu: 10m
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+        dashboards:
+          enabled: true
+          label: grafana_dashboard
+          labelValue: "1"
+          searchNamespace: ALL
+          folderAnnotation: grafana_folder
+          # Without it the grafana_folder annotations are inert and every
+          # dashboard lands in the root folder. Requires the chart's empty
+          # `folder`, which stays at its default.
+          provider:
+            foldersFromFilesStructure: true
+          skipReload: true
+          resource: configmap
+          extraMounts:
+            - name: sidecar-kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+        datasources:
+          # Fixed UID so dashboard JSON can reference "prometheus".
+          uid: prometheus
+          skipReload: true
+          initDatasources: true
+          resource: configmap
+          extraMounts:
+            - name: sidecar-kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+
+      additionalDataSources:
+        - name: Loki
+          type: loki
+          uid: loki
+          url: http://loki.observability.svc.cluster.local:3100
+          access: proxy
+          isDefault: false
+
+      persistence:
+        enabled: true
+        type: pvc
+        existingClaim: grafana-data
+
+      # The NFS export squashes all operations to a fixed uid:gid and does not
+      # permit chown, so the init-chown-data container can only fail.
+      initChownData:
+        enabled: false
+
+      # NFS-ESTALE self-heal: stat the mount instead of httpGet, so a stale
+      # handle or a hung hard-mount restarts the pod. httpGet MUST be nulled —
+      # Helm merges into the subchart probe and a two-handler probe is rejected.
+      livenessProbe:
+        httpGet: null
+        exec:
+          command: ["stat", "/var/lib/grafana"]
+        initialDelaySeconds: 30
+        periodSeconds: 30
+        timeoutSeconds: 10
+        failureThreshold: 3
+
+      # CRITICAL: SQLite on a network filesystem cannot tolerate two writers,
+      # and RollingUpdate runs old and new pods against the same DB on upgrade.
+      # rollingUpdate is nulled explicitly: a live Deployment keeps those
+      # defaults and the API rejects them alongside Recreate.
+      deploymentStrategy:
+        type: Recreate
+        rollingUpdate: null
+
+      resources:
+        requests:
+          cpu: 100m
+          memory: 512Mi
+        limits:
+          memory: 1Gi
+
+    # -------------------------------------------------------------------------
+    # node-exporter
+    # -------------------------------------------------------------------------
+    nodeExporter:
+      enabled: true
+
+    prometheus-node-exporter:
+      # Run on every node, including tainted ones.
+      tolerations:
+        - operator: Exists
+      # processes collector is off by default; node_processes_* gives process,
+      # thread and PID-limit visibility and populates the node-exporter-full
+      # dashboard's System Processes panels.
+      extraArgs:
+        - --collector.processes
+      resources:
+        requests:
+          cpu: 50m
+          memory: 32Mi
+        limits:
+          # No CPU limit: node-exporter bursts during scrape collection and CFS
+          # throttling here is the dominant CPUThrottlingHigh source. The memory
+          # limit stays (OOM is a real failure mode) and matches the VPA ceiling.
+          memory: 128Mi
+
+    # -------------------------------------------------------------------------
+    # kube-state-metrics
+    # -------------------------------------------------------------------------
+    kube-state-metrics:
+      # Its working set scales with object count. The paired VPA is RequestsOnly,
+      # so this limit is the binding OOM ceiling; move it with maxAllowed in
+      # observability/vpa.yaml.
+      resources:
+        requests:
+          cpu: 50m
+          memory: 192Mi
+        limits:
+          memory: 384Mi
+      # Per-resource Flux readiness comes from kube-state-metrics
+      # customResourceState, not from the controllers themselves.
+      rbac:
+        extraRules:
+          - apiGroups:
+              - kustomize.toolkit.fluxcd.io
+              - helm.toolkit.fluxcd.io
+            resources:
+              - kustomizations
+              - helmreleases
+            verbs: [list, watch]
+          - apiGroups:
+              - source.toolkit.fluxcd.io
+            resources:
+              - gitrepositories
+              - helmrepositories
+              - helmcharts
+            verbs: [list, watch]
+          - apiGroups:
+              - autoscaling.k8s.io
+            resources:
+              - verticalpodautoscalers
+            verbs: [list, watch]
+      customResourceState:
+        enabled: true
+        config:
+          spec:
+            resources:
+              - groupVersionKind:
+                  group: kustomize.toolkit.fluxcd.io
+                  version: v1
+                  kind: Kustomization
+                metricNamePrefix: gotk
+                metrics:
+                  - name: resource_info
+                    help: Flux Kustomization readiness
+                    each:
+                      type: Info
+                      info:
+                        labelsFromPath:
+                          name: [metadata, name]
+                          exported_namespace: [metadata, namespace]
+                          ready: [status, conditions, "[type=Ready]", status]
+                          suspended: [spec, suspend]
+              - groupVersionKind:
+                  group: helm.toolkit.fluxcd.io
+                  version: v2
+                  kind: HelmRelease
+                metricNamePrefix: gotk
+                metrics:
+                  - name: resource_info
+                    help: Flux HelmRelease readiness
+                    each:
+                      type: Info
+                      info:
+                        labelsFromPath:
+                          name: [metadata, name]
+                          exported_namespace: [metadata, namespace]
+                          ready: [status, conditions, "[type=Ready]", status]
+                          suspended: [spec, suspend]
+              - groupVersionKind:
+                  group: source.toolkit.fluxcd.io
+                  version: v1
+                  kind: GitRepository
+                metricNamePrefix: gotk
+                metrics:
+                  - name: resource_info
+                    help: Flux GitRepository readiness
+                    each:
+                      type: Info
+                      info:
+                        labelsFromPath:
+                          name: [metadata, name]
+                          exported_namespace: [metadata, namespace]
+                          ready: [status, conditions, "[type=Ready]", status]
+                          suspended: [spec, suspend]
+              - groupVersionKind:
+                  group: source.toolkit.fluxcd.io
+                  version: v1
+                  kind: HelmRepository
+                metricNamePrefix: gotk
+                metrics:
+                  - name: resource_info
+                    help: Flux HelmRepository readiness
+                    each:
+                      type: Info
+                      info:
+                        labelsFromPath:
+                          name: [metadata, name]
+                          exported_namespace: [metadata, namespace]
+                          ready: [status, conditions, "[type=Ready]", status]
+                          suspended: [spec, suspend]
+              - groupVersionKind:
+                  group: source.toolkit.fluxcd.io
+                  version: v1
+                  kind: HelmChart
+                metricNamePrefix: gotk
+                metrics:
+                  - name: resource_info
+                    help: Flux HelmChart readiness
+                    each:
+                      type: Info
+                      info:
+                        labelsFromPath:
+                          name: [metadata, name]
+                          exported_namespace: [metadata, namespace]
+                          ready: [status, conditions, "[type=Ready]", status]
+                          suspended: [spec, suspend]
+              # The VPA components export no recommendation metrics, so this
+              # emits one series per container and resource for the capped and
+              # uncapped values. Consumed by VPARecommendationCapped below.
+              - groupVersionKind:
+                  group: autoscaling.k8s.io
+                  version: v1
+                  kind: VerticalPodAutoscaler
+                metricNamePrefix: vpa
+                labelsFromPath:
+                  verticalpodautoscaler: [metadata, name]
+                  exported_namespace: [metadata, namespace]
+                  target_kind: [spec, targetRef, kind]
+                  target_name: [spec, targetRef, name]
+                # valueFrom must resolve to a scalar quantity, so target and
+                # uncappedTarget are split into their cpu and memory members;
+                # commonLabels carry resource/unit so the series never collide.
+                metrics:
+                  - name: recommendation_target
+                    # Same metric family as the memory series below — HELP must match.
+                    help: VPA recommended resource request after minAllowed/maxAllowed capping (see resource/unit labels)
+                    commonLabels:
+                      resource: cpu
+                      unit: core
+                    each:
+                      type: Gauge
+                      gauge:
+                        path: [status, recommendation, containerRecommendations]
+                        labelsFromPath:
+                          container: [containerName]
+                        valueFrom: [target, cpu]
+                  - name: recommendation_target
+                    help: VPA recommended resource request after minAllowed/maxAllowed capping (see resource/unit labels)
+                    commonLabels:
+                      resource: memory
+                      unit: byte
+                    each:
+                      type: Gauge
+                      gauge:
+                        path: [status, recommendation, containerRecommendations]
+                        labelsFromPath:
+                          container: [containerName]
+                        valueFrom: [target, memory]
+                  - name: recommendation_uncappedtarget
+                    help: VPA recommended resource request ignoring minAllowed/maxAllowed (see resource/unit labels)
+                    commonLabels:
+                      resource: cpu
+                      unit: core
+                    each:
+                      type: Gauge
+                      gauge:
+                        path: [status, recommendation, containerRecommendations]
+                        labelsFromPath:
+                          container: [containerName]
+                        valueFrom: [uncappedTarget, cpu]
+                  - name: recommendation_uncappedtarget
+                    help: VPA recommended resource request ignoring minAllowed/maxAllowed (see resource/unit labels)
+                    commonLabels:
+                      resource: memory
+                      unit: byte
+                    each:
+                      type: Gauge
+                      gauge:
+                        path: [status, recommendation, containerRecommendations]
+                        labelsFromPath:
+                          container: [containerName]
+                        valueFrom: [uncappedTarget, memory]
+
+    # Components k3s does not expose: it bundles kube-scheduler,
+    # kube-controller-manager and kube-proxy into the server process with no
+    # metrics endpoints, so enabling them yields permanent *Down criticals.
+    kubeProxy:
+      enabled: false
+    kubeScheduler:
+      enabled: false
+    kubeControllerManager:
+      enabled: false
+    # etcd is the one component whose failure loses the cluster. k3s serves its
+    # metrics on :2381; enabling this component also enables the upstream etcd
+    # alert rules. endpoints is a JSON flow sequence (Helm needs a real list).
+    kubeEtcd:
+      enabled: true
+      endpoints: ${cluster_etcd_endpoints}
+      service:
+        enabled: true
+        port: 2381
+        targetPort: 2381
+      serviceMonitor:
+        enabled: true
+        scheme: http
+
+    defaultRules:
+      disabled:
+        # A 5m hold pages critical on one transient webhook timeout.
+        # Replaced by the 15m copy in platform-monitoring below.
+        AlertmanagerClusterFailedToSendAlerts: true
+
+    # Platform-wide alert rules only; app-specific rules belong in a
+    # PrometheusRule next to the app. Every rule carries a runbook_url, and
+    # ${cluster_node_exporter_job_regex} scopes the host-metric ones.
+    additionalPrometheusRulesMap:
+      platform-storage:
+        groups:
+          - name: platform.storage
+            rules:
+              # efivarfs is the kernel's NVRAM-backed virtual fs and routinely
+              # sits above 70%; devtmpfs/iso9660 are virtual or read-only.
+              - alert: DiskUsageWarning
+                expr: >-
+                  (1 - node_filesystem_avail_bytes{job=~"${cluster_node_exporter_job_regex}", fstype!~"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660"}
+                  / node_filesystem_size_bytes{job=~"${cluster_node_exporter_job_regex}", fstype!~"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660"})
+                  * 100 > 80
+                for: 10m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Disk usage above 80% on {{ $labels.instance }}:{{ $labels.mountpoint }}'
+                  description: >-
+                    Disk usage is {{ $value | printf "%.1f" }}%
+                    on {{ $labels.instance }} mount {{ $labels.mountpoint }}.
+
+              - alert: DiskUsageCritical
+                expr: >-
+                  (1 - node_filesystem_avail_bytes{job=~"${cluster_node_exporter_job_regex}", fstype!~"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660"}
+                  / node_filesystem_size_bytes{job=~"${cluster_node_exporter_job_regex}", fstype!~"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660"})
+                  * 100 > 90
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Disk usage above 90% on {{ $labels.instance }}:{{ $labels.mountpoint }}'
+                  description: >-
+                    Disk usage is {{ $value | printf "%.1f" }}%
+                    on {{ $labels.instance }} mount {{ $labels.mountpoint }}.
+
+              # Inode exhaustion, which the byte-usage rules above miss. The
+              # chart's own rule covers only the in-cluster job; this one
+              # follows the job regex.
+              - alert: InodeUsageWarning
+                expr: >-
+                  (node_filesystem_files_free{job=~"${cluster_node_exporter_job_regex}", fstype!~"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660"}
+                  / node_filesystem_files{job=~"${cluster_node_exporter_job_regex}", fstype!~"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660"})
+                  * 100 < 10
+                for: 10m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Inodes below 10% free on {{ $labels.instance }}:{{ $labels.mountpoint }}'
+                  description: >-
+                    Only {{ $value | printf "%.1f" }}% of inodes are free
+                    on {{ $labels.instance }} mount {{ $labels.mountpoint }}.
+
+              - alert: InodeUsageCritical
+                expr: >-
+                  (node_filesystem_files_free{job=~"${cluster_node_exporter_job_regex}", fstype!~"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660"}
+                  / node_filesystem_files{job=~"${cluster_node_exporter_job_regex}", fstype!~"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660"})
+                  * 100 < 5
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Inodes below 5% free on {{ $labels.instance }}:{{ $labels.mountpoint }}'
+                  description: >-
+                    Only {{ $value | printf "%.1f" }}% of inodes are free
+                    on {{ $labels.instance }} mount {{ $labels.mountpoint }}.
+
+              # CRITICAL: the threshold must stay under DiskUsageWarning's
+              # 80%, or that alert's inhibit rule in alertmanager-config.yaml
+              # mutes this one permanently. It sits up to 5 points above
+              # k3s_image_gc_high_threshold (capped at 79) so a node where GC is
+              # simply doing its job does not page.
+              - alert: KubeletImageGCIneffective
+                expr: >-
+                  100 * (1 - node_filesystem_avail_bytes{job="node-exporter", mountpoint="/"}
+                  / node_filesystem_size_bytes{job="node-exporter", mountpoint="/"}) > {% endraw %}{{ [k3s_image_gc_high_threshold | int + 5, 79] | min }}{% raw %}
+                for: 2h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#kubelet-image-store-on-a-node-root-filesystem'
+                  summary: 'Kubelet image GC cannot reach its low watermark on {{ $labels.instance }}'
+                  description: >-
+                    Root filesystem has stayed {{ $value | printf "%.1f" }}% used
+                    for 2 hours, at or above the kubelet image-gc-high-threshold
+                    of {% endraw %}{{ k3s_image_gc_high_threshold }}{% raw %}%: image GC is running and
+                    cannot reach its low watermark, so something other than the
+                    image store is holding the space.
+
+              - alert: PVCUsageWarning
+                expr: (kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100 > 80
+                for: 10m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'PVC {{ $labels.persistentvolumeclaim }} in {{ $labels.namespace }} above 80%'
+                  description: 'PVC usage is {{ $value | printf "%.1f" }}%.'
+
+              - alert: PVCUsageCritical
+                expr: (kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100 > 90
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'PVC {{ $labels.persistentvolumeclaim }} in {{ $labels.namespace }} above 90%'
+                  description: 'PVC usage is {{ $value | printf "%.1f" }}%.'
+
+              # Every stateful PV here is statically provisioned. A local-path
+              # PV means a claim fell through to the default class, onto a node
+              # bootdisk no backup covers. Delete if you adopt a provisioner.
+              - alert: LocalPathPVExists
+                expr: kube_persistentvolume_info{storageclass="local-path"} > 0
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'PersistentVolume {{ $labels.persistentvolume }} is on the local-path StorageClass'
+                  description: >-
+                    PV {{ $labels.persistentvolume }} uses the local-path
+                    StorageClass, which lands on a stateless node bootdisk and is
+                    excluded from backups. Pin its storageClassName to "" and
+                    rebind it to the intended static PV.
+{% endraw %}{% if storage_backend == 'zfs' %}{% raw %}
+
+              # Pool integrity, from the node_exporter_host zpool textfile
+              # collector — it covers every host with a pool, not only the NAS.
+              - alert: ZFSPoolNotOnline
+                expr: zfs_pool_status_health_code > 0
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#storage'
+                  summary: 'ZFS pool {{ $labels.pool }} on {{ $labels.instance }} is not ONLINE'
+                  description: >-
+                    Pool {{ $labels.pool }} on {{ $labels.instance }} reports
+                    DEGRADED or worse (health code {{ $value | printf "%.0f" }}).
+
+              - alert: ZFSPoolDataErrors
+                expr: zfs_pool_status_data_errors > 0
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#storage'
+                  summary: 'ZFS pool {{ $labels.pool }} on {{ $labels.instance }} has permanent data errors'
+                  description: >-
+                    zpool status -v lists {{ $value | printf "%.0f" }} entries with
+                    unrecoverable data on pool {{ $labels.pool }}. On a single-vdev
+                    pool ZFS cannot self-heal these.
+
+              # Health alone misses silent corruption: checksum errors accumulate
+              # while the pool stays ONLINE. Each series is one counter column's max
+              # across the pool's vdev rows; `zpool clear` resets them.
+              - alert: ZFSPoolDeviceErrors
+                expr: sum by (instance, pool) (zfs_pool_status_errors_total) > 0
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#storage'
+                  summary: 'ZFS pool {{ $labels.pool }} on {{ $labels.instance }} has device errors'
+                  description: >-
+                    zpool status reports {{ $value | printf "%.0f" }}
+                    read/write/cksum errors on pool {{ $labels.pool }}. The pool may
+                    still show ONLINE.
+
+              # The == 0 arm covers a never-scrubbed pool and makes a collector
+              # regression loud: it emits 0 when it cannot parse a completion time.
+              - alert: ZFSPoolScrubStale
+                expr: >-
+                  (zfs_pool_status_last_scrub_seconds == 0)
+                  or (
+                    zfs_pool_status_last_scrub_seconds > 0
+                    and time() - zfs_pool_status_last_scrub_seconds > 35 * 86400
+                  )
+                for: 6h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#storage'
+                  summary: 'ZFS pool {{ $labels.pool }} on {{ $labels.instance }} has no recent completed scrub'
+                  description: >-
+                    Pool {{ $labels.pool }} has never completed a scrub, or its last
+                    one finished over 35 days ago. Without scrubs, latent corruption
+                    surfaces only when something reads the bad blocks.
+
+              # zfs-mount-encrypted.service retries forever so its After=
+              # dependents stay queued, leaving it permanently `activating`: a
+              # generic systemd-failed alert can never match it. This pair covers it.
+              - alert: ZfsEncryptedMountStuck
+                expr: >-
+                  node_systemd_unit_state{name="zfs-mount-encrypted.service",
+                  state="activating"} == 1
+                for: 30m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Encrypted ZFS datasets have not mounted on {{ $labels.instance }}'
+                  description: >-
+                    zfs-mount-encrypted has been retrying for 30 minutes on
+                    {{ $labels.instance }}, so the encrypted datasets, their NFS
+                    exports and every gated guest stay down. Check
+                    `systemctl status zfs-mount-encrypted` and
+                    `journalctl -u zfs-load-key@<pool>`.
+
+              - alert: ZfsEncryptedMountStuckCritical
+                expr: >-
+                  node_systemd_unit_state{name="zfs-mount-encrypted.service",
+                  state="activating"} == 1
+                for: 2h
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Encrypted ZFS datasets have not mounted for 2 hours on {{ $labels.instance }}'
+                  description: >-
+                    zfs-mount-encrypted has not completed in 2 hours on
+                    {{ $labels.instance }}. The key source is unreachable or a
+                    passphrase rotated: check `journalctl -u zfs-load-key@<pool>`
+                    and the secrets backend.
+
+              # swap-clean arms, live only where nas_storage_swap_clean_enabled is
+              # on. A skip is permanent while a conflicting unit stays active, and
+              # every other swap metric reads green through it.
+              - alert: SwapCleanFailed
+                expr: swap_clean_last_run_success == 0
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'swap-clean failed or aborted-unsafe on {{ $labels.instance }}'
+                  description: >-
+                    The swap-clean run on {{ $labels.instance }} recorded a
+                    non-clean outcome: a script error, an unsafe headroom abort,
+                    or a guest that did not restart. Swap may not be resetting.
+                    Check `journalctl -t swap-clean`.
+
+              - alert: SwapCleanSkipped
+                expr: min_over_time(swap_clean_last_run_skipped[3d]) == 1
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'swap-clean has skipped every run for 3 days on {{ $labels.instance }}'
+                  description: >-
+                    Every swap-clean run in the last 3 days skipped the swap
+                    cycle, so swap is never reset while every other swap metric
+                    reads green. A conflicting unit that never deactivates
+                    disables the job indefinitely. Query
+                    swap_clean_skip_reason_info for the reason, then check
+                    nas_storage_swap_clean_conflicting_units and
+                    `journalctl -t swap-clean`.
+{% endraw %}{% endif %}{% raw %}
+
+      platform-nodes:
+        groups:
+          - name: platform.nodes
+            rules:
+              - alert: NodeMemoryPressure
+                expr: kube_node_status_condition{condition="MemoryPressure", status="true"} == 1
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Node {{ $labels.node }} is under memory pressure'
+                  description: 'Kubelet on {{ $labels.node }} has reported memory pressure for 5 minutes. Pods may be evicted.'
+
+              # Source for the node-outage inhibit in alertmanager-config.yaml;
+              # info-tier so the operator sees the mute is active. The
+              # max_over_time arm bounds it: a node never Ready, or 7d gone, stops.
+              - alert: NodeOutageStormControl
+                expr: >-
+                  kube_node_status_condition{condition="Ready", status="true"} == 0
+                  and max_over_time(kube_node_status_condition{condition="Ready", status="true"}[7d]) == 1
+                for: 5m
+                labels:
+                  severity: info
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Node {{ $labels.node }} NotReady — workload alerts inhibited'
+                  description: >-
+                    {{ $labels.node }} has been NotReady for under 7 days, so
+                    per-pod and per-workload warnings are inhibited while it
+                    recovers. The critical tier is never inhibited.
+
+              - alert: NodeStuckCordoned
+                expr: kube_node_spec_unschedulable == 1
+                for: 30m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Node {{ $labels.node }} cordoned (unschedulable) for 30m'
+                  description: >-
+                    Node {{ $labels.node }} has been SchedulingDisabled for 30
+                    minutes. If maintenance is not in progress, suspect a stuck
+                    uncordon or a timed-out drain, then
+                    `kubectl uncordon {{ $labels.node }}`.
+
+              # A healthy reboot cycle clears well inside 3h, so a sentinel held
+              # longer means no node is being serviced: a dead kured pod holding
+              # the cluster lock, a blocking pod, or a PDB refusing the drain.
+              - alert: KuredRebootStuck
+                expr: kured_reboot_required == 1
+                for: 3h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'kured reboot for {{ $labels.node }} pending over 3h (stuck cycle)'
+                  description: >-
+                    Node {{ $labels.node }} has held the kured reboot sentinel for
+                    more than 3 hours. Check the cluster-wide lock
+                    (`kubectl -n kube-system get ds kured -o jsonpath='{.metadata.annotations}'`),
+                    any CI job pinning the node, and PDBs blocking the drain.
+                    Clear a dead lock with `kubectl -n kube-system annotate
+                    ds/kured weave.works/kured-node-lock-`.
+
+              # The maintenance playbooks write this node-exporter textfile
+              # metric when they defer a host reboot to an operator. It
+              # self-clears once the host no longer needs one.
+              - alert: MaintenanceRebootDeferred
+                expr: maintenance_reboot_deferred == 1
+                for: 10m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Host {{ $labels.host }} has a maintenance-deferred reboot pending'
+                  description: >-
+                    Maintenance deferred a kernel reboot of {{ $labels.host }} to
+                    an operator. Reboot it manually when convenient; the alert
+                    clears on the next run.
+
+              # node-exporter-healthcheck.sh restarts the exporter when /metrics
+              # goes unanswered twice. /metrics answers again between restarts, so
+              # a restart loop fires no exporter-down alert; this gauge is the signal.
+              - alert: NodeExporterHealthcheckRestartLoop
+                expr: >-
+                  changes(node_exporter_healthcheck_last_restart_timestamp_seconds[1h]) >= 3
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'node_exporter is being restarted repeatedly on {{ $labels.instance }}'
+                  description: >-
+                    The liveness gate has restarted node_exporter at least three
+                    times in the last hour on {{ $labels.instance }}. Check
+                    `journalctl -t node-exporter-healthcheck` and
+                    `systemctl status prometheus-node-exporter`.
+
+              # Every encrypted_swap fallback branch exits 0 so the host keeps
+              # booting, so this gauge is the only report that swap went back to
+              # cleartext. Absent on hosts where the role is off, so inert there.
+              - alert: EncryptedSwapPlaintextFallback
+                expr: >-
+                  encrypted_swap_mapper_active == 0
+                  and on (instance) (encrypted_swap_any_swap_active == 1)
+                for: 30m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Swap on {{ $labels.instance }} is plaintext, not the dm-crypt mapper'
+                  description: >-
+                    The dm-crypt swap mapper is not the active swap device on
+                    {{ $labels.instance }}, so swapped-out memory is written in
+                    cleartext while the finalize unit reads green. Check
+                    `swapon --show` and `journalctl -t encrypted-swap`.
+
+              # The swapless half: the mapper failed AND the plaintext fallback
+              # could not be restored, which no SwapTotal threshold alert sees.
+              - alert: EncryptedSwapRestoreFailed
+                expr: >-
+                  encrypted_swap_any_swap_active == 0
+                  and on (instance) (node_memory_SwapTotal_bytes == 0)
+                for: 30m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Encrypted-swap finalize left {{ $labels.instance }} with no swap'
+                  description: >-
+                    The encrypted-swap switch on {{ $labels.instance }} failed and
+                    the plaintext fallback could not be restored, so the host runs
+                    with no swap. Check `swapon --show` and
+                    `journalctl -t encrypted-swap`.
+
+      platform-resources:
+        groups:
+          - name: platform.resources
+            rules:
+              # Working set against the container's own limit, the leading
+              # indicator ahead of an OOMKill. The page-cache-dominated
+              # observability containers are covered by the RSS rule below.
+              - alert: ContainerMemoryNearLimit
+                expr: >-
+                  (
+                  max by (namespace, pod, container) (
+                  container_memory_working_set_bytes{container!="", container!="POD"}
+                  )
+                  / on (namespace, pod, container) group_left ()
+                  max by (namespace, pod, container) (
+                  kube_pod_container_resource_limits{resource="memory"}
+                  )
+                  ) > 0.9
+                  unless on (namespace, container) (
+                  kube_pod_container_resource_limits{resource="memory", namespace="observability",
+                  container=~"grafana|loki|prometheus"}
+                  )
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: >-
+                    Container {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }}
+                    is within 10% of its memory limit
+                  description: >-
+                    Container {{ $labels.container }} in pod
+                    {{ $labels.namespace }}/{{ $labels.pod }} has held above 90%
+                    of its memory limit for 15 minutes
+                    ({{ $value | humanizePercentage }}). Raise the limit in git
+                    and, where the workload has a VPA, its maxAllowed alongside.
+
+              # CRITICAL: every container excluded from the rule above needs a
+              # replacement band here, prometheus most of all — its own death is
+              # what blinds every other alert, so it must never be exempt.
+              - alert: PageCacheWorkloadRSSNearLimit
+                expr: >-
+                  (
+                  max by (namespace, pod, container) (
+                  container_memory_rss{namespace="observability",
+                  container=~"grafana|loki|prometheus"}
+                  )
+                  / on (namespace, pod, container) group_left ()
+                  max by (namespace, pod, container) (
+                  kube_pod_container_resource_limits{resource="memory", namespace="observability",
+                  container=~"grafana|loki|prometheus"}
+                  )
+                  ) > 0.9
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: >-
+                    {{ $labels.namespace }}/{{ $labels.container }} RSS is within
+                    10% of its memory limit
+                  description: >-
+                    Non-reclaimable memory in {{ $labels.namespace }}/{{ $labels.pod }}
+                    has held above 90% of the container's memory limit for 15
+                    minutes ({{ $value | humanizePercentage }}). Unlike the
+                    working set this is not page cache: raise the limit and the
+                    VPA maxAllowed in git.
+
+      platform-gitops:
+        groups:
+          - name: platform.gitops
+            rules:
+              - alert: FluxReconciliationFailure
+                expr: sum by (controller) (rate(controller_runtime_reconcile_errors_total{job="observability/flux-system"}[5m])) > 0
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Flux controller {{ $labels.controller }} has reconciliation errors'
+                  description: >-
+                    Flux controller {{ $labels.controller }} has produced
+                    reconciliation errors at {{ $value | printf "%.2f" }}/s for 15
+                    minutes.
+
+              # Catches a HelmRelease or Kustomization durably not Ready at any
+              # error rate, complementing the rate-based rule above.
+              # gotk_resource_info comes from kube-state-metrics, not Flux.
+              - alert: FluxResourceNotReady
+                expr: gotk_resource_info{ready="False", suspended!="true"} == 1
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: >-
+                    Flux resource {{ $labels.customresource_kind }}/{{ $labels.exported_namespace }}/{{ $labels.name }} not Ready
+                  description: >-
+                    Ready=False for 15 minutes. Run `flux get all -A | grep -v True`
+                    and `kubectl describe {{ $labels.customresource_kind }}
+                    {{ $labels.name }} -n {{ $labels.exported_namespace }}`.
+
+              # Fed by the kube-state-metrics VPA customResourceState above:
+              # uncappedTarget over target means a recommendation clamped at
+              # maxAllowed. The floors and max by () keep noise and reschedules out.
+              - alert: VPARecommendationCapped
+                expr: >-
+                  (
+                    (
+                      max by (exported_namespace, verticalpodautoscaler, container, resource, unit)
+                        (vpa_recommendation_uncappedtarget{resource="memory"})
+                      > 1.25 * max by (exported_namespace, verticalpodautoscaler, container, resource, unit)
+                        (vpa_recommendation_target{resource="memory"})
+                      and
+                      max by (exported_namespace, verticalpodautoscaler, container, resource, unit)
+                        (vpa_recommendation_uncappedtarget{resource="memory"})
+                      - max by (exported_namespace, verticalpodautoscaler, container, resource, unit)
+                        (vpa_recommendation_target{resource="memory"}) > 134217728
+                    )
+                    or
+                    (
+                      max by (exported_namespace, verticalpodautoscaler, container, resource, unit)
+                        (vpa_recommendation_uncappedtarget{resource="cpu"})
+                      > 1.25 * max by (exported_namespace, verticalpodautoscaler, container, resource, unit)
+                        (vpa_recommendation_target{resource="cpu"})
+                    )
+                  )
+                for: 24h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: >-
+                    VPA {{ $labels.exported_namespace }}/{{ $labels.verticalpodautoscaler }} recommendation capped at maxAllowed
+                  description: >-
+                    The recommendation for container {{ $labels.container }}
+                    ({{ $labels.resource }}) has been clamped by maxAllowed for 24
+                    hours — it wants {{ $value }} {{ $labels.unit }} uncapped.
+                    Raise the container's limit and re-derive maxAllowed from it
+                    in the same commit, or investigate the growth.
+
+      platform-secrets:
+        groups:
+          - name: platform.secrets
+            rules:
+              - alert: ExternalSecretSyncFailure
+                expr: externalsecret_status_condition{condition="Ready", status="False"} == 1
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'ExternalSecret {{ $labels.name }} sync failing'
+                  description: 'ExternalSecret {{ $labels.name }} in {{ $labels.namespace }} has not synced for 15 minutes.'
+
+              # The secrets provider is the dependency every ExternalSecret
+              # shares: while it is down nothing can be created or rotated. The
+              # target follows the secrets backend through cluster-config.
+              - alert: SecretsProviderDown
+                expr: >-
+                  kube_deployment_status_replicas_available{namespace="${cluster_secrets_provider_namespace}", deployment="${cluster_secrets_provider_deployment}"} == 0
+                  or absent(kube_deployment_status_replicas_available{namespace="${cluster_secrets_provider_namespace}", deployment="${cluster_secrets_provider_deployment}"})
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'The in-cluster secrets provider has no available replicas'
+                  description: >-
+                    The secrets provider deployment has had 0 available replicas
+                    for 5 minutes, or the metric is absent (kube-state-metrics
+                    also down). No secret can be created or rotated until it
+                    recovers.
+
+      platform-certificates:
+        groups:
+          - name: platform.certificates
+            rules:
+              - alert: CertExpiringWarning
+                expr: certmanager_certificate_expiration_timestamp_seconds - time() < 86400 * 14
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#certificates'
+                  summary: 'Certificate {{ $labels.name }} expiring in less than 14 days'
+                  description: 'Certificate {{ $labels.name }} in {{ $labels.namespace }} expires in {{ $value | humanizeDuration }}.'
+
+              - alert: CertExpiringCritical
+                expr: certmanager_certificate_expiration_timestamp_seconds - time() < 86400 * 3
+                for: 1h
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#certificates'
+                  summary: 'Certificate {{ $labels.name }} expiring in less than 3 days'
+                  description: 'Certificate {{ $labels.name }} in {{ $labels.namespace }} expires in {{ $value | humanizeDuration }}.'
+
+              # The expiry arms need a first successful issuance; this covers a
+              # Certificate that never gets one.
+              - alert: CertificateNotReady
+                expr: certmanager_certificate_ready_status{condition="False"} == 1
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#certificates'
+                  summary: 'Certificate {{ $labels.name }} in {{ $labels.namespace }} is not Ready'
+                  description: >-
+                    cert-manager has not issued this certificate for an hour. The
+                    expiry alerts cannot cover it: that series only exists after a
+                    first successful issuance.
+
+              # Backstop for TLS cert-manager does not issue. The internal zone is
+              # excluded; the sso-external target remains, and its cert-manager
+              # cert also trips CertExpiringWarning.
+              - alert: BlackboxCertExpiringSoon
+                expr: >-
+                  probe_ssl_earliest_cert_expiry{
+                  instance=~"https://[^/]+\\.${cluster_external_domain}(/.*)?",
+                  instance!~"https://[^/]+\\.${cluster_internal_domain}(/.*)?"
+                  } - time() < 86400 * 14
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#certificates'
+                  summary: 'TLS cert presented by {{ $labels.instance }} expires in under 14 days'
+                  description: >-
+                    The certificate presented by {{ $labels.instance }} expires in
+                    {{ $value | humanizeDuration }}. If it is edge/CDN-managed this
+                    normally auto-renews — investigate if it does not clear.
+
+              # The host-side renewal's own gauges, read from the node-exporter
+              # textfile. At the pinned library a failed distribution target
+              # zeroes this bit too; v0.18.0 narrows it to the local certificate.
+              - alert: CertRenewalFailed
+                expr: cert_renewal_last_run_success == 0
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#certificates'
+                  summary: 'Host-side certificate renewal failed on {{ $labels.instance }}'
+                  description: >-
+                    The renewal and local reload on {{ $labels.instance }} did
+                    not complete. A failed distribution target also zeroes this
+                    bit at the pinned library, so read the per-target gauges
+                    before assuming the local certificate is at fault.
+
+              # A renewal pipeline broken for three days is an incident, not a
+              # nudge: the expiry arms below are only the backstop, and weeks of
+              # failure burn the whole issuance cycle of margin.
+              - alert: CertRenewalFailedProlonged
+                expr: cert_renewal_last_run_success == 0
+                for: 72h
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#certificates'
+                  summary: 'Host-side certificate renewal has been failing for over 3 days'
+                  description: >-
+                    Renewal on {{ $labels.instance }} has failed continuously for
+                    three days. The wildcard certificate still has margin, but
+                    nothing is renewing it — fix the pipeline before the expiry
+                    alerts are the only thing left.
+
+              # The run bit only moves when the renewal runs, so a dead cron
+              # neither renews nor fails. 75d is past the ~60d issuance cycle,
+              # leaving ~15d. No absent arm: the gauge needs one success first.
+              - alert: CertRenewalStale
+                expr: time() - cert_renewal_last_success_timestamp_seconds > 86400 * 75
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#certificates'
+                  summary: 'No successful certificate renewal on {{ $labels.instance }} in over 75 days'
+                  description: >-
+                    {{ $labels.instance }} last renewed a certificate
+                    {{ $value | humanizeDuration }} ago, past the issuance cycle,
+                    so renewal has stopped running rather than failing. Check the
+                    renewal cron entry on that host and the reload script's
+                    journal.
+
+              # Per-target gauge: a dead target is otherwise collapsed into the
+              # run-level bit and never named. The 25h hold spans the daily
+              # distribution check, which arrives with the v0.18.0 pin bump.
+              - alert: CertDistributionTargetFailed
+                expr: cert_distribution_target_last_run_success == 0
+                for: 25h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#certificates'
+                  summary: 'Certificate distribution to {{ $labels.host }} is failing'
+                  description: >-
+                    The host-side renewal could not install the wildcard
+                    certificate on {{ $labels.host }}. Every other target is
+                    unaffected, so that host keeps serving the certificate it
+                    already holds until it expires. Check the reload script's
+                    journal on {{ $labels.instance }} and SSH reachability to
+                    the named host.
+
+              # Real notAfter, not time since renewal: issuance is ~60d apart, so
+              # a renewal-timestamp proxy false-fires for most of each cycle. The
+              # absent arm catches a host that stopped emitting the gauge.
+              - alert: CertExpiringSoon
+                expr: (cert_local_expiry_timestamp_seconds - time() < 86400 * 14) or absent(cert_local_expiry_timestamp_seconds)
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#certificates'
+                  summary: 'Host-distributed wildcard certificate expires in under 14 days'
+                  description: >-
+                    The host-distributed wildcard for
+                    ${cluster_internal_domain} is within 14 days of its
+                    notAfter, so renewal and distribution have stopped working,
+                    or the gauge is absent because the host left the inventory.
+                    cert-manager's expiry alerts cover in-cluster certificates,
+                    not this one.
+
+              # This certificate terminates the TLS-required NFS exports and log
+              # ingest as well as web UIs, so expiry is wider than a browser
+              # warning. No absent arm: absence stays warning-tier above.
+              - alert: CertExpiringSoonCritical
+                expr: cert_local_expiry_timestamp_seconds - time() < 86400 * 3
+                for: 1h
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#certificates'
+                  summary: 'Host-distributed wildcard certificate expires in under 3 days'
+                  description: >-
+                    The host-distributed wildcard on {{ $labels.instance }}
+                    expires in {{ $value | humanizeDuration }}. The TLS-required
+                    NFS exports, the resolver's TLS listener and the log-ingest
+                    ingress all break at expiry — renew and redistribute now.
+
+      platform-probes:
+        groups:
+          - name: platform.probes
+            rules:
+              # The 10m hold absorbs brief probe dips. A load-bearing endpoint
+              # gets its own critical rule, matched on instance and paired with
+              # an inhibit. The 1.1.1.1 WAN witness reports the ISP, not this cluster.
+              - alert: EndpointDown
+                expr: max by (instance) (probe_success{instance!~"1\\.1\\.1\\.1"}) == 0
+                for: 10m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: 'Endpoint {{ $labels.instance }} is down'
+                  description: 'Blackbox probe for {{ $labels.instance }} has failed for 10 minutes.'
+
+              - alert: BlackboxExporterDown
+                expr: absent(up{job=~".*blackbox.*"} == 1)
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: 'Blackbox exporter is down'
+                  description: 'All endpoint monitoring is blind — the blackbox exporter has been down for 5 minutes.'
+
+              # Prometheus label matchers are fully anchored, so renaming a probe
+              # target silently empties every rule that selects it by instance.
+              # This names the load-bearing ones, the WAN witness included.
+              - alert: KeyEndpointProbeMissing
+                expr: >-
+                  absent(probe_success{instance="https://auth.${cluster_internal_domain}"})
+                  or absent(probe_success{instance="https://auth.${cluster_external_domain}"})
+                  or absent(probe_success{instance="1.1.1.1"})
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: 'A load-bearing blackbox probe target has no series'
+                  description: >-
+                    One of the probe targets other rules select by instance has
+                    produced no probe_success series for 15 minutes, so those
+                    rules now match nothing. Restore the target in
+                    observability/exporters/blackbox-exporter.yaml, or repoint
+                    every rule that names it.
+
+      platform-dns:
+        groups:
+          - name: platform.dns
+            rules:
+              # external-dns silently owning zero sources is the failure that
+              # looks healthy: the controller is Ready and publishes nothing.
+              - alert: ExternalDNSNoSourceEndpoints
+                expr: max(external_dns_source_endpoints_total) == 0 or absent(external_dns_source_endpoints_total)
+                for: 15m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: 'external-dns sees no source endpoints'
+                  description: >-
+                    external-dns has found no Ingress or Service source for 15
+                    minutes, or exports no source metric at all. Every record it
+                    owns is unmanaged until this clears.
+
+              - alert: ExternalDNSSyncStale
+                expr: >-
+                  time() - max(external_dns_controller_last_sync_timestamp_seconds) > 1800
+                  or absent(external_dns_controller_last_sync_timestamp_seconds)
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: 'external-dns has not synced in over 30 minutes'
+                  description: >-
+                    The last successful external-dns sync is more than 30 minutes
+                    old, or the metric is absent. Check the provider credential
+                    and the controller log.
+
+              # The offset arm proves the 6h lookback holds real samples: a
+              # rebuilt series would otherwise read its own first minutes as the
+              # baseline and page for a drop that never happened.
+              - alert: ExternalDNSRecordsDropped
+                expr: >-
+                  sum(external_dns_registry_records)
+                  < 0.8 * max_over_time(sum(external_dns_registry_records)[6h:15m])
+                  and sum(external_dns_registry_records offset 5h)
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: 'external-dns owns fewer records than it did'
+                  description: >-
+                    The owned-record count has fallen by more than a fifth against
+                    its six-hour peak. A changed annotation prefix or owner id
+                    makes external-dns disown and delete records it created.
+
+      platform-logging:
+        groups:
+          - name: platform.logging
+            rules:
+              # The Loki ruler is the only alert path that does not run through
+              # Prometheus, so nothing else notices when it stops.
+              - alert: LokiRulerRulesMissing
+                expr: (sum(loki_prometheus_rule_group_rules{job="observability/loki"}) or vector(0)) < 1
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: 'The Loki ruler has loaded no rules'
+                  description: >-
+                    The ruler has loaded no rules at all. Check the loki-sc-rules
+                    sidecar and the rule ConfigMap's folder annotation.
+
+              - alert: LokiRulerEvaluationFailures
+                expr: sum(increase(loki_prometheus_rule_evaluation_failures_total{job="observability/loki"}[15m])) > 0
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: 'The Loki ruler is failing rule evaluations'
+                  description: >-
+                    LogQL rule evaluations have failed in the last 15 minutes. The
+                    log-based alerts are not firing while this holds.
+
+              - alert: LokiRulerNotificationFailures
+                expr: >-
+                  sum(increase(loki_prometheus_notifications_errors_total{job="observability/loki"}[15m])) > 0
+                  or max(loki_prometheus_notifications_alertmanagers_discovered{job="observability/loki"}) == 0
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: 'The Loki ruler cannot reach Alertmanager'
+                  description: >-
+                    Notification delivery from the Loki ruler is failing, or the
+                    ruler has discovered no Alertmanager at all, so a firing log
+                    alert never reaches a receiver.
+
+      platform-monitoring:
+        groups:
+          - name: platform.monitoring
+            rules:
+              # Disabled upstream. for: 15m rides out a transient receiver
+              # timeout; the inner `> 0` keeps a healthy gossip peer from flooring min().
+              # Taken from kube-prometheus-stack 91.3.0
+              - alert: AlertmanagerClusterFailedToSendAlerts
+                expr: >-
+                  min by (namespace, service, integration) (
+                  rate(alertmanager_notifications_failed_total{job="kube-prometheus-stack-alertmanager",
+                  container="alertmanager", namespace="observability"}[15m])
+                  / ignoring (reason) group_left
+                  rate(alertmanager_notifications_total{job="kube-prometheus-stack-alertmanager",
+                  container="alertmanager", namespace="observability"}[15m]) > 0
+                  ) > 0.01
+                for: 15m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: 'Alertmanager has failed to notify {{ $labels.integration }} for 15 minutes'
+                  description: >-
+                    Over 1% of notifications to {{ $labels.integration }} have
+                    failed for 15 minutes (currently {{ $value | humanizePercentage }}).
+                    Alerts are being generated but not delivered on that
+                    integration.
+
+      platform-networking:
+        groups:
+          - name: platform.networking
+            rules:
+              # A speaker-less cluster still ASSIGNS every LoadBalancer IP, so
+              # the Services look healthy while nothing announces the VIPs.
+              - alert: MetalLBSpeakerNotScheduled
+                expr: >-
+                  kube_daemonset_status_desired_number_scheduled{namespace="metallb-system",
+                  daemonset="metallb-speaker"} == 0
+                  or absent(kube_daemonset_status_desired_number_scheduled{namespace="metallb-system",
+                  daemonset="metallb-speaker"})
+                for: 10m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'No metallb-speaker pod is scheduled, so no LoadBalancer VIP is announced'
+                  description: >-
+                    The metallb-speaker DaemonSet wants zero pods, or no longer
+                    exists, usually because no node carries the
+                    ${cluster_node_label_domain}/ingress label. MetalLB still assigns EXTERNAL-IPs from the pools, but
+                    every VIP is unreachable.
+
+      platform-backups:
+        groups:
+          - name: platform.backups
+            rules:
+              # Off-node etcd snapshot copy. Losing every server node without an
+              # off-node snapshot loses etcd. 26h = two 12h snapshot cycles; the
+              # absent() arm fires if the copy metric never appears at all.
+              - alert: EtcdSnapshotStale
+                expr: (time() - etcd_snapshot_last_copy_timestamp_seconds > 93600) or absent(etcd_snapshot_last_copy_timestamp_seconds)
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'etcd snapshot off-node copy is stale'
+                  description: >-
+                    The newest off-node etcd snapshot is more than 26 hours old, or
+                    the copy metric is missing. Check the snapshot copy timer on
+                    the server nodes.
+
+              - alert: OffsiteBackupFailed
+                expr: restic_offsite_last_run_success == 0
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Offsite backup run failed'
+                  description: >-
+                    The last offsite backup run exited unsuccessfully. Offsite
+                    durability is at risk — check the backup unit's journal on the
+                    storage host.
+
+              # restic rc=3 is a success with unreadable paths, so the run gauge
+              # above stays 1. The incomplete gauge is sticky until an rc=0 run
+              # clears it, which is what makes the 36h arm span two nights.
+              - alert: OffsiteBackupIncomplete
+                expr: restic_offsite_last_run_incomplete == 1
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'The last offsite backup run skipped unreadable paths'
+                  description: >-
+                    restic exited 3: the snapshot exists but at least one path
+                    could not be read. Check which paths the backup unit logged
+                    on the storage host.
+
+              - alert: OffsiteBackupIncompleteProlonged
+                expr: restic_offsite_last_run_incomplete == 1
+                for: 36h
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Two consecutive offsite backup runs were incomplete'
+                  description: >-
+                    The offsite snapshot has skipped unreadable paths across two
+                    consecutive nightly runs. Whatever cannot be read has not
+                    reached the offsite repository in over a day.
+
+              # 50h tolerates one skipped night. The absent() arm is gated on
+              # ${cluster_offsite_backup_probe_metric} so it stays inert until
+              # the offsite tier is on — see infrastructure/sources/cluster-config.yaml.
+              - alert: OffsiteBackupStale
+                expr: >-
+                  (time() - restic_offsite_last_success_timestamp_seconds > 180000)
+                  or absent({__name__=~"${cluster_offsite_backup_probe_metric}"})
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Offsite backup has not succeeded in over 50 hours'
+                  description: >-
+                    No successful offsite backup in more than 50 hours (one skipped
+                    night plus grace), or the metric is absent.
+
+              # Repository integrity, distinct from upload freshness: an
+              # unverifiable offsite copy defeats the tier. No absent() arm — the
+              # metric only appears after the first verify.
+              - alert: OffsiteBackupVerifyStale
+                expr: >-
+                  (time() - restic_offsite_last_verify_timestamp_seconds > 691200)
+                  or restic_offsite_last_verify_success == 0
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Offsite repository verify is stale (>8d) or failing'
+                  description: >-
+                    The offsite repository has not passed an integrity check in
+                    over 8 days, or the last check failed. Run the verify command
+                    on the storage host before relying on it for recovery.
+
+              # The three LOCAL tiers, all off in a fresh cluster. Each stale arm
+              # is gated on its own probe metric (see cluster-config.yaml), so
+              # the arms stay inert until the tier is turned on.
+              - alert: ArchiveBackupFailed
+                expr: archive_backup_last_run_success == 0
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Archive replication run failed'
+                  description: >-
+                    The last archive replication to the detachable pool exited
+                    with a zfs send/receive error. The offsite tier chains off
+                    this one, so both copies stop ageing forward together.
+
+              - alert: ArchiveBackupStale
+                expr: >-
+                  (time() - archive_backup_last_success_timestamp_seconds > 172800)
+                  or absent({__name__=~"${cluster_archive_backup_probe_metric}"})
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Archive replication has not succeeded in over 2 days'
+                  description: >-
+                    No successful archive replication in more than 48 hours, or
+                    the metric is absent while the tier is enabled.
+
+              # A deferred dataset re-emits its previous success timestamp rather
+              # than zeroing it, so a chronically deferred one still goes stale.
+              - alert: ArchiveBackupDatasetStale
+                expr: time() - archive_backup_dataset_last_success_timestamp_seconds > 172800
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Archive dataset {{ $labels.dataset }} has not replicated in over 2 days'
+                  description: >-
+                    Dataset {{ $labels.dataset }} has had no successful archive
+                    replication for more than 48 hours. A dataset deferred every
+                    run means the vzdump window is overrunning the archive one.
+
+              - alert: VzdumpBackupFailed
+                expr: vzdump_backup_last_run_success == 0
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Proxmox vzdump backup failed on {{ $labels.instance }}'
+                  description: >-
+                    The last vzdump job did not complete successfully. Guest
+                    images are the DR path for every VM and LXC on that host.
+
+              # 36h tolerates one night deferred by planned maintenance. The
+              # unless arm spares a node whose last run succeeded selecting no
+              # guests; a run that failed still pages.
+              - alert: VzdumpBackupStale
+                expr: >-
+                  (
+                    (time() - vzdump_backup_last_success_timestamp_seconds > 129600)
+                    unless on (instance) (
+                      vzdump_backup_guests == 0
+                      and on (instance) vzdump_backup_last_run_success == 1
+                    )
+                  )
+                  or absent({__name__=~"${cluster_vzdump_probe_metric}"})
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Proxmox vzdump backup has not succeeded in over 36 hours'
+                  description: >-
+                    No successful vzdump on {{ $labels.instance }} in more than
+                    36 hours, or the metric is absent while the tier is enabled.
+
+              # The witness for the host VzdumpBackupStale's `unless` arm spares:
+              # a zero-guest run refreshes the timestamp, so nothing else sees it.
+              # The 30d arm spares a host whose guests are all excluded.
+              - alert: VzdumpBackupNoGuests
+                expr: >-
+                  vzdump_backup_guests == 0
+                  and on (instance) vzdump_backup_last_run_success == 1
+                  and on (instance) (max_over_time(vzdump_backup_guests[30d]) > 0)
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Proxmox vzdump on {{ $labels.instance }} backed up no guests'
+                  description: >-
+                    The last vzdump run on {{ $labels.instance }} finished
+                    successfully without starting a single guest backup, so its
+                    success metric and timestamp stay green while nothing new
+                    lands. Check the guest selection on that host's backup
+                    schedule, and that the host still owns guests.
+
+              # /etc/pve holds the cluster CA, node certs and every guest
+              # definition — the first step of rebuilding the cluster itself.
+              - alert: PveClusterBackupFailed
+                expr: pve_cluster_backup_last_run_success == 0
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Proxmox /etc/pve cluster-config backup failed'
+                  description: >-
+                    The nightly /etc/pve tar did not complete. vzdump covers the
+                    guests; this is the DR path for the cluster itself.
+
+              # The Failed arm cannot fire if the timer simply stops: the last
+              # success=1 stays in the textfile forever.
+              - alert: PveClusterBackupStale
+                expr: time() - pve_cluster_backup_last_success_timestamp_seconds > 129600
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Proxmox /etc/pve cluster-config backup has not succeeded in over 36 hours'
+                  description: >-
+                    No successful /etc/pve tar in more than 36 hours — the
+                    pve-cluster-backup timer has probably stopped.
+
+              # Per-app logical dumps landing on the NAS, one series per entry in
+              # nas_storage_backup_artifact_apps.
+              - alert: BackupArtifactStale
+                # The mtime guard keeps a dump that never landed (mtime 0) out of
+                # this arm; BackupArtifactNeverLanded owns that case. One absent()
+                # arm per app, held equal by scripts/check-backup-artifact-apps.py.
+                expr: >-
+                  (backup_artifact_last_mtime_seconds > 0
+                  and time() - backup_artifact_last_mtime_seconds > 180000)
+                  or absent(backup_artifact_last_mtime_seconds{app="authentik"})
+                  or absent({__name__=~"${cluster_backup_artifact_probe_metric}"})
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Backup artifact for {{ $labels.app }} stopped landing'
+                  description: >-
+                    The newest dump for {{ $labels.app }} is more than 50 hours
+                    old, or its series has gone missing while the tier is enabled.
+
+              # mtime 0 is the collector saying nothing matched the app's glob, so
+              # no dump has EVER landed. The window outlasts a full schedule
+              # interval, and unlike a 26h `for:` it survives a restart.
+              - alert: BackupArtifactNeverLanded
+                expr: >-
+                  max_over_time(backup_artifact_last_mtime_seconds[26h]) == 0
+                  and backup_artifact_last_mtime_seconds offset 25h == 0
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'No dump has ever landed for {{ $labels.app }}'
+                  description: >-
+                    Nothing on the NAS matches {{ $labels.app }}'s artifact
+                    pattern. Either the dump job has never run, or it writes
+                    somewhere the collector does not glob.
+
+              # A truncated dump lands with a FRESH mtime, so staleness stays
+              # green. The mtime guard splits no file at all (mtime 0) from a
+              # real, empty one.
+              - alert: BackupArtifactZeroBytes
+                expr: >-
+                  backup_artifact_last_size_bytes == 0
+                  and backup_artifact_last_mtime_seconds > 0
+                for: 1h
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Backup artifact for {{ $labels.app }} landed 0 bytes'
+                  description: >-
+                    The newest dump for {{ $labels.app }} is 0 bytes with a
+                    recent mtime — the run wrote nothing. An empty dump restores
+                    nothing; treat it as no backup for that app tonight.
+{%- endraw %}

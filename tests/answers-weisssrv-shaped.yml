@@ -1,26 +1,20 @@
 ---
-# Answer fixture for the render tests: the same SHAPE as the reference cluster
-# (flat /24 LAN, split-horizon domains, three VIPs, every optional module on)
-# with placeholder identity. No real host, domain or credential appears here —
-# the render tests assert that none of the reference cluster's values survive
-# into a generated repository.
-#
-# Every question in copier.yml must have an entry: `copier copy --defaults`
-# would otherwise fall back to a default, and a question that gains one later
-# would silently stop being exercised.
+# Reference-shaped fixture: flat /24 LAN, split-horizon domains, three VIPs,
+# every optional module on, placeholder identity throughout. Every question
+# needs an entry here, or `--defaults` silently answers it instead.
 cluster_name: homelab
 internal_domain: lan.example.com
 external_domain: example.com
 
-lan_cidr: 192.168.0.0/24
-lan_prefix: 192.168.0
-lan_gateway: 192.168.0.1
-k3s_api_vip: 192.168.0.161
-metallb_public_vip: 192.168.0.100
-metallb_internal_vip: 192.168.0.101
+lan_cidr: 172.19.4.0/24
+lan_prefix: 172.19.4
+lan_gateway: 172.19.4.1
+k3s_api_vip: 172.19.4.161
+metallb_public_vip: 172.19.4.100
+metallb_internal_vip: 172.19.4.101
 k3s_pod_cidr: 10.42.0.0/16
 k3s_service_cidr: 10.43.0.0/16
-upstream_dns_servers: 192.168.0.21 192.168.0.22
+upstream_dns_servers: 172.19.4.21 172.19.4.22
 
 admin_user: ops
 admin_email: ops@example.com
@@ -45,14 +39,16 @@ smtp_host: smtp-relay.lan.example.com
 # Both shipped host-metric sources: the in-cluster DaemonSet and the static
 # scrape of the Proxmox hosts (matches copier.yml's default).
 node_exporter_job_regex: node-exporter|node-exporter-host
+# The reference cluster's kubelet image-gc watermark, so the shaped render is
+# the one this template was extracted from.
+k3s_image_gc_high_threshold: 70
 
 # Every optional module ON: their conditional branches are the ones a
 # defaults-only render would never reach.
 vpn_tailscale: true
-# A real-SHAPED suffix, not the CHANGEME sentinel: the question's validator
-# rejects the placeholder, because a cluster generated with it ships a tailnet
-# resolver CNAMEing internal names into a domain that does not exist — broken
-# remote access with nothing failing to say so.
+# A real-SHAPED suffix, not the CHANGEME sentinel, which the question's
+# validator rejects: a cluster generated with it would CNAME internal names
+# into a domain that does not exist.
 tailnet_dns_suffix: tail1a2b3c.ts.net
 gpu: nvidia
 # The gateway root and its drift-plan job, which exist only under this answer.
@@ -66,3 +62,22 @@ lib_project: eric/weisssrv-lib
 ci_runner_tag: infrastructure
 ci_cpu_selector: lan.example.com/cpu=modern
 enable_semantic_release: false
+
+# Two compose guests, exercising both ends of the optional-section logic: one
+# fully-featured app and one internal service with only a health endpoint.
+compose_app_guests:
+  - host: 172.19.4.56
+    label: nextcloud
+    compose_dir: /mnt/nextcloud-app/compose
+    nginx_cert: /etc/ssl/nextcloud/fullchain.pem
+    backup_glob: /mnt/backups-offsite/nextcloud-db-*.sql.gz
+    backup_timer: nextcloud-backup.timer
+    backup_prom: /var/lib/node_exporter/nextcloud_backup.prom
+  - host: 172.19.4.58
+    label: photos-ml
+    compose_dir: /opt/photos-ml/compose
+    health_url: http://127.0.0.1:3003/ping
+
+license: mit
+license_holder: Ada Lovelace
+license_year: '2026'

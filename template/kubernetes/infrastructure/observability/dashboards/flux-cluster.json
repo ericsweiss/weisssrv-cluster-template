@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Flux CD reconciliation overview (v2.8.5+ metrics)",
+  "description": "Flux CD reconciliation overview",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -397,7 +397,7 @@
         "textMode": "auto"
       },
       "title": "Not Ready Resources",
-      "description": "Flux Kustomizations/HelmReleases/GitRepositories currently reporting ready=False (gotk_resource_info).",
+      "description": "Flux Kustomizations/HelmReleases/GitRepositories currently reporting ready=False (gotk_resource_info). Suspended resources are excluded, matching the FluxResourceNotReady alert.",
       "type": "stat",
       "targets": [
         {
@@ -405,7 +405,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "count(gotk_resource_info{ready=\"False\"}) OR vector(0)",
+          "expr": "count(gotk_resource_info{ready=\"False\", suspended!=\"true\"}) OR vector(0)",
           "legendFormat": "not ready",
           "refId": "A"
         }
@@ -461,7 +461,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "gotk_resource_info{ready=\"False\"}",
+          "expr": "gotk_resource_info{ready=\"False\", suspended!=\"true\"}",
           "format": "table",
           "instant": true,
           "refId": "A"
@@ -496,6 +496,7 @@
       ]
     }
   ],
+  "refresh": "1m",
   "schemaVersion": 39,
   "tags": [
     "flux",

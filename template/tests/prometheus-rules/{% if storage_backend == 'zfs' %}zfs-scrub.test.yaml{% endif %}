@@ -1,0 +1,54 @@
+---
+# promtool unit tests for ZFSPoolScrubStale: a 35-day window needs its own
+# evaluation interval, and the `== 0` arm (never scrubbed) must be told apart
+# from a pool whose last scrub keeps advancing.
+rule_files:
+  - rules.yaml
+evaluation_interval: 6h
+tests:
+  - interval: 1h
+    input_series:
+      # Never scrubbed: the zero arm.
+      - series: 'zfs_pool_status_last_scrub_seconds{pool="never", instance="nas:9101", job="node-exporter-host"}'
+        values: '0+0x860'
+      # Scrubbed once at the epoch: the windowed arm.
+      - series: 'zfs_pool_status_last_scrub_seconds{pool="stale", instance="nas:9101", job="node-exporter-host"}'
+        values: '1+0x860'
+      # Scrubbed on schedule: the timestamp advances with the clock.
+      - series: 'zfs_pool_status_last_scrub_seconds{pool="fresh", instance="nas:9101", job="node-exporter-host"}'
+        values: '3600+3600x860'
+    alert_rule_test:
+      # Inside the 6h hold.
+      - eval_time: 0m
+        alertname: ZFSPoolScrubStale
+        exp_alerts: []
+      - eval_time: 6h
+        alertname: ZFSPoolScrubStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pool: never
+              instance: 'nas:9101'
+              job: node-exporter-host
+      # Past 35 days, inside the stale pool's hold.
+      - eval_time: 846h
+        alertname: ZFSPoolScrubStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pool: never
+              instance: 'nas:9101'
+              job: node-exporter-host
+      - eval_time: 852h
+        alertname: ZFSPoolScrubStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pool: never
+              instance: 'nas:9101'
+              job: node-exporter-host
+          - exp_labels:
+              severity: warning
+              pool: stale
+              instance: 'nas:9101'
+              job: node-exporter-host

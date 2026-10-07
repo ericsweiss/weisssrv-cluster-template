@@ -1,0 +1,220 @@
+# Ansible testing
+
+## What is tested where
+
+| Layer | Lives in | Runs |
+|---|---|---|
+| Per-role Molecule scenarios | **weisssrv-lib**, beside each role in `ansible_collections/weisssrv/infra/roles/<role>/molecule/` | that repo's `molecule-tests` matrix |
+| Multi-role integration stacks | this repo, `ansible/integration-tests/` | `task ansible:test`, and the `integration-tests` matrix job |
+| Static analysis | this repo | `task ansible:lint` (ansible-lint + yamllint over the whole `ansible/` tree) |
+| Production verification | this repo, `playbooks/postflight.yml` | `task infra:verify` |
+
+A role's own behaviour is proven where the role lives. A change to one is
+released as a library tag and adopted here by bumping `requirements.yml`. What
+this repo proves is the composition: that the roles this cluster runs together
+still converge together, against the pinned collection.
+
+The files under `ansible/molecule/` come from weisssrv-lib's `molecule-shared/`.
+Fix one upstream and re-copy it here; a local edit is lost on the next refresh.
+
+## Prerequisites
+
+```bash
+pip install -r ../requirements.txt   # molecule + molecule-plugins[docker], pinned
+docker info                          # Docker must be running
+```
+
+The scenarios pull the published `molecule-test` image from
+`registry.{{ git_host }}/{{ lib_project }}`, at the ref this repository pins.
+That is the same image CI uses. weisssrv-lib and its `molecule-test` and
+`molecule-ci` images must exist on that registry under that path. The
+pipeline's `include: project:` entries already impose the same requirement.
+Override the image a scenario runs:
+
+```bash
+export MOLECULE_TEST_IMAGE=registry.{{ git_host }}/{{ lib_project }}/molecule-test:{{ lib_ref }}
+```
+
+The collection itself is installed by molecule's `galaxy` dependency step from
+`ansible/requirements.yml`, so a scenario always exercises the pinned tag rather
+than whatever is in the operator's collections path.
+
+## Running
+
+```bash
+task ansible:test                       # every stack
+task ansible:test-integration-dns       # one stack (also -mail, -base, -certs{% if storage_backend == 'zfs' %}, -storage{% endif %})
+
+# By hand, from the stack directory:
+cd ansible/integration-tests/dns-stack
+molecule test                           # full cycle
+molecule converge                       # apply only
+molecule verify                         # assertions only, after a converge
+molecule login -h dns-01                # shell into a container
+molecule destroy
+```
+
+`molecule test --destroy=never` keeps the containers for debugging.
+
+## The stacks
+
+A scenario cannot override anything `inventories/prod/group_vars/all.yml`
+defines. The converge play loads all.yml through `vars_files`, which outranks
+both inventory group_vars and the play's own `vars:`. Steer such a key through
+the scenario's `provisioner.env` instead, where all.yml reads it from the
+environment. A key all.yml does not define can live in either place.
+
+The domains, addresses and mailboxes inside a scenario are **fixtures, not site
+data**: `test.local`, `192.0.2.x`, `admin@example.com` and the public resolver
+addresses are there so the assertions read the same on every machine. Leave them
+alone when you re-address the cluster — a scenario that used your real domain
+would pass or fail depending on what DNS answers that day.
+
+### DNS stack — `integration-tests/dns-stack/`
+
+`unbound` + `adguard_home` + `adguard_sync` across two servers (dns-01 primary,
+dns-02 replica) on a shared Docker network.
+
+Asserted: Unbound installs, runs and resolves over DoT; the converge-supplied
+`unbound_forwarders` reach the template (a negative check on a default-only
+forwarder catches a rename silently falling back); AdGuard Home installs, starts
+and answers on :3000; the codified `adguard_home_rewrites` are reconciled onto
+the primary through the role's API path; the sync unit and timer are configured
+and enabled on the primary.
+
+Not asserted: DNS on :53 through AdGuard, and full sync operation. The role
+skips the resolv.conf switch in-container, so AdGuard's own resolution path is
+not representative. `postflight.yml` covers both against the real resolvers.
+
+### Mail stack — `integration-tests/mail-stack/`
+
+`smtp_relay` + `postfix_null_client`: one relay, two clients.
+
+Asserted: the relay's `main.cf` renders from the role defaults merged with the
+scenario's deltas; the SASL password files exist with the right modes on relay
+and clients; the null clients are loopback-only; a client reaches the relay and
+gets an SMTP banner; the alias map rewrites root to the admin address.
+
+Not asserted: delivery to a real upstream smarthost. The credentials are mock,
+so a relayed message stays deferred at the relay, which is what the queue
+assertion keys on.
+
+### Base infrastructure — `integration-tests/base-infrastructure/`
+
+`base` + `qol`{% if vpn_tailscale %} + `tailscale`{% endif %} on two hosts. Asserted: packages, admin user and
+sudoers, timezone, and the zsh/neovim configuration.
+{%- if vpn_tailscale %}
+The Tailscale package lands and the unit is installed and enabled. `tailscale
+up` self-skips because the scenario sets no `TAILSCALE_AUTH_KEY`, which is what
+makes it runnable in a container; the daemon's runtime state is deliberately not
+asserted. The scenario therefore leaves `tailscale_require_authkey` at the role
+default of `false`, while `group_vars/all.yml` sets it to `true` so a real deploy
+without the key fails rather than leaving the host off the tailnet.
+{%- endif %}
+{%- if storage_backend == 'zfs' %}
+
+### Storage stack — `integration-tests/storage-stack/`
+
+`nas_storage` plus a Samba client. Asserted: the rendered `/etc/exports`
+(including an entry with `bind_source`, export-level `xprtsec=tls`, fsid and
+`all_squash` mapping), the Samba configuration and shares, the smartd setup, and
+share listing and writing from the client.
+
+Not asserted: NFS or CIFS client mounts. Docker containers have no kernel NFS
+support and CIFS needs `CAP_SYS_ADMIN`, so server-side render and Samba access
+are the boundary.
+{%- endif %}
+
+### Certificate distribution — `integration-tests/cert-distribution/`
+
+`acme_certs` with SSH distribution: one cert server, two clients. Certificate
+issuance is mocked, with a throwaway CA and wildcard leaf generated locally, so
+what runs is everything after issuance. Asserted: the acme.sh layout and the
+distribution keypair, the reload script and its per-target list, the push to a
+pinned host key, the forced-command receiver with its sudoers drop-in, and a
+real unexpired wildcard certificate landing on each client with the right modes.
+
+Not asserted: real certificate issuance. The mock acme.sh stands in for the
+Cloudflare DNS-01 path, so the hook is only checked for presence.
+
+### Not covered by any stack
+
+The k3s lifecycle (`proxmox_vm` -> k3s server/agent -> `kube_vip`) appears in no
+stack. Its per-role scenarios in weisssrv-lib are render and contract scenarios
+by design: they set `k3s_skip_install`, so the install half is proven only
+against production, by `playbooks/postflight.yml` (`task infra:verify`).
+
+Add a stack here when this cluster starts composing roles the shipped stacks do
+not cover. `scripts/check-integration-matrix-coverage.py` fails when a scenario
+directory has no entry in the CI matrix.
+
+## Idempotence
+
+Every stack runs `idempotence` in its `test_sequence`: converge runs twice and
+the second pass must report zero changes.
+
+A stack that starts failing idempotence usually points at a task in the
+*collection* with a missing `changed_when`, an unconditional file write, or a
+shell command with no `creates:` guard. Fix it in weisssrv-lib.
+
+## Container caveats
+
+Works in a systemd container: package installs, users and groups, file and
+template rendering, systemd unit management, most service starts, Samba.
+
+Does not: ZFS (no kernel modules), NFS client mounts, real block devices,
+`tailscale up`, anything needing a real network peer. Roles expose skip flags
+for exactly these — `nas_storage_skip_zfs_operations`,
+`nas_storage_skip_nfs_reload`, `nas_storage_skip_smartd_service`,
+`base_skip_ssh_config`, `base_skip_dns_config` — and the scenarios set them with
+a comment saying why.
+
+The containers are amd64. On an arm64 workstation Docker needs binfmt/qemu
+emulation, and some scenarios are slow enough that CI is the practical arbiter.
+
+## Expected negative-path failures
+
+No stack declares one. If you add a scenario that drives a guard task to failure
+inside `block`/`rescue`, the junit callback records the raw failure even though
+the rescue handles it. List the task name in
+`molecule/default/expected-junit-failures.txt` and
+`scripts/sanitize-junit-expected-failures.py` (CI's last step, and only on a
+molecule success) downgrades exactly those entries. Undeclared failures stay
+red, and `scripts/molecule-retry.sh` clears the junit directory between attempts
+so a transient first try never uploads alongside a passing retry.
+
+Each line of the file is a case-sensitive substring matched against the junit
+testcase name, and declares one testcase. A line ending in ` ::<n>` declares
+that it may match n of them. Blank lines and `#` comments are ignored.
+
+Keep every pattern narrow. Under `--strict` the gate fails when a declaration
+matches more testcases than it declares, so a broad pattern cannot green-wash a
+real failure elsewhere in the scenario.
+
+Write the case so that a failure anywhere else still reds. Set the sentinel fact
+`false` as the last task inside the `block`, where it runs only if the guard did
+not fail. In the `rescue`, set it `true` behind
+`when: ansible_failed_task.name == '<the guard task name>'`, so an unrelated
+failure leaves the fact `false`. Assert the fact in a task *after* the block, not
+inside the rescue: a rescue that asserts cannot tell a handled guard from a
+broken scenario, and swallows the sentinel either way.
+
+## Pre-deployment checklist
+
+- `task ansible:lint`
+- `task infra:check` (dry-run)
+- `task ansible:test` when a change touches the roles' composition
+
+## Post-deployment
+
+`task infra:verify` runs `playbooks/postflight.yml`: SSH reachability and disk
+headroom on every managed host, service state and a live DNS query on both
+resolvers, the relay's SASL configuration{% if storage_backend == 'zfs' %}, ZFS pool health, mounts, SMART
+and NFS/Samba on the NAS{% endif %}.
+
+## References
+
+- [Molecule](https://molecule.readthedocs.io/)
+- [molecule-plugins (docker driver)](https://github.com/ansible-community/molecule-plugins)
+- weisssrv-lib: the collection README and `MIGRATING.md` for the role-side
+  contract, and that repo's own testing docs for the per-role scenarios

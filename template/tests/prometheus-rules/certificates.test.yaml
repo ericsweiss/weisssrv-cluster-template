@@ -1,0 +1,103 @@
+---
+# The 1h-hold cert alerts: CertRenewalFailed and the two host-distributed expiry
+# arms. The expiry gauge is a constant notAfter, so a healthy fixture sits one
+# day past the budget to pin the threshold from below.
+rule_files:
+  - rules.yaml
+evaluation_interval: 15m
+tests:
+  # A renewal failing from the first sample: silent inside the hold, warning after.
+  - interval: 15m
+    input_series:
+      - series: 'cert_renewal_last_run_success{instance="192.0.2.11:9101"}'
+        values: '0+0x16'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CertRenewalFailed
+        exp_alerts: []
+      - eval_time: 1h15m
+        alertname: CertRenewalFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: '192.0.2.11:9101'
+
+  # A renewal that succeeded: silent.
+  - interval: 15m
+    input_series:
+      - series: 'cert_renewal_last_run_success{instance="192.0.2.11:9101"}'
+        values: '1+0x16'
+    alert_rule_test:
+      - eval_time: 1h15m
+        alertname: CertRenewalFailed
+        exp_alerts: []
+
+  # 13 days to notAfter fires the 14d arm and not the 3d one.
+  - interval: 15m
+    input_series:
+      - series: 'cert_local_expiry_timestamp_seconds{instance="192.0.2.11:9101"}'
+        values: '1123200+0x16'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CertExpiringSoon
+        exp_alerts: []
+      - eval_time: 1h15m
+        alertname: CertExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: '192.0.2.11:9101'
+      - eval_time: 1h15m
+        alertname: CertExpiringSoonCritical
+        exp_alerts: []
+
+  # 15 days out is healthy, one day past the 14d budget.
+  - interval: 15m
+    input_series:
+      - series: 'cert_local_expiry_timestamp_seconds{instance="192.0.2.11:9101"}'
+        values: '1296000+0x16'
+    alert_rule_test:
+      - eval_time: 1h15m
+        alertname: CertExpiringSoon
+        exp_alerts: []
+
+  # No expiry gauge at all: the absent arm fires, and it carries no instance.
+  - interval: 15m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="192.0.2.11:9101"}'
+        values: '1+0x16'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CertExpiringSoon
+        exp_alerts: []
+      - eval_time: 1h15m
+        alertname: CertExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+
+  # 2 days to notAfter escalates to critical.
+  - interval: 15m
+    input_series:
+      - series: 'cert_local_expiry_timestamp_seconds{instance="192.0.2.11:9101"}'
+        values: '172800+0x16'
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: CertExpiringSoonCritical
+        exp_alerts: []
+      - eval_time: 1h15m
+        alertname: CertExpiringSoonCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: '192.0.2.11:9101'
+
+  # 4 days out is healthy, one day past the 3d budget.
+  - interval: 15m
+    input_series:
+      - series: 'cert_local_expiry_timestamp_seconds{instance="192.0.2.11:9101"}'
+        values: '345600+0x16'
+    alert_rule_test:
+      - eval_time: 1h15m
+        alertname: CertExpiringSoonCritical
+        exp_alerts: []

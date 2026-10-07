@@ -12,6 +12,7 @@ resources:
   - middleware.yaml
   - certificate.yaml
   - networkpolicy.yaml
+  - podmonitor.yaml
   - vpa.yaml
   - pg-dump.yaml
 

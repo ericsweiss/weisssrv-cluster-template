@@ -1,7 +1,6 @@
-# Forked from weisssrv-lib `lint/ruff.toml`: same rule selection, tenant-scoped
+# Forked from weisssrv-lib `lint/ruff.toml`: same rule selection, cluster-scoped
 # header. The `python-lint` CI job uses ruff's own config discovery, so this file
-# is what makes the job agree with a local `ruff check` — without it ruff's
-# built-in defaults flag style rules the vendored library scripts do not follow.
+# at the repository root is what makes the job agree with a local `ruff check`.
 target-version = "py39"
 
 [lint]

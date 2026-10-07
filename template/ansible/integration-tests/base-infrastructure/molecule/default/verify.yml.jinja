@@ -1,0 +1,209 @@
+---
+# Base infrastructure verify: the admin account, the base packages and the
+# qol shell.
+{%- raw %}
+
+- name: Verify - Base Infrastructure Integration
+  hosts: all
+  become: true
+  gather_facts: true
+  # admin_user and the rest of the production defaults come from the same file
+  # the converge loads, so these assertions track the inventory.
+  vars_files:
+    - ../../../../inventories/prod/group_vars/all.yml
+
+  tasks:
+    - name: Check admin user exists
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        state: present
+      check_mode: true
+      # NOT `admin_user`: a register of that name would shadow the inventory
+      # variable for every task below.
+      register: admin_user_check
+
+    - name: Assert admin user configured
+      ansible.builtin.assert:
+        that:
+          - admin_user_check is not changed
+        fail_msg: "Admin user '{{ admin_user }}' not configured"
+        success_msg: "Admin user exists"
+
+    - name: Check admin user shell
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ admin_user }}"
+      register: user_info
+
+    - name: Assert admin user has zsh shell
+      ansible.builtin.assert:
+        that:
+          - "'/bin/zsh' in user_info.ansible_facts.getent_passwd[admin_user][5]"
+        fail_msg: "Admin user shell is not /bin/zsh"
+        success_msg: "Admin user shell is /bin/zsh"
+
+    - name: Check sudoers configuration
+      ansible.builtin.stat:
+        path: /etc/sudoers.d/{{ admin_user }}
+      register: sudoers_file
+
+    - name: Assert sudoers file exists
+      ansible.builtin.assert:
+        that:
+          - sudoers_file.stat.exists
+          - sudoers_file.stat.mode == '0440'
+        fail_msg: "Sudoers file missing or wrong permissions"
+        success_msg: "Sudoers configured"
+
+    # curl/git/htop/tmux come from the base role default base_common_packages.
+    - name: Check base packages installed
+      ansible.builtin.package:
+        name:
+          - curl
+          - git
+          - htop
+          - tmux
+        state: present
+      check_mode: true
+      register: base_pkgs
+      failed_when: base_pkgs is changed
+
+    - name: Assert base packages installed
+      ansible.builtin.assert:
+        that:
+          - base_pkgs is not changed
+        fail_msg: "Base packages not installed"
+        success_msg: "Base packages installed"
+
+    - name: Check timezone configuration
+      ansible.builtin.stat:
+        path: /etc/localtime
+      register: timezone_link
+
+    - name: Assert timezone is configured
+      ansible.builtin.assert:
+        that:
+          - timezone_link.stat.exists
+          - timezone_link.stat.islnk
+          - timezone in timezone_link.stat.lnk_source
+        fail_msg: "Timezone not configured correctly"
+        success_msg: "Timezone configured"
+
+    - name: Check Oh My Zsh installed
+      ansible.builtin.stat:
+        path: /home/{{ admin_user }}/.oh-my-zsh
+      register: ohmyzsh_dir
+
+    - name: Assert Oh My Zsh installed
+      ansible.builtin.assert:
+        that:
+          - ohmyzsh_dir.stat.exists
+          - ohmyzsh_dir.stat.isdir
+        fail_msg: "Oh My Zsh not installed"
+        success_msg: "Oh My Zsh installed"
+
+    - name: Check .zshrc exists
+      ansible.builtin.stat:
+        path: /home/{{ admin_user }}/.zshrc
+      register: zshrc_file
+
+    - name: Assert .zshrc configured
+      ansible.builtin.assert:
+        that:
+          - zshrc_file.stat.exists
+        fail_msg: ".zshrc not configured"
+        success_msg: ".zshrc configured"
+
+    - name: Check zsh plugins in .zshrc
+      ansible.builtin.command: sed -n '/^plugins=(/,/^)/p' /home/{{ admin_user }}/.zshrc  # noqa: command-instead-of-module
+      register: zsh_plugins_check
+      changed_when: false
+      failed_when: false
+
+    - name: Assert zsh plugins configured
+      ansible.builtin.assert:
+        that:
+          - "'git' in zsh_plugins_check.stdout"
+          - "'docker' in zsh_plugins_check.stdout"
+          - "'kubectl' in zsh_plugins_check.stdout"
+        fail_msg: "Zsh plugins not configured correctly"
+        success_msg: "Zsh plugins configured"
+
+    - name: Check Vundle installed
+      ansible.builtin.stat:
+        path: /home/{{ admin_user }}/.vim/bundle/Vundle.vim
+      register: vundle_dir
+
+    - name: Assert Vundle installed
+      ansible.builtin.assert:
+        that:
+          - vundle_dir.stat.exists
+          - vundle_dir.stat.isdir
+        fail_msg: "Vundle not installed"
+        success_msg: "Vundle installed"
+
+    - name: Test zsh is functional
+      become: true
+      become_user: "{{ admin_user }}"
+      ansible.builtin.shell: zsh -c 'echo $SHELL'
+      register: zsh_test
+      changed_when: false
+
+    - name: Assert zsh works
+      ansible.builtin.assert:
+        that:
+          - "'/bin/zsh' in zsh_test.stdout"
+        fail_msg: "Zsh not functional"
+        success_msg: "Zsh functional"
+{%- endraw %}
+{%- if vpn_tailscale %}
+{%- raw %}
+
+    - name: Check Tailscale apt source
+      ansible.builtin.stat:
+        path: /etc/apt/sources.list.d/tailscale.list
+      register: tailscale_source
+
+    - name: Assert Tailscale apt source exists
+      ansible.builtin.assert:
+        that:
+          - tailscale_source.stat.exists
+        fail_msg: "Tailscale apt source not configured"
+        success_msg: "Tailscale apt source configured"
+
+    - name: Check Tailscale package installed
+      ansible.builtin.command: dpkg -l tailscale
+      register: tailscale_pkg
+      changed_when: false
+      failed_when: false
+
+    # The role dpkg-holds tailscale, which flips dpkg -l's desired-state column
+    # from i to h: an installed+held package lists as "hi", not "ii".
+    - name: Assert Tailscale package installed (held)
+      ansible.builtin.assert:
+        that:
+          - tailscale_pkg.rc == 0
+          - tailscale_pkg.stdout is search('^[hi]i\s+tailscale', multiline=True)
+        fail_msg: "Tailscale package not installed (dpkg -l shows no ii/hi tailscale line)"
+        success_msg: "Tailscale package installed (dpkg-held)"
+
+    # Installed+enabled, not running: without an auth key the role never runs
+    # `tailscale up`, and tailscaled runtime in a container is not something
+    # this scenario should depend on.
+    - name: Check Tailscale daemon unit
+      ansible.builtin.systemd:
+        name: tailscaled
+      check_mode: true
+      register: tailscaled_service
+      failed_when: false
+
+    - name: Assert tailscaled unit is installed and enabled
+      ansible.builtin.assert:
+        that:
+          - tailscaled_service.status.UnitFileState | default('') == 'enabled'
+        fail_msg: >-
+          tailscaled unit is not installed+enabled
+          (UnitFileState={{ tailscaled_service.status.UnitFileState | default('ABSENT') }})
+        success_msg: "tailscaled unit installed and enabled"
+{%- endraw %}
+{%- endif %}

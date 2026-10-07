@@ -1,13 +1,13 @@
+{%- import "partials/links.jinja" as links with context -%}
 # {{ cluster_name }}
 
 Infrastructure as code for the **{{ cluster_name }}** cluster: Proxmox hosts and
 guests configured by Ansible, external state managed by Terraform, and
 everything inside Kubernetes reconciled from `kubernetes/` by Flux.
 
-Generated from
-[weisssrv-cluster-template](https://git.ericsweiss.com/eric/weisssrv-cluster-template);
-`.copier-answers.yml` records the answers and the template ref, and `copier
-update` replays them against a newer version.
+Generated from the weisssrv-cluster-template copier template.
+`.copier-answers.yml` records its URL in `_src_path` alongside the answers and
+the template ref, and `copier update` replays them against a newer version.
 
 ## This cluster
 
@@ -40,9 +40,15 @@ First time only, in this order. Each phase leaves a working state.
    `{{ lib_ref }}`, not vendored, so nothing Ansible-shaped works before this.
 3. **Inventory** — fill in `hosts.yml` (every name and address in it is a
    placeholder), the pools and exports in `group_vars/nas.yml`, and the platform
-   defaults in `group_vars/all.yml`. Then `task hosts:sync` and
-   `task flux:sync-versions`, committing the generated files.
-4. **Gates** — `task lib:sync`, then `task lint` and `task ansible:ping` must
+   defaults in `group_vars/all.yml`. Then `task hosts:sync`,
+   `task flux:sync-versions` and `task flux:sync-host-log-staleness`,
+   committing the generated files. All three are drift-gated by `task lint`
+   and the CI repo-sync job, so skipping one reds step 4. An LXC
+   application host must also be listed under `lxc_containers`: the maintenance
+   reboot play asserts it determined an installed kernel, and an LXC has no
+   kernel package of its own.
+4. **Gates** — `pip install -r requirements.txt`, `task lib:sync`, then
+   `task lint` and `task ansible:ping` must
    both be clean. `lib:sync` clones weisssrv-lib at `{{ lib_ref }}` into
    `.weisssrv-lib/`: it is the source the vendored `scripts/` copies are
    refreshed from, and the checkout the vendored-copy gate inside `task lint`
@@ -61,9 +67,14 @@ First time only, in this order. Each phase leaves a working state.
    then `task certs:show-host-keys` and paste each pin into
    `_acme_certs_targets` in `ansible/inventories/prod/group_vars/dns.yml`, then
    one manual `acme.sh --issue` on `dns-01` (the certificate play prints the
-   exact command), then a full `task infra:deploy`. A single pass instead stops
-   on the storage host, where `nfs_tls` hard-fails on the missing certificate.
-   SETUP.md § 4 walks it, and `docs/RUNBOOKS.md` § Certificates has it too.
+   exact command), then `task disaster-recovery:storage-bootstrap` to create
+   the datasets `group_vars/nas.yml` declares inside the hand-made pools, then
+   a full `task infra:deploy`. `nas_storage` fails loudly on a declared dataset
+   that does not exist rather than creating it (`docs/RUNBOOKS.md` § Storage
+   bootstrap). A single pass instead stops on the storage host, where `nfs_tls`
+   hard-fails on the missing certificate.
+   The cluster template's `docs/SETUP.md` § 4 walks it, and
+   `docs/RUNBOOKS.md` § Certificates has it too.
 6. **Kubernetes nodes** — `task k3s:provision-vms`, `task k3s:deploy`,
    `task k3s:kubeconfig`, then `export KUBECONFIG=~/.kube/config-k3s`.
 7. **GitOps** — put `1password-credentials.json` in this repository's root, run
@@ -84,14 +95,33 @@ First time only, in this order. Each phase leaves a working state.
 9. **Single sign-on** — the platform is green but nothing can be signed into
    yet: Grafana is SSO-only and its identity provider is this cluster's own
    Authentik, freshly deployed and empty. Run the one-time
-   `https://auth.{{ internal_domain }}/if/flow/initial-setup/` flow (available
-   only until an admin exists), mint an `akadmin` token into the vault, then
+   `https://auth.{{ external_domain }}/if/flow/initial-setup/` flow (available
+   only until an admin exists) from a machine already using the new resolvers
+   (step 5). That external name is the canonical origin Authentik builds its
+   links from, and `group_vars/dns.yml` answers it with the internal VIP on the
+   LAN; `kubernetes/apps/authentik/README.md` has the detail. Then mint an
+   `akadmin` token into the vault and run
    `task terraform:authentik-init`, `task terraform:authentik-plan`,
-   `task terraform:authentik-apply`. SETUP.md § 7 step 4 covers the group
-   membership and the two `Grafana SSO` fields that must be real values.
+   `task terraform:authentik-apply`. The cluster template's `docs/SETUP.md`
+   § 7 step 4 covers the group membership and the two `Grafana SSO` fields that
+   must be real values.
 
-The long form, with what each phase actually does and what to check:
-[SETUP.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/SETUP.md).
+Once the cluster is up, a few one-time follow-ups:
+
+- `pre-commit install` in your checkout. It runs the secret scan and yamllint
+  before each commit, the last local gate before a credential reaches a remote.
+- Create the two pipeline schedules in Settings -> CI/CD -> Schedules, both on
+  `main`: a weekly one with `SCHEDULE_TYPE=version-bump` for the upstream
+  version bot, and a nightly one with `SCHEDULE_TYPE=full-test` that runs the
+  integration tests as a canary for upstream image and package rot. Neither job
+  runs without its schedule (`docs/ci-pipeline.md` § Version bumps).
+- Review the inherited version holds in `scripts/version-registry.py` and
+  confirm each still applies to this cluster.
+- Set `require_cluster_root: true` in `.gitlab-ci.yml` now that `flux-system`
+  exists: it is what fails a cluster that has LOST its Flux content.
+
+The long form, with what each phase actually does and what to check: the
+cluster template's `docs/SETUP.md`.
 
 ## Everyday operations
 
@@ -106,6 +136,9 @@ task infra:verify             # confirm it converged
 task k3s:status               # nodes, etcd, workloads
 task maintenance:check-versions
 ```
+
+`task lint` runs locally on the pinned toolchain: `pip install -r
+requirements.txt`. Every gate's precondition names the tool it is missing.
 
 ## How changes ship
 
@@ -126,6 +159,24 @@ task maintenance:check-versions
   `weisssrv.infra.<role>` by FQCN, pinned at `{{ lib_ref }}` in
   `ansible/requirements.yml`. A role change happens in the library, not here.
 
+## Applications
+
+What is reachable, and what guards it. Add a row per application you deploy;
+keep it a table, never a block per app.
+
+| Application | Hostnames | Authentication | Doc |
+|---|---|---|---|
+| Authentik | `auth.{{ external_domain }}` (public), `auth.{{ internal_domain }}` (LAN{% if vpn_tailscale %} and tailnet{% endif %} only) | its own login | `kubernetes/apps/authentik/README.md` |
+| Grafana | `grafana.{{ internal_domain }}` | Authentik OIDC; the login form and basic auth are off | `kubernetes/infrastructure/observability/README.md` |
+| Traefik dashboard | `traefik.{{ internal_domain }}` | none — a strict LAN{% if vpn_tailscale %}/tailnet{% endif %} allowlist is the whole control | `kubernetes/infrastructure/controllers/traefik/` |
+{% if secrets_backend == 'onepassword' %}| 1Password Connect | `connect.{{ internal_domain }}` | token, behind the same strict allowlist | `kubernetes/infrastructure/configs/onepassword-connect-ingress.yaml` |
+{% endif %}| vm-ingress example | `example.{{ internal_domain }}` | none — the worked example, replace it | `kubernetes/apps/vm-ingress/README.md` |
+
+Two facts cut across every row. The OIDC issuer host is the **external** name
+for every consumer — one issuer, or tokens fail across applications. And an app
+behind forward-auth is only as private as its NetworkPolicy: the middleware
+guards the ingress path, not the Service.
+
 ## Layout
 
 ```
@@ -133,14 +184,17 @@ ansible/
   requirements.yml           the platform collection, pinned
   inventories/prod/          this cluster's hosts, groups and per-host facts
   playbooks/                 site, base, dns, storage, k3s, maintenance/
+  integration-tests/         the multi-role molecule stacks
+  TESTING.md                 what is tested where, and the container caveats
 terraform/                   public DNS{% if vpn_tailscale %}, tailnet policy{% endif %}, SSO objects{% if use_unifi %}, gateway networks{% endif %}
 kubernetes/
-  clusters/{{ cluster_name }}/  Flux entrypoint and the stage Kustomizations
+{{ '%-29s' | format('  clusters/' ~ cluster_name ~ '/') }}Flux entrypoint and the stage Kustomizations
   infrastructure/            sources → crds → controllers → configs → observability
   apps/                      one directory per application
 scripts/                     verification, generators, the version registry
-docs/                        RUNBOOKS.md, ci-pipeline.md — and anything you add
+docs/                        RUNBOOKS.md, ci-pipeline.md, security-posture.md{% if use_unifi %}, unifi-network.md{% endif %}
 Taskfile.yml                 every operation
+taskfiles/                   one file per task namespace
 ```
 
 ## Reference
@@ -150,8 +204,55 @@ Taskfile.yml                 every operation
   points here, so keep its section headings stable.
 - [docs/ci-pipeline.md](docs/ci-pipeline.md) — what the pipeline runs and what
   it needs from the GitLab instance
-- [ARCHITECTURE.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/ARCHITECTURE.md)
-  — the Flux stage graph, substitution model, storage tiers, DNS split, backups
-- [weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib) — the roles, CI
-  templates and Terraform modules this cluster is assembled from, pinned at
-  `{{ lib_ref }}`. Role variables are documented in each role's README there.
+- [docs/security-posture.md](docs/security-posture.md) — the at-rest and
+  in-transit ledger: what is encrypted here and what is not. Fill in its
+  `Confirm` rows as you bring the cluster up
+{%- if use_unifi %}
+- [docs/unifi-network.md](docs/unifi-network.md) — the VLANs, zone firewall and
+  WLANs `terraform/unifi` manages. Its § Site settings table is held against
+  `networks.tf` by a gate, so edit both together.
+{%- endif %}
+- the cluster template's `docs/ARCHITECTURE.md` — the Flux stage graph,
+  substitution model, storage tiers, DNS split, backups
+- [weisssrv-lib]({{ links.lib_home() }}) — the roles, CI templates and Terraform
+  modules this cluster is assembled from, pinned at `{{ lib_ref }}`. Role
+  variables are documented in each role's README there.
+
+**Agent guidance**: coding agents start from the
+[`cluster-development` skill](.claude/skills/cluster-development/SKILL.md) — it
+maps the workflow, the pre-merge gates and the change-type decision tree onto the
+documents above. `CLAUDE.md` and `AGENTS.md` defer to it.
+
+### Documentation conventions
+
+The documents above are the set this cluster ships with. Anything you add
+follows the same rules.
+
+- **Declare the source of truth** in the first paragraph of any document whose
+  subject is also described elsewhere, and link rather than restate. An
+  enumeration that must stay exact — apps, exports, namespaces, version pins —
+  names the file that generates it.
+- **An app README** (`kubernetes/apps/<app>/README.md`) covers what lives in that
+  folder. Role READMEs live with the roles, in the platform collection.
+- **No table of contents.** The heading structure is the navigation; a hand-kept
+  table of contents only adds a second thing to drift.
+- **Cross-links in a document you add go in a `## Related documentation` section
+  at the foot**, holding internal links only, with third-party reading in an
+  `## External references` list below it. `docs/RUNBOOKS.md` keeps its own
+  `## Where the platform is documented` for the upstream-repository table.
+- **Wrap prose at about 100 columns.** Tables, code blocks and URLs are exempt.
+- **Commands are repository-root-relative** unless the document says otherwise,
+  because that is the form the `task` wrappers and CI present.
+- **A superseded document keeps its filename** and gains a status banner under
+  its H1. It is never silently deleted: older merge requests and runbooks link
+  to it.
+- Every relative `.md` link is checked in CI, so a rename that breaks a
+  cross-link fails the pipeline.
+
+{% if license == 'mit' %}## License
+
+MIT — see [LICENSE](LICENSE).
+
+{% endif %}Generated from weisssrv-cluster-template `{{ _copier_answers.get('_commit', 'HEAD') }}`.
+The weisssrv-lib link above points at its default branch; check out
+`{{ lib_ref }}` if it has moved on.

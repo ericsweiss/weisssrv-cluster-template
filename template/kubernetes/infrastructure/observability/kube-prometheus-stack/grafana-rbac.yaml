@@ -1,19 +1,7 @@
 ---
-# Replacement for the grafana subchart's own ClusterRole + ClusterRoleBinding,
-# selected by `grafana.rbac.create: false` in release.yaml.
-#
-# The chart hard-codes `resources: ["configmaps", "secrets"]` whenever a sidecar
-# is enabled, so a stock install gives the Grafana ServiceAccount cluster-wide
-# `secrets` get/list/watch — every credential in the cluster, on a user-facing
-# web app reachable from the LAN. Nothing here needs Secrets: both sidecars are
-# pinned to `resource: configmap` in release.yaml, so re-adding `secrets` takes
-# two deliberate edits.
-#
-# BOTH objects, and NOT `rbac.useExistingClusterRole`: that keeps the chart's
-# fixed-name binding and only swaps its roleRef, which is IMMUTABLE — the apply
-# is rejected, and because the binding sorts before the Deployment the whole
-# release upgrade rolls back on every reconcile. Disabling the chart's RBAC
-# instead makes the binding below a distinct object with its own name.
+# Replaces the grafana subchart's ClusterRole+Binding (grafana.rbac.create:
+# false). The chart's version grants cluster-wide secrets get/list/watch
+# whenever a sidecar is on; both sidecars here read ConfigMaps only.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -27,9 +15,6 @@ rules:
     verbs: ["get", "watch", "list"]
 
 ---
-# The binding, since the chart's own is disabled. The subject must stay in step
-# with the chart's ServiceAccount name (`<releaseName>-grafana`); the sidecars
-# mount that SA's token through the projected volume in release.yaml.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

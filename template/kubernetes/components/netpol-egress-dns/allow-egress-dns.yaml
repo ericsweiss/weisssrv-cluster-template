@@ -1,4 +1,7 @@
 ---
+# The peer is two facts ANDed: the `kube-system` namespace and the pod label
+# `k8s-app: kube-dns`. CoreDNS labelled otherwise (the upstream chart uses
+# `k8s-app: coredns`) matches nothing, and every namespace here resolves nothing.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

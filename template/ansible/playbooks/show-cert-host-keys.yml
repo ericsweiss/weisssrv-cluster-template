@@ -1,13 +1,7 @@
 ---
 # Capture the SSH host key of every certificate-distribution target and print it
-# in a paste-ready form for _acme_certs_targets (group_vars/dns.yml).
-#
-# It scans _acme_certs_targets — the FULL list — not the filtered
-# acme_certs_distribution_targets the role consumes: an unpinned target is
-# exactly the one whose key you are here to capture.
-#
-# The cert push uses StrictHostKeyChecking=yes against a pinned key, so a
-# rebuilt target fails the push loudly until you re-capture it here.
+# ready to paste into _acme_certs_targets (group_vars/dns.yml). The cert push
+# pins the key, so a rebuilt target fails until it is re-captured here.
 
 - name: Show SSH host keys for certificate distribution targets
   hosts: dns_primary

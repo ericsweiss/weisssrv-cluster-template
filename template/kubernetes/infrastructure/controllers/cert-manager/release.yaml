@@ -1,8 +1,7 @@
 ---
-# CRDs: this chart ships them as templates gated by values.crds.enabled (not a
-# crds/ directory), so Flux's install/upgrade crds policy has no effect —
-# crds.enabled is what manages them and crds.keep is what stops an uninstall or
-# a failed-install remediation from taking every Certificate with it.
+# This chart ships CRDs as templates gated by values.crds.enabled, not a crds/
+# directory, so Flux's crds policy has no effect. crds.keep stops an uninstall
+# or a failed-install remediation from taking every Certificate with it.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -46,6 +45,23 @@ spec:
       limits:
         memory: 128Mi
     webhook:
+      # 2 replicas + pdb.yaml: the webhook validates every cert-manager CR write
+      # on a failurePolicy: Fail path, so a single pod fails those writes closed
+      # while it drains for an unattended kured reboot.
+      replicaCount: 2
+      # CRITICAL: DoNotSchedule, not ScheduleAnyway. With both replicas on one
+      # node the pdb.yaml minAvailable: 1 refuses the second eviction and the
+      # drain never finishes. No nodeSelector here, so every node is eligible.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          matchLabelKeys:
+            - pod-template-hash
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: webhook
+              app.kubernetes.io/instance: cert-manager
       resources:
         requests:
           cpu: 50m

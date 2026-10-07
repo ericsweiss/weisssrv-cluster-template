@@ -1,0 +1,18 @@
+# Python toolchain for local Ansible, Molecule and the `task lint` gates.
+# Exact pins, not lower bounds, so a local checkout and CI resolve the same
+# tools; the molecule CI images build from their own pins in weisssrv-lib.
+
+# ansible and ruff are mirrored in .gitlab-ci.yml (ANSIBLE_VERSION and the
+# python-lint include's ruff_version); tests/test_site_configs.py fails on drift.
+ansible==11.6.0
+ansible-lint==25.12.2
+# black is a transitive dep (ansible-lint's jinja rule imports it); the black
+# 26.5.x wheels ship a broken mypyc extension that makes ansible-lint fail to
+# load. Lift once 26.5.x is fixed.
+black<26.5.0
+molecule==26.4.0
+molecule-plugins[docker]==25.8.12
+pytest==9.1.1
+pyyaml==6.0.2
+ruff==0.16.7
+yamllint==1.38.0

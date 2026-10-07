@@ -1,0 +1,373 @@
+# infrastructure/observability
+
+The platform observability stage: Prometheus + Alertmanager + Grafana
+(kube-prometheus-stack), Loki, the Alloy log-collector DaemonSet, the blackbox
+prober, the platform dashboards, and the internal ingress for Grafana and the
+Loki push API.
+
+Reconciled by the `infrastructure-observability` Flux Kustomization
+(`dependsOn: infrastructure-configs`). A failure here must never block the
+`apps` stage — the two are siblings, not a chain. The `monitoring.coreos.com`
+CRDs every ServiceMonitor and PrometheusRule here depends on are installed by
+the separate `infrastructure-crds` stage; this stage consumes them and must not
+ship them.
+
+## No site literals
+
+Nothing in this directory contains a domain, an IP, or a hostname. Every
+site-specific value arrives at reconcile time from the `cluster-config`
+ConfigMap via `postBuild.substituteFrom` (chart/image versions come from the
+sibling `cluster-versions` ConfigMap the same way). Adding a hostname literal
+here is a regression — put it in `cluster-config` instead. The gate that proves
+it reads the dashboard JSON as well as the manifests, so a
+`probe_success{instance="https://git.example.com"}` literal in a new app
+dashboard reds it.
+
+### `cluster-config` keys this directory consumes
+
+| Key | Example | Used by |
+|---|---|---|
+| `cluster_internal_domain` | `int.example.com` | Grafana root URL + OIDC, ingress hosts, certs, SMTP/relay host, blackbox module |
+| `cluster_external_domain` | `example.com` | blackbox external probe |
+| `cluster_issuer` | `letsencrypt-prod` | Certificates |
+| `cluster_secret_store` | `onepassword-cluster` | ExternalSecrets |
+| `cluster_secrets_provider_namespace` | `external-secrets` | `SecretsProviderDown` target — follows the secrets backend through cluster-config |
+| `cluster_secrets_provider_deployment` | `onepassword-connect` | `SecretsProviderDown` target — follows the secrets backend through cluster-config |
+| `cluster_node_label_domain` | `int.example.com` | storage-node affinity + tolerations, `MetalLBSpeakerNotScheduled` description |
+| `cluster_nas_host` | `nas-01.int.example.com` | Grafana NFS PV server — a HOSTNAME, never an IP: the exports require TLS and the wildcard certificate carries no IP SAN, so an IP mount fails the handshake |
+| `cluster_smtp_host` | `smtp-relay.int.example.com` | Alertmanager `smtp_smarthost` |
+| `cluster_alert_email` | `ops@example.com` | Alertmanager critical receiver |
+| `cluster_api_vip` | `10.0.0.161` | blackbox API-VIP probe |
+| `cluster_etcd_endpoints` | `'["10.0.0.31", "10.0.0.32", "10.0.0.33"]'` | `kubeEtcd` scrape targets — a JSON flow sequence, see below |
+| `cluster_node_exporter_host_addresses` | `'[{"addresses": ["10.0.0.11"], "conditions": {"ready": true}}, …]'` | `exporters/node-exporter-host.yaml` EndpointSlice roster — also a flow sequence |
+| `cluster_unbound_exporter_addresses` | `'[{"addresses": ["10.0.0.21"], "conditions": {"ready": true}}, …]'` | `exporters/unbound-exporter.yaml` roster, one entry per resolver |
+| `cluster_zfs_exporter_addresses` | `'[{"addresses": ["10.0.0.11"], "conditions": {"ready": true}}]'` | `exporters/zfs-exporter.yaml` roster (ZFS storage backend only) |
+| `cluster_offsite_backup_probe_metric` | `up` | gates `OffsiteBackupStale`'s `absent()` arm — see `platform.backups` |
+| `cluster_archive_backup_probe_metric` | `up` | gates `ArchiveBackupStale`'s `absent()` arm — see `platform.backups` |
+| `cluster_vzdump_probe_metric` | `up` | gates `VzdumpBackupStale`'s `absent()` arm — see `platform.backups` |
+| `cluster_backup_artifact_probe_metric` | `backup_artifact_last_mtime_seconds` | gates `BackupArtifactStale`'s `absent()` arm — see `platform.backups` |
+| `cluster_runbook_base_url` | `https://git.example.com/ops/cluster/-/blob/main/docs` | every alert's `runbook_url` (see below) |
+| `cluster_node_exporter_job_regex` | `node-exporter\|node-exporter-host` | node/storage alert job scoping — see below |
+
+### `cluster-versions` keys this directory consumes
+
+`helm_chart_versions_kube_prometheus_stack`, `helm_chart_versions_loki`,
+`helm_chart_versions_alloy`, `helm_chart_versions_prometheus_blackbox_exporter`.
+
+## Alert rules
+
+The custom rules live in `additionalPrometheusRulesMap` inside
+`kube-prometheus-stack/release.yaml`, in these platform groups. That map holds
+platform-wide rules only: a rule about one app ships as a `PrometheusRule` in
+that app's own directory, as `apps/registry-cache/prometheusrule.yaml` does.
+
+| Group | Covers |
+|---|---|
+| `platform.storage` | filesystem bytes/inodes, PVC usage, stray dynamically-provisioned PVs |
+| `platform.nodes` | node memory pressure, stuck cordon, stuck kured reboot, deferred maintenance reboot |
+| `platform.resources` | container memory held near its own limit, working set and RSS |
+| `platform.gitops` | Flux reconcile errors, durable `Ready=False` on any Flux resource |
+| `platform.secrets` | ExternalSecret sync failures, secrets-provider Deployment down |
+| `platform.certificates` | cert-manager expiry (warning/critical), edge-cert expiry via blackbox, host-side renewal and its per-target distribution, host-distributed wildcard expiry |
+| `platform.probes` | blackbox endpoint down, prober down, a load-bearing probe target missing |
+| `platform.dns` | external-dns: no source endpoints, stale sync, records disowned |
+| `platform.logging` | Loki ruler health: rules loaded, evaluation and notification failures |
+| `platform.monitoring` | Alertmanager notification delivery |
+| `platform.networking` | no metallb-speaker pod scheduled, so no LoadBalancer VIP is announced |
+| `platform.backups` | etcd off-node snapshot freshness, offsite/archive/vzdump/per-app dump freshness |
+
+`platform.backups` reads textfile metrics that only exist because the host
+node-exporter job below is scraped. `OffsiteBackupStale`'s `absent()` arm is
+gated by `${cluster_offsite_backup_probe_metric}`, which ships as `up` (inert) —
+flip it to `restic_offsite_last_success_timestamp_seconds` in the same change
+that sets `restic_offsite_enabled: true`, or that arm stays switched off. The
+gate is a metric name rather than a boolean because `${...}` is only valid PromQL
+inside a quoted string, and these rules are linted before substitution.
+
+Every rule that reads a textfile-collector series needs a companion rule on that
+collector's own success or last-success series. A stopped timer, an unreadable
+source file or a renamed key makes the first rule match zero series, and a rule
+that matches nothing never fires. The `node_exporter_host` role README names the
+witness metric each collector emits.
+
+Every rule carries a `runbook_url` pointing at
+`${cluster_runbook_base_url}/RUNBOOKS.md`, with four anchors —
+`#backups-and-restore`, `#certificates`, `#storage`, `#where-to-look-first`. Keep
+that file and those headings, or repoint the annotations: an alert whose runbook
+404s at 03:00 is worse than one with no link at all.
+
+Validate rule changes before pushing — `scripts/lint-prometheus-config.sh`
+extracts this map and runs `promtool check rules` over it, which catches a bad
+PromQL expression that schema validation cannot see.
+
+Derive every log-volume threshold from the live baseline before shipping the
+rule. Query Loki over 24h and 7d, note the per-window peak, and put the measured
+baseline in a one-line comment beside the threshold so a later reader can tell a
+tuned number from a guess. promtool does not check a threshold against the
+normal rate, so a rule that ships under its own baseline alerts permanently from
+its first evaluation. A `> 0` threshold is only right for a log line whose
+baseline really is zero, and the comment should say so.
+
+**App alerts do not go here.** An app module ships its own `PrometheusRule` CR
+next to its manifests. Only rules about the *platform* belong in the release
+values.
+
+Discovery is cluster-wide for both rules and monitors: the release sets
+`ruleSelectorNilUsesHelmValues: false`,
+`serviceMonitorSelectorNilUsesHelmValues: false`,
+`podMonitorSelectorNilUsesHelmValues: false` and the matching
+`*NamespaceSelector: {}`, so a `PrometheusRule`, `ServiceMonitor` or
+`PodMonitor` in any namespace is selected without a release label. Left at the
+chart defaults the selector becomes `matchLabels: {release: <release>}` and
+every unlabelled object is ignored silently.
+
+### The node-exporter job regex
+
+Every rule the chart ships from the upstream node-exporter mixin is hard-scoped
+to `job="node-exporter"` — the in-cluster DaemonSet. A cluster that also scrapes
+bare-metal or VM hosts with a second job (the `node_exporter_host` role's
+`:9101` targets, conventionally `job="node-exporter-host"`) gets **no** upstream
+coverage on those host targets: no filesystem, no NIC-error, no textfile-scrape
+alerts.
+
+The rules in this repo therefore never hardcode the job. They select
+`job=~"${cluster_node_exporter_job_regex}"`. The filesystem panels in
+`dashboards/cluster-overview.json` follow the same rule.
+
+**This cluster ships that second job.** `exporters/node-exporter-host.yaml` is a
+selectorless headless `Service` + a hand-maintained `EndpointSlice`
+(`discovery.k8s.io/v1`, not the deprecated core/v1 `Endpoints`) +
+a `ServiceMonitor` with `jobLabel: app.kubernetes.io/name`, giving
+`job="node-exporter-host"` over the `:9101` exporters the `node_exporter_host`
+Ansible role installs on the Proxmox hosts, the resolver and relay LXCs, and the
+k3s servers. That layer carries the hardware metrics (hwmon, SMART, NIC, disk
+I/O) no VM can see, and the textfile metrics — off-node etcd snapshot freshness,
+offsite-backup timestamps — that `platform.backups` alerts on.
+
+Both `node-exporter` and `node-exporter-host` must stay in
+`cluster_node_exporter_job_regex`: the host rules select on it, so dropping
+either makes every filesystem, inode and node-condition rule for those targets
+match zero series — and a rule that matches nothing never fires. The shipped
+default is correct and copier's validator refuses a value that drops either
+job; extend the alternation only when you add a third exporter source.
+
+The address roster itself lives with `cluster_node_exporter_host_addresses` in
+`infrastructure/sources/cluster-config.yaml` (a JSON flow sequence, same reason
+as the etcd endpoints), annotated host by host. The k3s **agents** are
+deliberately excluded: the in-cluster DaemonSet already covers them on `:9100`,
+and listing them would double every agent's series under two jobs.
+
+Re-check that roster on every inventory change. A host listed there but not yet
+running the role scrapes as `up == 0`, which is visible; a host running the role
+and missing from the roster is invisible.
+
+### The other two host exporters
+
+`exporters/unbound-exporter.yaml` (`:9167`, every resolver) and
+`exporters/zfs-exporter.yaml` (`:9134`, the storage node, ZFS backend only) have
+the same shape and take their rosters from `cluster_unbound_exporter_addresses`
+and `cluster_zfs_exporter_addresses`. Both ship the **scrape only** — their
+series are there for dashboards and for rules you add, and no shipped rule
+selects them.
+
+Pool integrity is not built on `zfs_exporter`. The four `ZFSPool*` rules in group
+`platform.storage` read `zfs_pool_status_*`, which the `node_exporter_host` zpool
+textfile collector emits for **every** host with a pool rather than only the
+storage node. That collector follows `node_exporter_host_proxmox`, which
+`group_vars/proxmox.yml` sets true, so the rules work on a fresh cluster.
+
+## Blackbox probe targets
+
+`exporters/blackbox-exporter.yaml` ships a starter target list: only endpoints
+this template guarantees exist, each composed from `cluster-config` so there are
+no literals to update when the domain changes. Add your own to that list, using
+one of the modules defined in the same file (`http_2xx`, `http_sso`,
+`dns_resolution`, `icmp_ping`, `tcp_connect`):
+
+```yaml
+        - name: dns-01
+          url: 10.0.0.150:53        # a site address; prefer a cluster-config key
+          module: dns_resolution
+        - name: public-ingress
+          url: https://www.${cluster_external_domain}
+          module: http_2xx
+```
+
+A target that is legitimately offline much of the time needs its own gated
+alert, not a bare `EndpointDown`.
+
+## Dashboards
+
+`dashboards/README.md` lists the platform set, where each one came from and
+what a new dashboard must satisfy; the directory is the inventory, and that
+table follows it. Each is a `configMapGenerator` entry with
+`disableNameSuffixHash: true` — the name must stay stable or the Grafana sidecar
+loses track of it and orphans accumulate.
+
+Add an app dashboard by dropping the JSON next to the app's manifests with the
+`grafana_dashboard: "1"` label and a `grafana_folder` annotation; the sidecar
+searches all namespaces.
+
+Imported dashboards carry local changes. `dashboards/README.md` records each
+one's grafana.com id, revision and every local edit; re-import from grafana.com
+and re-apply that column.
+
+## Grafana is SSO-only, and that is enforced in three places
+
+`kube-prometheus-stack` ships a built-in `admin` account whose password is a
+**well-known chart default** (`prom-operator`), and that account is a Grafana
+Admin — it can query every datasource, edit dashboards and mint API tokens.
+Disabling the login form alone does not close it: the form is a browser affordance,
+while HTTP basic auth against `/api/...` is a separate path that keeps working.
+
+The release values therefore set both of:
+
+| Setting | Closes |
+|---|---|
+| `auth.disable_login_form: true` | the browser login form |
+| `auth.basic.enabled: false` | `curl -u admin:<password> .../api/...` |
+
+and replace the chart's well-known default password
+(`prom-operator`) with an ESO-managed one:
+`grafana.admin.existingSecret: observability-secrets`, reading
+`grafana-admin-user` / `grafana-admin-password`. The account therefore *exists*
+but authenticates through no open path.
+
+`security.disable_initial_admin_creation` is deliberately **not** set, even
+though it looks like the strictest option. Grafana creates the built-in admin
+only while the user table is empty, so suppressing it means the account can
+never be created at all: after the first OIDC login the table is non-empty, and
+flipping the setting back later re-opens the login form against a database that
+contains no admin. `grafana cli admin reset-admin-password` fails the same way
+("Could not find user named admin"), leaving hand-editing `grafana.db` on the PV
+as the only way back in. A password-protected account behind two closed doors is
+the safer trade.
+
+Authorization then comes entirely from the OIDC role mapping
+(`GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH`): the first member of the admin
+group to sign in becomes a Grafana Admin. Two consequences:
+
+- **Running without an identity provider** means deleting both settings *and*
+  the OIDC block. The vault-backed admin account is then the only way in, which
+  is why it is wired up from the start.
+- **Break-glass** (the IdP is down, or a group-mapping mistake in the IdP locks
+  everyone out): set `auth.disable_login_form: false` and
+  `auth.basic.enabled: true`, reconcile, and sign in as `admin` with the vault's
+  `Grafana SSO` → `admin-password`. Fix the IdP, then revert both. Do not leave
+  that state committed.
+
+### The admin password is applied once, at the first start
+
+Grafana reads `GF_SECURITY_ADMIN_PASSWORD` only while it is creating the
+account, and `persistence.enabled: true` means the database outlives the pod,
+so there is never a second first start. The vault's `admin-password` must
+therefore be its final value before this stage first reconciles; changing it
+later does nothing to the account on its own. Resetting or rotating it:
+`docs/RUNBOOKS.md` § Locked out of Grafana.
+
+Closing the basic-auth path is also why both Grafana sidecars run with
+`skipReload: true` — their default behaviour is to POST Grafana's
+`/api/admin/provisioning/*/reload` endpoint using that same admin account, which
+would now only ever log a 401. Dashboards are unaffected (Grafana's file
+provisioner rescans on its own interval). **Datasources are not**: Grafana reads
+those files only at startup, and the Prometheus datasource itself arrives as a
+sidecar-discovered ConfigMap — so `sidecar.datasources.initDatasources: true`
+runs the sidecar as an init container as well, guaranteeing the files exist
+before Grafana boots. Keep `skipReload` and `initDatasources` together; the
+chart documents them as a pair.
+
+## Grafana RBAC and alert routing
+
+The chart's own ClusterRole is replaced (`grafana.rbac.create: false`), not
+reused through `rbac.useExistingClusterRole`. Reusing it keeps the chart's
+fixed-name binding and only swaps its `roleRef`, which is immutable: the apply
+is rejected, and because the binding sorts before the Deployment, the whole
+release upgrade rolls back on every reconcile.
+
+The node-outage inhibition suppresses per-pod and per-workload warnings
+**cluster-wide** — the target alertnames carry no node label, so no `equal:` is
+possible. Criticals, `EndpointDown` and `TargetDown` are never inhibited, and
+the source is the bounded `NodeOutageStormControl` rule, which stops firing 7d
+after the node was last Ready. The `Watchdog` route is a dead man's switch: it
+must stay ahead of the `severity=none` null route, and the external heartbeat is
+the only signal that survives a total observability-plane outage, loss of DNS
+included.
+
+## Resolver assumption
+
+The template deploys and scrapes the AdGuard + Unbound stack from
+`ansible/playbooks/dns.yml`. A cluster using a different recursive resolver
+drops that playbook, removes `unbound-exporter.yaml` from
+`exporters/kustomization.yaml` and clears `cluster_unbound_exporter_addresses`
+in `cluster-config` — otherwise the ServiceMonitor targets stay permanently
+`up == 0` and feed `TargetDown`.
+
+## etcd
+
+`kubeEtcd` is **enabled**. k3s serves etcd metrics on `:2381` over plain HTTP on
+every server node, and enabling this component is what turns on the upstream
+etcd rule group — quorum loss, leader flapping, DB-size growth, fsync latency —
+on the one component whose failure loses the cluster.
+
+Its `endpoints` list is the single site value here that cannot be an ordinary
+substitution, because Helm needs a real YAML list rather than a string. It comes
+from `${cluster_etcd_endpoints}` in `cluster-config`, stored as a **JSON flow
+sequence** (`'["10.0.0.31", "10.0.0.32", "10.0.0.33"]'`) so that it parses as a
+list once Flux substitutes it inline. Re-address the server nodes and update
+that key in the same change; a stale entry shows up as a permanently-down etcd
+target and an `etcdMembersDown` alert, never as silence.
+
+{% if gpu == 'nvidia' %}## GPU telemetry
+
+The device plugin advertises the card to the scheduler but exports no metrics:
+no utilisation, VRAM, temperature, power or per-pod attribution. NVIDIA's DCGM
+exporter fills the gap. See `docs/RUNBOOKS.md` § Adding DCGM GPU telemetry for
+the four steps.
+
+{% endif %}## Loki ruler
+
+`loki/kustomization.yaml` generates rule ConfigMaps labelled `loki_rule: "1"`
+and annotated `k8s-sidecar-target-directory: /rules/fake`. That chain is subtle
+and load-bearing: `auth_enabled: false` makes the single tenant `fake`, and the
+ruler's local storage scans `<directory>/<tenant>/`, so the files must land in
+`/rules/fake` or the ruler silently loads nothing.
+
+## Secrets backend seam
+
+Three ExternalSecrets live here (Grafana OIDC credentials, the Alertmanager
+config template, the Loki push basic-auth htpasswd). They reference the
+`ClusterSecretStore` named by `${cluster_secret_store}` and address items by
+provider-native `key`/`property`. Swapping the secrets backend means replacing
+that one store — the manifests here only need their `remoteRef` addressing
+adjusted to the new provider's convention.
+
+## Network policy
+
+`networkpolicy.yaml` carries the pod-layer allows for this namespace. The
+ingress default-deny underneath them comes from the `netpol-baseline`
+component, applied by this stage's `kustomization.yaml`.
+
+Egress is deliberately open. The exporters, Alertmanager and Prometheus reach a
+wide LAN surface — host exporters, the relay, the gateway — and an egress policy
+here would have to restate the whole site roster to stay correct.
+
+## Storage assumptions
+
+A generated cluster has **no default StorageClass**: k3s local-storage is
+disabled, so every PV is static. A PVC that omits `storageClassName` stays
+Pending, and a chart that provisions its own needs `storageClassName: ""` or
+whatever sentinel that chart uses for "none".
+
+Prometheus and Loki bind statically-provisioned local PVs
+(`storageClassName: ""`, node-affinity on the `${cluster_node_label_domain}/nas`
+label); Grafana binds an NFS PV. A cluster with a real CSI driver can replace
+`storage.yaml` in each directory with a `storageClassName` and delete the
+`volumeName`/`existingClaim` pins — nothing else changes.
+
+`loki/nodeport.yaml` is deliberately **not** reconciled. An always-on NodePort is
+an unauthenticated Loki push/read path on every node IP that bypasses the
+basic-auth ingress. It does **not** bypass the NetworkPolicy: `allow-loki-ingress`
+admits port 3100 from the Traefik namespace only, and a NodePort push arrives with
+the node's own address, so a collector needs a temporary `ipBlock` allow as well.
+The recipe and its teardown are in `docs/RUNBOOKS.md`, under "Loki push emergency
+fallback".

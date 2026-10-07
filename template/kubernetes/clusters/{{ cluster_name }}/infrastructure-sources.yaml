@@ -1,16 +1,10 @@
 ---
-# Stage 1/5 — HelmRepository sources plus the two substitution ConfigMaps
-# (cluster-versions, cluster-config) every later stage reads.
-#
-# optional:true on both, and ONLY here: this stage CREATES those ConfigMaps, so
-# on a fresh bootstrap they do not exist yet and a required reference would
-# deadlock. Nothing in sources/ carries a ${placeholder}, so tolerating the
-# miss costs nothing. Every downstream stage sets optional:false.
-#
-# wait:false — the stage only declares CRs that are usable the moment they are
-# applied. Waiting for every chart index fetch would let one transient registry
-# outage stall the whole crds -> controllers -> configs chain; helm-controller
-# already waits for each chart's own repo before pulling.
+# Stage 1/5 — HelmRepository sources plus the cluster-versions and
+# cluster-config ConfigMaps every later stage reads. No postBuild: this stage
+# creates them and carries no placeholders of its own.
+
+# wait:false: these CRs are usable the moment they are applied, and waiting on
+# chart index fetches would stall the crds -> controllers -> configs chain.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
@@ -26,11 +20,3 @@ spec:
   path: ./kubernetes/infrastructure/sources
   prune: true
   wait: false
-  postBuild:
-    substituteFrom:
-      - kind: ConfigMap
-        name: cluster-versions
-        optional: true
-      - kind: ConfigMap
-        name: cluster-config
-        optional: true

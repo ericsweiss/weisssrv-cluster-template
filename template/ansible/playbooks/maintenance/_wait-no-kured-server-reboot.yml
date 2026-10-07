@@ -1,21 +1,15 @@
 ---
-# etcd-quorum guard. Block until no k3s SERVER node is mid-kured-reboot, so an
-# operation that briefly drops THIS server's etcd member never coincides with
-# kured rebooting another one.
-#
-# Caller MUST set kured_clear_delegate (a server that stays reachable throughout
-# the operation — never the one going down). kured_clear_reason is a label.
+# etcd-quorum guard. Block until no k3s SERVER node is mid-kured-reboot.
+# Caller MUST set kured_clear_delegate to a server that stays reachable
+# throughout the operation; kured_clear_reason is a label.
 
 - name: "Wait for kured to not be rebooting any k3s server ({{ kured_clear_reason | default('etcd quorum') }})"
   ansible.builtin.shell: |
     set -o pipefail
     for n in {{ groups['k3s_servers'] | join(' ') }}; do
-      # A server is ACTIVELY rebooting only if it is BOTH annotated AND cordoned:
-      # kured writes the annotation before it checks its reboot blockers and does
-      # not clear it when blocked, so annotated-but-schedulable means blocked or
-      # stale, not mid-reboot. Waiting on that would hang forever.
-      # Fail CLOSED on a kubectl error: an unreadable node cannot prove the
-      # cluster is safe.
+      # A server is actively rebooting only when annotated AND cordoned: kured
+      # keeps the annotation while blocked, so annotated-but-schedulable is not
+      # mid-reboot. A kubectl error fails closed.
       st=$(k3s kubectl get node "$n" \
         -o jsonpath='{.metadata.annotations.weave\.works/kured-reboot-in-progress}{" "}{.spec.unschedulable}' \
         2>/dev/null) || st=KUBECTL_ERR

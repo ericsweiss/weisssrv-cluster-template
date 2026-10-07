@@ -1,0 +1,63 @@
+---
+# promtool unit tests for the node alerts whose logic is more than a threshold:
+# NodeOutageStormControl, whose `and` joins on the full label set, and
+# NodeExporterHealthcheckRestartLoop, which counts restarts inside a window.
+rule_files:
+  - rules.yaml
+evaluation_interval: 5m
+tests:
+  - interval: 5m
+    input_series:
+      # The exporter pod that saw node-a Ready, then goes away.
+      - series: 'kube_node_status_condition{node="node-a", condition="Ready", status="true", job="kube-state-metrics", instance="10.42.1.4:8080", pod="kube-state-metrics-aaa"}'
+        values: '1+0x60'
+      # Its replacement: same node, new pod and instance, Ready then NotReady.
+      - series: 'kube_node_status_condition{node="node-a", condition="Ready", status="true", job="kube-state-metrics", instance="10.42.1.5:8080", pod="kube-state-metrics-bbb"}'
+        values: '_x61 1+0x12 0+0x24'
+      # Never Ready: a node that never joined is not an outage.
+      - series: 'kube_node_status_condition{node="node-b", condition="Ready", status="true", job="kube-state-metrics", instance="10.42.1.5:8080", pod="kube-state-metrics-bbb"}'
+        values: '0+0x97'
+    alert_rule_test:
+      # Inside the 5m hold.
+      - eval_time: 6h10m
+        alertname: NodeOutageStormControl
+        exp_alerts: []
+      - eval_time: 6h30m
+        alertname: NodeOutageStormControl
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              node: node-a
+              condition: Ready
+              status: 'true'
+              job: kube-state-metrics
+              instance: '10.42.1.5:8080'
+              pod: kube-state-metrics-bbb
+
+  # The healthcheck gauge is a restart timestamp, so the signal is how often it
+  # changes: three restarts inside an hour, not any single restart.
+  - interval: 5m
+    input_series:
+      # Restarting every 15 minutes: four changes inside any 1h window.
+      - series: 'node_exporter_healthcheck_last_restart_timestamp_seconds{instance="192.0.2.11:9101"}'
+        values: '100+0x2 200+0x2 300+0x2 400+0x2 500+0x2 600+0x2 700+0x2 800+0x2'
+      # One restart, then quiet: a single recovery is not a loop.
+      - series: 'node_exporter_healthcheck_last_restart_timestamp_seconds{instance="192.0.2.12:9101"}'
+        values: '100+0x11 200+0x11'
+    alert_rule_test:
+      # Inside the 15m hold.
+      - eval_time: 55m
+        alertname: NodeExporterHealthcheckRestartLoop
+        exp_alerts: []
+      - eval_time: 1h5m
+        alertname: NodeExporterHealthcheckRestartLoop
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: '192.0.2.11:9101'
+      - eval_time: 1h30m
+        alertname: NodeExporterHealthcheckRestartLoop
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: '192.0.2.11:9101'

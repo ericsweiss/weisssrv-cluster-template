@@ -39,7 +39,7 @@ configure and how to remove it.
 
 The registration *scope* is the security boundary, not the tag: tags are
 cooperative routing, and any project on the instance can write
-`tags: [{{ ci_runner_tag | default('infrastructure') }}]` in its own
+`tags: [{{ ci_runner_tag }}]` in its own
 `.gitlab-ci.yml`. Registered instance-wide, that one line gets an arbitrary
 authenticated user root + Docker-in-Docker execution on this cluster, on a runner
 that also holds SSH reach to the hosts. Nothing in this repository can check the

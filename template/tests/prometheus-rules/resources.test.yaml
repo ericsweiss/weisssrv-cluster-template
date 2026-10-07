@@ -1,0 +1,58 @@
+---
+# promtool unit tests for the memory-ceiling pair. Both are a ratio against the
+# container's own limit, and the working-set rule's `unless` arm is what hands
+# the page-cache-dominated observability containers to the RSS rule.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # ContainerMemoryNearLimit: an ordinary container at 95% of its limit fires;
+  # grafana at the same ratio is excluded, because page cache is reclaimable.
+  - interval: 1m
+    input_series:
+      - series: 'container_memory_working_set_bytes{namespace="traefik", pod="traefik-0", container="traefik"}'
+        values: '95+0x30'
+      - series: 'kube_pod_container_resource_limits{resource="memory", namespace="traefik", pod="traefik-0", container="traefik"}'
+        values: '100+0x30'
+      - series: 'container_memory_working_set_bytes{namespace="observability", pod="grafana-0", container="grafana"}'
+        values: '95+0x30'
+      - series: 'kube_pod_container_resource_limits{resource="memory", namespace="observability", pod="grafana-0", container="grafana"}'
+        values: '100+0x30'
+    alert_rule_test:
+      # Inside the 15m hold.
+      - eval_time: 10m
+        alertname: ContainerMemoryNearLimit
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ContainerMemoryNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: traefik
+              pod: traefik-0
+              container: traefik
+
+  # PageCacheWorkloadRSSNearLimit: RSS is the non-reclaimable half, so
+  # prometheus near its ceiling fires here while loki with room stays quiet.
+  - interval: 1m
+    input_series:
+      - series: 'container_memory_rss{namespace="observability", pod="prometheus-0", container="prometheus"}'
+        values: '95+0x30'
+      - series: 'kube_pod_container_resource_limits{resource="memory", namespace="observability", pod="prometheus-0", container="prometheus"}'
+        values: '100+0x30'
+      - series: 'container_memory_rss{namespace="observability", pod="loki-0", container="loki"}'
+        values: '50+0x30'
+      - series: 'kube_pod_container_resource_limits{resource="memory", namespace="observability", pod="loki-0", container="loki"}'
+        values: '100+0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PageCacheWorkloadRSSNearLimit
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PageCacheWorkloadRSSNearLimit
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: observability
+              pod: prometheus-0
+              container: prometheus

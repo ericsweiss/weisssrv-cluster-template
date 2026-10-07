@@ -1,0 +1,313 @@
+---
+- name: Verify - Storage Stack (NAS Server Configuration)
+  hosts: nas_servers
+  become: true
+  gather_facts: true
+
+  tasks:
+    # NFS Configuration Verification
+    # (Service may not run, but config should be correct)
+    - name: Check NFS server package is installed
+      ansible.builtin.package:
+        name: nfs-kernel-server
+        state: present
+      check_mode: true
+      register: nfs_installed
+
+    - name: Assert NFS server is installed
+      ansible.builtin.assert:
+        that:
+          - not nfs_installed.changed
+        fail_msg: "NFS server package not installed"
+        success_msg: "NFS server package is installed"
+
+    - name: Check NFS exports file exists
+      ansible.builtin.stat:
+        path: /etc/exports
+      register: exports_file
+
+    - name: Assert NFS exports file exists
+      ansible.builtin.assert:
+        that:
+          - exports_file.stat.exists
+        fail_msg: "NFS exports file missing"
+        success_msg: "NFS exports file exists"
+
+    - name: Read NFS exports content
+      ansible.builtin.command: cat /etc/exports
+      register: exports_content
+      changed_when: false
+
+    - name: Log NFS exports configuration
+      ansible.builtin.debug:
+        msg: "NFS exports:\n{{ exports_content.stdout }}"
+
+    - name: Assert NFS exports contain expected paths
+      ansible.builtin.assert:
+        that:
+          - "'/tank/media' in exports_content.stdout"
+          - "'/tank/share' in exports_content.stdout"
+          - "'172.16.0.0/12' in exports_content.stdout"
+          - "'rw,sync,no_subtree_check,no_root_squash' in exports_content.stdout"
+        fail_msg: "NFS exports missing expected configuration"
+        success_msg: "NFS exports configured correctly"
+
+    # Prod-shaped export (bind_source + xprtsec + fsid + all_squash mapping) —
+    # asserts the schema production actually uses renders correctly, not just
+    # the legacy path-only shape above.
+    - name: Assert prod-shaped TLS export rendered correctly
+      ansible.builtin.assert:
+        that:
+          - "'/export/appdata' in exports_content.stdout"
+          - "'xprtsec=tls' in exports_content.stdout"
+          - "'fsid=11' in exports_content.stdout"
+          - "'all_squash,anonuid=1000,anongid=2000' in exports_content.stdout"
+        fail_msg: "Prod-shaped export (/export/appdata bind + xprtsec=tls) did not render"
+        success_msg: "Prod-shaped TLS export rendered correctly"
+
+    - name: Check bind mount for prod-shaped export is live
+      ansible.builtin.command: findmnt /export/appdata
+      register: appdata_bind
+      changed_when: false
+
+    - name: Assert bind mount is live
+      ansible.builtin.assert:
+        that:
+          - appdata_bind.rc == 0
+        fail_msg: "/export/appdata bind mount not mounted"
+        success_msg: "/export/appdata bind mount is live"
+
+    # Samba Server Verification
+    # (Samba works fully in Docker containers)
+    - name: Check Samba package is installed
+      ansible.builtin.package:
+        name: samba
+        state: present
+      check_mode: true
+      register: samba_installed
+
+    - name: Assert Samba is installed
+      ansible.builtin.assert:
+        that:
+          - not samba_installed.changed
+        fail_msg: "Samba package not installed"
+        success_msg: "Samba package is installed"
+
+    - name: Check Samba configuration file exists
+      ansible.builtin.stat:
+        path: /etc/samba/smb.conf
+      register: smb_conf
+
+    - name: Assert Samba configuration exists
+      ansible.builtin.assert:
+        that:
+          - smb_conf.stat.exists
+        fail_msg: "Samba configuration file missing"
+        success_msg: "Samba configuration file exists"
+
+    - name: Read Samba configuration
+      ansible.builtin.command: cat /etc/samba/smb.conf
+      register: smb_conf_content
+      changed_when: false
+
+    - name: Log Samba configuration
+      ansible.builtin.debug:
+        msg: "Samba configuration:\n{{ smb_conf_content.stdout }}"
+
+    - name: Assert Samba configuration contains expected shares
+      ansible.builtin.assert:
+        that:
+          - "'[media]' in smb_conf_content.stdout"
+          - "'[share]' in smb_conf_content.stdout"
+          - "'/tank/media' in smb_conf_content.stdout"
+          - "'/tank/share' in smb_conf_content.stdout"
+        fail_msg: "Samba configuration missing expected shares"
+        success_msg: "Samba shares configured correctly"
+
+    - name: Validate Samba configuration syntax
+      ansible.builtin.command: testparm -s /etc/samba/smb.conf
+      register: testparm_result
+      changed_when: false
+
+    - name: Assert Samba configuration is valid
+      ansible.builtin.assert:
+        that:
+          - testparm_result.rc == 0
+        fail_msg: "Samba configuration has syntax errors"
+        success_msg: "Samba configuration syntax is valid"
+
+    - name: Check smbd service status
+      ansible.builtin.systemd:
+        name: smbd
+      register: smbd_status
+
+    - name: Log smbd service status
+      ansible.builtin.debug:
+        msg: "smbd status: {{ smbd_status.status.ActiveState }} ({{ smbd_status.status.SubState }})"
+
+    - name: Assert smbd is running
+      ansible.builtin.assert:
+        that:
+          - smbd_status.status.ActiveState == "active"
+        fail_msg: "smbd service is not running"
+        success_msg: "smbd service is running"
+
+    - name: Check Samba is listening on port 445
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 445
+        timeout: 5
+      register: samba_port
+
+    # Anonymous access is hardened off (restrict anonymous); the listing
+    # contract is now: -N is DENIED, authenticated as nas succeeds.
+    - name: Anonymous share listing is denied
+      ansible.builtin.command: smbclient -L localhost -N
+      register: anon_samba_shares
+      changed_when: false
+      failed_when: false
+
+    - name: Assert anonymous listing is rejected
+      ansible.builtin.assert:
+        that:
+          - anon_samba_shares.rc != 0
+        fail_msg: "Anonymous smbclient listing unexpectedly succeeded (hardening regression)"
+        success_msg: "Anonymous listing correctly denied"
+
+    - name: List local Samba shares (authenticated)
+      ansible.builtin.command: smbclient -L localhost -U nas
+      environment:
+        PASSWD: "{{ lookup('ansible.builtin.env', 'SAMBA_NAS_PASSWORD') }}"
+      register: local_samba_shares
+      changed_when: false
+
+    - name: Log local Samba shares
+      ansible.builtin.debug:
+        msg: "Local Samba shares:\n{{ local_samba_shares.stdout }}"
+
+    - name: Assert local Samba shares are visible
+      ansible.builtin.assert:
+        that:
+          - "'media' in local_samba_shares.stdout"
+          - "'share' in local_samba_shares.stdout"
+        fail_msg: "Expected Samba shares not visible locally"
+        success_msg: "Samba shares are visible locally"
+
+    # Service Status Summary
+    - name: Check NFS service status (informational only)
+      ansible.builtin.systemd:
+        name: nfs-kernel-server
+      register: nfs_status
+      failed_when: false
+
+    - name: Log NFS service status
+      ansible.builtin.debug:
+        msg: |
+          NFS Server Status (may not be running in Docker - expected):
+          - LoadState: {{ nfs_status.status.LoadState | default('unknown') }}
+          - ActiveState: {{ nfs_status.status.ActiveState | default('unknown') }}
+          Note: NFS requires kernel modules which may not work in Docker
+
+- name: Verify - Storage Stack (Samba Client Connectivity)
+  hosts: smb_clients
+  become: true
+  gather_facts: true
+
+  tasks:
+    # Samba Client Connectivity Tests
+    - name: Check smbclient is installed
+      ansible.builtin.package:
+        name: smbclient
+        state: present
+      check_mode: true
+      register: smbclient_installed
+
+    - name: Assert smbclient is installed
+      ansible.builtin.assert:
+        that:
+          - not smbclient_installed.changed
+        fail_msg: "smbclient package not installed"
+        success_msg: "smbclient package is installed"
+
+    - name: Test Samba connectivity to nas-server
+      ansible.builtin.command: smbclient -L //nas-server -U nas
+      environment:
+        PASSWD: "{{ lookup('ansible.builtin.env', 'SAMBA_NAS_PASSWORD') }}"
+      register: smb_list
+      changed_when: false
+
+    - name: Log available Samba shares on nas-server
+      ansible.builtin.debug:
+        msg: "Available shares on nas-server:\n{{ smb_list.stdout }}"
+
+    - name: Assert can list Samba shares from client
+      ansible.builtin.assert:
+        that:
+          - smb_list.rc == 0
+          - "'media' in smb_list.stdout"
+          - "'share' in smb_list.stdout"
+        fail_msg: "Cannot list Samba shares from client"
+        success_msg: "Can list Samba shares from client"
+
+    - name: Test reading from media share
+      ansible.builtin.command: smbclient //nas-server/media -U nas -c "ls"
+      environment:
+        PASSWD: "{{ lookup('ansible.builtin.env', 'SAMBA_NAS_PASSWORD') }}"
+      register: smb_media_ls
+      changed_when: false
+
+    - name: Log media share contents
+      ansible.builtin.debug:
+        msg: "Media share contents:\n{{ smb_media_ls.stdout }}"
+
+    - name: Assert can read from media share
+      ansible.builtin.assert:
+        that:
+          - smb_media_ls.rc == 0
+          - "'test.txt' in smb_media_ls.stdout"
+        fail_msg: "Cannot read from media share"
+        success_msg: "Can read from media share"
+
+    - name: Test reading from share share
+      ansible.builtin.command: smbclient //nas-server/share -U nas -c "ls"
+      environment:
+        PASSWD: "{{ lookup('ansible.builtin.env', 'SAMBA_NAS_PASSWORD') }}"
+      register: smb_share_ls
+      changed_when: false
+
+    - name: Log share contents
+      ansible.builtin.debug:
+        msg: "Share contents:\n{{ smb_share_ls.stdout }}"
+
+    - name: Assert can read from share
+      ansible.builtin.assert:
+        that:
+          - smb_share_ls.rc == 0
+          - "'test.txt' in smb_share_ls.stdout"
+        fail_msg: "Cannot read from share"
+        success_msg: "Can read from share"
+
+    # The media share is read-write for `nas`, so a failed put is a regression,
+    # not an expected outcome — assert it rather than tolerating any rc.
+    - name: Test writing to media share
+      ansible.builtin.command: >
+        smbclient //nas-server/media -U nas -c "put /etc/hostname client_test.txt"
+      environment:
+        PASSWD: "{{ lookup('ansible.builtin.env', 'SAMBA_NAS_PASSWORD') }}"
+      register: smb_write_test
+      changed_when: false
+
+    - name: Verify written file exists
+      ansible.builtin.command: smbclient //nas-server/media -U nas -c "ls client_test.txt"
+      environment:
+        PASSWD: "{{ lookup('ansible.builtin.env', 'SAMBA_NAS_PASSWORD') }}"
+      register: smb_verify_write
+      changed_when: false
+
+    - name: Assert write was successful
+      ansible.builtin.assert:
+        that:
+          - smb_write_test.rc == 0
+          - "'client_test.txt' in smb_verify_write.stdout"
+        fail_msg: "Write verification failed"
+        success_msg: "Write verification successful"

@@ -1,0 +1,12 @@
+---
+# Molecule prepare playbook: the shared container initialization every
+# scenario needs before its role runs.
+- name: Prepare
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Apply the shared systemd-wait + temp-dir prep
+      ansible.builtin.import_tasks: tasks/prepare-base.yml
+
+    - name: Disable apt background services
+      ansible.builtin.import_tasks: tasks/prepare-apt-disable.yml

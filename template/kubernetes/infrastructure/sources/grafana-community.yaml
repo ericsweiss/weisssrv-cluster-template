@@ -1,4 +1,5 @@
 ---
+# The OSS Loki chart lives here, not in grafana/, which is the GEL chart.
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata:

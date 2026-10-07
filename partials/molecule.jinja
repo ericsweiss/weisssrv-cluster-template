@@ -1,0 +1,70 @@
+{#- The one home for the shape every integration-test scenario repeats: the
+    systemd-container platform body, the galaxy pin, the two env vars each
+    scenario needs, and the test sequence. Conventions: ansible/TESTING.md. -#}
+{%- macro systemd_platform(network, capabilities=[], tmpfs=['/run', '/tmp'], groups=[]) %}
+      image: "${MOLECULE_TEST_IMAGE:-registry.{{ git_host }}/{{ lib_project }}/molecule-test:{{ lib_ref }}}"
+      pre_build_image: true
+      privileged: true
+      cgroupns_mode: host
+      volumes:
+        - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      command: /lib/systemd/systemd
+      stop_signal: SIGRTMIN+3
+      tty: true
+{%- if capabilities %}
+      capabilities:
+{%- for cap in capabilities %}
+        - {{ cap }}
+{%- endfor %}
+{%- endif %}
+      tmpfs:
+{%- for path in tmpfs %}
+        - {{ path }}
+{%- endfor %}
+      networks:
+        - name: {{ network }}
+{%- if groups %}
+      groups:
+{%- for group in groups %}
+        - {{ group }}
+{%- endfor %}
+{%- endif %}
+{%- endmacro -%}
+{%- macro galaxy_dependency() -%}
+dependency:
+  name: galaxy
+  options:
+    # Single source of truth for the weisssrv.infra pin, resolved in molecule's
+    # CWD (the stack dir).
+    requirements-file: ../../requirements.yml
+{%- endmacro -%}
+{%- macro molecule_env() %}
+  env:
+    # Required for molecule_docker plugin (upstream broken conditional in destroy.yml)
+    ANSIBLE_ALLOW_BROKEN_CONDITIONALS: "1"
+    # Dummy key: all.yml looks SSH_PUBLIC_KEY up and the base role requires it.
+    # yamllint disable-line rule:line-length
+    SSH_PUBLIC_KEY: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC3qctest123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123TEST123== test@molecule"
+{%- endmacro -%}
+{#- skip_comment carries the lines explaining a dropped idempotence step. -#}
+{%- macro test_sequence(idempotence=true, skip_comment=[]) -%}
+scenario:
+  test_sequence:
+    - dependency
+    - cleanup
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+{%- if idempotence %}
+    - idempotence
+{%- else %}
+{%- for line in skip_comment %}
+    # {{ line }}
+{%- endfor %}
+{%- endif %}
+    - verify
+    - cleanup
+    - destroy
+{%- endmacro -%}

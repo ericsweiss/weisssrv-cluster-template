@@ -18,6 +18,13 @@ providers, groups, policy bindings — are site data and belong in
 - two Traefik middlewares (see below)
 - a nightly logical `pg_dump` to NFS
 
+`AUTHENTIK_WEB__BASE_URL` pins the canonical origin to `auth.<external_domain>`,
+so every OIDC issuer and absolute link authentik builds names the external host
+on both routes. The internal route still serves the UI, but its absolute links
+point at the external name, so make `auth.<external_domain>` resolve from the
+LAN (a split-horizon rewrite, or hairpin NAT) before running the initial-setup
+flow.
+
 ## The two ForwardAuth middlewares
 
 `authentik-auth` is the one to use. `authentik-auth-basic` is identical **plus**
@@ -42,8 +49,14 @@ expects authentik-injected basic credentials (a proxy provider with
 | Postgres storage | `/mnt/postgres-data` on the node labelled `<node-label-domain>/nas` |
 | Dump landing zone | NFS export `/backups-apps/authentik` on `${cluster_nas_host}` |
 
-The pg_dump CronJob runs at 02:30 **UTC**. Add `spec.timeZone` if you need it
-aligned with local overnight maintenance windows.
+The pg_dump CronJob runs at 02:30 in `cluster_timezone` and keeps the newest
+seven dumps (`RETENTION`). Stagger it against your other dump jobs.
+
+Restore one:
+
+```bash
+gunzip -c <file> | psql -h authentik-postgresql -U authentik authentik
+```
 
 ## Before first login
 
@@ -51,8 +64,9 @@ Nothing can sign in to anything until this is done, and Grafana ships SSO-only,
 so do it as soon as the ingress answers:
 
 1. **Bootstrap the built-in admin** at
-   `https://auth.<internal>/if/flow/initial-setup/`. That flow is available
-   only while no admin exists.
+   `https://auth.<external>/if/flow/initial-setup/`. That flow is available
+   only while no admin exists. `group_vars/dns.yml` answers that name with the
+   internal VIP on the LAN, so run it from a machine using the new resolvers.
 2. **Mint an API token** for `akadmin` (Directory > Tokens) and store it as the
    `Authentik Terraform Token` vault item.
 3. **Apply the objects from code.** `terraform/authentik/sso.tf` ships the

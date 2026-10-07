@@ -18,9 +18,8 @@
     - weisssrv.infra.unbound
     - weisssrv.infra.unbound_exporter
     - weisssrv.infra.adguard_home
-    # site.yml deploys these to the dns group in its own plays; repeating them
-    # here keeps a standalone DNS deploy from leaving the resolvers without
-    # host metrics or log shipping.
+    # Shared with site.yml; tests/test_shared_role_playbook_sync.py keeps the two
+    # in step, so a standalone DNS deploy leaves no resolver unmetered.
     - weisssrv.infra.node_exporter_host
     - weisssrv.infra.alloy_host
 

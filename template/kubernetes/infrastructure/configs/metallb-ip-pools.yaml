@@ -1,10 +1,7 @@
 ---
-# Two single-address pools: the public ingress VIP and the internal ingress VIP.
-# autoAssign:false — each address is claimed explicitly by its Service via the
-# metallb.io/loadBalancerIPs annotation, so MetalLB can never hand a pinned VIP
-# to some other LoadBalancer that omitted an address.
-#
-# Both addresses must be OUTSIDE the router's DHCP range.
+# Two single-address pools: the public and internal ingress VIPs. autoAssign is
+# false, so each Service claims its address with the metallb.io/loadBalancerIPs
+# annotation. Keep both outside your DHCP pool — MetalLB answers ARP for them.
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:

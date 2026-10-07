@@ -1,11 +1,7 @@
 ---
-# Alertmanager configuration, rendered by ESO from the secrets backend.
-#
-# The config is a Secret (not a plain ConfigMap) because it embeds credentials.
-# Values are interpolated through the `quote` template function so a rotated
-# password or a webhook URL containing special characters stays valid YAML.
-# webhook_url is used rather than webhook_url_file: the Prometheus Operator's
-# config parser does not support the _file suffix for every receiver type.
+# Alertmanager configuration, rendered by ESO from the secrets backend. A Secret
+# because it embeds credentials; `quote` keeps a rotated password valid YAML.
+# webhook_url, not webhook_url_file — the operator's parser rejects the suffix.
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
@@ -38,14 +34,23 @@ spec:
               equal:
                 - alertname
                 - namespace
-            # The warning/critical pairs below use DIFFERENT alertnames, so the
-            # generic rule above never matches them. Each pairs on its own
-            # identity labels — keyed too coarsely, one object crossing critical
-            # would silence a different object's warning on the same host.
+            # These pairs use different alertnames, so the generic rule above
+            # never matches them. Each pairs on its own identity labels; a
+            # coarser key would silence a different object's warning.
             - source_matchers:
                 - alertname="DiskUsageCritical"
               target_matchers:
                 - alertname="DiskUsageWarning"
+              equal:
+                - instance
+                - mountpoint
+            # Above 80% the two alerts are the same condition on the same
+            # filesystem; equal on mountpoint so another filling mount still pages.
+            # k3s_image_gc_high_threshold must stay under 80 or this mutes it for good.
+            - source_matchers:
+                - alertname="DiskUsageWarning"
+              target_matchers:
+                - alertname="KubeletImageGCIneffective"
               equal:
                 - instance
                 - mountpoint
@@ -70,22 +75,32 @@ spec:
               equal:
                 - namespace
                 - name
+            # Different alertnames for the same failing integration, so the
+            # generic pair cannot match them.
+            - source_matchers:
+                - alertname="AlertmanagerClusterFailedToSendAlerts"
+              target_matchers:
+                - alertname="AlertmanagerFailedToSendAlerts"
+              equal:
+                - integration
+            # CRITICAL: `equal: [namespace]` is load-bearing - without it one
+            # namespace's info condition suppresses every info alert in the
+            # cluster. Absent counts as equal, so an info alert with no
+            # namespace label needs listing below or it is never delivered.
             - source_matchers:
                 - alertname="InfoInhibitor"
               target_matchers:
                 - severity="info"
-            # Node-outage storm control: while a node is down, per-pod and
-            # per-workload warnings are noise, so they stay suppressed for as
-            # long as the node is NotReady. Tradeoff: an unrelated pod failure
-            # elsewhere is also suppressed during the window. Criticals are
-            # deliberately NOT inhibited — a serialized reboot must never lose
-            # quorum, so their firing is a genuine signal. EndpointDown and
-            # TargetDown are also excluded: they cover off-cluster
-            # infrastructure whose health is independent of node readiness.
+                - alertname!~"NodeOutageStormControl"
+              equal:
+                - namespace
+            # While a node is down, NodeOutageStormControl suppresses per-pod
+            # and per-workload warnings cluster-wide; the targets carry no node
+            # label. It stops firing 7d after the node was last Ready.
             - source_matchers:
-                - alertname=~"KubeNodeNotReady|KubeNodeUnreachable"
+                - alertname="NodeOutageStormControl"
               target_matchers:
-                - alertname=~"KubePodNotReady|KubeContainerWaiting|KubeDaemonSetRolloutStuck|KubeDaemonSetMisScheduled|KubeDeploymentReplicasMismatch|KubeStatefulSetReplicasMismatch|KubeletInstanceUnreachable|KubeAggregatedAPIDown|NodeSystemSaturation"
+                - alertname=~"KubePodNotReady|KubeContainerWaiting|KubeDaemonSetRolloutStuck|KubeDaemonSetMisScheduled|KubeDeploymentReplicasMismatch|KubeStatefulSetReplicasMismatch|KubeAggregatedAPIDown|NodeSystemSaturation"
 
           route:
             receiver: chat-default
@@ -99,14 +114,9 @@ spec:
             group_interval: 10m
             repeat_interval: 4h
             routes:
-              # Dead-man's switch: the chart's Watchdog alert always fires, and
-              # the external heartbeat service alarms when the pings STOP — i.e.
-              # when Prometheus, Alertmanager, the node, or notification egress is
-              # down. This is the only signal that survives a total
-              # observability-plane outage, including loss of DNS (on which the
-              # SMTP and chat receivers depend). MUST precede the severity=none
-              # null route: Watchdog carries severity=none, and InfoInhibitor
-              # (also severity=none) must stay null-routed.
+              # Dead-man's switch: Watchdog always fires and the external
+              # heartbeat alarms on silence. MUST precede the severity=none null
+              # route — Watchdog and InfoInhibitor both carry severity=none.
               - receiver: watchdog-heartbeat
                 matchers:
                   - alertname="Watchdog"
@@ -123,6 +133,12 @@ spec:
                 matchers:
                   - severity="warning"
                 repeat_interval: 12h
+              # severity=info is a notice, not a fault. Without this branch it
+              # inherits the route's 4h repeat — more often than a warning.
+              - receiver: chat-default
+                matchers:
+                  - severity="info"
+                repeat_interval: 24h
 
           receivers:
             - name: "null"
@@ -132,10 +148,12 @@ spec:
               webhook_configs:
                 - url: {{ .healthchecksPingUrl | quote }}
                   send_resolved: false
-            # Generic JSON webhook — works with a chat bridge, ntfy, or any
-            # receiver that accepts an Alertmanager POST. Swap to slack_configs /
-            # discord_configs / msteams_configs if you prefer the native
-            # integration; the routes above do not change.
+                  # Bounds one attempt. Unset, a stalled request consumes the
+                  # whole 1m notify window and the ping is dropped, not retried.
+                  timeout: 10s
+            # Generic JSON webhook, for a chat bridge, ntfy, or anything that
+            # accepts an Alertmanager POST. Swap in slack_configs,
+            # discord_configs or msteams_configs without changing the routes.
             - name: chat-default
               webhook_configs:
                 - url: {{ .alertWebhookUrl | quote }}

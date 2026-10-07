@@ -1,5 +1,4 @@
 {
-  "__elements": {},
   "annotations": {
     "list": [
       {
@@ -27,7 +26,6 @@
   "fiscalYearStartMonth": 0,
   "gnetId": 17347,
   "graphTooltip": 0,
-  "id": null,
   "links": [],
   "liveNow": false,
   "panels": [
@@ -1513,7 +1511,7 @@
     "to": "now"
   },
   "timepicker": {},
-  "timezone": "",
+  "timezone": "browser",
   "title": "Traefik Official Kubernetes Dashboard",
   "uid": "traefik-official",
   "version": 7,

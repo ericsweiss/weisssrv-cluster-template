@@ -1,0 +1,14 @@
+---
+# kube-system's Pod Security Admission labels, made explicit: the one BUILT-IN
+# namespace needing privileged (configs/builtin-namespace-policies.yaml keeps
+# kube-public and kube-node-lease restricted); audit and warn stay at `baseline`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-system
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/audit: baseline

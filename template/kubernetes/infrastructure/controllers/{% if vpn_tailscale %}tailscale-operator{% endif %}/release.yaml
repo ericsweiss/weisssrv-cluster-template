@@ -1,9 +1,7 @@
 ---
 # Watches for Services with loadBalancerClass: tailscale and gives each one a
-# real tailnet device that L3-forwards to the backing Service.
-#
-# oauth.* is deliberately unset so the chart consumes the pre-existing
-# `operator-oauth` Secret that ESO renders (externalsecret.yaml).
+# real tailnet device that L3-forwards to the backing Service. oauth.* is
+# unset, so the chart uses the `operator-oauth` Secret ESO renders.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -11,6 +9,9 @@ metadata:
   namespace: tailscale
 spec:
   interval: 30m
+  # Revert out-of-band edits; the repo rule lives in traefik/release.yaml.
+  driftDetection:
+    mode: enabled
   chart:
     spec:
       chart: tailscale-operator
@@ -21,11 +22,9 @@ spec:
         namespace: flux-system
       interval: 12h
   install:
-    # The operator-oauth Secret is created by the configs stage (the
-    # ClusterSecretStore this namespace's ExternalSecret targets lives there),
-    # which depends on this one. Without disableWait, Helm --wait blocks on pod
-    # readiness -> pods block on the Secret -> bootstrap deadlock. Upgrades run
-    # in steady state where the Secret already exists.
+    # The operator-oauth Secret comes from the configs stage, which depends on
+    # this one. Helm --wait would block on pods that are themselves blocked on
+    # that Secret, deadlocking bootstrap.
     disableWait: true
     remediation:
       retries: 3
@@ -36,6 +35,9 @@ spec:
   values:
     operatorConfig:
       hostname: tailscale-operator
+      # The chart defaults this to "" (priority 0), below every platform
+      # controller and only 10 above ci-jobs.
+      priorityClassName: platform
       # The chart ships resources: {} (BestEffort); give it a floor and a memory
       # ceiling. The operator VPA right-sizes it on natural restarts.
       resources:

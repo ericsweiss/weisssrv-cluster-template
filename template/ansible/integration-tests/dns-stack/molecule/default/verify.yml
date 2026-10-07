@@ -1,0 +1,191 @@
+---
+# DNS Stack Integration Test - Verify
+# Validates unbound + adguard_home + adguard_sync integration
+
+- name: Verify - DNS Stack Integration
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    # molecule.yml platforms[].groups drive the `group_names` guards below; an
+    # empty group would skip those assertions and still report a pass.
+    - name: Assert the molecule roster resolved
+      ansible.builtin.assert:
+        that:
+          - groups['dns_primary'] | default([]) | length == 1
+          - groups['dns_replica'] | default([]) | length == 1
+        fail_msg: >-
+          molecule.yml no longer produces dns_primary and dns_replica, so the
+          guarded assertions in this scenario skip.
+      run_once: true
+
+    # Unbound Verification
+    - name: Check Unbound service is running
+      ansible.builtin.systemd:
+        name: unbound
+        state: started
+      check_mode: true
+      register: unbound_service
+      failed_when: false
+
+    - name: Assert Unbound is active
+      ansible.builtin.assert:
+        that:
+          - unbound_service.status.ActiveState == "active"
+        fail_msg: "Unbound is not active"
+        success_msg: "Unbound is running"
+
+    - name: Wait for Unbound to listen on port 5335
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 5335
+        timeout: 30
+        msg: "Unbound not listening on port 5335"
+
+    - name: Test DNS resolution through Unbound
+      ansible.builtin.command: dig @127.0.0.1 -p 5335 google.com +short
+      register: unbound_query
+      changed_when: false
+      failed_when: false
+
+    - name: Log Unbound query result
+      ansible.builtin.debug:
+        msg: "Unbound query result: {{ unbound_query.stdout_lines }}"
+
+    # Dead-var guard: both codified forwarders are also role defaults, so the
+    # negative check on 9.9.9.9 (a default-only entry) is what proves the
+    # override was consumed rather than silently ignored.
+    - name: Read rendered unbound config
+      ansible.builtin.command: cat /etc/unbound/unbound.conf.d/managed.conf
+      register: unbound_rendered
+      changed_when: false
+
+    - name: Assert converge's forwarders (and only those) rendered into the forward-zone
+      ansible.builtin.assert:
+        that:
+          - "'forward-addr: 1.1.1.1@853#cloudflare-dns.com' in unbound_rendered.stdout"
+          - "'forward-addr: 8.8.8.8@853#dns.google' in unbound_rendered.stdout"
+          # default-only entry — present ⇒ the override was ignored and defaults rendered
+          - "'forward-addr: 9.9.9.9@853#dns.quad9.net' not in unbound_rendered.stdout"
+        fail_msg: "unbound_forwarders from converge did not render (default forwarders present) — variable ignored/renamed?"
+        success_msg: "Custom unbound forwarders rendered (defaults not present)"
+
+    # AdGuard Home Verification
+    - name: Check AdGuard Home service is running
+      ansible.builtin.systemd:
+        name: AdGuardHome
+        state: started
+      check_mode: true
+      register: adguard_home_service
+      failed_when: false
+
+    - name: Assert AdGuard Home is active
+      ansible.builtin.assert:
+        that:
+          - adguard_home_service.status.ActiveState == "active"
+        fail_msg: "AdGuard Home is not active"
+        success_msg: "AdGuard Home is running"
+
+    # AdGuard's own resolution path is not representative in-container (the role
+    # skips the resolv.conf switch), so DNS resolution is asserted through
+    # Unbound, its upstream. The API surface is asserted directly below.
+    - name: Wait for the AdGuard Home web UI to answer
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ adguard_home_http_port | default(3000) }}/control/status"
+        method: GET
+        status_code: [200, 401, 403]
+        timeout: 10
+      register: adguard_home_ui
+      until: adguard_home_ui.status | default(-1) in [200, 401, 403]
+      retries: 12
+      delay: 5
+
+    # The API pass is gated on adguard_home_is_primary, so the rewrite
+    # reconcile runs on dns-01 only; dns-02 receives them via sync, not asserted here.
+    - name: Fetch live DNS rewrites from AdGuard (dns-01)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ adguard_home_http_port | default(3000) }}/control/rewrite/list"
+        method: GET
+        user: "{{ adguard_home_admin_user }}"
+        password: "{{ adguard_home_admin_password }}"
+        force_basic_auth: true
+        status_code: 200
+      register: live_rewrites
+      when: "'dns_primary' in group_names"
+      no_log: true
+
+    - name: Assert each codified rewrite was reconciled onto dns-01
+      ansible.builtin.assert:
+        that:
+          - live_rewrites.json | selectattr('domain', 'equalto', item.domain) |
+            selectattr('answer', 'equalto', item.answer) | list | length == 1
+        fail_msg: "Codified rewrite {{ item.domain }} -> {{ item.answer }} missing from live AdGuard"
+        success_msg: "Rewrite {{ item.domain }} reconciled onto dns-01"
+      loop: "{{ adguard_home_rewrites }}"
+      loop_control:
+        label: "{{ item.domain }}"
+      when: "'dns_primary' in group_names"
+
+    # Sync runs ON dns-01 to push config TO dns-02.
+    - name: Check AdGuard Sync timer is enabled
+      ansible.builtin.systemd:
+        name: adguardhome-sync.timer
+        enabled: true
+      check_mode: true
+      register: sync_timer
+      when: "'dns_primary' in group_names"
+      failed_when: false
+
+    - name: Assert AdGuard Sync timer is active
+      ansible.builtin.assert:
+        that:
+          - sync_timer.status.UnitFileState | default('ABSENT') == "enabled"
+          - sync_timer.status.ActiveState | default('ABSENT') == "active"
+        fail_msg: >-
+          AdGuard Sync timer is not enabled/active:
+          UnitFileState={{ sync_timer.status.UnitFileState | default('ABSENT') }}
+          ActiveState={{ sync_timer.status.ActiveState | default('ABSENT') }}
+        success_msg: "AdGuard Sync timer is running"
+      when: "'dns_primary' in group_names"
+
+    - name: Check AdGuard Sync configuration file
+      ansible.builtin.stat:
+        path: /etc/adguardhome-sync.yaml
+      register: sync_config
+      when: "'dns_primary' in group_names"
+
+    - name: Assert AdGuard Sync config exists
+      ansible.builtin.assert:
+        that:
+          - sync_config.stat.exists
+          - sync_config.stat.isreg
+        fail_msg: "AdGuard Sync configuration not found"
+        success_msg: "AdGuard Sync configuration exists"
+      when: "'dns_primary' in group_names"
+
+    # DNS chain test via Unbound (AdGuard's upstream) - verifies Unbound → upstream DNS
+    - name: Verify DNS resolution via Unbound
+      ansible.builtin.assert:
+        that:
+          - unbound_query.rc == 0
+          - unbound_query.stdout_lines | length > 0
+        fail_msg: "Unbound DNS resolution failed"
+        success_msg: "Unbound DNS resolution working (Unbound → upstream)"
+
+    # Cross-server connectivity (dns-02 -> dns-01): both containers share the
+    # scenario docker network, so an unreachable primary is a real failure.
+    - name: Wait for the primary AdGuard Home port
+      ansible.builtin.wait_for:
+        host: dns-01
+        port: 3000
+        timeout: 60
+      when: "'dns_replica' in group_names"
+
+    - name: Assert the replica reaches the primary AdGuard Home
+      ansible.builtin.uri:
+        url: "http://dns-01:3000/control/status"
+        method: GET
+        timeout: 15
+        status_code: [200, 301, 302, 401, 403]
+      when: "'dns_replica' in group_names"

@@ -1,8 +1,7 @@
 ---
-# Check-mode reachability guard for an application playbook's pre_tasks: in
-# check mode the guest may not exist yet (creation is skipped), so probe first
-# and end the play quietly instead of erroring.
-# Override reachable_check_timeout (seconds, default 5) per include.
+# Check-mode reachability guard for an application playbook's pre_tasks: the
+# guest may not exist yet, so probe first and end the play quietly. Override
+# reachable_check_timeout (seconds, default 5) per include.
 
 - name: Check whether the host is reachable
   ansible.builtin.wait_for_connection:

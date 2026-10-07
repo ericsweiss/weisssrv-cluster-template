@@ -1,9 +1,7 @@
 ---
-# Dedicated namespace for the privileged runner. The separation from the shared
-# runner's namespace IS the isolation boundary: the shared runner's
-# namespace-scoped RBAC cannot read this runner's token Secret. PSS enforce stays
-# `privileged` because the DinD job pods legitimately require it — which is
-# precisely why untrusted jobs must never land here.
+# CRITICAL: this namespace runs `privileged` PSS for Docker-in-Docker job pods.
+# Untrusted jobs must never land here; they belong in the shared runner.
+# Namespace separation is the isolation boundary for the runner token Secret.
 apiVersion: v1
 kind: Namespace
 metadata:

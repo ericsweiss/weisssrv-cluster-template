@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Assert every live Secret is owned by something (ESO, Flux, Helm, a controller).
+
+Reads `kubectl get secrets -A -o json` on stdin; an unowned Secret was
+hand-applied. Exits 1 on a finding, 2 on an operator error or an empty corpus.
+"""
+from __future__ import annotations
+
+import json
+import sys
+
+ALLOWLIST: dict[str, str] = {
+    # "namespace/name": why it has no controller owner. Each entry is a claim
+    # that the value is created out-of-band on purpose and that its rotation is
+    # documented somewhere other than an ExternalSecret. See docs/RUNBOOKS.md.
+}
+
+# Ownership markers, checked in metadata.labels and metadata.annotations.
+MANAGED_LABELS = {
+    "app.kubernetes.io/managed-by",       # Helm and friends
+    "controller.cert-manager.io/fao",     # cert-manager-issued TLS
+    "tailscale.com/managed",              # tailscale operator device secrets
+}
+MANAGED_KEY_PREFIXES = (
+    "kustomize.toolkit.fluxcd.io/",       # Flux-applied
+    "helm.toolkit.fluxcd.io/",
+    "meta.helm.sh/",                      # Helm release membership
+    "reconcile.external-secrets.io/",     # ESO
+    "cert-manager.io/certificate-name",   # cert-manager-issued TLS
+    "listener.cattle.io/",                # k3s dynamic listener
+)
+MANAGED_TYPES = (
+    "helm.sh/release.v1",                 # Helm release history
+    "kubernetes.io/service-account-token",
+    "bootstrap.kubernetes.io/token",
+)
+
+REMEDIATION = """
+For each offender: confirm nothing consumes it
+  kubectl -n <ns> get pods,deploy,sts,cronjob -o yaml | grep -c '<name>'
+then delete it and rotate any value it duplicated (docs/15-credential-rotation.md).
+If it must exist out-of-band, declare it: add an ExternalSecret, or add it to
+ALLOWLIST in this script with the reason.
+Note: an old ReplicaSet revision can still reference a deleted Secret, so a
+`kubectl rollout undo` far enough back would fail — prune stale RS history too.
+""".rstrip()
+
+
+def _is_managed(secret: dict) -> bool:
+    meta = secret.get("metadata") or {}
+    if meta.get("ownerReferences"):
+        return True
+    if str(secret.get("type", "")) in MANAGED_TYPES:
+        return True
+    keys = set(meta.get("labels") or {}) | set(meta.get("annotations") or {})
+    if keys & MANAGED_LABELS:
+        return True
+    return any(k.startswith(MANAGED_KEY_PREFIXES) for k in keys)
+
+
+def unmanaged_secrets(secrets: list[dict]) -> list[str]:
+    """One line per Secret with no ownership marker, allowlist applied."""
+    out: list[str] = []
+    for secret in secrets:
+        meta = secret.get("metadata") or {}
+        ns = meta.get("namespace", "")
+        name = meta.get("name", "?")
+        if f"{ns}/{name}" in ALLOWLIST or _is_managed(secret):
+            continue
+        keys = sorted((secret.get("data") or {}).keys())
+        out.append(f"  {ns}/{name}: no owner/manager, keys={keys}")
+    return sorted(out)
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError as exc:
+        print(
+            f"ERROR: cannot parse stdin as JSON: {exc}. Empty input usually means "
+            "the kubectl on the left of the pipe failed.",
+            file=sys.stderr,
+        )
+        return 2
+    items = payload.get("items") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        print(
+            "ERROR: stdin is not a Secret list (expected `kubectl get secrets -A -o json`)",
+            file=sys.stderr,
+        )
+        return 2
+    if not items:
+        print(
+            "ERROR: no Secrets on stdin — a gate that checks nothing is not a gate; "
+            "check the kubectl on the left of the pipe.",
+            file=sys.stderr,
+        )
+        return 2
+
+    violations = unmanaged_secrets([s for s in items if isinstance(s, dict)])
+    if violations:
+        print(
+            "Unmanaged Secrets found — these are outside the ESO rotation "
+            "lifecycle, so `task flux:rotate-secret` and docs/15 never touch "
+            "them and a superseded credential value can live on indefinitely:",
+            file=sys.stderr,
+        )
+        print("\n".join(violations), file=sys.stderr)
+        print(REMEDIATION, file=sys.stderr)
+        return 1
+
+    print(f"Unmanaged-Secret check OK ({len(items)} secrets checked)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

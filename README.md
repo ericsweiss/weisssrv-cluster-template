@@ -10,9 +10,9 @@ GitOps repository for a **Proxmox + ZFS + k3s** homelab cluster: Ansible for the
 host and guest layer, Terraform for external state (DNS, tailnet, SSO), and Flux
 reconciling everything inside the cluster.
 
-You answer about thirty-five questions — domains, LAN, VIPs, backends — and get
-a repository that lints clean, has no site literals scattered through it, and is
-ready to point at real hardware.
+You answer questions — domains, LAN, VIPs, backends — and get a repository that
+lints clean, has no site literals scattered through it, and is ready to point at
+real hardware.
 
 ## What this is not
 
@@ -27,7 +27,7 @@ the thousand small decisions and the copy-paste between them.
 weisssrv-lib .................. the building blocks, pinned by tag
   ansible_collections/weisssrv/infra   generic host/guest roles (FQCN)
   ci/                                  GitLab CI templates (spec:inputs)
-  terraform/modules/                   cloudflare-zone, tailscale-acl, authentik-sso
+  terraform/modules/                   cloudflare-zone, tailscale-acl, authentik-sso, unifi-network
   scripts/                             the gates and generators CI runs
         |
         | consumed at `lib_ref` by
@@ -66,22 +66,13 @@ operator applies.
 ### Where the platform is documented
 
 This repository documents *assembling a cluster*. The pieces it assembles are
-documented in the library, and the generated cluster's docs and agent skill both
-link there rather than restating it:
-
-| What | Where |
-|---|---|
-| Role variables and behaviour | [`ansible_collections/weisssrv/infra/roles/<role>/README.md`](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) |
-| The inventory-wide variables roles alias | [collection README](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/README.md) |
-| Role breaking changes across refs | [MIGRATING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/MIGRATING.md) |
-| CI template inputs | [docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md) |
-| What a `lib_ref` bump can break | [docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md) |
-| The vendored scripts' upstream | [docs/SCRIPTS.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/SCRIPTS.md) |
-| The seams a non-reference consumer swaps | [docs/EXTENSIBILITY.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/EXTENSIBILITY.md) |
+documented in the library — see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § Where the platform is documented
+for the table of which library document owns what.
 
 The inventory that [docs/SETUP.md](docs/SETUP.md) § 2 calls "the one part no
-template can generate" is filled in against those role READMEs — they define
-every variable it sets.
+template can generate" is filled in against the library's role READMEs — they
+define every variable it sets.
 
 ## Quickstart
 
@@ -90,7 +81,7 @@ every variable it sets.
 open docs/PRE-SETUP.md
 
 # 2. Install copier (any of these)
-pipx install copier
+pipx install 'copier>=9.15.0'   # or: uv tool install 'copier>=9.15.0'
 pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@vX.Y.Z#subdirectory=cli'  # vX.Y.Z = the release you'll answer for lib_ref (default in copier.yml)
 
 # 3. Generate
@@ -101,13 +92,9 @@ copier copy https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/
 weisssrv-new-project new-cluster \
   https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
 
-# Both generation blocks above are runnable as written because neither pins a
-# template ref: copier resolves an unpinned VCS source to the template's LATEST
-# RELEASE TAG, and falls back to the branch tip only if the template has cut
-# none. To pin an older release add `--vcs-ref <template-tag>`, and to generate
-# from unreleased work add `--vcs-ref HEAD`. A tag that does not exist
-# (`git ls-remote --tags <template-url>` lists what does) fails at clone time,
-# before the first question.
+# Both generation blocks above are runnable as written: an unpinned VCS source
+# resolves to the template's latest release tag. docs/SETUP.md lists the flags
+# that pin a different one, and docs/VERSIONING.md the `lib_ref` each ships.
 
 # 4. Bring it up
 cd ~/src/mycluster
@@ -145,20 +132,24 @@ checks live there. Summary:
 | `admin_user` / `admin_email` | — | SSH login on every host; system-mail and ACME address |
 | `alert_email` | `admin_email` | Alertmanager critical receiver |
 | `timezone` | `UTC` | IANA name |
-| `git_backend` / `git_host` / `git_namespace` | `gitlab_selfhosted` | Where Flux reads from and CI runs. The repository is `git_namespace/cluster_name` — there is no separate repo-name answer |
-| `secrets_backend` / `onepassword_vault` | `onepassword` | Credential source for hosts and cluster |
+| `git_backend` / `git_host` / `git_namespace` | `gitlab_selfhosted` / — / — | Where Flux reads from and CI runs. The repository is `git_namespace/cluster_name` — there is no separate repo-name answer |
+| `secrets_backend` / `onepassword_vault` | `onepassword` / — | Credential source for hosts and cluster |
 | `storage_backend` | `zfs` | What the NAS node serves datasets and PVs from; also selects the ZFS-only pool scrape |
 | `dns_backend` | `cloudflare` | Zone module, external-dns, ACME DNS-01 |
 | `compute_node_count` | `2` | Compute hosts in the starter inventory (plus the NAS node) |
+| `k3s_image_gc_high_threshold` | `70` | Root-filesystem percentage the kubelet starts image GC at, against a 50% low watermark. The `KubeletImageGCIneffective` alert uses the same number. Bounded 55-79 |
 | `nas_host` / `smtp_host` | derived from `internal_domain` | NFS server (mounted by name) and SMTP relay; both must stay under `internal_domain` — the wildcard certificate covers that zone only |
 | `node_exporter_job_regex` | `node-exporter\|node-exporter-host` | Prometheus jobs the host alert rules scope to; both shipped names are required |
 | `vpn_tailscale` | `false` | Overlay VPN: host role, operator, ACL module |
 | `tailnet_dns_suffix` | *(none — asked)* | Asked only with `vpn_tailscale`; MagicDNS suffix, rejected if left at the `CHANGEME` placeholder |
 | `gpu` | `none` | `nvidia` adds VFIO prep, driver + container toolkit, device plugin; GPU telemetry is a documented add-on, **not shipped** (`kubernetes/infrastructure/observability/README.md`) |
 | `use_unifi` | `false` | Manages a UniFi gateway as code: `terraform/unifi`, its supervised tasks, a drift-plan job. The generated site data is a worked example to edit |
-| `lib_url` / `lib_ref` | upstream URL / a release tag (default in `copier.yml`) | weisssrv-lib source and pin for collection, CI includes, TF modules |
+| `compose_app_guests` | `[]` | Single-VM docker-compose guests `task collect-state` collects from. Each entry needs `host`, `label` and `compose_dir` |
+| `lib_url` / `lib_ref` | defaults in `copier.yml` | weisssrv-lib source and pin for collection, CI includes, TF modules |
 | `lib_project` | path part of `lib_url` | GitLab project path for `include: project:` (instance-local) |
 | `ci_runner_tag` / `ci_cpu_selector` | `infrastructure` / `<internal_domain>/cpu=modern` | Runner tag and the secret-detection CPU pin |
+| `license` | `mit` | `mit` writes LICENSE and a README section; `none` leaves the repository unlicensed |
+| `license_holder` / `license_year` | — | Copyright line in LICENSE; asked only when `license` is `mit` |
 | `enable_semantic_release` | `false` | Adds the release stage to the generated pipeline |
 
 Site identity has no default on purpose: a cluster cannot be generated from
@@ -178,10 +169,11 @@ someone else's addresses by accident.
 │   ├── infrastructure/             sources → crds → controllers → configs → observability
 │   └── apps/                       one directory per application
 ├── scripts/                        verification, generators, version registry
-├── docs/                           RUNBOOKS.md (what the alerts link to) + ci-pipeline.md
+├── docs/                           RUNBOOKS.md (what the alerts link to), ci-pipeline.md, security-posture.md
 ├── .claude/skills/                 the cluster-development agent skill; CLAUDE.md
 │                                   and AGENTS.md at the root point at it
 ├── Taskfile.yml                    every operation, grouped by namespace
+├── taskfiles/                      one file per namespace, included by Taskfile.yml
 └── .gitlab-ci.yml                  lint / validate / deploy, from the library templates
 ```
 
@@ -202,6 +194,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | DNS | Cloudflare | Terraform zone module, external-dns, ACME DNS-01 |
 | Ingress | Traefik + cert-manager | `infrastructure/controllers`, `infrastructure/configs` |
 | Overlay VPN | Tailscale (`vpn_tailscale`) | host role, operator, ACL module |
+| GPU | NVIDIA (`gpu`) | VFIO host prep, node driver, `nvidia-device-plugin` — telemetry (DCGM) is operator-added |
 | Gateway / VLANs | UniFi (`use_unifi`) | `terraform/unifi`, the `unifi-drift-plan` job — off by default, and nothing in the cluster depends on it |
 | SSO | Authentik | `apps/authentik`, `terraform/authentik` |
 
@@ -250,13 +243,37 @@ change — read the target release's notes before updating across a MAJOR.
 
 ## Developing this template
 
+### Local gates
+
+Run these before opening a merge request. This is the canonical list;
+`AGENTS.md` points here rather than restating it.
+
 ```bash
-python3 -m pytest tests -q       # copier.yml schema + render invariants
-copier copy --data-file tests/answers-weisssrv-shaped.yml --defaults . /tmp/render-smoke
-yamllint -c .yamllint copier.yml tests/ .gitlab-ci.yml   # CI's target list; template/ is covered by the rendered-tree lint
+python3 -m pytest tests -q                      # copier.yml schema + render invariants
+python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib
+python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
+  --answers tests/answers-unlike.yml
+ruff check scripts tests template/tests template/scripts template/kubernetes
+shellcheck template/scripts/*.sh
+python3 scripts/check-doc-links.py
+yamllint -c lint/yamllint-relaxed.yml copier.yml tests/ lint/ .gitlab-ci.yml scripts/vendored-manifest.yml
 ```
 
-Conventions:
+That is the CI lint and test stages, in the order the pipeline runs them.
+`template/` itself is linted through the rendered tree, not directly. A change
+that skips the ruff, shellcheck or link lines can still go red in the pipeline
+on a file the tests never open.
+
+Both fixtures, always, and `--lib-path` on both. `pytest tests` also runs
+`scripts/check-lib-pins.py` over this repository's own `include:` refs.
+
+[docs/CI.md](docs/CI.md) owns the rest: § The gate that matters for why the
+shaped render alone proves nothing, and § Running the tests locally for the
+validator's flags and the tools each check needs — including `--skip <check>`,
+which runs everything but one check when a tool is missing locally. CI never
+passes `--skip`.
+
+### Conventions
 
 - Template content lives under `template/`; files needing substitution carry a
   `.jinja` suffix. Paths may contain answers (`clusters/{{ cluster_name }}/`).
@@ -268,9 +285,7 @@ Conventions:
   results are. `partials/ci-sizing.jinja` is the worked example.
 - Kubernetes manifests must not interpolate answers. Site values reach them
   through the `cluster-config` ConfigMap and Flux `postBuild.substituteFrom`;
-  copier fills the ConfigMap and the genuinely structural spots only. This is
-  the rule that keeps a generated cluster free of the hundreds of hard-coded
-  domains and addresses the reference repository accumulated.
+  copier fills the ConfigMap and the genuinely structural spots only.
 - Ansible roles are never vendored here. If a role needs a change, it changes in
   weisssrv-lib and the template bumps `lib_ref`.
 - Every library tag written literally in this repository's docs is the `lib_ref`

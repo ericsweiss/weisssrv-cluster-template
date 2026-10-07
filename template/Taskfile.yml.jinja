@@ -1,59 +1,33 @@
-{#- SECRETS SEAM. Everything that knows WHICH secrets backend this cluster uses
-    is the two macros below: `secret_runner()` is the wrapper that resolves
-    references when a task runs, `secret_ref()` composes one reference. Every
-    call site emits their output, so a second backend is a branch here plus the
-    matching `secrets_backend` choice in copier.yml — not an edit across ~100
-    lines. The else-branches subscript an empty mapping to hand `mandatory` an
-    undefined value: an unimplemented backend then fails the RENDER, instead of
-    generating a repository whose deploy tasks resolve nothing.
-
-    .gitlab-ci.yml.jinja carries the pipeline half of the same seam. Here the
-    1Password branch emits the go-task `{{.OP_VAULT}}` variable rather than the
-    vault name, so the vault stays editable in the generated repo; the pipeline
-    has no equivalent variable and emits the name. Consequence for anything that
-    reads the Taskfile as TEXT — `task secrets:show` is the one that does — the
-    file holds the variable, so a pattern built from the resolved vault name
-    matches nothing.
-
-    Three things stay backend-specific by nature and are NOT routed through
-    these: the `op_preconditions` anchor (a CLI availability + login check), the
-    `op:check` / `secrets:show` tasks (they name the CLI and its reference
-    syntax outright), and the `eso:connect-*` bootstrap tasks (1Password
-    Connect's own server/token commands). A second backend replaces those
-    outright. -#}
-{%- macro secret_runner() -%}
-{%- if secrets_backend == 'onepassword' -%}
-op run --
-{%- else -%}
-{{ {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no host-side runner — add a branch to secret_runner() in Taskfile.yml.jinja') }}
-{%- endif -%}
-{%- endmacro -%}
-{%- macro secret_ref(item, field) -%}
-{%- if secrets_backend == 'onepassword' -%}
-op://{{ '{{.OP_VAULT}}' }}/{{ item }}/{{ field }}
-{%- else -%}
-{{ {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no reference syntax — add a branch to secret_ref() in Taskfile.yml.jinja') }}
-{%- endif -%}
-{%- endmacro -%}
-# https://taskfile.dev
-#
-# Two lifecycles live here. Ansible (`infra:*`, `dns:*`, `storage:*`, `k3s:*`)
-# owns the hosts and the k3s layer; everything INSIDE the cluster is reconciled
-# by Flux from kubernetes/ on push, so the `flux:*` tasks are bootstrap,
-# validation and operational control — never deployment.
-#
-# Secrets are never values in this file: every `env:` entry is a REFERENCE into
-# the secrets backend ({{ secrets_backend }}), resolved at execution time by the
-# wrapper each deploy command runs under. Every item named below must exist in
-# the {{ onepassword_vault }} vault; the template's docs/PRE-SETUP.md lists them
-# (the template this repo came from is recorded as `_src_path` in
-# .copier-answers.yml).
+{#- SECRETS SEAM: partials/secrets.jinja is the one home, shared with
+    .gitlab-ci.yml.jinja. Here the vault is go-task's {{.OP_VAULT}} so
+    `task secrets:show`, which reads the Taskfile tree as text, matches it. -#}
+{%- import "partials/secrets.jinja" as secrets with context -%}
+{%- set secret_runner = secrets.secret_runner -%}
+{%- macro secret_ref(item, field) -%}{{ secrets.secret_ref(item, field, vault='{{.OP_VAULT}}') }}{%- endmacro -%}
+# https://taskfile.dev — Ansible owns the hosts and k3s; `flux:*` is bootstrap
+# and control, never deployment. Every `env:` entry is a {{ secrets_backend }}
+# reference resolved at run time; docs/RUNBOOKS.md lists the items.
 version: '3'
 
 # Host roster (PVE_HOSTS, K3S_SERVERS, …) generated from the inventory into
 # scripts/hosts.env by `task hosts:sync`, loaded here as env vars AND template
 # vars. Editing hosts.yml without re-running that task leaves this stale.
 dotenv: ['scripts/hosts.env']
+
+# One file per task namespace; task names are unchanged (`flux:lint` is the task
+# `lint:` in taskfiles/flux.yml). The root vars: and dotenv: reach every included
+# file, and a task calls another namespace's with a leading colon.
+includes:
+  ansible: taskfiles/ansible.yml
+  authentik: taskfiles/authentik.yml
+  flux: taskfiles/flux.yml
+  infra: taskfiles/infra.yml
+  k3s: taskfiles/k3s.yml
+  lint: taskfiles/lint.yml
+  maintenance: taskfiles/maintenance.yml
+  observability: taskfiles/observability.yml
+  proxmox: taskfiles/proxmox.yml
+  terraform: taskfiles/terraform.yml
 
 vars:
   ANSIBLE_DIR: ./ansible
@@ -69,129 +43,96 @@ vars:
   GIT_NAMESPACE: {{ git_namespace }}
   CLUSTER_DIR: kubernetes/clusters/{{ cluster_name }}
   VERSIONS_CM: kubernetes/infrastructure/sources/versions-configmap.yaml
-  CLUSTER_CM: kubernetes/infrastructure/sources/cluster-config.yaml
-  # Checkout of weisssrv-lib used to refresh the vendored copies in scripts/
-  # (`task lib:sync`); nothing at run time reads from it.
+  # weisssrv-lib checkout at LIB_REF: the source the vendored copies in scripts/,
+  # ansible/molecule/ and the root lint profiles are re-copied from
+  # (scripts/vendored-manifest.yml). Read by lint:invariants only; no deploy path touches it.
   LIB_DIR: .weisssrv-lib
   LIB_URL: {{ lib_url }}
   LIB_REF: {{ lib_ref }}
   # GitLab-managed Terraform state. The API takes the URL-encoded project PATH
-  # wherever it documents a numeric ID, so nothing needs looking up after the
-  # project exists; pass `TF_STATE_PROJECT=<id>` on the command line if your
+  # wherever it documents a numeric ID; pass `TF_STATE_PROJECT=<id>` if your
   # instance rejects the path form.
   TF_API: https://{{ git_host }}/api/v4
   TF_STATE_PROJECT: {{ git_namespace | replace('/', '%2F') }}%2F{{ cluster_name }}
-{% raw %}
+{% raw -%}
+# Anchors aliased by the tasks below. YAML anchors do not cross files, so each
+# namespace file carries the precondition list it uses.
+x-preconditions:
+  op: &op_preconditions
+    - sh: command -v ansible-playbook
+      msg: "ansible-playbook not installed. pip install ansible, then: task ansible:install-collections"
+    - sh: command -v op
+      msg: "1Password CLI not installed: https://developer.1password.com/docs/cli/get-started/"
+    # `op account list`, not `op whoami`: with the desktop-app integration
+    # whoami reports "not signed in" in the non-interactive shell Task uses
+    # here.
+    - sh: op account list 2>/dev/null
+      msg: "1Password CLI not authenticated. Run: eval $(op signin)"
+  pyyaml: &pyyaml_precondition
+    - sh: python3 -c "import yaml" 2>/dev/null
+      msg: "PyYAML not installed (pip install pyyaml)"
+  needs_timeout: &needs_timeout
+    sh: command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1
+    msg: |
+      This task needs a wall-clock backstop: neither timeout(1) nor
+      gtimeout(1) is on PATH, so every ssh/kubectl probe would run UNBOUNDED.
+      macOS: brew install coreutils
+  # An empty roster reports every host unreachable instead of naming the stale
+  # scripts/hosts.env. collect-state.sh reads PVE_HOSTS, the diagnostics sweep
+  # reads PVE_IPS.
+  needs_roster: &needs_roster
+    sh: '[ -n "$PVE_HOSTS" ] && [ -n "$PVE_IPS" ]'
+    msg: "scripts/hosts.env carries no Proxmox roster. Run: task hosts:sync"
+
 tasks:
   default:
     desc: Show available tasks
     cmds:
       - task --list
 
+  kubernetes:lint:
+    desc: "Validate all Flux-managed Kubernetes manifests (alias for flux:lint)"
+    cmds:
+      - task: flux:lint
+
   # === Library checkout =================================================
   lib:sync:
-    desc: "Clone/refresh .weisssrv-lib at LIB_REF — the source for the vendored scripts/ copies"
+    desc: "Clone/refresh .weisssrv-lib at LIB_REF — the source for the vendored copies"
     cmds:
       - |
         set -eo pipefail
         if [ -d "{{.LIB_DIR}}/.git" ]; then
           git -C "{{.LIB_DIR}}" fetch --tags --force origin
-          git -C "{{.LIB_DIR}}" checkout --detach "{{.LIB_REF}}" 2>/dev/null \
-            || git -C "{{.LIB_DIR}}" checkout --detach "origin/{{.LIB_REF}}"
         else
           git clone --no-checkout "{{.LIB_URL}}" "{{.LIB_DIR}}"
-          git -C "{{.LIB_DIR}}" checkout --detach "{{.LIB_REF}}" 2>/dev/null \
-            || git -C "{{.LIB_DIR}}" checkout --detach "origin/{{.LIB_REF}}"
+        fi
+        # LIB_REF must be a release tag. origin/<ref> is a MOVING branch, and the
+        # vendored byte-identity gate then compares against wherever it points.
+        if git -C "{{.LIB_DIR}}" rev-parse -q --verify "refs/tags/{{.LIB_REF}}^{commit}" >/dev/null; then
+          git -C "{{.LIB_DIR}}" checkout --detach "{{.LIB_REF}}"
+        else
+          echo "WARNING: {{.LIB_REF}} is not a tag in the library; taking the branch origin/{{.LIB_REF}}" >&2
+          git -C "{{.LIB_DIR}}" checkout --detach "origin/{{.LIB_REF}}"
         fi
         git -C "{{.LIB_DIR}}" --no-pager log -1 --oneline
 
-  # === Ansible ==========================================================
-  ansible:install-collections:
-    desc: Install the weisssrv.infra collection (and its dependencies) at the pinned ref
-    dir: "{{.ANSIBLE_DIR}}"
+  collect-state:
+    desc: Collect a redacted cluster-state snapshot into CLUSTER_STATUS.txt
+    # collect-state.sh's SSH_COLLECT_TIMEOUT backstop is inert without a
+    # timeout(1); every ssh then runs unbounded and a wedged host hangs the run.
+    preconditions: [*needs_timeout, *needs_roster]
     cmds:
-      - ansible-galaxy collection install -r requirements.yml {{.CLI_ARGS}}
+      - ./scripts/collect-state.sh {{.CLI_ARGS}}
 
-  ansible:ping:
-    desc: Ping every managed host
-    dir: "{{.ANSIBLE_DIR}}"
+  diagnose:network:
+    desc: "Network-instability diagnostics across all hosts (cluster/HA/ARP/bond/corosync/kube-vip/MetalLB)"
+    # shell-lib.sh's timeout_cmd runs the probe unbounded when neither binary is
+    # present, so a wedged host hangs the whole sweep.
+    preconditions: [*needs_timeout, *needs_roster]
     cmds:
-      - ansible -i {{.INVENTORY}} all -m ping -e "ansible_become=false"
+      - bash scripts/diagnose-network-issues.sh {{.CLI_ARGS}}
 
-  ansible:lint:
-    desc: Lint the playbooks (roles come from the collection and are linted upstream)
-    dir: "{{.ANSIBLE_DIR}}"
-    cmds:
-      - |
-        # Resolve ansible-lint through the shared helper (PATH, then a validated
-        # pyenv glob; no `python3 -m` step — its module is `ansiblelint`).
-        LINT=$({{.ROOT_DIR}}/scripts/resolve-tool.sh ansible-lint) \
-          || { echo "ERROR: ansible-lint not found (pip install ansible-lint)"; exit 1; }
-        # Unquoted: $LINT may be a bare command or a pyenv path.
-        $LINT playbooks/
-
-  # === Base infrastructure ==============================================
-  infra:deploy:
-    desc: Deploy the full host stack (Proxmox, DNS, storage, mail — excludes k3s)
-    dir: "{{.ANSIBLE_DIR}}"
-    # Anchor shared with infra:check so dry-run and deploy can never disagree
-    # about which secrets are injected.
-    env: &infra_env
-      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
-      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
-      SMTP_RELAY_USER: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'username') }}{% raw %}
-      SMTP_RELAY_PASSWORD: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'password') }}{% raw %}
-      SMTP_UPSTREAM_USER: {% endraw %}{{ secret_ref('SMTP Smarthost', 'username') }}{% raw %}
-      SMTP_UPSTREAM_PASSWORD: {% endraw %}{{ secret_ref('SMTP Smarthost', 'password') }}{% raw %}
-      ADGUARD_ADMIN_PASSWORD: {% endraw %}{{ secret_ref('AdGuard Home', 'password') }}{% raw %}
-      SAMBA_NAS_PASSWORD: {% endraw %}{{ secret_ref('Samba NAS User', 'password') }}{% raw %}
-      ACME_SSH_PRIVATE_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'private key') }}{% raw %}
-      ACME_SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'public key') }}{% raw %}
-      LOKI_PUSH_USER: {% endraw %}{{ secret_ref('Loki Push Auth', 'username') }}{% raw %}
-      LOKI_PUSH_PASSWORD: {% endraw %}{{ secret_ref('Loki Push Auth', 'password') }}{% raw %}
-{% endraw %}{% if vpn_tailscale %}      TAILSCALE_AUTH_KEY: {{ secret_ref('Tailscale Auth Key', 'credential') }}
-{% endif %}{% raw %}    preconditions: &op_preconditions
-      - sh: command -v ansible-playbook
-        msg: "ansible-playbook not installed. pip install ansible, then: task ansible:install-collections"
-      - sh: command -v op
-        msg: "1Password CLI not installed: https://developer.1password.com/docs/cli/get-started/"
-      - sh: op whoami 2>/dev/null
-        msg: "1Password CLI not authenticated. Run: eval $(op signin)"
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/site.yml {{.CLI_ARGS}}
-
-  infra:check:
-    desc: Check mode — show what infra:deploy would change
-    dir: "{{.ANSIBLE_DIR}}"
-    env: *infra_env
-    preconditions: *op_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/site.yml --check --diff {{.CLI_ARGS}}
-
-  infra:base:
-    desc: Deploy base host configuration only
-    dir: "{{.ANSIBLE_DIR}}"
-    env: &base_env
-      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
-      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
-    preconditions: *op_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/base.yml {{.CLI_ARGS}}
-
-  infra:base-first-run:
-    desc: First base run on a host whose sudo still prompts (-K)
-    dir: "{{.ANSIBLE_DIR}}"
-    env: *base_env
-    preconditions: *op_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/base.yml -K {{.CLI_ARGS}}
-
-  infra:verify:
-    desc: Run the post-deployment verification play
-    dir: "{{.ANSIBLE_DIR}}"
-    cmds:
-      - ansible-playbook -i {{.INVENTORY}} playbooks/postflight.yml {{.CLI_ARGS}}
-
+  # === Service plays ====================================================
   dns:deploy:
     desc: Deploy the DNS stack (recursive resolver + filtering frontends)
     dir: "{{.ANSIBLE_DIR}}"
@@ -221,6 +162,9 @@ tasks:
       SMTP_UPSTREAM_PASSWORD: {% endraw %}{{ secret_ref('SMTP Smarthost', 'password') }}{% raw %}
       LOKI_PUSH_USER: {% endraw %}{{ secret_ref('Loki Push Auth', 'username') }}{% raw %}
       LOKI_PUSH_PASSWORD: {% endraw %}{{ secret_ref('Loki Push Auth', 'password') }}{% raw %}
+      # base rewrites the relay's authorized_keys, so mail.yml re-seeds the
+      # cert-distribution key from the primary resolver afterwards.
+      ACME_SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'public key') }}{% raw %}
     preconditions: *op_preconditions
     cmds:
       - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/mail.yml {{.CLI_ARGS}}
@@ -256,7 +200,7 @@ tasks:
       - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/zfs-encryption.yml {{.CLI_ARGS}}
 
   disaster-recovery:storage-bootstrap:
-    desc: "INTERACTIVE: bootstrap storage from scratch (disaster recovery only)"
+    desc: "INTERACTIVE: create the ZFS datasets group_vars/nas.yml declares (first bring-up and disaster recovery)"
     dir: "{{.ANSIBLE_DIR}}"
     env:
       SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
@@ -264,352 +208,6 @@ tasks:
     preconditions: *op_preconditions
     cmds:
       - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/bootstrap/storage-bootstrap.yml {{.CLI_ARGS}}
-
-  # === Proxmox ==========================================================
-  proxmox:configure-autostart:
-    desc: Apply autostart and boot order to existing guests (one-time)
-    dir: "{{.ANSIBLE_DIR}}"
-    cmds:
-      - ansible-playbook -i {{.INVENTORY}} playbooks/proxmox-enable-autostart.yml {{.CLI_ARGS}}
-
-  proxmox:ha:
-    desc: Configure Proxmox HA rules, resources and storage replication
-    dir: "{{.ANSIBLE_DIR}}"
-    cmds:
-      - ansible-playbook -i {{.INVENTORY}} playbooks/proxmox-ha.yml {{.CLI_ARGS}}
-
-  proxmox:ha-check:
-    desc: Check mode — show what proxmox:ha would change
-    dir: "{{.ANSIBLE_DIR}}"
-    cmds:
-      - ansible-playbook -i {{.INVENTORY}} playbooks/proxmox-ha.yml --check --diff {{.CLI_ARGS}}
-
-  proxmox:ha-status:
-    desc: Show HA manager state, resources and replication across the cluster
-    cmds:
-      - |
-        set -eo pipefail
-        if [ -z "$PVE_HOSTS" ]; then
-          echo "ERROR: PVE_HOSTS is empty — fill in the inventory and run: task hosts:sync"
-          exit 1
-        fi
-        # Bare hostnames (no user@) so ssh-config resolves the login user.
-        # shellcheck disable=SC2086
-        HOST=$(scripts/find-reachable-host.sh $PVE_HOSTS) || {
-          echo "ERROR: cannot reach any Proxmox host"
-          exit 1
-        }
-        echo "Connected via $HOST"
-        echo "=== HA manager status ==="
-        ssh -o BatchMode=yes "$HOST" "sudo ha-manager status" 2>/dev/null || echo "(no HA manager status)"
-        echo "=== HA resources ==="
-        ssh -o BatchMode=yes "$HOST" "sudo ha-manager config" 2>/dev/null | grep -E '^(ct|vm):' || echo "(none configured)"
-        echo "=== HA rules ==="
-        ssh -o BatchMode=yes "$HOST" "sudo ha-manager rules list" 2>/dev/null || echo "(none, or Proxmox < 9)"
-        echo "=== Replication jobs ==="
-        ssh -o BatchMode=yes "$HOST" "sudo pvesr list" 2>/dev/null || echo "(none configured)"
-      - |
-        # Replication STATUS only exists on the source nodes, so ask each host.
-        for host in $PVE_HOSTS; do
-          echo "--- $host ---"
-          if ssh -o ConnectTimeout=2 -o BatchMode=yes "$host" "true" 2>/dev/null; then
-            ssh -o BatchMode=yes "$host" "sudo pvesr status" 2>/dev/null || echo "(no replication status)"
-          else
-            echo "(unreachable)"
-          fi
-        done
-
-  # === k3s ==============================================================
-  k3s:provision-vms:
-    desc: Provision the k3s VMs on Proxmox (creates guests only)
-    dir: "{{.ANSIBLE_DIR}}"
-    env:
-      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
-    preconditions: *op_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/k3s-provision-vms.yml {{.CLI_ARGS}}
-
-  k3s:deploy:
-    desc: Deploy/refresh the k3s cluster (servers, agents, kube-vip)
-    dir: "{{.ANSIBLE_DIR}}"
-    env:
-      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
-      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
-      SMTP_RELAY_USER: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'username') }}{% raw %}
-      SMTP_RELAY_PASSWORD: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'password') }}{% raw %}
-      K3S_TOKEN: {% endraw %}{{ secret_ref('K3s Cluster Token', 'credential') }}{% raw %}
-      # Agents join with the lower-privilege worker token, which the servers
-      # advertise as agent-token.
-      K3S_AGENT_TOKEN: {% endraw %}{{ secret_ref('K3s Agent Token', 'credential') }}{% raw %}
-      LOKI_PUSH_USER: {% endraw %}{{ secret_ref('Loki Push Auth', 'username') }}{% raw %}
-      LOKI_PUSH_PASSWORD: {% endraw %}{{ secret_ref('Loki Push Auth', 'password') }}{% raw %}
-    preconditions: *op_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/k3s.yml {{.CLI_ARGS}}
-
-  k3s:kubeconfig:
-    desc: Fetch the cluster kubeconfig into ~/.kube/config-k3s (rewritten to the API VIP)
-    cmds:
-      - |
-        set -eo pipefail
-        if [ -z "$K3S_SERVERS" ]; then
-          echo "ERROR: K3S_SERVERS is empty — fill in the inventory and run: task hosts:sync"
-          exit 1
-        fi
-        TARGETS=""
-        for ip in $K3S_SERVERS; do TARGETS="$TARGETS {{.ADMIN_USER}}@$ip"; done
-        # shellcheck disable=SC2086
-        SERVER=$(scripts/find-reachable-host.sh $TARGETS) || {
-          echo "ERROR: cannot reach any k3s server ($K3S_SERVERS)"
-          exit 1
-        }
-        DATA=$(ssh "$SERVER" "sudo cat /etc/rancher/k3s/k3s.yaml")
-        [ -n "$DATA" ] || { echo "ERROR: kubeconfig came back empty"; exit 1; }
-        mkdir -p ~/.kube
-        # The server writes 127.0.0.1; every client must go through the VIP so a
-        # server failover does not invalidate the file.
-        echo "$DATA" | sed 's/127.0.0.1/{{.API_VIP}}/g; s/0.0.0.0/{{.API_VIP}}/g' > ~/.kube/config-k3s
-        chmod 600 ~/.kube/config-k3s
-        echo "Wrote ~/.kube/config-k3s — export KUBECONFIG=~/.kube/config-k3s"
-
-  k3s:status:
-    desc: Show cluster nodes and platform service health
-    preconditions: &kubectl_preconditions
-      - sh: command -v kubectl
-        msg: "kubectl not installed: https://kubernetes.io/docs/tasks/tools/"
-      - sh: kubectl cluster-info 2>/dev/null
-        msg: "Cannot reach the cluster. Run: export KUBECONFIG=~/.kube/config-k3s"
-    cmds:
-      - kubectl get nodes -o wide
-      - kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded
-      - kubectl get svc -A --field-selector spec.type=LoadBalancer
-      - kubectl get ingressroute -A 2>/dev/null || true
-
-  k3s:backup:
-    desc: Take an on-demand etcd snapshot on a reachable server
-    cmds:
-      - |
-        set -eo pipefail
-        if [ -z "$K3S_SERVERS" ]; then
-          echo "ERROR: K3S_SERVERS is empty — run: task hosts:sync"
-          exit 1
-        fi
-        SNAPSHOT="manual-$(date +%Y%m%d-%H%M%S)"
-        TARGETS=""
-        for ip in $K3S_SERVERS; do TARGETS="$TARGETS {{.ADMIN_USER}}@$ip"; done
-        # shellcheck disable=SC2086
-        SERVER=$(scripts/find-reachable-host.sh $TARGETS) || {
-          echo "ERROR: cannot reach any k3s server"
-          exit 1
-        }
-        ssh "$SERVER" "sudo k3s etcd-snapshot save --name $SNAPSHOT"
-        echo "Snapshot $SNAPSHOT created; list with: ssh $SERVER 'sudo k3s etcd-snapshot ls'"
-
-  # === Flux =============================================================
-  flux:install-cli:
-    desc: Install the flux CLI (Homebrew)
-    preconditions:
-      - sh: command -v brew
-        msg: "Homebrew not installed. Install flux another way: https://fluxcd.io/flux/installation/"
-    cmds:
-      - |
-        if ! command -v flux >/dev/null 2>&1; then
-          brew install fluxcd/tap/flux
-        fi
-        flux --version
-
-  flux:bootstrap-secrets:
-    desc: Create the two bootstrap Secrets External Secrets needs (one-time, needs ./1password-credentials.json)
-    preconditions:
-      - sh: command -v op
-        msg: "1Password CLI not installed"
-      - sh: op whoami 2>/dev/null
-        msg: "1Password CLI not authenticated. Run: eval $(op signin)"
-      - sh: kubectl cluster-info 2>/dev/null
-        msg: "Cannot reach the cluster. Point KUBECONFIG at it first"
-      - sh: test -f ./1password-credentials.json
-        msg: "./1password-credentials.json missing. Run: op connect server create {{.CLUSTER_NAME}}-connect --vaults '{{.OP_VAULT}}'"
-    cmds:
-      - |
-        set -eo pipefail
-        # These two Secrets are the ONLY hand-created ones in the cluster;
-        # every other Secret is produced by External Secrets from this token.
-        # The Connect token is minted here rather than read from the vault —
-        # it is deliberately not stored as an item.
-        TOKEN="$(op connect token create {{.CLUSTER_NAME}}-eso --server {{.CLUSTER_NAME}}-connect --vaults "{{.OP_VAULT}}")"
-        [ -n "$TOKEN" ] || { echo "ERROR: op connect token create returned nothing"; exit 1; }
-        TOKEN_FILE=$(mktemp)
-        trap 'rm -f "$TOKEN_FILE"' EXIT
-        printf '%s' "$TOKEN" > "$TOKEN_FILE"
-        kubectl create namespace external-secrets --dry-run=client -o yaml | kubectl apply -f -
-        kubectl -n external-secrets create secret generic op-credentials \
-          --from-file=1password-credentials.json=./1password-credentials.json \
-          --dry-run=client -o yaml | kubectl apply -f -
-        kubectl -n external-secrets create secret generic onepassword-connect-token \
-          --from-file=token="$TOKEN_FILE" \
-          --dry-run=client -o yaml | kubectl apply -f -
-        echo "Bootstrap Secrets created. Next: task flux:bootstrap"
-
-  flux:bootstrap:
-    desc: "One-time Flux bootstrap into this repository (BRANCH=main)"
-    vars:
-      BRANCH: '{{.BRANCH | default "main"}}'
-    preconditions:
-      - sh: command -v flux
-        msg: "flux CLI not installed. Run: task flux:install-cli"
-      - sh: kubectl cluster-info 2>/dev/null
-        msg: "Cannot reach the cluster. Point KUBECONFIG at it first"
-      - sh: op whoami 2>/dev/null
-        msg: "1Password CLI not authenticated. Run: eval $(op signin)"
-      - sh: kubectl -n external-secrets get secret op-credentials 2>/dev/null
-        msg: "Bootstrap Secret op-credentials missing. Run: task flux:bootstrap-secrets"
-      - sh: kubectl -n external-secrets get secret onepassword-connect-token 2>/dev/null
-        msg: "Bootstrap Secret onepassword-connect-token missing. Run: task flux:bootstrap-secrets"
-    cmds:
-      - |
-        set -eo pipefail
-        if [ ! -t 0 ]; then
-          echo "ERROR: flux:bootstrap needs an interactive TTY (it confirms before pushing)."
-          exit 1
-        fi
-        echo "Bootstrapping Flux into {{.GIT_HOST}}/{{.GIT_NAMESPACE}}/{{.CLUSTER_NAME}} (branch {{.BRANCH}})."
-        echo "This commits to the branch and pushes it."
-        read -r -p "Continue? [y/N] " confirm
-        [ "$confirm" = "y" ] || { echo "Aborted"; exit 1; }
-      - |
-        set -eo pipefail
-        # Explicit read + emptiness check: a silent op failure would otherwise
-        # run bootstrap with an empty token and fail with an opaque auth error.
-        GITLAB_TOKEN="$(op read '{% endraw %}{{ secret_ref('Git Access Token', 'credential') }}{% raw %}')"
-        [ -n "$GITLAB_TOKEN" ] || { echo "ERROR: empty token from 'Git Access Token'"; exit 1; }
-        export GITLAB_TOKEN
-        flux bootstrap gitlab \
-          --hostname={{.GIT_HOST}} \
-          --owner={{.GIT_NAMESPACE}} \
-          --repository={{.CLUSTER_NAME}} \
-          --branch={{.BRANCH}} \
-          --path={{.CLUSTER_DIR}} \
-          --deploy-token-auth \
-          --interval=1m
-
-  flux:reconcile:
-    desc: Force a full reconcile (source → the infrastructure chain → apps)
-    preconditions: &flux_preconditions
-      - sh: command -v flux
-        msg: "flux CLI not installed. Run: task flux:install-cli"
-      - sh: command -v kubectl
-        msg: "kubectl not found"
-    cmds:
-      - flux reconcile source git flux-system
-      # Root first: it applies the child Kustomization CRs themselves, so edits
-      # under the cluster dir take effect without waiting for its own interval.
-      - flux reconcile kustomization flux-system
-      - flux reconcile kustomization infrastructure-sources
-      - flux reconcile kustomization infrastructure-crds
-      - flux reconcile kustomization infrastructure-controllers
-      - flux reconcile kustomization infrastructure-configs
-      - flux reconcile kustomization infrastructure-observability
-      - flux reconcile kustomization apps
-
-  flux:status:
-    desc: Concise health summary (kustomizations, releases, secrets)
-    preconditions: *flux_preconditions
-    cmds:
-      - flux get kustomizations -A
-      - flux get helmreleases -A
-      - kubectl get externalsecrets -A
-
-  flux:verify:
-    desc: flux check plus every managed resource
-    preconditions: *flux_preconditions
-    cmds:
-      - flux check
-      - flux get all -A
-
-  flux:suspend:
-    desc: "Suspend a Flux resource (task flux:suspend -- <ns>/<kind>/<name>)"
-    preconditions: *flux_preconditions
-    cmds:
-      - |
-        set -eo pipefail
-        if [ -z "{{.CLI_ARGS}}" ]; then
-          echo "Usage: task flux:suspend -- <ns>/<kind>/<name>"
-          exit 1
-        fi
-        IFS='/' read -r NS KIND NAME <<< "{{.CLI_ARGS}}"
-        flux suspend "$KIND" "$NAME" -n "$NS"
-
-  flux:resume:
-    desc: "Resume a suspended Flux resource (task flux:resume -- <ns>/<kind>/<name>)"
-    preconditions: *flux_preconditions
-    cmds:
-      - |
-        set -eo pipefail
-        if [ -z "{{.CLI_ARGS}}" ]; then
-          echo "Usage: task flux:resume -- <ns>/<kind>/<name>"
-          exit 1
-        fi
-        IFS='/' read -r NS KIND NAME <<< "{{.CLI_ARGS}}"
-        flux resume "$KIND" "$NAME" -n "$NS"
-
-  flux:refresh-secret:
-    desc: "Force an ExternalSecret to re-fetch (task flux:refresh-secret -- <ns>/<name>)"
-    cmds:
-      - |
-        set -eo pipefail
-        if ! [[ "{{.CLI_ARGS}}" =~ ^[a-z0-9-]+/[a-z0-9-]+$ ]]; then
-          echo "Usage: task flux:refresh-secret -- <namespace>/<name>"
-          exit 1
-        fi
-        IFS='/' read -r NS NAME <<< "{{.CLI_ARGS}}"
-        # Wait for status.refreshTime to CHANGE, not for condition=Ready: an
-        # already-Ready ExternalSecret stays Ready across the annotation, so
-        # Ready returns instantly and consumers restart against the OLD value.
-        BEFORE=$(kubectl get -n "$NS" externalsecret "$NAME" \
-          -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
-        kubectl annotate --overwrite -n "$NS" externalsecret "$NAME" force-sync="$(date +%s)"
-        for _ in $(seq 1 60); do
-          AFTER=$(kubectl get -n "$NS" externalsecret "$NAME" \
-            -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
-          [ -n "$AFTER" ] && [ "$AFTER" != "$BEFORE" ] && break
-          sleep 1
-        done
-        if [ "$AFTER" = "$BEFORE" ]; then
-          echo "ERROR: $NS/$NAME did not refresh within 60s (refreshTime unchanged: ${BEFORE:-none})" >&2
-          echo "Consumers were NOT restarted; the old secret value is still in place." >&2
-          exit 1
-        fi
-        kubectl wait -n "$NS" externalsecret "$NAME" --for=condition=Ready --timeout=60s
-
-  flux:rotate-secret:
-    desc: "Re-fetch an ExternalSecret and restart its consumers (task flux:rotate-secret -- <ns>/<name>)"
-    cmds:
-      - |
-        # `set -e` matters: without it a failed refresh would still restart the
-        # pods, which come back with the OLD value and look like a success.
-        set -eo pipefail
-        if ! [[ "{{.CLI_ARGS}}" =~ ^[a-z0-9-]+/[a-z0-9-]+$ ]]; then
-          echo "Usage: task flux:rotate-secret -- <namespace>/<name>"
-          exit 1
-        fi
-        IFS='/' read -r NS NAME <<< "{{.CLI_ARGS}}"
-        task flux:refresh-secret -- "$NS/$NAME"
-        # Reloader watches ConfigMaps only (ignoreSecrets), so a Secret rotation
-        # is always a manual restart.
-        kubectl rollout restart deployment,statefulset,daemonset -n "$NS"
-
-  flux:sync-versions:
-    desc: Regenerate the cluster-versions ConfigMap from the Ansible vars file
-    preconditions: &pyyaml_precondition
-      - sh: python3 -c "import yaml" 2>/dev/null
-        msg: "PyYAML not installed (pip install pyyaml)"
-    cmds:
-      - >-
-        python3 scripts/generate-versions-configmap.py
-        --vars-file ansible/inventories/prod/group_vars/all.yml
-        --output {{.VERSIONS_CM}}
-        --nested-key helm_chart_versions
-        --regen-command "task flux:sync-versions"
 
   hosts:sync:
     desc: Regenerate scripts/hosts.env from the Ansible inventory
@@ -621,556 +219,9 @@ tasks:
         --map scripts/hosts-env-map.yml
         --regen-command "task hosts:sync"
 
-  flux:dev-apply:
-    desc: "Dev helper: render one path and apply it (Flux reverts it on the next reconcile)"
-    preconditions:
-      - sh: command -v kustomize
-        msg: "kustomize not installed"
-      - sh: command -v envsubst
-        msg: "envsubst not installed (brew install gettext)"
-      - sh: python3 -c "import yaml" 2>/dev/null
-        msg: "PyYAML not installed (pip install pyyaml)"
-    cmds:
-      - |
-        set -eo pipefail
-        if [ -z "{{.CLI_ARGS}}" ]; then
-          echo "Usage: task flux:dev-apply -- <path-to-kustomization-dir>"
-          exit 1
-        fi
-        # Substitute exactly what Flux substitutes at reconcile time, or the
-        # applied manifests carry literal ${...} placeholders.
-        VARS=$(scripts/flux-env.sh export-versions "{{.VERSIONS_CM}}") || exit 1
-        eval "$VARS"
-        echo "WARNING: Flux reverts this unless the change is committed."
-        kustomize build "{{.CLI_ARGS}}" | envsubst "$FLUX_ENVSUBST_VARS" | kubectl apply -f -
-
-  flux:lint:
-    desc: Build every Flux Kustomization, substitute, schema-validate, and run the corpus gates
-    preconditions:
-      - sh: command -v kustomize
-        msg: "kustomize not installed"
-      - sh: command -v kubeconform
-        msg: "kubeconform not installed (brew install kubeconform)"
-      - sh: command -v envsubst
-        msg: "envsubst not installed (brew install gettext)"
-      - sh: command -v helm
-        msg: "helm not installed (brew install helm — schema-validates the value-heavy HelmReleases)"
-      - sh: python3 -c "import yaml" 2>/dev/null
-        msg: "PyYAML not installed (pip install pyyaml)"
-    cmds:
-      - |
-        set -eo pipefail
-        FAILED=0
-        # Mirror the reconcile-time postBuild substitution: both ConfigMaps
-        # (versions + cluster config) are exported, so a placeholder typo is
-        # caught here instead of rendering as an empty string in-cluster.
-        VARS=$(scripts/flux-env.sh export-versions "{{.VERSIONS_CM}}") || exit 1
-        eval "$VARS"
-        K8S_VER=$(scripts/flux-env.sh k8s-version "{{.VERSIONS_CM}}")
-        echo "kubeconform target: $K8S_VER"
-
-        # The corpus the invariant gates below read. They need every stage at
-        # once — an HPA in one namespace against a VPA in another, a
-        # ClusterSecretStore against its consumers — so each build is appended
-        # here rather than checked in isolation. Same file the CI flux-lint job
-        # passes to the same scripts as "$RENDER_ALL".
-        RENDER_ALL=$(mktemp)
-        trap 'rm -f "$RENDER_ALL"' EXIT
-
-        for ks in {{.CLUSTER_DIR}}/*.yaml; do
-          [ -f "$ks" ] || continue
-          NAME=$(basename "$ks" .yaml)
-          [ "$NAME" = "kustomization" ] && continue
-          SRCPATH=$(python3 -c "
-        import sys, yaml
-        with open(sys.argv[1]) as f:
-            doc = yaml.safe_load(f)
-        print((doc or {}).get('spec', {}).get('path', '') or '')
-        " "$ks") || { echo "ERROR: cannot parse $ks"; FAILED=1; continue; }
-          [ -n "$SRCPATH" ] || continue
-          SRCPATH="${SRCPATH#./}"
-          echo "=== $ks (path $SRCPATH) ==="
-          if ! RAW=$(kustomize build "$SRCPATH" 2>&1); then
-            echo "ERROR: kustomize build failed for $SRCPATH:"
-            echo "$RAW"
-            FAILED=1
-            continue
-          fi
-          # Check placeholders against the PRE-substitution output: envsubst
-          # renders an unknown var as an empty string, so only the raw text can
-          # reveal a typo.
-          MISSING=""
-          for ref in $(echo "$RAW" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' | sort -u); do
-            varname=${ref#\$\{}
-            varname=${varname%\}}
-            if [ -z "${!varname+x}" ]; then
-              MISSING="$MISSING $varname"
-            fi
-          done
-          MISSING=$(echo "$MISSING" | tr ' ' '\n' | grep -v '^$' | sort -u || true)
-          if [ -n "$MISSING" ]; then
-            echo "ERROR: $SRCPATH references keys absent from both ConfigMaps:"
-            echo "$MISSING" | sed 's/^/  - /'
-            FAILED=1
-            continue
-          fi
-          # printf, never echo: rendered dashboards carry literal \n inside
-          # block scalars that echo would expand and corrupt.
-          RENDERED=$(printf '%s\n' "$RAW" | envsubst "$FLUX_ENVSUBST_VARS")
-          printf '%s\n---\n' "$RENDERED" >> "$RENDER_ALL"
-          if ! printf '%s\n' "$RENDERED" | kubeconform \
-              -strict -ignore-missing-schemas \
-              -kubernetes-version "$K8S_VER" \
-              -schema-location default \
-              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{`{{.Group}}`}}/{{`{{.ResourceKind}}`}}_{{`{{.ResourceAPIVersion}}`}}.json' \
-              -summary; then
-            FAILED=1
-          fi
-        done
-
-        # The gates CI's flux-lint job runs as extra_validation, in the same
-        # order over the same corpus. Keep the two lists EQUAL: a gate only here
-        # is one CI does not enforce, and a gate only there is a green
-        # `task lint` followed by a red pipeline.
-        echo "=== Checking HPA/VPA invariant ==="
-        python3 scripts/check-hpa-vpa-invariant.py --require-chart-native-vpas \
-          --policy-config scripts/autoscaling-policy.yaml < "$RENDER_ALL" || FAILED=1
-        echo "=== Checking scrape/NetworkPolicy invariant ==="
-        python3 scripts/check-scrape-netpol.py < "$RENDER_ALL" || FAILED=1
-        echo "=== Checking ingress default-deny coverage ==="
-        python3 scripts/check-default-deny-coverage.py < "$RENDER_ALL" || FAILED=1
-        echo "=== Checking ClusterSecretStore scoping ==="
-        python3 scripts/check-secretstore-scope.py < "$RENDER_ALL" || FAILED=1
-        echo "=== Checking PVC storageClassName ==="
-        python3 scripts/check-pvc-storageclass.py < "$RENDER_ALL" || FAILED=1
-
-        # kustomize build emits a HelmRelease verbatim, so .spec.values — a
-        # free-form object in the CRD — reaches the cluster unvalidated. This
-        # renders the value-heavy charts with `helm template` instead. Needs
-        # network (helm repo add/update).
-        echo "=== Schema-validating HelmRelease values blocks (helm template) ==="
-        MERGED_CM=$(mktemp)
-        if scripts/flux-env.sh merged-configmap "{{.VERSIONS_CM}}" > "$MERGED_CM"; then
-          python3 scripts/validate-helm-values.py --kubeconform \
-            --releases scripts/helm-values-releases.yaml \
-            --versions-configmap "$MERGED_CM" \
-            --policy-config scripts/autoscaling-policy.yaml || FAILED=1
-        else
-          echo "ERROR: could not merge the substitution ConfigMaps"
-          FAILED=1
-        fi
-        rm -f "$MERGED_CM"
-
-        # The root also pulls in flux-system/, whose gotk-components.yaml is
-        # written by `flux bootstrap` — before that it does not exist, so a
-        # pre-bootstrap repository would fail here for the wrong reason.
-        if [ -f "{{.CLUSTER_DIR}}/flux-system/gotk-components.yaml" ]; then
-          echo "=== cluster root {{.CLUSTER_DIR}} ==="
-          kustomize build {{.CLUSTER_DIR}} >/dev/null || FAILED=1
-        else
-          echo "=== cluster root skipped: flux-system/ is written by flux bootstrap ==="
-        fi
-        exit $FAILED
-
-  # === Observability ====================================================
-  observability:status:
-    desc: Show the observability namespace's workloads and scrape config
-    preconditions: *kubectl_preconditions
-    cmds:
-      - kubectl get pods -n observability -o wide
-      - kubectl get pvc -n observability
-      - kubectl get helmreleases -n observability
-      - kubectl get servicemonitors -n observability
-
-  observability:logs:
-    desc: "Tail an observability component (COMPONENT=prometheus)"
-    vars:
-      COMPONENT: '{{.COMPONENT | default "prometheus"}}'
-    cmds:
-      - kubectl logs -n observability -l app.kubernetes.io/name={{.COMPONENT}} --tail=100 -f {{.CLI_ARGS}}
-
-  observability:restart:
-    desc: Restart every observability workload
-    cmds:
-      - kubectl rollout restart deployment,statefulset,daemonset -n observability
-
-  # === Maintenance ======================================================
-  maintenance:update-packages:
-    desc: Rolling OS package updates across all hosts (interactive)
-    dir: "{{.ANSIBLE_DIR}}"
-    cmds:
-      - ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-packages.yml {{.CLI_ARGS}}
-
-  maintenance:update-applications:
-    desc: Update the host-level applications to their pinned versions
-    dir: "{{.ANSIBLE_DIR}}"
-    # Anchor shared by the update-full variants so they cannot drift on secrets.
-    env: &maintenance_env
-      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
-      SMTP_RELAY_USER: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'username') }}{% raw %}
-      SMTP_RELAY_PASSWORD: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'password') }}{% raw %}
-      ADGUARD_ADMIN_PASSWORD: {% endraw %}{{ secret_ref('AdGuard Home', 'password') }}{% raw %}
-      ACME_SSH_PRIVATE_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'private key') }}{% raw %}
-      ACME_SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'public key') }}{% raw %}
-{% endraw %}{% if vpn_tailscale %}      TAILSCALE_AUTH_KEY: {{ secret_ref('Tailscale Auth Key', 'credential') }}
-{% endif %}{% raw %}    preconditions: *op_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-applications.yml {{.CLI_ARGS}}
-
-  maintenance:update-full:
-    desc: OS packages plus applications, rolling and interactive
-    dir: "{{.ANSIBLE_DIR}}"
-    env: *maintenance_env
-    preconditions: *op_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-full.yml {{.CLI_ARGS}}
-
-  maintenance:update-full-auto:
-    desc: OS packages plus applications, rolling with automatic reboots
-    dir: "{{.ANSIBLE_DIR}}"
-    env: *maintenance_env
-    preconditions: *op_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-full.yml -e auto_reboot=true {{.CLI_ARGS}}
-
-  maintenance:update-k3s-nodes:
-    desc: Rolling k3s binary upgrade (cordon, upgrade, restart, uncordon)
-    dir: "{{.ANSIBLE_DIR}}"
-    env:
-      K3S_TOKEN: {% endraw %}{{ secret_ref('K3s Cluster Token', 'credential') }}{% raw %}
-      K3S_AGENT_TOKEN: {% endraw %}{{ secret_ref('K3s Agent Token', 'credential') }}{% raw %}
-    preconditions: *op_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/maintenance/update-k3s-nodes.yml {{.CLI_ARGS}}
-
-  maintenance:check-versions:
-    desc: Report available updates for every tracked pin (scripts/version-registry.py)
-    env: &version_env
-      GITHUB_TOKEN: {% endraw %}{{ secret_ref('GitHub Token', 'credential') }}{% raw %}
-    cmds:
-      # Exit 1 means "updates available", which is information, not failure.
-      - {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py {{.CLI_ARGS}}; RC=$?; [ $RC -le 1 ] || exit $RC
-
-  maintenance:check-versions-json:
-    desc: The same report as JSON
-    env: *version_env
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py --json {{.CLI_ARGS}}; RC=$?; [ $RC -le 1 ] || exit $RC
-
-  maintenance:update-version:
-    desc: "Bump one tracked pin and regenerate the ConfigMap (SERVICE=<name>)"
-    vars:
-      SERVICE: '{{.SERVICE | default ""}}'
-    env: *version_env
-    cmds:
-      - |
-        if [ -z "{{.SERVICE}}" ]; then
-          echo "Usage: task maintenance:update-version SERVICE=<name>"
-          {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py --list
-          exit 1
-        fi
-        {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py --update "{{.SERVICE}}"
-      - task: flux:sync-versions
-      - echo "Pins updated. Commit all.yml + the versions ConfigMap and raise an MR."
-
-  maintenance:update-all-versions:
-    desc: Bump every outdated tracked pin and regenerate the ConfigMap
-    env: *version_env
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py --update-all
-      - task: flux:sync-versions
-      - echo "Pins updated. Commit all.yml + the versions ConfigMap and raise an MR."
-
-  maintenance:update-cluster:
-    desc: Full cluster update pass — k3s nodes, then version pins
-    cmds:
-      - task: maintenance:update-k3s-nodes
-      - task: maintenance:check-versions
-      - task: maintenance:update-all-versions
-      - 'echo "Commit and push so Flux reconciles the new versions, then run task flux:status"'
-
-  # === Terraform ========================================================
-  # Each root module keeps its own state name under the project's
-  # GitLab-managed Terraform state. CI authenticates with CI_JOB_TOKEN; local
-  # runs use the project access token in the vault.
-  terraform:init:
-    desc: Initialize the DNS zone module
-    dir: "{{.TERRAFORM_DIR}}/cloudflare"
-    env: &tf_dns_env
-      TF_VAR_cloudflare_api_token: {% endraw %}{{ secret_ref('Cloudflare Terraform Token', 'credential') }}{% raw %}
-      TF_VAR_cloudflare_account_id: {% endraw %}{{ secret_ref('Cloudflare Terraform Token', 'username') }}{% raw %}
-      TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/cloudflare"
-      TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/cloudflare/lock"
-      TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/cloudflare/lock"
-      TF_HTTP_USERNAME: "terraform"
-      TF_HTTP_PASSWORD: {% endraw %}{{ secret_ref('Git Terraform State Token', 'credential') }}{% raw %}
-      TF_HTTP_LOCK_METHOD: "POST"
-      TF_HTTP_UNLOCK_METHOD: "DELETE"
-    preconditions: &tf_preconditions
-      - sh: command -v terraform
-        msg: "terraform not installed: https://developer.hashicorp.com/terraform/downloads"
-      - sh: command -v op
-        msg: "1Password CLI not installed"
-      - sh: op whoami 2>/dev/null
-        msg: "1Password CLI not authenticated. Run: eval $(op signin)"
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} terraform init {{.CLI_ARGS}}
-
-  terraform:plan:
-    desc: Plan DNS zone changes
-    dir: "{{.TERRAFORM_DIR}}/cloudflare"
-    env: *tf_dns_env
-    preconditions: *tf_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
-
-  terraform:apply:
-    desc: Apply DNS zone changes
-    dir: "{{.TERRAFORM_DIR}}/cloudflare"
-    env: *tf_dns_env
-    preconditions: *tf_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
-{% endraw %}{% if vpn_tailscale %}{% raw %}
-  # --- Tailnet ACL (own state name; SUPERVISED apply) ---
-  terraform:tailscale-init:
-    desc: Initialize the tailnet ACL module
-    dir: "{{.TERRAFORM_DIR}}/tailscale"
-    env: &tf_tailscale_env
-      TF_VAR_tailscale_oauth_client_id: {% endraw %}{{ secret_ref('Tailscale OAuth', 'client id') }}{% raw %}
-      TF_VAR_tailscale_oauth_client_secret: {% endraw %}{{ secret_ref('Tailscale OAuth', 'credential') }}{% raw %}
-      TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/tailscale"
-      TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/tailscale/lock"
-      TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/tailscale/lock"
-      TF_HTTP_USERNAME: "terraform"
-      TF_HTTP_PASSWORD: {% endraw %}{{ secret_ref('Git Terraform State Token', 'credential') }}{% raw %}
-      TF_HTTP_LOCK_METHOD: "POST"
-      TF_HTTP_UNLOCK_METHOD: "DELETE"
-    preconditions: *tf_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} terraform init {{.CLI_ARGS}}
-
-  terraform:tailscale-plan:
-    desc: Plan tailnet ACL changes (diff against the live policy)
-    dir: "{{.TERRAFORM_DIR}}/tailscale"
-    env: *tf_tailscale_env
-    preconditions: *tf_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
-
-  terraform:tailscale-apply:
-    desc: "SUPERVISED: apply the tailnet ACL — it overwrites the live policy; read terraform/tailscale/README.md first"
-    dir: "{{.TERRAFORM_DIR}}/tailscale"
-    env: *tf_tailscale_env
-    preconditions: *tf_preconditions
-    cmds:
-      # A bad ACL can sever tailnet and SSH access to every node, so the plan
-      # review cannot be skipped by a stray flag.
-      - |
-        case " {{.CLI_ARGS}} " in
-          *-auto-approve*)
-            echo "Refusing -auto-approve: this apply is supervised. Review the plan and type 'yes'." >&2
-            exit 1
-            ;;
-        esac
-        {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
-{% endraw %}{% endif %}{% raw %}
-  # --- SSO objects (own state name; SUPERVISED apply) ---
-  terraform:authentik-init:
-    desc: Initialize the SSO module
-    dir: "{{.TERRAFORM_DIR}}/authentik"
-    # The anchor is shared by authentik-plan and authentik-apply, so all three
-    # tasks see the same credentials.
-    env: &tf_authentik_env
-      TF_VAR_authentik_token: {% endraw %}{{ secret_ref('Authentik Terraform Token', 'credential') }}{% raw %}
-      # Grafana's OIDC client secret is SUPPLIED to Authentik, not minted by it:
-      # the same vault field the Grafana ExternalSecret reads. Without this the
-      # provider generates a secret that exists only in Terraform state, so the
-      # value in the cluster and the value in Authentik diverge the first time
-      # either is rebuilt — and the login cannot be reproduced or rotated.
-      TF_VAR_oauth2_client_secret_grafana: {% endraw %}{{ secret_ref('Grafana SSO', 'oidc-client-secret') }}{% raw %}
-      TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/authentik"
-      TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/authentik/lock"
-      TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/authentik/lock"
-      TF_HTTP_USERNAME: "terraform"
-      TF_HTTP_PASSWORD: {% endraw %}{{ secret_ref('Git Terraform State Token', 'credential') }}{% raw %}
-      TF_HTTP_LOCK_METHOD: "POST"
-      TF_HTTP_UNLOCK_METHOD: "DELETE"
-    preconditions: *tf_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} terraform init {{.CLI_ARGS}}
-
-  terraform:authentik-plan:
-    desc: Plan SSO changes (read-only diff against the live objects)
-    dir: "{{.TERRAFORM_DIR}}/authentik"
-    env: *tf_authentik_env
-    preconditions: *tf_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
-
-  terraform:authentik-import:
-    desc: "Adopt UI-created SSO objects into state (idempotent; read-only against authentik)"
-    dir: "{{.TERRAFORM_DIR}}/authentik"
-    env: *tf_authentik_env
-    preconditions: *tf_preconditions
-    cmds:
-      # Only writes Terraform state. Required after a state loss: an apply with
-      # empty state duplicates every group instead of adopting it.
-      - {% endraw %}{{ secret_runner() }}{% raw %} ./import.sh
-
-  terraform:authentik-apply:
-    desc: "SUPERVISED: apply SSO changes — a misconfiguration locks every user out of every app"
-    dir: "{{.TERRAFORM_DIR}}/authentik"
-    env: *tf_authentik_env
-    preconditions: *tf_preconditions
-    cmds:
-      - |
-        case " {{.CLI_ARGS}} " in
-          *-auto-approve*)
-            echo "Refusing -auto-approve: this apply is supervised. Review the plan and type 'yes'." >&2
-            exit 1
-            ;;
-        esac
-        {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
-{% endraw %}{% if use_unifi %}{% raw %}
-  # --- Gateway networks and VLANs (own state name; SUPERVISED apply) ---
-  terraform:unifi-init:
-    desc: Initialize the gateway network module
-    dir: "{{.TERRAFORM_DIR}}/unifi"
-    # The anchor is shared by unifi-plan and unifi-apply, so all three tasks see
-    # the same credentials. One line per WLAN passphrase the root declares — a
-    # variable with no value fails the plan, which is the intent.
-    env: &tf_unifi_env
-      TF_VAR_unifi_api_url: {% endraw %}{{ secret_ref('UniFi Controller', 'url') }}{% raw %}
-      TF_VAR_unifi_api_key: {% endraw %}{{ secret_ref('UniFi Controller', 'api-key') }}{% raw %}
-      TF_VAR_wlan_passphrase_iot: {% endraw %}{{ secret_ref('WiFi IoT', 'password') }}{% raw %}
-      TF_VAR_wlan_passphrase_guest: {% endraw %}{{ secret_ref('WiFi Guest', 'password') }}{% raw %}
-      TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/unifi"
-      TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/unifi/lock"
-      TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/unifi/lock"
-      TF_HTTP_USERNAME: "terraform"
-      TF_HTTP_PASSWORD: {% endraw %}{{ secret_ref('Git Terraform State Token', 'credential') }}{% raw %}
-      TF_HTTP_LOCK_METHOD: "POST"
-      TF_HTTP_UNLOCK_METHOD: "DELETE"
-    preconditions: *tf_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} terraform init {{.CLI_ARGS}}
-
-  terraform:unifi-plan:
-    desc: Plan gateway network changes (read-only diff against the live console)
-    dir: "{{.TERRAFORM_DIR}}/unifi"
-    env: *tf_unifi_env
-    preconditions: *tf_preconditions
-    cmds:
-      - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
-
-  terraform:unifi-import:
-    desc: "Adopt one pre-existing console object into state (read-only against the console; writes only Terraform state) — usage: task terraform:unifi-import -- <address> <id>"
-    dir: "{{.TERRAFORM_DIR}}/unifi"
-    env: *tf_unifi_env
-    preconditions: *tf_preconditions
-    cmds:
-      # No import.sh counterpart to authentik's: that root imports a fixed
-      # inventory, while the UniFi ids are read off the live console one object
-      # at a time, so the address and id arrive as CLI_ARGS. Required before the
-      # first apply and after a state loss — an apply with empty state plans
-      # creates against objects that already exist and fails part-way on the
-      # unique-name constraints. The ordered sequence is
-      # terraform/unifi/README.md § Before the first apply.
-      - |
-        if [ -z "{{.CLI_ARGS}}" ]; then
-          echo "Usage: task terraform:unifi-import -- <address> <id>"
-          echo "Example: task terraform:unifi-import -- 'module.network.unifi_network.this[\"default\"]' name=Default"
-          exit 1
-        fi
-      - {% endraw %}{{ secret_runner() }}{% raw %} terraform import {{.CLI_ARGS}}
-
-  terraform:unifi-state:
-    desc: "Run a `terraform state` subcommand against the gateway module's state — usage: task terraform:unifi-state -- rm 'module.network.unifi_network.this[\"iot\"]'"
-    dir: "{{.TERRAFORM_DIR}}/unifi"
-    env: *tf_unifi_env
-    preconditions: *tf_preconditions
-    cmds:
-      # State-only: `list`, `show` and `rm` never reach the console, but they do
-      # need the HTTP backend credentials this anchor carries, so a bare
-      # `terraform state ...` answers 401 instead. `rm` stops managing an object
-      # and leaves it live — terraform/unifi/README.md § Renaming and removing.
-      - |
-        if [ -z "{{.CLI_ARGS}}" ]; then
-          echo "Usage: task terraform:unifi-state -- <subcommand> [args]"
-          echo "Example: task terraform:unifi-state -- rm 'module.network.unifi_network.this[\"iot\"]'"
-          exit 1
-        fi
-      - {% endraw %}{{ secret_runner() }}{% raw %} terraform state {{.CLI_ARGS}}
-
-  terraform:unifi-apply:
-    desc: "SUPERVISED: apply gateway network changes — a bad apply is a LAN you cannot reach the console from"
-    dir: "{{.TERRAFORM_DIR}}/unifi"
-    env: *tf_unifi_env
-    preconditions: *tf_preconditions
-    cmds:
-      # Back the controller up (.unf export) before an apply that touches
-      # networks or zones; read terraform/unifi/README.md first.
-      #
-      # Stricter than the sibling supervised applies on purpose: this module
-      # owns every VLAN, the zone-based firewall and the SSIDs, so an unreviewed
-      # apply can sever routing to the console itself and recovery is then
-      # physical. Hence a TTY requirement (no pipeline, no `yes |`) and a typed
-      # confirmation on top of the refused flag.
-      - |
-        set -eu
-        if [ ! -t 0 ]; then
-          echo "ERROR: terraform:unifi-apply is a supervised operator step; run it from a terminal." >&2
-          exit 2
-        fi
-        case " {{.CLI_ARGS}} " in
-          *-auto-approve*)
-            echo "Refusing -auto-approve: this apply is supervised. Review the plan and confirm at the prompt." >&2
-            exit 1
-            ;;
-        esac
-        echo "About to apply terraform/unifi — this rewrites live VLANs, firewall zones/policies and WLANs."
-        printf 'Type "apply" to continue: '
-        read -r confirm
-        [ "$confirm" = "apply" ] || { echo "Aborted."; exit 1; }
-      - {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
-{% endraw %}{% endif %}{% raw %}
-  terraform:fmt:
-    desc: Format every Terraform module
-    dir: "{{.TERRAFORM_DIR}}"
-    cmds:
-      - terraform fmt -recursive
-
-  terraform:fmt-check:
-    desc: Check Terraform formatting (mirrors CI)
-    dir: "{{.TERRAFORM_DIR}}"
-    cmds:
-      - terraform fmt -check -recursive
-
-  terraform:validate:
-    desc: Validate every Terraform module (no backend credentials needed)
-    dir: "{{.TERRAFORM_DIR}}"
-    cmds:
-      - |
-        set -euo pipefail
-        # Separate data dir per module so a backend-free init cannot disturb the
-        # real state, kept under the module's gitignored .terraform/ so the
-        # library modules are fetched once rather than on every lint run.
-        for mod in */; do
-          [ -f "${mod}versions.tf" ] || continue
-          echo "=== terraform validate ${mod} ==="
-          ( cd "$mod" \
-            && export TF_DATA_DIR=".terraform/validate" \
-            && terraform init -backend=false -input=false >/dev/null \
-            && terraform validate )
-        done
-
   # === Lint =============================================================
   lint:
-    # deploy-coverage is the one lint-stage job with no counterpart here: it
-    # compares the MR's diff against the deploy jobs' `changes:` lists, so it
-    # needs a merge base rather than a working tree. Everything else in that
-    # stage runs below.
+    # One lint-stage job stays out: deploy-coverage needs a merge base.
     desc: Run every local gate (no credentials required) — mirrors the CI lint stage except deploy-coverage
     cmds:
       - task: lint:yamllint
@@ -1178,164 +229,36 @@ tasks:
       - task: lint:ruff
       - task: lint:doc-links
       - task: lint:taskfile-smoke
+      - task: lint:busybox-version-pin
       - task: lint:lib-pins
+      - task: lint:ci-policy
+      - task: lint:deploy-preflight
+      - task: lint:coverage-checks
       - task: lint:version-coverage
+      - task: lint:flux-version-pin
       - task: lint:repo-sync
       - task: lint:netpol-parity
-      - task: lint:invariants
+      - task: lint:kustomization-coverage
+      - task: lint:cluster-literals
+      - task: lint:integration-matrix
+{% endraw %}{% if vpn_tailscale %}{% raw %}
+      - task: lint:tailscale-policy
+{% endraw %}{% endif %}{% raw %}
+      - task: lint:tenant-traefik-isolation
+      - task: lint:upstream-rule-mirror
+      - task: lint:comment-length
+      # promtool/amtool gate; its preconditions name the missing tool rather
+      # than skipping. CI runs the same checks as prometheus-config-lint.
+      - task: lint:prometheus-config
       - task: ansible:lint
       - task: terraform:fmt-check
       - task: terraform:validate
+      - task: terraform:tflint
       - task: flux:lint
-
-  lint:yamllint:
-    desc: Baseline YAML syntax check (mirrors the CI yaml-lint job)
-    preconditions:
-      - sh: command -v yamllint
-        msg: "yamllint not installed (pip install yamllint)"
-    cmds:
-      # -c .yamllint, not -d relaxed: the repo's config is what pre-commit and
-      # the CI yaml-lint job use, and a different config reports different findings.
-      - yamllint -c .yamllint ansible/ kubernetes/ terraform/ scripts/ .gitlab-ci.yml Taskfile.yml
-
-  lint:shellcheck:
-    desc: ShellCheck the repository's shell scripts
-    preconditions:
-      - sh: command -v shellcheck
-        msg: "shellcheck not installed (brew install shellcheck)"
-    cmds:
-      - shellcheck --severity=warning --exclude=SC1091,SC2034 scripts/*.sh terraform/*/*.sh
-
-  lint:ruff:
-    desc: Ruff over scripts/, tests/ and the Python kubernetes/ ships (mirrors the CI python-lint job)
-    preconditions:
-      - sh: command -v ruff
-        msg: "ruff not installed (pipx install ruff)"
-    cmds:
-      # Same argv as the CI python-lint include: targets `scripts tests
-      # kubernetes`, and no --config, so ruff's own discovery finds ruff.toml at
-      # the repository root (the library's shared profile, vendored here)
-      # exactly as it does in CI.
-      - ruff check --no-cache --output-format concise scripts tests kubernetes
-
-  lint:doc-links:
-    desc: Resolve relative Markdown cross-links offline
-    cmds:
-      - python3 scripts/check-doc-links.py
-
-  lint:taskfile-smoke:
-    desc: Assert every script this Taskfile references (and the dotenv target) exists
-    cmds:
-      - task --list >/dev/null
-      - bash scripts/check-taskfile.sh
-
-  lint:lib-pins:
-    desc: Assert every weisssrv-lib include pins variables.WEISSSRV_LIB_REF
-    # `include:` is resolved before job variables exist, so the ref is a literal
-    # on every entry. This is what keeps the copies equal to the single source
-    # and rejects a branch ref. `--fix` rewrites them after a bump.
-    cmds:
-{% endraw %}      - python3 scripts/check-lib-pins.py --project {{ lib_project }}
-{% raw %}
-  lint:netpol-parity:
-    desc: Assert every NetworkPolicy reserved-CIDR except-list matches the canonical set
-    # Reads the manifests on disk, not the rendered corpus, so it also covers
-    # kubernetes/clusters/*/flux-system/ — which no Kustomization builds and
-    # flux:lint therefore never sees. Mirrors the CI netpol-parity job.
-    preconditions:
-      - sh: python3 -c "import yaml" 2>/dev/null
-        msg: "PyYAML not installed (pip install pyyaml)"
-    cmds:
-      - python3 scripts/check-netpol-except-parity.py --config scripts/netpol-except.yaml kubernetes/
-
-  lint:invariants:
-    desc: Assert the inventory, the Flux wiring and the vendored copies hold together (tests/)
-    # The inventory is hand-edited, so duplicate addresses and vmids, an address
-    # outside lan_cidr and a ${placeholder} with no ConfigMap entry are all one
-    # typo away — and every one of them survives yamllint and flux:lint. This is
-    # the gate that catches them before a deploy rather than after a push.
-    #
-    # tests/test_vendored_byte_identity.py runs in the same suite and needs the
-    # library checkout `lib:sync` creates — it compares every copy listed in
-    # scripts/vendored-manifest.yml against weisssrv-lib at the pinned ref and
-    # never skips, so it says "run task lib:sync" rather than passing quietly on
-    # a machine that has no library to compare against.
-    preconditions:
-      - sh: python3 -c "import pytest" 2>/dev/null
-        msg: "pytest not installed (pip install pytest pyyaml)"
-      # The three places the gate itself looks, in its order — a precondition
-      # that failed where the gate would have succeeded is a false alarm.
-      - sh: test -n "$WEISSSRV_LIB_PATH" || test -d "{{.LIB_DIR}}/.git" || test -d ../weisssrv-lib
-        msg: "no weisssrv-lib checkout for the vendored-copy gate. Run: task lib:sync"
-    cmds:
-      - python3 -m pytest tests -q
-
-  lint:version-coverage:
-    desc: Assert every pin in all.yml has a scripts/version-registry.py entry
-    # Offline and instant: it compares two local files' key sets, hence `lint`
-    # rather than the network-bound maintenance:check-versions. A pin missing
-    # from the registry is never reported as outdated, so the weekly bump stays
-    # green while silently skipping it.
-    cmds:
-      - python3 scripts/check-versions.py --check-coverage
-
-  lint:repo-sync:
-    desc: Assert every generated file still matches the source it is generated from
-    # Regenerate-and-diff the two OUTPUT files: scripts/hosts.env (from the
-    # inventory) and the cluster-versions ConfigMap (from group_vars/all.yml).
-    # Nothing else compares them against their source — see the repo-sync job in
-    # .gitlab-ci.yml. Uses a temp file, so the workspace is never touched.
-    preconditions: *pyyaml_precondition
-    cmds:
-      - |
-        set -uo pipefail
-        FAILED=0
-        TMPDIR_SYNC=$(mktemp -d)
-        trap 'rm -rf "$TMPDIR_SYNC"' EXIT
-
-        python3 scripts/generate-hosts-env.py \
-          --inventory ansible/inventories/prod/hosts.yml \
-          --map scripts/hosts-env-map.yml \
-          --output "$TMPDIR_SYNC/hosts.env" \
-          --regen-command "task hosts:sync" >/dev/null
-        if ! diff -u scripts/hosts.env "$TMPDIR_SYNC/hosts.env"; then
-          echo "ERROR: scripts/hosts.env is out of sync with ansible/inventories/prod/hosts.yml"
-          echo "Run: task hosts:sync and commit the result."
-          FAILED=1
-        else
-          echo "scripts/hosts.env is in sync with hosts.yml"
-        fi
-
-        python3 scripts/generate-versions-configmap.py \
-          --vars-file ansible/inventories/prod/group_vars/all.yml \
-          --output "$TMPDIR_SYNC/versions-configmap.yaml" \
-          --nested-key helm_chart_versions \
-          --regen-command "task flux:sync-versions" >/dev/null
-        if ! diff -u {{.VERSIONS_CM}} "$TMPDIR_SYNC/versions-configmap.yaml"; then
-          echo "ERROR: {{.VERSIONS_CM}} is out of sync with group_vars/all.yml"
-          echo "Run: task flux:sync-versions and commit the result."
-          FAILED=1
-        else
-          echo "{{.VERSIONS_CM}} is in sync with all.yml"
-        fi
-        exit $FAILED
-
-  lint:prometheus-config:
-    desc: Lint the alert rules and Alertmanager config with promtool/amtool
-    preconditions:
-      - sh: command -v promtool
-        msg: "promtool not installed (ships in the Prometheus release tarball)"
-      - sh: command -v amtool
-        msg: "amtool not installed (ships in the Alertmanager release tarball)"
-      - sh: python3 -c "import yaml" 2>/dev/null
-        msg: "PyYAML not installed (pip install pyyaml)"
-    # The extractor's default paths already match this tree's observability
-    # layout; the unit-test step is skipped while the tests dir holds no
-    # *.test.yaml.
-    env:
-      RULE_TESTS_DIR: tests/prometheus-rules
-    cmds:
-      - bash scripts/lint-prometheus-config.sh
+      # Last: its vendored-byte-identity arm is red by design between a
+      # weisssrv-lib change and the lib_ref bump that adopts it, and go-task
+      # stops the list at the first failure.
+      - task: lint:invariants
 
   # === Secrets ==========================================================
   op:check:
@@ -1347,21 +270,76 @@ tasks:
     desc: List the secret REFERENCES this repo uses (never the values)
     cmds:
       - |
-        # The vault segment is matched loosely for THIS file only: the Taskfile
-        # holds the go-task VARIABLE, not the vault name, so a pattern carrying
-        # the resolved name can never match its own source. The trailing sed
-        # rewrites that segment to the resolved vault so the printed references
-        # are the ones op takes. The inventory below holds the name literally.
-        echo "op:// references in Taskfile.yml:"
-        grep -oE "op://[^\"'\`)(]+" Taskfile.yml \
-          | sed 's/[[:space:]]*$//' \
-          | grep -E "^op://[^/]+/[^/]+/[^/]+$" \
-          | sed 's|^op://[^/]*/|op://{{.OP_VAULT}}/|' | sort -u | sed 's/^/  - /'
+        # The Taskfile tree spells the vault as a go-task variable, so its refs are
+        # rewritten to the resolved name; .gitlab-ci.yml already carries it. An
+        # empty section is printed, not swallowed: find(1) exits 0 either way.
+        show() {
+          label="$1"; shift
+          echo "$label"
+          refs=$("$@" | sed 's/[[:space:]]*$//' | grep -E "^op://[^/]+/[^/]+/[^/]+$" | sort -u || true)
+          if [ -n "$refs" ]; then
+            printf '%s\n' "$refs" | sed 's/^/  - /'
+          else
+            echo "  (none found)"
+          fi
+        }
+        scan_tree() {
+          find "$@" -name '*.yml' -type f -exec grep -hoE "op://[^\"'\`)(]+" {} \; 2>/dev/null
+        }
+        scan_taskfiles() {
+          scan_tree Taskfile.yml taskfiles | sed 's|^op://[^/]*/|op://{{.OP_VAULT}}/|'
+        }
+        show "op:// references in the Taskfile tree:" scan_taskfiles
         echo ""
-        echo "op:// references in the inventory (the canonical home):"
-        find ansible/inventories -name '*.yml' -type f -exec grep -hoE "op://{{.OP_VAULT}}/[^\"'\`)(]+" {} \; 2>/dev/null \
-          | sed 's/[[:space:]]*$//' \
-          | grep -E "^op://{{.OP_VAULT}}/[^/]+/[^/]+$" | sort -u | sed 's/^/  - /' || echo "  (none)"
+        show "op:// references in .gitlab-ci.yml:" scan_tree .gitlab-ci.yml
+        echo ""
+        echo "Composed inside include:d library CI fragments (the greps above cannot see these):"
+        # Split at the field so this echo is not itself a grep hit.
+        echo "  - {% endraw %}{{ secret_ref('K3s Kubeconfig', '') }}{% raw %}""kubeconfig"
+        echo "  docs/ci-pipeline.md lists every vault item and its consumer."
         echo ""
         echo "Verify they exist:  op item list --vault '{{.OP_VAULT}}'"
+
+  # === App operations ===================================================
+  # Shared templates the per-app namespaces call with vars instead of carrying a
+  # copy of the kubectl invocation.
+  _app:status:
+    internal: true
+    # SECTIONS is one `Header|resource` pair per line; `pods` is listed -o wide.
+    cmds:
+      - |
+        printf '%s\n' '{{.SECTIONS}}' | {
+          first=1
+          while IFS='|' read -r label resource; do
+            [ -n "$label" ] || continue
+            [ "$first" = "1" ] || echo ""
+            first=0
+            echo "=== $label ==="
+            if [ "$resource" = "pods" ]; then
+              kubectl get pods -n {{.NS}} -o wide
+            else
+              kubectl get "$resource" -n {{.NS}}
+            fi
+          done
+        }
+
+  _app:restart:
+    internal: true
+    vars:
+      TIMEOUT: '{{.TIMEOUT | default "300s"}}'
+      WAIT_SELECTOR: '{{.WAIT_SELECTOR | default .SELECTOR}}'
+    cmds:
+      # Pod delete, not `kubectl rollout restart`: docs/RUNBOOKS.md § Restarting a Flux-managed workload.
+      - |
+        {{if .BANNER}}echo "{{.BANNER}}"{{end}}
+        kubectl delete pod -n {{.NS}} {{.SELECTOR}}
+        {{if .BANNER}}echo "Waiting for pods to be ready..."{{end}}
+        kubectl wait --namespace {{.NS}} --for=condition=ready pod {{.WAIT_SELECTOR}} --timeout={{.TIMEOUT}}
+
+  _app:logs:
+    internal: true
+    vars:
+      TAIL: '{{.TAIL | default "100"}}'
+    cmds:
+      - kubectl logs -n {{.NS}} {{.TARGET}} {{if .CONTAINER}}-c "{{.CONTAINER}}" {{end}}--tail={{.TAIL}} -f
 {%- endraw %}

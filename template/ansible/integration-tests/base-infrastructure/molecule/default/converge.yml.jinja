@@ -1,0 +1,41 @@
+---
+# Base infrastructure converge: base, then qol{% if vpn_tailscale %}, then tailscale{% endif %}.
+
+- name: Converge - Base Infrastructure
+  hosts: all
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../../../../inventories/prod/group_vars/all.yml
+
+  pre_tasks:
+    # molecule.yml platforms[].groups drive the qol guard below; an empty group
+    # would skip the qol role and still report a pass.
+    - name: Assert the molecule roster resolved
+      ansible.builtin.assert:
+        that:
+          - groups['qol_enabled'] | default([]) | length == 2
+        fail_msg: >-
+          molecule.yml no longer produces qol_enabled, so the qol role is never
+          applied in this scenario.
+      run_once: true
+
+    - name: Container warm-up (apt locks, dpkg state, cache, systemd)
+      ansible.builtin.include_tasks: ../../../../molecule/tasks/container-warmup.yml
+
+  tasks:
+    # Vars come from the molecule.yml inventory and the all.yml vars_files above.
+    - name: Apply base role
+      ansible.builtin.include_role:
+        name: weisssrv.infra.base
+
+    - name: Apply qol role
+      ansible.builtin.include_role:
+        name: weisssrv.infra.qol
+      when: "'qol_enabled' in group_names"
+{%- if vpn_tailscale %}
+
+    - name: Apply tailscale role
+      ansible.builtin.include_role:
+        name: weisssrv.infra.tailscale
+{%- endif %}

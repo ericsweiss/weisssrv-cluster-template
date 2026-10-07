@@ -1,0 +1,11 @@
+{#- FORGE SEAM: the one home for forge-shaped library URLs. `lib_url` ends in
+    `.git` (copier validator), so the stripped form is its web root. -#}
+{%- macro lib_home() -%}
+{{ lib_url[:-4] }}
+{%- endmacro -%}
+{%- macro lib_tree() -%}
+{{ lib_url[:-4] }}{{ '/tree/' if 'github.com' in lib_url else '/-/tree/' }}
+{%- endmacro -%}
+{%- macro lib_blob() -%}
+{{ lib_url[:-4] }}{{ '/blob/' if 'github.com' in lib_url else '/-/blob/' }}
+{%- endmacro -%}

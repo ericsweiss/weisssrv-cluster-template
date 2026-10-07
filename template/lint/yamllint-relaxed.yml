@@ -1,0 +1,18 @@
+---
+# pre-commit, the CI yaml-lint job and `task lint` all select this profile with
+# `-c lint/yamllint-relaxed.yml`. It stays out of ansible-lint's discovery path:
+# a repo-root `.yamllint` replaces its yaml rule and disables fix mode.
+extends: relaxed
+
+# Local `terraform init` module checkouts, not repository sources.
+ignore: |
+  .terraform/
+
+rules:
+  # `relaxed` keeps line-length at warning level and disables the comment
+  # rules. Here line-length is off outright: inline documentation comments and
+  # Flux substitution placeholders run long.
+  line-length: disable
+  document-start:
+    present: true
+    level: warning

@@ -1,0 +1,158 @@
+# https://taskfile.dev
+# Playbook operations and the multi-role integration stacks. Per-ROLE molecule
+# scenarios live in weisssrv-lib with the roles.
+version: '3'
+
+{% raw -%}
+tasks:
+  install-collections:
+    desc: Install the weisssrv.infra collection (and its dependencies) at the pinned ref
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      # --force: galaxy skips an already-installed collection, so without it a
+      # pin bump leaves the previous release's roles in place.
+      - ansible-galaxy collection install -r requirements.yml --force {{.CLI_ARGS}}
+
+  ping:
+    desc: Ping every managed host
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible -i {{.INVENTORY}} all -m ping -e "ansible_become=false"
+
+  lint:
+    desc: Lint ansible/ (roles come from the collection and are linted upstream) — mirrors the CI ansible-lint job
+    cmds:
+      - |
+        set -e
+        # Same shape as the CI ansible-lint job: cwd = repo root, target
+        # `ansible/`, config at ./.ansible-lint, collection under
+        # .ansible-home/collections, which .ansible-lint excludes.
+        LINT=$({{.ROOT_DIR}}/scripts/resolve-tool.sh ansible-lint) \
+          || { echo "ERROR: ansible-lint not found (pip install ansible-lint)"; exit 1; }
+        DEP_PATH="{{.ROOT_DIR}}/.ansible-home/collections"
+        # Singular ONLY — ansible-compat hard-errors on the legacy plural.
+        unset ANSIBLE_COLLECTIONS_PATHS
+        # Exported BEFORE the install so galaxy's already-installed check reads
+        # this path — otherwise a copy elsewhere on the machine satisfies (and
+        # silently skips) a dependency that lint then fails to resolve.
+        export ANSIBLE_COLLECTIONS_PATH="{{.ROOT_DIR}}:$DEP_PATH"
+        if [ -n "${WEISSSRV_COLLECTION_PATH:-}" ]; then
+          # Coordinated weisssrv-lib bump: lint against a local checkout instead
+          # of the pinned ref. Point WEISSSRV_COLLECTION_PATH at the library repo
+          # root, the directory holding ansible_collections/.
+          echo "ansible:lint: using local collection from $WEISSSRV_COLLECTION_PATH"
+          # The galaxy deps still come from the pin file, minus the git entry —
+          # during a coordinated bump requirements.yml already names a ref that
+          # has not been cut, so installing it would fail.
+          REQ=$(mktemp)
+          python3 -c "import sys, yaml; d = yaml.safe_load(open('ansible/requirements.yml')); \
+            d['collections'] = [c for c in d['collections'] if not str(c.get('name', '')).startswith('git+')]; \
+            yaml.safe_dump(d, open(sys.argv[1], 'w'))" "$REQ"
+          ansible-galaxy collection install -r "$REQ" -p "$DEP_PATH"
+          rm -f "$REQ"
+          ansible-galaxy collection install --force \
+            "$WEISSSRV_COLLECTION_PATH/ansible_collections/weisssrv/infra" -p "$DEP_PATH"
+          # Invalidate the pin stamp: the tree now holds a local checkout, not
+          # the pinned ref, so the next plain `task ansible:lint` must reinstall
+          # rather than read a matching stamp and lint the checkout by accident.
+          rm -f "$DEP_PATH/.requirements-sha256"
+        else
+          # Install cache keyed on the CONTENT of requirements.yml, so a bumped
+          # pin reinstalls. `task ansible:install-collections` does not refresh
+          # it; editing requirements.yml or deleting .ansible-home/ does.
+          STAMP="$DEP_PATH/.requirements-sha256"
+          WANT=$(shasum -a 256 ansible/requirements.yml 2>/dev/null \
+                 || sha256sum ansible/requirements.yml)
+          WANT=${WANT%% *}
+          HAVE=$(cat "$STAMP" 2>/dev/null || true)
+          if [ ! -d "$DEP_PATH/ansible_collections/weisssrv/infra" ] || [ "$WANT" != "$HAVE" ]; then
+            if [ -n "$HAVE" ] && [ "$WANT" != "$HAVE" ]; then
+              echo "ansible:lint: ansible/requirements.yml changed — reinstalling the collection"
+            fi
+            # --force: a same-version reinstall over an existing tree is a
+            # no-op to galaxy otherwise, which is the very case a moved branch
+            # ref produces.
+            if ! ansible-galaxy collection install --force \
+                 -r ansible/requirements.yml -p "$DEP_PATH"; then
+              echo "ERROR: could not install the collection pinned in ansible/requirements.yml." >&2
+              echo "       During a coordinated weisssrv-lib bump that ref does not exist yet —" >&2
+              echo "       lint against the library checkout instead:" >&2
+              echo "         WEISSSRV_COLLECTION_PATH=../weisssrv-lib task ansible:lint" >&2
+              exit 1
+            fi
+            # Stamped only after a SUCCESSFUL install, so a failed one retries.
+            printf '%s\n' "$WANT" > "$STAMP"
+          fi
+        fi
+        # Unquoted: $LINT may be a bare command or a pyenv path (single word here).
+        $LINT ansible/
+
+  # Per-ROLE molecule scenarios live in weisssrv-lib with the roles; what runs
+  # here is the multi-role stacks this cluster composes from them.
+  test:
+    desc: Alias for ansible:test-integration (per-role scenarios run in weisssrv-lib)
+    cmds:
+      - task: test-integration
+
+  test-integration:
+    desc: Run every integration test (multi-role stacks)
+    dir: "{{.ANSIBLE_DIR}}"
+    preconditions:
+      - sh: "{{.ROOT_DIR}}/scripts/resolve-tool.sh molecule molecule >/dev/null"
+        msg: "molecule not installed. Run: pip install molecule 'molecule-plugins[docker]'"
+      - sh: docker info 2>/dev/null
+        msg: "Docker is not running. Start it first."
+    cmds:
+      - task: test-integration-dns
+      - task: test-integration-mail
+      - task: test-integration-base
+      - task: test-integration-certs
+{% endraw %}{% if storage_backend == 'zfs' %}      - task: test-integration-storage
+{% endif %}{% raw %}
+  # Internal helper: runs `molecule test` from {{.MOLECULE_DIR}}.
+  # Resolves molecule via PATH, then python3 -m molecule, then pyenv.
+  _molecule-run:
+    internal: true
+    dir: "{{.MOLECULE_DIR}}"
+    preconditions:
+      - sh: "{{.ROOT_DIR}}/scripts/resolve-tool.sh molecule molecule >/dev/null"
+        msg: "molecule not installed"
+      - sh: docker info 2>/dev/null
+        msg: "Docker is not running"
+    cmds:
+      - |
+        MOL=$({{.ROOT_DIR}}/scripts/resolve-tool.sh molecule molecule) \
+          || { echo "ERROR: molecule not found"; exit 1; }
+        # Unquoted: $MOL may be "python3 -m molecule", which must word-split.
+        $MOL test
+
+  test-integration-dns:
+    desc: Run the DNS stack integration test (unbound + adguard_home + adguard_sync)
+    cmds:
+      - task: _molecule-run
+        vars: {MOLECULE_DIR: "{{.ANSIBLE_DIR}}/integration-tests/dns-stack"}
+
+  test-integration-mail:
+    desc: Run the mail stack integration test (smtp_relay + postfix_null_client)
+    cmds:
+      - task: _molecule-run
+        vars: {MOLECULE_DIR: "{{.ANSIBLE_DIR}}/integration-tests/mail-stack"}
+
+  test-integration-base:
+    desc: Run the base infrastructure integration test (base + qol)
+    cmds:
+      - task: _molecule-run
+        vars: {MOLECULE_DIR: "{{.ANSIBLE_DIR}}/integration-tests/base-infrastructure"}
+
+  test-integration-certs:
+    desc: Run the certificate distribution integration test (acme_certs multi-host)
+    cmds:
+      - task: _molecule-run
+        vars: {MOLECULE_DIR: "{{.ANSIBLE_DIR}}/integration-tests/cert-distribution"}
+{% endraw %}{% if storage_backend == 'zfs' %}{% raw %}
+  test-integration-storage:
+    desc: Run the storage stack integration test (nas_storage + Samba client, NFS server-side only)
+    cmds:
+      - task: _molecule-run
+        vars: {MOLECULE_DIR: "{{.ANSIBLE_DIR}}/integration-tests/storage-stack"}
+{%- endraw %}{% endif %}

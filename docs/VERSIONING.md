@@ -27,7 +27,7 @@ repository — is not API.
 
 | Level | Meaning for this template |
 |---|---|
-| **MAJOR** | A generated repo cannot take the update without hand work. A question renamed or removed (its recorded answer no longer binds and the operator is re-prompted, or the value is silently lost); a question added with **no** default (`copier update` cannot run non-interactively); a validator tightened so a previously accepted answer is now refused; a rendered path moved, renamed or deleted; a change that makes a rendered file's *content* incompatible with state the cluster already holds (a renamed Flux Kustomization, a changed PV/zvol mount path, a renamed ConfigMap key that live manifests substitute). |
+| **MAJOR** | A generated repo cannot take the update without hand work. A question renamed or removed (its recorded answer no longer binds and the operator is re-prompted, or the value is silently lost); a question added with **no** default (`copier update` cannot run non-interactively); a validator tightened so a previously accepted answer is now refused; a raised `_min_copier_version`, which copier refuses on before rendering; a rendered path moved, renamed or deleted; a change that makes a rendered file's *content* incompatible with state the cluster already holds (a renamed Flux Kustomization, a changed PV/zvol mount path, a renamed ConfigMap key that live manifests substitute). |
 | **MINOR** | New capability that an existing answer set can absorb. A new question **with** a default that reproduces today's render; a new rendered file; a new Ansible play, Flux stage member, or Taskfile task; a bumped `lib_ref` default (see below). |
 | **PATCH** | A fix that changes no question, no path and no resolved value for an unchanged answer set. A corrected template expression, a fixed conditional, docs, comments, tests. |
 
@@ -64,6 +64,11 @@ the pair `tests/answers-weisssrv-shaped.yml` holds. `render-validate` renders th
 template with that fixture and runs the real toolchain over the output against a
 checkout of the library at that ref, so the fixture is the record of what was
 tested, not a preference.
+
+An unpinned `copier copy` resolves to the template's **latest release tag**, so
+when `main` carries a newer `lib_ref` than the newest tag does, the documented
+quickstart generates a cluster on the older library. Cut a template release
+after a `lib_ref` bump, or generate with `--vcs-ref HEAD` to take `main`.
 
 | Template release | Rendered and validated against |
 |---|---|
@@ -185,11 +190,130 @@ already-released commit is a no-op. The `release` stage is declared **last** and
 the job sets no `needs:`, so a tag is only ever cut from a commit where
 `render-validate` — both fixtures, the real toolchain — went green.
 
+## Vendored copies
+
+Some files here are copies of library files rather than local work.
+`scripts/vendored-manifest.yml` records them, the library publishes the offer
+list in `scripts/vendorable-paths.yml`, and its `check-vendored-copies.py` does
+the comparison. Every `lib:` path must appear in that offer list at the pinned
+ref.
+
+The manifest records two relationships. A `vendored` entry must stay
+byte-identical, and drift in either direction fails. A `forked` entry must stay
+different, needs a `reason:` naming a difference the file actually contains, and
+when it sets `reconciled_sha256` the check also fails if the library side moved
+since the fork was last reconciled. A fork whose only divergence is comments and
+blank lines must also set `comment_only: true`; without it the check rejects the
+entry, because the `reason:` no longer describes real divergence.
+
+The manifest lists both copy sets. Unprefixed paths are what
+this repository runs on itself; `template/`-prefixed ones are rendered into
+every generated cluster. The two sets drift separately, so re-vendoring one is
+not re-vendoring the other. An entry is a bare string when both repos use the
+same path, or a mapping with `lib:` and `consumer:` when they differ.
+`template/.gitleaks.toml.jinja` and
+`template/.gitlab/secret-detection-ruleset.toml.jinja` are Jinja sources rather
+than copies, so they are not listed.
+
+Absence from the manifest means template-local, not drift. Many gates under
+`template/scripts/` are written here and have no library counterpart, among
+them `check-guest-endpoint-parity.py`, `check-tenant-wiring.py` and
+`deploy-verify.sh`. The validator's orphan scan holds that line: a script with
+no library twin has to be declared in the render's own `scripts/README.md`
+under "Local helpers".
+
 `scripts/semantic-release.py` is **vendored** from weisssrv-lib and must stay
 byte-identical to the library's copy at the ref `.gitlab-ci.yml` pins;
 `tests/validate_render.py`'s `vendored` check enforces that for this
 repository's copy and for the one under `template/scripts/`. Re-copy it in the
 same MR that bumps the library ref.
+
+A vendored gate that imports a sibling module needs that module vendored with
+it. Register the pair in both manifests, or the gate ships without the module
+it imports and exits 2 naming the missing file.
+
+### Pending at the next library bump
+
+Each entry is deleted by the pin bump that satisfies it.
+
+- Six gates under `template/scripts/` import `gate_common` from their own
+  directory in the library's current tree: `check-default-deny-coverage.py`,
+  `check-hpa-vpa-invariant.py`, `check-netpol-except-parity.py`,
+  `check-pvc-storageclass.py`, `check-scrape-netpol.py` and
+  `check-secretstore-scope.py`. The bump that brings them must also copy
+  `template/scripts/gate_common.py` and register it in **both**
+  `scripts/vendored-manifest.yml` (as `lib: scripts/gate_common.py`,
+  `consumer: template/scripts/gate_common.py`) and
+  `template/scripts/vendored-manifest.yml` (as `scripts/gate_common.py`).
+  Without it, `render-validate` fails on the render's corpus gates and every
+  generated cluster's `task lint` fails the same way.
+- The `flux-lint` include in `template/.gitlab-ci.yml.jinja` gains
+  `crd_catalog_ref`, passed the sha `template/taskfiles/flux.yml.jinja` pins as
+  `CRD_CATALOG_REF`, so the pipeline and `task flux:lint` resolve one catalog.
+  Pass `expected_skipped_file` in the same change, with the baseline file it
+  names, so the rendered repo's skip tracker is a gate rather than a report.
+- `template/scripts/check-scrape-wiring.py`: the library's port-granularity
+  companion to `check-scrape-netpol.py`. It reads one namespace's directory, so
+  a generated cluster needs the corpus-shaped arm first; vendor it once the
+  library ships that, alongside `tests/test_check_scrape_wiring.py`.
+- Seven library scripts the render already carries are unregistered in
+  `template/scripts/vendored-manifest.yml`: `ci_yaml.py`,
+  `ci_playbook_invocations.py`, `inventory_tree.py`,
+  `supervised-apply-guard.sh`, `maintenance-run-with-verify.sh`,
+  `collect-state-lib.sh` and `deploy-verify-lib.sh`. Each is a straight
+  re-vendor plus a `vendored:` entry. `deploy-verify-lib.sh` diverges from the
+  library file only in its header and its per-function comments, so re-vendoring
+  it changes no behaviour and no call site. The `rendered-vendored` check reads
+  the library's offer list at the pin, so it names every one of them the moment
+  `lib_ref` moves.
+
+  Each registration also moves the script's row in
+  `template/scripts/README.md.jinja` from § Local helpers to § Vendored from
+  weisssrv-lib. `tests/test_scripts_readme_origin.py` compares that table
+  against the manifest in both directions, and a registered script missing from
+  it fails with a message about the manifest. Two rows are split rather than
+  moved whole: `collect-state-lib.sh` shares its row with `collect-state.sh`
+  and `deploy-verify-lib.sh` shares its with `deploy-verify.sh`, and both driver
+  halves stay local.
+- Two more the render carries diverge from the library file, so each needs a
+  decision rather than a registration. `check-flux-version-pin.py` takes
+  `--root` and `--components`, where the library's takes `--repo-root`,
+  `--ci-file`, `--versions-configmap`, `--gotk-glob`, `--components` and
+  `--runbook`. `check-secret-rotation-coverage.py` hard-codes `DOC` and
+  `DECLARED_MANUAL`, where the library's requires `--doc` and accepts
+  `--declared-manual`. Either re-vendor and adapt the call sites, or declare a
+  `forked:` entry with a reason. Adapting means passing `--doc
+  docs/RUNBOOKS.md` from `template/tests/test_check_secret_rotation_coverage.py`,
+  and the library's flags from `template/.pre-commit-config.yaml`,
+  `template/.gitlab-ci.yml.jinja` and `template/taskfiles/lint.yml.jinja`.
+  A re-vendor also moves that script's README row, the same way.
+- `template/scripts/flux-child-kustomizations.py` is a local program, not a copy.
+  The library's file excludes `flux-system`, globs `*.yml` too, tolerates an
+  unreadable file, prints `name<TAB>spec.path` for `--paths`, exits 1 on a
+  path-less Kustomization unless `--allow-missing-paths`, and exposes
+  `child_kustomization_paths()` / `_order()`. Vendoring it means, in the same
+  commit: register it in both manifests; read the tab form in
+  `template/scripts/deploy-verify.sh` (`while IFS=$'\t' read -r _KSNAME
+  SRCPATH`); pipe `KS_PATHS` through `cut -f2` in
+  `template/taskfiles/flux.yml.jinja`; rewrite
+  `template/tests/test_flux_child_kustomizations.py` against
+  `child_kustomization_paths` / `_order` and the tab output; correct its
+  `template/scripts/README.md.jinja` row and move it to § Vendored from
+  weisssrv-lib; and add the copy to `template/scripts/comment-length.yaml`'s
+  `exclude:`. weisssrv has already ported its half of the tab form.
+- `template/scripts/cluster-config-value.sh` is a `sed` reimplementation, not a
+  copy. The library's resolver is a `python3` heredoc that imports `yaml` and
+  reads only the `data:` mapping, so re-vendoring adds a PyYAML requirement to
+  its three call sites: `collect-state.sh`, `deploy-verify.sh` and
+  `diagnose-network-issues.sh`. `deploy-verify.sh` already installs PyYAML when
+  it is missing, so the `cluster-verify` job needs no change; the README row
+  gains a note that the resolver needs PyYAML, which is what the two
+  workstation-run scripts depend on. Register it in both manifests and add it to
+  `template/scripts/comment-length.yaml`'s `exclude:` in the same commit.
+- Every copy any entry above registers also joins
+  `template/scripts/comment-length.yaml`'s `exclude:` list. Without that, the
+  rendered comment-length gate fails on library comment blocks a generated
+  cluster cannot fix locally.
 
 ## Related
 

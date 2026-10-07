@@ -1,12 +1,7 @@
 ---
-# CI for the template itself. Generic jobs come from the shared library, so the
-# template is linted by the tooling it hands to a generated cluster; every job is
-# TAG-LESS and non-root safe (pip --user, workspace-local tool downloads) so they
-# land on the shared runner.
-#
-# `render-validate` (below) is the gate that matters. `release` is declared LAST
-# so stage ordering gates a tag on it — a template tag must never be cut from a
-# tree that does not render. See docs/VERSIONING.md.
+# CI for the template itself. Generic jobs come from the shared library, and
+# every job is tag-less and non-root safe so it lands on the shared runner.
+# `render-validate` is the gate that matters; see docs/VERSIONING.md.
 stages:
   - lint
   - test
@@ -14,28 +9,17 @@ stages:
   - ai-review
   - release
 
-# Settings every job inherits unless it says otherwise. No image or tags here —
-# each job and every library include already names its own, and this repository's
-# jobs are deliberately tag-less so they land on the shared runner.
+# Settings every job inherits unless it says otherwise. No image or tags here:
+# each job and every library include names its own.
 default:
   # Cancel a superseded pipeline's jobs on a new commit; see the workflow policy
   # below. The library's `release` job overrides this to false itself.
   interruptible: true
 
 workflow:
-  # AUTHORITATIVE description of this pipeline's cancellation policy; jobs that
-  # override `interruptible` point here rather than restating it.
-  #
-  # MR refs: `on_new_commit: interruptible` — a new push cancels the previous
-  # pipeline's interruptible jobs instead of letting render-validate, the
-  # heaviest job here, pile up on the shared runner it is already quota-refused
-  # on. GitLab's project default is "conservative", which stops cancelling as
-  # soon as any non-interruptible job has started, so it leaves them running.
-  #
-  # main: `on_new_commit: none` (the rule below) — a merged pipeline always runs
-  # to completion, because `release` cuts the tag every generated cluster's
-  # `copier update` resolves to and a cancelled one leaves that tag uncut with a
-  # green pipeline behind it.
+  # MR refs cancel superseded pipelines; main never cancels, because `release`
+  # cuts the tag every generated cluster's `copier update` resolves to.
+  # See docs/CI.md.
   auto_cancel:
     on_new_commit: interruptible
   rules:
@@ -47,12 +31,12 @@ workflow:
 
 variables:
   LIB_PROJECT: "eric/weisssrv-lib"
-  # Single source for the library pin. `include:` CANNOT read this — it is
-  # resolved before job variables exist — so each entry below repeats the tag as
-  # a literal and scripts/check-lib-pins.py (vendored from the library) fails the
-  # pipeline if they drift from it or pin a branch. Bump here, then
-  # `scripts/check-lib-pins.py --fix`.
+  # Single source for the library pin. `include:` cannot read it, so each entry
+  # repeats the tag; scripts/check-lib-pins.py fails drift. `--fix` rewrites.
   WEISSSRV_LIB_REF: "v0.17.1"
+  # Library checkout the python-tests job clones into and tests/test_render.py
+  # reads for the ruleset parity gate, which fails rather than skips in CI.
+  WEISSSRV_LIB_PATH: "$CI_PROJECT_DIR/.tmp/weisssrv-lib"
   COPIER_VERSION: "9.17.0"
   PYYAML_VERSION: "6.0.2"
   YAMLLINT_VERSION: "1.38.0"
@@ -65,6 +49,13 @@ variables:
   # needs the binary alongside python/ansible, so it is fetched, not imaged.
   TERRAFORM_VERSION: "1.15.8"
   TERRAFORM_SHA256: "d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d"
+  # promtool + amtool: the cluster-gates check lints the alert rules and the
+  # Alertmanager config, which live inside a HelmRelease's values where
+  # kubeconform cannot reach them.
+  PROMTOOL_VERSION: "3.6.0"
+  PROMTOOL_SHA256: "2002ef4a55a64161affccd2786c7081d4e3b3a8d08786a98b3bb110971414916"
+  AMTOOL_VERSION: "0.28.1"
+  AMTOOL_SHA256: "5ac7ab5e4b8ee5ce4d8fb0988f9cb275efcc3f181b4b408179fafee121693311"
 
 include:
   # Only genuine YAML: files under template/ that carry the .jinja suffix are
@@ -76,13 +67,13 @@ include:
     inputs:
       tags: []
       image: python:3.13-slim
-      config: "-c .yamllint"
-      targets: "copier.yml tests/ .gitlab-ci.yml scripts/vendored-manifest.yml"
+      config: "-c lint/yamllint-relaxed.yml"
+      targets: "copier.yml tests/ lint/ .gitlab-ci.yml scripts/vendored-manifest.yml"
       changes:
         - "copier.yml"
         - "tests/**/*"
         - "scripts/vendored-manifest.yml"
-        - ".yamllint"
+        - "lint/yamllint-relaxed.yml"
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
@@ -91,9 +82,9 @@ include:
     inputs:
       tags: []
       image: python:3.13-slim
-      # The Python under template/ is static (no .jinja suffix), so it is linted
-      # here as well as in every repository it ships to. `scripts` is this
-      # repository's OWN tooling (the vendored release script), not payload.
+      # ruff walks by .py suffix, so it sees only the plain-named Python under
+      # template/. Jinja-named sources (`{% if .. %}x.py{% endif %}`,
+      # `*.py.jinja`) are linted only by the generated cluster's own ruff job.
       targets: "scripts tests template/tests template/scripts template/kubernetes"
       changes:
         - "scripts/**/*.py"
@@ -102,8 +93,9 @@ include:
         - "ruff.toml"
         - ".gitlab-ci.yml"
 
-  # The shell the template ships is static (no .jinja suffix), so it can be
-  # checked in place rather than only after a render.
+  # Most of the shell the template ships is static, so it is checked in place.
+  # The one .sh.jinja source is covered by the render check in
+  # tests/validate_render.py, which shellchecks the generated scripts.
   - project: eric/weisssrv-lib
     ref: v0.17.1
     file: /ci/lint/shellcheck.yml
@@ -123,9 +115,18 @@ include:
     inputs:
       tags: []
       image: python:3.13
-      apt_packages: ""
+      # jq: the nested `pytest tests scripts` inside the render collects
+      # scripts/test_collect_state_lib.py and test_deploy_verify_lib.py, which
+      # drive the shipped jq filters and fail rather than skip without it.
+      apt_packages: "jq"
       test_dir: "tests"
-      pip_packages: "copier==9.17.0"
+      # ansible-core: the nested `pytest tests scripts` inside the render runs
+      # test_deploy_preflight.py, which fails rather than skips without it.
+      pip_packages: "copier==9.17.0 ansible-core==2.18.18"
+      # The library checkout the ruleset parity gate compares against; the
+      # python:3.13 image already ships git. The fetch brings this repo's own
+      # tags, which the validated-pair gate needs and a CI clone omits.
+      setup_command: 'mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" "$WEISSSRV_LIB_PATH" && git fetch --tags --quiet'
       changes:
         - "**/*"
 
@@ -142,10 +143,8 @@ include:
         - "scripts/check-doc-links.py"
         - ".gitlab-ci.yml"
 
-  # Pin drift in the SHIPPED defaults. The checker runs inside a RENDER of this
-  # template (all.yml.jinja is Jinja, not a vars file), so it reports what a
-  # freshly generated cluster would be pinned to. Soft-fail: rc 1 is "updates
-  # available".
+  # Pin drift in the SHIPPED defaults, checked inside a render of this template.
+  # Soft-fail: rc 1 means updates are available.
   - project: eric/weisssrv-lib
     ref: v0.17.1
     file: /ci/maintenance/version-check.yml
@@ -171,6 +170,10 @@ include:
     file: /ci/security/secret-detection.yml
     inputs:
       tags: []
+      # gitleaks needs SSE4.2 and SIGILLs on the legacy-CPU agents. A literal
+      # label, because this is the template's OWN pipeline; the rendered half
+      # passes the generated cluster's answer instead.
+      cpu_selector: "esweiss.com/cpu=modern"
 
   - project: eric/weisssrv-lib
     ref: v0.17.1
@@ -191,11 +194,9 @@ include:
         - job: render-validate
           optional: true
 
-  # Cuts THIS template's tag from the conventional commits merged to main — the
-  # tag a generated cluster's `copier update` resolves to. All inputs are the
-  # library defaults; `release` is declared LAST above so stage order gates the
-  # tag on every job here. Policy and the major_on_zero decision:
-  # docs/VERSIONING.md.
+  # Cuts this template's tag from the commits merged to main - the tag a
+  # generated cluster's `copier update` resolves to. `release` is declared last
+  # above, so stage order gates it on every job here. Policy: docs/VERSIONING.md.
   - project: eric/weisssrv-lib
     ref: v0.17.1
     file: /ci/release/semantic-release.yml
@@ -207,11 +208,8 @@ render-validate:
   image: python:3.13
   tags: []
   needs: []
-  # This job requests the largest limits in the pipeline, so on the quota-capped
-  # shared runner it is the first to be refused at POD-CREATION time when several
-  # pipelines overlap. That arrives as a system failure rather than a test
-  # failure, which the retry turns into throttling instead of a red pipeline that
-  # says nothing about the render.
+  # Largest limits in the pipeline: on the quota-capped shared runner a
+  # pod-creation refusal arrives as a system failure - retry it as throttling.
   retry:
     max: 2
     when:
@@ -221,10 +219,8 @@ render-validate:
     # The collection is cloned rather than installed from the pinned ref, so the
     # gate does not depend on anonymous access to the library project.
     LIB_CHECKOUT: "$CI_PROJECT_DIR/.tmp/lib"
-    # The runner pod's uid has no passwd entry, and ansible resolves the current
-    # user from these — without them every `--syntax-check` in this job dies with
-    # "No username set in the environment" before parsing a single playbook. The
-    # library's collection-checks job carries the same pair for the same reason.
+    # ansible reads the current user from USER/LOGNAME; the runner pod's uid has
+    # no passwd entry, so `--syntax-check` dies without them.
     USER: gitlab-runner
     LOGNAME: gitlab-runner
   before_script:
@@ -257,24 +253,44 @@ render-validate:
         "$TERRAFORM_SHA256"
       python -c "import zipfile,sys; zipfile.ZipFile('/tmp/terraform.zip').extract('terraform', sys.argv[1])" "$CI_PROJECT_DIR/.bin"
       chmod +x "$CI_PROJECT_DIR/.bin/terraform"
+      fetch_verified prometheus.tar.gz \
+        "https://github.com/prometheus/prometheus/releases/download/v${PROMTOOL_VERSION}/prometheus-${PROMTOOL_VERSION}.linux-amd64.tar.gz" \
+        "$PROMTOOL_SHA256"
+      tar xzf /tmp/prometheus.tar.gz -C "$CI_PROJECT_DIR/.bin" --strip-components=1 \
+        "prometheus-${PROMTOOL_VERSION}.linux-amd64/promtool"
+      fetch_verified alertmanager.tar.gz \
+        "https://github.com/prometheus/alertmanager/releases/download/v${AMTOOL_VERSION}/alertmanager-${AMTOOL_VERSION}.linux-amd64.tar.gz" \
+        "$AMTOOL_SHA256"
+      tar xzf /tmp/alertmanager.tar.gz -C "$CI_PROJECT_DIR/.bin" --strip-components=1 \
+        "alertmanager-${AMTOOL_VERSION}.linux-amd64/amtool"
       kubeconform -v && kustomize version && terraform version
+      promtool --version && amtool --version
     - |
       set -eo pipefail
-      # The ref under test is copier.yml's lib_ref default — the single source the
-      # fixtures inherit (they no longer restate it) — so the gate, the render and
-      # the generated requirements.yml can never disagree about which library is
-      # exercised.
+      # The ref under test is copier.yml's lib_ref default, so the gate, the
+      # render and the generated requirements.yml cannot disagree.
       LIB_REF=$(python -c "import yaml; print(yaml.safe_load(open('copier.yml'))['lib_ref']['default'])")
       git clone --depth 1 --branch "$LIB_REF" \
         "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" \
         "$LIB_CHECKOUT"
   script:
     # BOTH fixtures — see tests/answers-unlike.yml for why the contrast render
-    # is not optional.
-    - python3 tests/validate_render.py --lib-path "$LIB_CHECKOUT"
+    # is not optional. --self-checks rides on this line alone: its arms read no
+    # render, so running them twice only repeats the output.
+    - python3 tests/validate_render.py --lib-path "$LIB_CHECKOUT" --self-checks
     - |
       python3 tests/validate_render.py \
         --answers tests/answers-unlike.yml \
+        --lib-path "$LIB_CHECKOUT"
+    # One optional module on: the two fixtures move vpn_tailscale, gpu and
+    # use_unifi together, so a conditional coupling two of them has an arm
+    # neither render takes. Paired with MODULES_MIXED in tests/test_render.py.
+    - |
+      python3 tests/validate_render.py \
+        --answers tests/answers-unlike.yml \
+        --data vpn_tailscale=true \
+        --data gpu=none \
+        --data use_unifi=false \
         --lib-path "$LIB_CHECKOUT"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'

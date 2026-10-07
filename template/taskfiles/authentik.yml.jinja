@@ -1,0 +1,39 @@
+# https://taskfile.dev
+# Authentik day-2 operations. The Terraform root that owns the SSO objects is
+# taskfiles/terraform.yml.
+version: '3'
+
+{% raw -%}
+tasks:
+  status:
+    desc: Show Authentik workloads, storage and routing
+    cmds:
+      - task: :_app:status
+        vars:
+          NS: authentik
+          SECTIONS: |
+            Authentik Namespace|pods
+            Services|svc
+            PVCs|pvc
+            IngressRoutes|ingressroute
+            ExternalSecrets|externalsecrets
+
+  logs:
+    desc: "Tail one Authentik component (COMPONENT=server)"
+    vars:
+      COMPONENT: '{{.COMPONENT | default "server"}}'
+    cmds:
+      - task: :_app:logs
+        vars:
+          NS: authentik
+          TARGET: -l app.kubernetes.io/name=authentik,app.kubernetes.io/component={{.COMPONENT}}
+
+  restart:
+    desc: Restart the Authentik server and worker
+    cmds:
+      # HelmRelease-managed, so `rollout restart` is right here; the pod-delete
+      # form in :_app:restart is for kustomize-managed workloads.
+      - kubectl rollout restart deployment -n authentik -l app.kubernetes.io/name=authentik
+      - kubectl rollout status deployment/authentik-server -n authentik --timeout=300s
+      - kubectl rollout status deployment/authentik-worker -n authentik --timeout=300s
+{%- endraw %}

@@ -12,7 +12,7 @@
       }
     ]
   },
-  "description": "All alert rules defined across Prometheus, with currently firing/pending alerts, recent history, silences, and Alertmanager health.",
+  "description": "All alert rules defined across Prometheus, with currently firing/pending alerts, recent history, silences, Alertmanager health, and the Loki ruler path.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -232,9 +232,9 @@
     {
       "id": 6,
       "type": "stat",
-      "title": "Alert rules loaded",
+      "title": "Rules loaded",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Number of alerting rules loaded by Prometheus across all rule groups.",
+      "description": "Total rules loaded by Prometheus across all rule groups (alerting and recording; prometheus_rule_group_rules does not separate them).",
       "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
       "fieldConfig": {
         "defaults": {
@@ -334,7 +334,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "ALERTS_FOR_STATE and ignoring(alertstate) (ALERTS{alertstate=\"firing\"} == 1)",
+          "expr": "(ALERTS_FOR_STATE and ignoring(alertstate) (ALERTS{alertstate=\"firing\"} == 1)) * 1000",
           "instant": true,
           "refId": "A",
           "format": "table"
@@ -558,7 +558,7 @@
       "id": 21,
       "type": "table",
       "title": "Most-fired alerts (last 7d)",
-      "description": "Top alerts by total time spent firing in the past 7 days. count_over_time samples are multiplied by 30 (the Prometheus evaluation interval in seconds); the factor must track that interval.",
+      "description": "Top alerts of the past 7 days, ranked by how many firing samples they produced across all their series. A count, not a duration: an alert firing on many instances at once outranks a longer single-series outage.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 9, "w": 12, "x": 12, "y": 28 },
       "options": {
@@ -571,9 +571,9 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "Total firing time" },
+            "matcher": { "id": "byName", "options": "Firing samples (all series)" },
             "properties": [
-              { "id": "unit", "value": "dtdurations" },
+              { "id": "unit", "value": "short" },
               { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "gradient" } },
               { "id": "color", "value": { "mode": "thresholds" } },
               {
@@ -582,8 +582,8 @@
                   "mode": "absolute",
                   "steps": [
                     { "color": "green", "value": null },
-                    { "color": "yellow", "value": 3600 },
-                    { "color": "red", "value": 86400 }
+                    { "color": "yellow", "value": 120 },
+                    { "color": "red", "value": 2880 }
                   ]
                 }
               }
@@ -594,7 +594,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "topk(15, sum by (alertname, severity) (count_over_time(ALERTS{alertstate=\"firing\"}[7d])) * 30)",
+          "expr": "topk(15, sum by (alertname, severity) (count_over_time(ALERTS{alertstate=\"firing\"}[7d])))",
           "instant": true,
           "refId": "A",
           "format": "table"
@@ -613,7 +613,7 @@
             "renameByName": {
               "alertname": "Alert",
               "severity": "Severity",
-              "Value": "Total firing time"
+              "Value": "Firing samples (all series)"
             }
           }
         }
@@ -705,7 +705,7 @@
       "type": "stat",
       "title": "AM notify failures (5m)",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Outbound notification failures from Alertmanager to integrations (Discord, etc).",
+      "description": "Outbound notification failures from Alertmanager to its configured receivers.",
       "gridPos": { "h": 4, "w": 4, "x": 8, "y": 38 },
       "fieldConfig": {
         "defaults": {
@@ -841,6 +841,158 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Loki ruler (log-based alerts)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 46 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 41,
+      "type": "stat",
+      "title": "Ruler rules loaded",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Rules loaded by Loki's in-process ruler. They are evaluated inside Loki and pushed straight to Alertmanager, so they never appear in the Prometheus panels above. Raise the green threshold to the rule count this repo ships.",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 47 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(loki_prometheus_rule_group_rules{job=\"observability/loki\"}) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "type": "stat",
+      "title": "Ruler eval failures (15m)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Rule evaluations Loki's ruler failed in the last 15 minutes. Non-zero means the log-based alerts are not being computed.",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 47 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(loki_prometheus_rule_evaluation_failures_total{job=\"observability/loki\"}[15m])) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 43,
+      "type": "stat",
+      "title": "Ruler notify errors (15m)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Errors pushing ruler alerts to Alertmanager in the last 15 minutes. Non-zero means log-based alerts may be firing with nobody notified.",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 47 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(loki_prometheus_notifications_errors_total{job=\"observability/loki\"}[15m])) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "type": "stat",
+      "title": "Ruler -> Alertmanagers",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Alertmanager instances Loki's ruler has discovered. Zero means the ruler has nowhere to send, independently of Prometheus' own notifier.",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 47 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max(loki_prometheus_notifications_alertmanagers_discovered{job=\"observability/loki\"}) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",
@@ -851,7 +1003,7 @@
   "timepicker": {
     "refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "30m"]
   },
-  "timezone": "",
+  "timezone": "browser",
   "title": "Alerts overview",
   "uid": "alerts-overview",
   "version": 1,

@@ -1,240 +1,155 @@
 ---
-# Upgrade the platform services that are installed as binaries or packages
-# rather than reconciled by Flux, to the versions pinned in group_vars/all.yml.
-# Imported by update-full.yml, which is the single source of truth for the OS
-# half. Add a play here for any application host you introduce.
+# Upgrade the platform services installed as binaries or packages rather than
+# reconciled by Flux, to the versions pinned in group_vars/all.yml. Add a play
+# here for any application host you introduce.
 
 - name: Update AdGuard Home
   hosts: dns
   become: true
   serial: 1  # keep one resolver serving throughout
-  vars:
-    force_adguard_upgrade: false
+  # With serial: 1 a failure on the first resolver must stop the run before the
+  # second batch takes the surviving resolver down too.
+  any_errors_fatal: true
   tasks:
-    - name: Check the current version
-      ansible.builtin.command: "{{ adguard_home_install_path }}/AdGuardHome --version"
-      register: current_version
-      changed_when: false
-      failed_when: false
+    - name: Check for an installed AdGuard Home configuration
+      ansible.builtin.stat:
+        path: "{{ adguard_home_install_path }}/AdGuardHome.yaml"
+      register: adguard_home_config_stat
 
-    - name: Determine whether an upgrade is needed
-      ansible.builtin.set_fact:
-        needs_upgrade: >-
-          {{
-            force_adguard_upgrade or
-            current_version.rc != 0 or
-            adguard_home_version not in (current_version.stdout | default(''))
-          }}
+    # CRITICAL: a skip here is invisible. The binary swap below then runs with
+    # no pre-upgrade copy to roll back to, and the loss is only discovered once
+    # the upgraded resolver fails to start.
+    - name: Fail when no AdGuard Home configuration is there to back up
+      ansible.builtin.fail:
+        msg: >-
+          {{ adguard_home_install_path }}/AdGuardHome.yaml does not exist, so
+          the upgrade would run without a rollback copy. Point
+          adguard_home_install_path (group_vars/dns.yml) at this host's
+          AdGuard Home install directory.
+      when: not adguard_home_config_stat.stat.exists
 
-    - name: Upgrade AdGuard Home with failure recovery
-      when: needs_upgrade
+    # One fixed pre-upgrade copy, overwritten each run: the sync replicates the
+    # config continuously, so a growing backup-<epoch> set only clutters the
+    # install directory.
+    - name: Back up the AdGuard Home configuration before the upgrade
+      ansible.builtin.copy:
+        src: "{{ adguard_home_install_path }}/AdGuardHome.yaml"
+        dest: "{{ adguard_home_install_path }}/AdGuardHome.yaml.pre-upgrade"
+        remote_src: true
+        owner: "{{ adguard_home_user | default('adguard') }}"
+        group: "{{ adguard_home_group | default(adguard_home_user | default('adguard')) }}"
+        mode: "0600"
+
+    # DNS chicken-and-egg: each resolver resolves through itself, so the binary
+    # swap would leave it with no resolution. Borrow the peer for the window
+    # (serial: 1); a single-resolver cluster has no peer and skips the swap.
+    - name: Upgrade AdGuard Home behind the peer resolver
+      vars:
+        dns_peer: "{{ (groups['dns'] | difference([inventory_hostname]) | first) | default('') }}"
       block:
-        - name: Set the release architecture
-          ansible.builtin.set_fact:
-            adguard_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
-
-        - name: Back up resolv.conf
-          ansible.builtin.copy:
-            src: /etc/resolv.conf
-            dest: /etc/resolv.conf.backup-upgrade
-            remote_src: true
-            mode: "0644"
-
-        # The adguard_home role keeps resolv.conf immutable in steady state, so
-        # the rewrites below would EPERM without clearing the flag first.
-        - name: Clear the immutable flag for the upgrade window
+        - name: Clear the immutable flag on resolv.conf for the upgrade window
           ansible.builtin.command:
             cmd: chattr -i /etc/resolv.conf
           changed_when: false
+          # The file may not be immutable, or the FS may not support attrs.
           failed_when: false
 
-        # Each resolver resolves through itself, so it must borrow its peer
-        # while its own AdGuard is stopped. serial:1 guarantees the peer is up.
-        - name: Point resolution at the peer resolver
-          vars:
-            dns_peer: "{{ groups['dns'] | difference([inventory_hostname]) | first }}"
+        - name: Back up resolv.conf for the upgrade window
+          ansible.builtin.copy:
+            src: /etc/resolv.conf
+            dest: /etc/resolv.conf.pre-upgrade
+            remote_src: true
+            mode: "0644"
+
+        - name: Point resolv.conf at the peer resolver for the upgrade window
           ansible.builtin.copy:
             content: |
               # Temporary: {{ inventory_hostname }} is mid-upgrade
               nameserver {{ hostvars[dns_peer].ansible_host }}
             dest: /etc/resolv.conf
             mode: "0644"
+          when: dns_peer | length > 0
 
-        - name: Stop AdGuard Home
-          ansible.builtin.service:
-            name: AdGuardHome
-            state: stopped
+        - name: Reconcile AdGuard Home to the pinned version
+          ansible.builtin.include_role:
+            name: weisssrv.infra.adguard_home
 
-        - name: Back up the AdGuard Home configuration
-          ansible.builtin.copy:
-            src: "{{ adguard_home_install_path }}/AdGuardHome.yaml"
-            dest: "{{ adguard_home_install_path }}/AdGuardHome.yaml.backup-{{ ansible_date_time.epoch }}"
-            remote_src: true
-            mode: "0644"
-
-        - name: Download the new release
-          ansible.builtin.get_url:
-            url: "https://github.com/AdguardTeam/AdGuardHome/releases/download/v{{ adguard_home_version }}/AdGuardHome_linux_{{ adguard_arch }}.tar.gz"
-            # Upstream filename, so the checksum lookup matches an entry in checksums.txt
-            dest: "/tmp/AdGuardHome_linux_{{ adguard_arch }}.tar.gz"
-            mode: "0644"
-            timeout: 60
-            checksum: "sha256:https://github.com/AdguardTeam/AdGuardHome/releases/download/v{{ adguard_home_version }}/checksums.txt"
-
-        - name: Extract the release
-          ansible.builtin.unarchive:
-            src: "/tmp/AdGuardHome_linux_{{ adguard_arch }}.tar.gz"
-            dest: /tmp
-            remote_src: true
-
-        - name: Install the new binary
-          ansible.builtin.copy:
-            src: /tmp/AdGuardHome/AdGuardHome
-            dest: "{{ adguard_home_install_path }}/AdGuardHome"
-            owner: root
-            group: root
-            mode: "0755"
-            remote_src: true
-
-        - name: Start AdGuard Home
+        - name: Record that the AdGuard Home reconcile completed
+          ansible.builtin.set_fact:
+            adguard_reconcile_ok: true
+      always:
+        # Best effort first, then re-lock, and only then fail: a fail: placed
+        # earlier would skip the rest of this block. resolv.conf pointing at the
+        # peer still resolves, but leaving it MUTABLE lets DHCP clobber it.
+        - name: Start AdGuard Home again after the upgrade window
           ansible.builtin.service:
             name: AdGuardHome
             state: started
+          failed_when: false
 
-        - name: Wait for AdGuard Home to be ready
-          ansible.builtin.wait_for:
-            port: "{{ adguard_home_http_port }}"
-            timeout: 60
+        - name: Read the AdGuard Home service state  # noqa: command-instead-of-module
+          ansible.builtin.command: systemctl is-active AdGuardHome
+          register: adguard_home_active
+          changed_when: false
+          failed_when: false
+          check_mode: false
 
-        - name: Restore resolv.conf
+        # The +i below must never lock the temporary peer pointer, so put the
+        # pre-upgrade file back whenever the resolver did not come up.
+        - name: Restore resolv.conf when the resolver did not come back
           ansible.builtin.copy:
-            src: /etc/resolv.conf.backup-upgrade
+            src: /etc/resolv.conf.pre-upgrade
             dest: /etc/resolv.conf
             remote_src: true
             mode: "0644"
+          register: resolv_conf_restore
+          failed_when: false
+          when: >-
+            not (adguard_reconcile_ok | default(false))
+            or (adguard_home_active.stdout | default('') | trim) != 'active'
 
-        - name: Re-set the immutable flag
+        - name: Remove the resolv.conf upgrade-window backup
+          ansible.builtin.file:
+            path: /etc/resolv.conf.pre-upgrade
+            state: absent
+          failed_when: false
+          when:
+            - adguard_reconcile_ok | default(false)
+            - (adguard_home_active.stdout | default('') | trim) == 'active'
+
+        - name: Re-assert the immutable flag on resolv.conf
           ansible.builtin.command:
             cmd: chattr +i /etc/resolv.conf
+          register: resolv_conf_relock
           changed_when: false
           failed_when: false
 
-        - name: Clean up
-          ansible.builtin.file:
-            path: "{{ item }}"
-            state: absent
-          loop:
-            - /etc/resolv.conf.backup-upgrade
-            - "/tmp/AdGuardHome_linux_{{ adguard_arch }}.tar.gz"
-            - /tmp/AdGuardHome
-
-      rescue:
-        # Best effort throughout: leaving a resolver stopped, or pointed at a
-        # peer that is about to be upgraded itself, is worse than the failure.
-        - name: Ensure AdGuard Home is running again
-          ansible.builtin.service:
-            name: AdGuardHome
-            state: started
-          failed_when: false
-
-        - name: Restore resolv.conf after the failure
-          ansible.builtin.shell: |
-            chattr -i /etc/resolv.conf 2>/dev/null || true
-            cp /etc/resolv.conf.backup-upgrade /etc/resolv.conf 2>/dev/null || true
-            chattr +i /etc/resolv.conf 2>/dev/null || true
-            rm -f /etc/resolv.conf.backup-upgrade
-          args:
-            executable: /bin/bash
-          changed_when: false
-          failed_when: false
-
-        - name: Fail with the original error
+        - name: Fail when AdGuard Home is still down after the upgrade window
           ansible.builtin.fail:
-            msg: "AdGuard Home upgrade failed; the service was restarted on the previous version."
-
-    - name: Report the resulting version
-      ansible.builtin.command: "{{ adguard_home_install_path }}/AdGuardHome --version"
-      changed_when: false
-      register: new_version
-
-    - name: Display the upgrade result
-      ansible.builtin.debug:
-        msg: "AdGuard Home {{ 'upgraded to' if needs_upgrade else 'already at' }}: {{ new_version.stdout }}"
+            msg: >-
+              AdGuard Home on {{ inventory_hostname }} is
+              '{{ adguard_home_active.stdout | default('unknown') | trim }}' after the
+              upgrade window - this resolver is NOT answering.
+              {{ 'resolv.conf restored from the pre-upgrade copy'
+                 if resolv_conf_restore.dest is defined
+                 else 'resolv.conf still names the peer, chattr -i it before hand-fixing'
+              }}, re-lock
+              rc={{ resolv_conf_relock.rc | default('?') }}
+              {{ '(NOT immutable - DHCP can clobber it)'
+                 if (resolv_conf_relock.rc | default(1)) != 0 else '(immutable)' }};
+              fix this host before the peer's own serial: 1 turn takes the other
+              resolver down.
+          when: (adguard_home_active.stdout | default('') | trim) != 'active'
 
 - name: Update adguardhome-sync
   hosts: dns_primary
   become: true
   tasks:
-    - name: Check whether the binary exists
-      ansible.builtin.stat:
-        path: /usr/local/bin/adguardhome-sync
-      register: sync_binary
-
-    - name: Get the current version
-      ansible.builtin.command: /usr/local/bin/adguardhome-sync --version
-      register: current_sync_version
-      changed_when: false
-      failed_when: false
-      when: sync_binary.stat.exists
-
-    - name: Determine whether an upgrade is needed
-      ansible.builtin.set_fact:
-        needs_sync_upgrade: >-
-          {{
-            not sync_binary.stat.exists or
-            adguard_sync_version not in (current_sync_version.stdout | default(''))
-          }}
-
-    - name: Upgrade adguardhome-sync
-      when: needs_sync_upgrade
-      block:
-        - name: Set the release architecture
-          ansible.builtin.set_fact:
-            adguard_sync_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
-
-        - name: Download the new release
-          ansible.builtin.get_url:
-            url: "https://github.com/bakito/adguardhome-sync/releases/download/v{{ adguard_sync_version }}/adguardhome-sync_{{ adguard_sync_version }}_linux_{{ adguard_sync_arch }}.tar.gz"  # noqa yaml[line-length]
-            dest: "/tmp/adguardhome-sync_{{ adguard_sync_version }}_linux_{{ adguard_sync_arch }}.tar.gz"
-            mode: "0644"
-            timeout: 60
-            checksum: "sha256:https://github.com/bakito/adguardhome-sync/releases/download/v{{ adguard_sync_version }}/checksums.txt"
-
-        - name: Extract the release
-          ansible.builtin.unarchive:
-            src: "/tmp/adguardhome-sync_{{ adguard_sync_version }}_linux_{{ adguard_sync_arch }}.tar.gz"
-            dest: /tmp
-            remote_src: true
-
-        - name: Stop the sync timer
-          ansible.builtin.systemd:
-            name: adguardhome-sync.timer
-            state: stopped
-
-        - name: Install the new binary
-          ansible.builtin.copy:
-            src: /tmp/adguardhome-sync
-            dest: /usr/local/bin/adguardhome-sync
-            owner: root
-            group: root
-            mode: "0755"
-            remote_src: true
-
-      always:
-        - name: Ensure the sync timer is running again
-          ansible.builtin.systemd:
-            name: adguardhome-sync.timer
-            state: started
-            daemon_reload: true
-
-    - name: Clean up
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - "/tmp/adguardhome-sync_{{ adguard_sync_version }}_linux_{{ adguard_sync_arch }}.tar.gz"
-        - /tmp/adguardhome-sync
-      when: needs_sync_upgrade
+    # The role self-gates on adguard_sync_enabled (hosts.yml), so it is a no-op
+    # wherever the sync is not deployed - a single-resolver cluster included.
+    - name: Reconcile adguardhome-sync to the pinned version
+      ansible.builtin.include_role:
+        name: weisssrv.infra.adguard_sync
 
 - name: Update Tailscale on the subnet routers
   hosts: proxmox

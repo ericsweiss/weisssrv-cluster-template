@@ -1,13 +1,7 @@
 ---
-# Export map for scripts/generate-hosts-env.py: which inventory group becomes
-# which shell variable in scripts/hosts.env. Regenerate with `task hosts:sync`
-# after editing the inventory; CI fails when the committed file is stale.
-#
-# `group` names must exist in ansible/inventories/prod/hosts.yml AND must hold
-# hosts directly — a group that only lists `children:` resolves to nothing,
-# which is why the two hypervisor roles are exported separately and combined.
-# A missing group is an error unless the entry sets `required: false`. Add an
-# entry here when you add a guest the Taskfile or a script reaches by address.
+# Export map for generate-hosts-env.py: inventory group -> shell variable in
+# scripts/hosts.env. Regenerate with `task hosts:sync`; CI fails when stale.
+# A group must list hosts directly; a children-only group resolves to nothing.
 output: scripts/hosts.env
 exports:
   # Hostnames, not addresses: the Proxmox nodes are reached through SSH config

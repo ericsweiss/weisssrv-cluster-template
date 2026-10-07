@@ -1,0 +1,17 @@
+---
+# The profile the CI yaml-lint job selects with `-c lint/yamllint-relaxed.yml`,
+# and the one the local lint command in README.md runs. Kept at lint/ to match
+# the generated cluster, where a repo-root `.yamllint` lands in ansible-lint's
+# discovery path and replaces its yaml rule.
+extends: relaxed
+
+rules:
+  # `relaxed` keeps line-length at warning level and disables the comment
+  # rules. Here line-length is off outright, because inline documentation
+  # comments run long, and document-start comes back as a warning.
+  line-length: disable
+  # Files under template/ are Jinja sources: a rendered document may legitimately
+  # start with a control block, so the `---` requirement is advisory here.
+  document-start:
+    present: true
+    level: warning

@@ -1,0 +1,23 @@
+---
+# Reachability ledger (first half), imported by base.yml and site.yml: records
+# hosts that converge nothing under ignore_unreachable. Scope is base_managed,
+# so the metrics and log-shipping plays report for themselves.
+- name: Probe reachability of every targeted host
+  hosts: base_managed
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    - name: Probe the connection
+      ansible.builtin.ping:
+      register: deploy_reachability_probe
+      changed_when: false
+      tags: [always]
+
+    - name: Record the probe outcome in the skip ledger
+      # group_by (unlike add_host, which is BYPASS_HOST_LOOP) runs once per host
+      # and needs no connection, so it still runs for a host whose probe came back
+      # unreachable — that host stays in the play under ignore_unreachable.
+      ansible.builtin.group_by:
+        key: "deploy_{{ 'skipped' if (deploy_reachability_probe.unreachable | default(false)) else 'reached' }}"
+      changed_when: false
+      tags: [always]

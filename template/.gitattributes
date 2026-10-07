@@ -1,0 +1,19 @@
+# Normalize line endings on checkin; git does not enforce .editorconfig's eol=lf.
+# Shell heredocs and sed blocks do not tolerate CRLF.
+* text=auto eol=lf
+
+# Explicit LF for the interpreted/templated files that break on CRLF.
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+# Binary assets: never normalize or diff as text.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.gz   binary

@@ -23,28 +23,90 @@ substitution in the shaped fixture and is only visible in a second, unlike one.
 
 | Check | What it proves | Needs |
 |---|---|---|
-| `yamllint` | the tree passes the generated repo's own `.yamllint` | `yamllint` |
+| `yamllint` | the tree passes the generated repo's own `lint/yamllint-relaxed.yml` | `yamllint` |
+| `shellcheck` | the rendered `scripts/*.sh` and `terraform/*/*.sh` pass at the severity and exclusions the generated pipeline uses. `scripts/collect-state.sh` is Jinja in the template, so a render is the only place it exists as shell | `shellcheck` |
 | `terraform` | `terraform fmt -check -recursive` over the rendered `terraform/`, plus the tailnet policy still parses. Most of those files are Jinja templates, so this is what catches a template bug that lands as invalid HCL | `terraform` |
-| `flux` | for every Kustomization under `kubernetes/clusters/<name>/`: `kustomize build` the target path, assert every `${placeholder}` is a key of one of the two postBuild ConfigMaps, substitute, `kubeconform`. Mirrors `ci/validate/flux-lint.yml`, through the generated repo's own `scripts/flux-env.sh` | `kustomize`, `kubeconform` |
-| `cluster-gates` | the six invariant gates the generated pipeline wires — `check-scrape-netpol`, `check-default-deny-coverage`, `check-secretstore-scope`, `check-pvc-storageclass` and `check-hpa-vpa-invariant` over the whole rendered corpus, `check-netpol-except-parity` over `kubernetes/` on disk — actually PASS on the manifests the template ships. The render suite proves they are wired; without this, a generated cluster's first pipeline can be red on manifests nobody edited, and the template change that caused it went green | `kustomize` |
+| `flux` | for every Kustomization under `kubernetes/clusters/<name>/`: `kustomize build` the target path, assert every `${placeholder}` is a key of one of the two postBuild ConfigMaps, substitute, `kubeconform`. Mirrors `ci/validate/flux-lint.yml`, through the generated repo's own `scripts/flux-env.sh`. A path that builds to nothing, and a kind kubeconform validated against no schema outside `validate_render.EXPECTED_SKIPPED`, both fail: either would otherwise pass as a validated render | `kustomize`, `kubeconform` |
+| `cluster-gates` | the invariant gates the generated pipeline wires actually pass on the manifests the template ships | `kustomize` |
 | `ci-policy` | the generated pipeline pins a `default: image:`, sets `default: interruptible: true` with the `workflow.auto_cancel` split (`interruptible` globally, `none` on `main`), and leaves every deploy/gate/plan job uninterruptible. All three are defaults a job inherits by saying nothing, so no rendered job fails when they go missing | — |
-| `inventory-addresses` | no two hosts in `inventories/prod/hosts.yml` share an `ansible_host` or a `vmid`, and every address sits inside `cluster_lan_cidr`. Copier answers are validated one at a time, never against the address plan `hosts.yml` composes them into — and a resolver's vmid is derived from its answer (`100 + last octet`), so `upstream_dns_servers` landing in the `.31+` server band duplicates both. Reads the rendered inventory rather than the answer, so a hand re-address reaches the same gate | — |
+| `include-contract` | every library `include:` in the rendered pipeline and in this repository's own resolves against the checkout: no undeclared `inputs:` key, every default-less input passed, and each job's resolved `stage:` declared. All three fail pipeline creation, which is otherwise first seen on the ref bump | `--lib-path` |
+| `inventory-addresses` | cluster-config declares the LAN CIDR and all three VIPs, so the render's own address invariants assert instead of skipping | — |
 | `version-coverage` | every pin in the rendered vars file has a `scripts/version-registry.py` entry. Both are template output, so an entry added to one `.jinja` and not the other renders a cluster whose weekly bump bot silently never reports that pin | — |
 | `versions-configmap` | the rendered `cluster-versions` ConfigMap matches the rendered vars file — `flux` substitutes FROM the ConfigMap, so a stale value is otherwise a valid render | — |
-| `vendored` | every script in the render's `scripts/` **and** in this repository's own `scripts/` is byte-identical to the library's copy, plus the library's vendored-copy engine (`scripts/check-vendored-copies.py`) run against this repository's own [`scripts/vendored-manifest.yml`](../scripts/vendored-manifest.yml). The own-`scripts/` half is what holds `scripts/semantic-release.py` — the file that cuts the tag a generated cluster's `copier update` resolves to — to the library at the ref the includes pin, and that half refuses to compare at all if those includes and `copier.yml`'s `lib_ref` default disagree. The manifest arm adds the copies no directory walk reaches — the canonical `tests/test_check_lib_pins.py` suite, the secret-detection ruleset under `.gitlab/`, and the lint profiles this repository deliberately forks — and compares them against the same checkout unconditionally (no ref guard: the engine itself announces which tree it compared). The list is consumer-owned — the library publishes only an offer list (`scripts/vendorable-paths.yml`) bounding what the manifest may name, so moving a copy here is an edit to the manifest in the same commit, not a library release | `--lib-path` |
-| `rendered-vendored` | the GENERATED cluster's own vendored-copy gate passes on its render: the library's engine over the render's [`scripts/vendored-manifest.yml`](../template/scripts/vendored-manifest.yml) rooted at the render (every listed copy identical, every declared fork — `ruff.toml`, `.editorconfig`, `.gitleaks.toml`, `.gitlab/secret-detection-ruleset.toml` — still divergent and still reconciled), that the manifest names every rendered script with a library twin, and that `tests/test_vendored_byte_identity.py` renders to read it. The `vendored` check above proves the copies are current *here*; this proves a generated cluster can prove it for *itself*, which is what the consumer-owned manifest bought — the library cannot gate a repository generated after its release | `--lib-path` |
+| `vendored` | every script in the render and in this repository is byte-identical to the library copy it was vendored from | `--lib-path` |
+| `rendered-vendored` | a generated cluster can run that same proof for itself, from its own manifest | `--lib-path` |
 | `role-opt-ins` | no playbook invokes a `<role>_enabled: false` role without the inventory setting the flag — a role that runs and does nothing, successfully | `--lib-path` |
 | `role-inputs` | every input an invoked role *asserts* and has no **usable** default for is assigned in `inventories/prod`. "Usable" is decided by rendering the default against the inventory, not by reading it: `proxmox_lxc_nameserver` defaults to `{{ dns_servers \| default([]) \| join(' ') }}`, which is non-empty as text and empty as a value the moment `dns_servers` is unset | `--lib-path` |
 | `terraform-validate` | `terraform validate` per module against the library checkout, with each `git::…?ref=` source rewritten to it — otherwise the RELEASED module is what validates | `--lib-path`, `terraform` |
 | `ansible` | `ansible-playbook --syntax-check` on every rendered playbook, with `weisssrv.infra` resolved from the library | `ansible-playbook` |
 
-**`vendored`, `rendered-vendored`, `role-opt-ins`, `role-inputs` and
+**`include-contract`, `vendored`, `rendered-vendored`, `role-opt-ins`, `role-inputs` and
 `terraform-validate` are silently skipped without `--lib-path`** — they read the library's roles,
 scripts and Terraform modules, so there is nothing to compare against. The validator prints `skipped (no --lib-path)` for each. A
 local run without it is therefore weaker than CI, which always passes one.
 
 A template change that produces a cluster which cannot reconcile fails here
 instead of in someone's homelab.
+
+### cluster-gates
+
+The render suite proves the generated pipeline wires these gates. This check
+runs them, over the manifests the template ships. The rendered
+`scripts/flux-corpus-gates.sh` runs the corpus arms, the same wrapper
+`task flux:lint` calls: `check-hpa-vpa-invariant`, `check-scrape-netpol`,
+`check-default-deny-coverage`, `check-secretstore-scope` and
+`check-pvc-storageclass` over the rendered corpus, plus
+`check-backup-artifact-apps` over the inventory and the alert rules. Its
+HelmRelease-values arm needs the network, so the validator calls the wrapper
+without a versions ConfigMap and that arm is skipped. The validator then runs
+`check-netpol-except-parity` over `kubernetes/` on disk and
+`lint-prometheus-config.sh` over the alert rules and the Alertmanager config.
+Without this check, a generated cluster's first pipeline can be red on
+manifests nobody edited, and the template change that caused it went green.
+
+The alert rules and the Alertmanager config live inside a HelmRelease's
+`.spec.values`, where `kubeconform` cannot reach them, so that last arm needs
+`promtool` and `amtool`. `render-validate` fetches both, pinned and
+sha256-verified like `kubeconform`, `kustomize` and `terraform`; a local run
+without them skips that arm and says so.
+
+A clean `check-scrape-netpol` proves the namespace admits observability, not
+that the scrape lands: the allow policy's own `podSelector` and port go
+unchecked. A `TargetDown` that survives a green pipeline is the signal to read
+the live policy's targeting.
+
+### inventory-addresses
+
+Copier answers are validated one at a time, never against the address plan
+`hosts.yml` composes them into, and a resolver's vmid is derived from its
+answer (`100 + last octet`), so `upstream_dns_servers` landing in the `.31+`
+server band duplicates both. The assertions themselves ship in the render's own
+`tests/test_cluster_invariants.py`, which reads the rendered inventory rather
+than the answers, so a hand re-address reaches the same gate. It skips when
+cluster-config is silent, which is what this check refuses to allow.
+
+### The vendored checks
+
+`vendored` compares this repository and the render against the library at the
+ref the `include:` block pins, and refuses to compare at all when those
+includes and `copier.yml`'s `lib_ref` default disagree. It also runs the
+library's vendored-copy engine (`scripts/check-vendored-copies.py`) against
+[`scripts/vendored-manifest.yml`](../scripts/vendored-manifest.yml), which
+names the copies no directory walk reaches: the canonical
+`tests/test_check_lib_pins.py` suite, the secret-detection ruleset under
+`.gitlab/`, and the lint profiles this repository deliberately forks. The
+manifest is consumer-owned. The library publishes only an offer list
+(`scripts/vendorable-paths.yml`) bounding what a manifest may name, so moving a
+copy here is an edit to the manifest in the same commit, not a library release.
+
+`rendered-vendored` runs that same engine over the render's own
+[`scripts/vendored-manifest.yml`](../template/scripts/vendored-manifest.yml),
+rooted at the render: every listed copy identical, every declared fork still
+divergent and still reconciled, every rendered script with a library twin
+named, and `tests/test_vendored_byte_identity.py` rendered to read it. The
+first check proves the copies are current *here*; this one proves a generated
+cluster can prove it for *itself*, which the library cannot do for a repository
+generated after its release.
 
 ## Running the tests locally
 
@@ -53,6 +115,9 @@ python3 -m pytest tests -q                      # structure + copier schema
 python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib          # every check above
 python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
   --answers tests/answers-unlike.yml            # the contrast fixture
+python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
+  --answers tests/answers-unlike.yml \
+  --data vpn_tailscale=true --data gpu=none --data use_unifi=false   # mixed modules
 python3 tests/render_cluster.py --out /tmp/x    # just render, and keep it
 python3 tests/validate_render.py --render-dir /tmp/x --lib-path ~/src/weisssrv-lib
 ```
@@ -62,10 +127,10 @@ removed. Copier treats a git checkout as a VCS source and would otherwise
 render the last commit, silently testing something other than the diff under
 review.
 
-Requirements: `copier>=9`, `pytest`, `pyyaml` for the pytest suite; plus
-`yamllint`, `terraform`, `kustomize`, `kubeconform` and `ansible-playbook` for
-the validator. Any missing tool is reported by name. `--skip` takes any of
-`yamllint,terraform,flux,cluster-gates,ci-policy,inventory-addresses,version-coverage,versions-configmap,vendored,rendered-vendored,role-opt-ins,role-inputs,terraform-validate,ansible`
+Requirements: `copier>=9.15`, `pytest`, `pyyaml` for the pytest suite; plus
+`yamllint`, `shellcheck`, `terraform`, `kustomize`, `kubeconform` and
+`ansible-playbook` for the validator. Any missing tool is reported by name. `--skip` takes any of
+`yamllint,shellcheck,terraform,flux,cluster-gates,ci-policy,include-contract,inventory-addresses,version-coverage,versions-configmap,vendored,rendered-vendored,role-opt-ins,role-inputs,terraform-validate,ansible`
 — the same names `validate_render.py --help` prints, and the same order the
 table above lists them in. `test_ci_doc_lists_every_validator_check` holds the
 three together, so a check added to the registry without a row here fails the suite;
@@ -73,11 +138,34 @@ an unknown `--skip` name is rejected rather than silently skipping nothing.
 
 `--lib-path` points at a weisssrv-lib checkout — the directory that *contains*
 `ansible_collections/`. Use it to exercise an unmerged library change, to avoid
-the network, and — as the table above says — to run the four library-reading
+the network, and — as the table above says — to run the library-reading
 checks at all. Without it the collection is installed from the git ref in the render's
 `requirements.yml`. The library's galaxy dependencies (`ansible.posix`,
 `community.general`) are installed either way, with the operator's own
 `~/.ansible/collections` as the offline fallback.
+
+The checkout must be at the `lib_ref` the template pins, or every
+library-reading check above has another library tree as its subject. The
+validator fails on a mismatch and names the tags it found. Add
+`--allow-ref-mismatch` to run against an unreleased checkout: the mismatch is
+then printed as a warning and the checks still run.
+
+## Pipeline policy
+
+MR refs set `auto_cancel.on_new_commit: interruptible`, so a new push cancels
+the previous pipeline's interruptible jobs instead of letting `render-validate`,
+the heaviest job, pile up on the quota-capped shared runner. GitLab's project
+default, `conservative`, stops cancelling as soon as any non-interruptible job
+has started, which leaves them running.
+
+`main` overrides to `none`. A merged pipeline always runs to completion, because
+`release` cuts the tag every generated cluster's `copier update` resolves to,
+and a cancelled one leaves that tag uncut behind a green pipeline.
+
+`render-validate` retries `runner_system_failure` and `scheduler_failure`: it
+requests the largest limits in the pipeline and is the first job refused at
+pod-creation time when several pipelines overlap, which arrives as a system
+failure rather than a test failure.
 
 ## The two answer fixtures
 
@@ -90,16 +178,31 @@ that). `tests/test_copier_config.py` fails if any other question is added to
 same question set — so a new question that reaches only one of them fails there
 instead.
 
+Neither fixture may answer a computed (`when: false`) entry. Copier takes a
+`--data-file` value over a skipped question's default, so an entry there
+silently replaces the expression the render is meant to prove.
+`test_no_fixture_answers_a_computed_question` fails that.
+
 | Fixture | Shape | Reaches |
 |---|---|---|
-| `answers-weisssrv-shaped.yml` | the reference cluster's shape with placeholder identity: flat `/24`, split-horizon domains, three VIPs, smallest roster | both optional modules **on** (`vpn_tailscale`, `gpu: nvidia`), multi-resolver, semantic-release off |
-| `answers-unlike.yml` | deliberately unlike it in every answer that can differ: other LAN, other domains, other names, other vault, other runner tag, largest roster | both optional modules **off**, a single resolver, a third exporter job, semantic-release on |
+| `answers-weisssrv-shaped.yml` | the reference cluster's shape with placeholder identity: flat `/24`, split-horizon domains, three VIPs, smallest roster | every optional module **on** (`vpn_tailscale`, `gpu: nvidia`, `use_unifi`), multi-resolver, semantic-release off |
+| `answers-unlike.yml` | deliberately unlike it in every answer that can differ: other LAN, other domains, other names, other vault, other runner tag, largest roster | every optional module **off**, a single resolver, a third exporter job, semantic-release on |
 
 They are a pytest *parameter* (the `cluster` fixture), so most assertions run
-against both renders for the price of one render each. `answers-unlike.yml` is
-also what `test_render_b_carries_no_fixture_a_values` diffs against: any answer
-from the shaped fixture appearing in the unlike render is a hard-coded literal,
-not a substitution.
+against both renders for the price of one render each.
+
+`test_render_b_carries_no_fixture_a_values` diffs the shaped fixture's answers
+against the unlike renders: any answer from the shaped fixture appearing there
+is a hard-coded literal, not a substitution. It runs over the `cluster_b`
+fixture's renders: `answers-unlike.yml` as shipped, the same answers with the
+optional modules forced on, and the same answers with one of them on. Without
+the modules-on render, every file those answers gate would be outside the scan,
+because the only render that carries them is the one whose values are the
+needles. The mixed render takes the arms a conditional coupling two modules has,
+which neither an all-on nor an all-off render reaches; `render-validate` puts
+the same set through the toolchain with `--data`, and
+`test_ci_validates_the_same_mixed_module_set_the_suite_renders` holds the two
+together.
 
 ## Adding a check
 
@@ -126,9 +229,17 @@ when it merges — which takes every include, module source and collection insta
 with it. `scripts/check-lib-pins.py` fails the pipeline on a branch pin or on an
 include that drifts from `variables.WEISSSRV_LIB_REF`.
 
+`include:` is resolved before job variables exist, so each entry repeats the tag
+as a literal rather than reading `variables.WEISSSRV_LIB_REF`. The ref
+`render-validate` actually clones is `copier.yml`'s `lib_ref` default, so the
+gate, the render and the generated `requirements.yml` cannot disagree.
+
 `render-validate` clones the library with `CI_JOB_TOKEN`, so the job does not
 depend on anonymous access — the library project must list this project on its
-CI/CD job-token allowlist if it is not public.
+CI/CD job-token allowlist if it is not public. It also sets `USER` and
+`LOGNAME`: the runner pod's uid has no passwd entry, and ansible resolves the
+current user from them, so every `--syntax-check` would die before parsing a
+playbook.
 
 ## The release stage
 
@@ -151,8 +262,10 @@ reference through the template's `release_token` / `token_header` inputs.
 
 The generated cluster's pipeline gets the same stage only when the operator
 answers `enable_semantic_release: true` — off by default, because a cluster
-repository is normally released by hand. `answers-unlike.yml` turns it on, so
-the rendered wiring is exercised on every run.
+repository is normally released by hand. `scripts/semantic-release.py` ships in
+every generated cluster; the answer only adds the stage that runs it.
+`answers-unlike.yml` turns it on, so the rendered wiring is exercised on every
+run.
 
 ## Deferred by design
 

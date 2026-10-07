@@ -7,6 +7,8 @@ metadata:
   name: authentik
   namespace: authentik
   annotations:
+    # CNAMEs this host at the zone apex, so the apex must itself be an A/AAAA
+    # record for the public edge. A different edge name is a retarget here.
     external-dns.alpha.kubernetes.io/target: ${cluster_external_domain}
 spec:
   entryPoints:

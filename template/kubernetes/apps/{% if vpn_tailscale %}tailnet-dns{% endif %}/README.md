@@ -16,7 +16,7 @@ service that bypasses the ingress) are forwarded to the LAN resolvers unchanged.
 `loadBalancerClass: tailscale` this Service uses, and the platform ships a
 `traefik-tailnet` Service that is the CNAME target.
 
-## Two values you MUST set before this works
+## Two values that must be right
 
 Both live in the `cluster-config` ConfigMap:
 
@@ -25,8 +25,13 @@ Both live in the `cluster-config` ConfigMap:
 | `cluster_tailnet_dns_suffix` | Your tailnet's MagicDNS suffix, e.g. `tailXXXXX.ts.net` | `tailscale status` |
 | `cluster_upstream_dns_servers` | Space-separated LAN resolver IPs the override zone forwards to | your DNS hosts |
 
-If either is empty the rendered Corefile is invalid or forwards nowhere, and the
-Deployment crash-loops on config parse. There is no safe default for either.
+Both come from validated answers, so neither is empty in a generated repo —
+but a wrong value fails **silently**. A
+well-formed-but-wrong tailnet suffix renders a valid Corefile that hands out
+CNAMEs into a domain that does not exist; a wrong resolver list answers the
+override zone with SERVFAIL. Nothing crash-loops. Verify after wiring Split-DNS:
+`dig @<ts-dns tailnet address> app.<internal-domain>` must return a CNAME to
+`traefik-tailnet.<suffix>` that your client can itself resolve.
 
 The CNAME target is `traefik-tailnet.<suffix>` — deterministic from the Traefik
 tailnet Service's `tailscale.com/hostname`, so there is no bootstrap

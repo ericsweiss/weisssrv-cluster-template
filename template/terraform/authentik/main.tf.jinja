@@ -3,6 +3,17 @@
 module "sso" {
   source = "git::{{ lib_url }}//terraform/modules/authentik-sso?ref={{ lib_ref }}"
 
+  # Pinned here, not inherited from the module defaults: these are identity for
+  # every provider, and a library default change must never repoint them on a
+  # `lib_ref` bump.
+  authorization_flow_slug = "default-provider-authorization-implicit-consent"
+  invalidation_flow_slug  = "default-provider-invalidation-flow"
+  signing_key_name        = "authentik Self-signed Certificate"
+
+  oauth2_grant_types     = local.oauth2_grant_types
+  oauth2_scope_mappings  = local.oauth2_scope_mappings
+  saml_property_mappings = local.saml_property_mappings
+
   oauth2_providers      = local.oauth2_providers
   oauth2_client_secrets = local.oauth2_client_secrets
   proxy_providers       = local.proxy_providers

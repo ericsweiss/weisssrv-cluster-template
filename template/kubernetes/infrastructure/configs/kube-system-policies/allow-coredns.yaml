@@ -1,25 +1,7 @@
 ---
-# CoreDNS ingress — the one allow a kube-system default-deny can break
-# cluster-wide, so every clause is deliberate.
-#
-# podSelector: k3s labels its CoreDNS pods `k8s-app: kube-dns` and nothing else
-# besides the ReplicaSet hash. It is the same selector the kube-dns Service and
-# kube-prometheus-stack's coredns Service carry, so all three agree.
-#
-# A DNS query reaches those pods three ways, hence three peer shapes on one rule:
-#   * namespaceSelector {} — ordinary pods, in every namespace, present and
-#     future. This is the path essentially all cluster traffic takes.
-#   * the pod CIDR — a query aimed at the kube-dns ClusterIP from outside the pod
-#     network is DNAT'd AND masqueraded by kube-proxy/flannel before it reaches
-#     the pod, so its source can arrive as the sending node's flannel gateway
-#     address rather than as a pod IP. Strictly a superset of what the
-#     namespaceSelector above already admits, so it widens nothing.
-#   * the LAN — defence in depth for host-netns clients. The hostNetwork
-#     DaemonSets do not need it (kubelet demotes ClusterFirst to Default under
-#     hostNetwork, so they resolve via the node's /etc/resolv.conf), and it
-#     widens nothing because neither pod IPs nor the ClusterIP are LAN-routable.
-#     Confirm no host-side unit queries the cluster DNS ClusterIP before
-#     narrowing it.
+# CoreDNS ingress under the kube-system default-deny. Peers: all namespaces, the
+# pod CIDR (kube-proxy masquerades ClusterIP traffic) and the LAN. Narrowing any
+# peer can break DNS cluster-wide — see docs/RUNBOOKS.md, kube-system fencing.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -44,9 +26,8 @@ spec:
         - protocol: TCP
           port: 53
     # Prometheus scrape of the `metrics` container port, via the
-    # kube-prometheus-stack-coredns Service + ServiceMonitor the chart renders
-    # into this namespace. Chart-rendered monitors never appear in the
-    # flux:lint corpus, so check-scrape-netpol.py cannot see this one.
+    # kube-prometheus-stack-coredns Service + ServiceMonitor the chart renders.
+    # Chart-rendered monitors are invisible to check-scrape-netpol.py.
     - from:
         - namespaceSelector:
             matchLabels:

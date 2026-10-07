@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Assert tailnet-dns's override zone and the AdGuard rewrite list agree.
+
+A zone name needs a non-ingress answer in the DNS layer, and a rewrite answering
+anything but the internal ingress VIP needs a zone entry. Exit 0 clean, 1 drifted.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - environment guard
+    print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
+    raise SystemExit(2) from None
+
+REPO = Path(__file__).resolve().parent.parent
+
+HOSTS = Path("ansible/inventories/prod/hosts.yml")
+DNS_VARS = Path("ansible/inventories/prod/group_vars/dns.yml")
+COREFILE = Path("kubernetes/apps/tailnet-dns/configmap.yaml")
+CLUSTER_CONFIG = Path("kubernetes/infrastructure/sources/cluster-config.yaml")
+
+# Inventory variables that hold the internal ingress VIP. A rewrite answering
+# one of these is Traefik-fronted, so it belongs in the CNAME zone, not here.
+INTERNAL_VIP_ALIASES = {"metallb_internal_vip"}
+
+# Direct-answer names deliberately left out of the override zone, with the
+# reason. Site data: a generated cluster adds an entry only when it must.
+EXEMPT: dict = {}
+
+# Override-zone names that are ingress routes rather than direct answers, with
+# the reason the mesh CNAME path does not work for them -- an ingress middleware
+# that rejects the pod source IP, for instance.
+STRICT_ROUTES: dict = {}
+
+# `label.{{ internal_domain }}` in the Ansible rewrites.
+_REWRITE_NAME = re.compile(r"^(?P<name>[A-Za-z0-9_-]+)\.\{\{\s*internal_domain\s*\}\}$")
+# `${cluster_internal_domain}` and friends in a Flux-substituted manifest.
+_PLACEHOLDER = re.compile(r"\$\{(?P<key>cluster_[A-Za-z0-9_]+)\}")
+
+
+class GateError(Exception):
+    """The gate could not inspect its subject - exit 2, never a violation."""
+
+
+def _load_yaml(path: Path):
+    try:
+        with path.open() as fh:
+            return yaml.safe_load(fh)
+    except OSError as exc:
+        raise GateError(f"{path}: unreadable: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise GateError(f"{path}: unparseable YAML: {exc}") from exc
+
+
+def _unwrap(value: str) -> str:
+    """A rewrite answer reduced to a literal address or a bare variable name."""
+    text = str(value).strip()
+    if text.startswith("{{") and text.endswith("}}"):
+        text = text[2:-2].strip()
+    return text
+
+
+def cluster_config(path: Path) -> dict:
+    data = (_load_yaml(path) or {}).get("data") or {}
+    for key in ("cluster_internal_domain", "cluster_metallb_internal_vip"):
+        if not data.get(key):
+            raise GateError(f"{path}: no {key} key")
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def host_names(path: Path) -> set:
+    """Inventory hostnames with an address: the role rewrites one A record each."""
+    found = set()
+
+    def walk(node) -> None:
+        if not isinstance(node, dict):
+            return
+        for name, host in (node.get("hosts") or {}).items():
+            if isinstance(host, dict) and host.get("ansible_host"):
+                found.add(str(name))
+        for child in (node.get("children") or {}).values():
+            walk(child)
+
+    walk((_load_yaml(path) or {}).get("all") or {})
+    if not found:
+        raise GateError(f"{path}: no host carries an ansible_host")
+    return found
+
+
+def service_names(path: Path, internal_vip: str) -> tuple:
+    """(every service-rewrite label, the labels not answering the ingress VIP)."""
+    doc = _load_yaml(path) or {}
+    rewrites = doc.get("_dns_service_rewrites")
+    if not rewrites:
+        raise GateError(f"{path}: no _dns_service_rewrites entries")
+    every, direct = set(), set()
+    ingress = {internal_vip} | INTERNAL_VIP_ALIASES
+    for entry in rewrites:
+        if not isinstance(entry, dict):
+            continue
+        match = _REWRITE_NAME.match(str(entry.get("domain", "")))
+        if not match:
+            continue
+        every.add(match.group("name"))
+        if _unwrap(entry.get("answer", "")) not in ingress:
+            direct.add(match.group("name"))
+    if not every:
+        raise GateError(f"{path}: no _dns_service_rewrites entry is under the internal domain")
+    return every, direct
+
+
+def override_zone_names(path: Path, config: dict) -> set:
+    """Host labels on the Corefile override-zone line.
+
+    Zone names are written as Flux placeholders or as `label.${cluster_internal_domain}`,
+    so each line is substituted before the internal domain is stripped off.
+    """
+    doc = _load_yaml(path) or {}
+    text = ((doc.get("data") or {}).get("Corefile")) or ""
+    if not text:
+        raise GateError(f"{path}: no Corefile key")
+    suffix = "." + config["cluster_internal_domain"]
+    best: set = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#") or not line.endswith("{"):
+            continue
+        resolved = _PLACEHOLDER.sub(lambda m: config.get(m.group("key"), m.group(0)), line[:-1])
+        names = {
+            token[: -len(suffix)]
+            for token in resolved.split()
+            if token.endswith(suffix) and token != suffix[1:]
+        }
+        # The CNAME zone line carries the bare internal domain; the override zone
+        # is the one listing names in front of it.
+        if len(names) > len(best):
+            best = names
+    if not best:
+        raise GateError(f"{path}: no override-zone names found")
+    return best
+
+
+def check(root: Path) -> list:
+    config = cluster_config(root / CLUSTER_CONFIG)
+    every_service, direct_service = service_names(
+        root / DNS_VARS, config["cluster_metallb_internal_vip"]
+    )
+    hosts = host_names(root / HOSTS)
+    zone = override_zone_names(root / COREFILE, config)
+
+    problems = []
+    for name in sorted(direct_service - zone - set(EXEMPT)):
+        problems.append(
+            f"{name} has a direct answer in {DNS_VARS} but is missing from the override "
+            f"zone in {COREFILE} - tailnet clients would get the ingress CNAME instead "
+            "of its real address. Add it, or exempt it with a reason."
+        )
+    for name in sorted(zone - hosts - direct_service - set(STRICT_ROUTES)):
+        if name in every_service:
+            detail = f"its {DNS_VARS} rewrite answers the internal ingress VIP"
+        elif name in EXEMPT:
+            detail = f"it is listed EXEMPT ({EXEMPT[name]})"
+        else:
+            detail = f"it is neither an inventory host nor a rewrite in {DNS_VARS}"
+        problems.append(f"{name} is in the {COREFILE} override zone but {detail}.")
+    return problems
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="tailnet-dns override zone must track the AdGuard rewrite list.",
+    )
+    parser.add_argument("--repo-root", default=REPO, type=Path)
+    args = parser.parse_args(argv)
+    try:
+        problems = check(args.repo_root)
+    except GateError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    if problems:
+        print("ERROR: the tailnet-dns override zone has drifted from the DNS rewrites:")
+        for problem in problems:
+            print(f"  - {problem}")
+        return 1
+    print("tailnet-dns override zone tracks the direct-answer AdGuard rewrites.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,120 @@
+{#- SECRETS SEAM: partials/secrets.jinja is the one home. The vault here is
+    go-task's {{.OP_VAULT}} so `task secrets:show`, which reads the Taskfile tree
+    as text, matches the variable. -#}
+{%- import "partials/secrets.jinja" as secrets with context -%}
+{%- set secret_runner = secrets.secret_runner -%}
+{%- macro secret_ref(item, field) -%}{{ secrets.secret_ref(item, field, vault='{{.OP_VAULT}}') }}{%- endmacro -%}
+# https://taskfile.dev
+# k3s lifecycle: guest provisioning, cluster deploy, kubeconfig and snapshots.
+version: '3'
+
+{% raw -%}
+# Anchors aliased by the tasks below. YAML anchors do not cross files, so each
+# namespace file carries the precondition list it uses.
+x-preconditions:
+  op: &op_preconditions
+    - sh: command -v ansible-playbook
+      msg: "ansible-playbook not installed. pip install ansible, then: task ansible:install-collections"
+    - sh: command -v op
+      msg: "1Password CLI not installed: https://developer.1password.com/docs/cli/get-started/"
+    # `op account list`, not `op whoami`: with the desktop-app integration
+    # whoami reports "not signed in" in the non-interactive shell Task uses
+    # here.
+    - sh: op account list 2>/dev/null
+      msg: "1Password CLI not authenticated. Run: eval $(op signin)"
+
+tasks:
+  provision-vms:
+    desc: Provision the k3s VMs on Proxmox (creates guests only)
+    dir: "{{.ANSIBLE_DIR}}"
+    env:
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
+    preconditions: *op_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/k3s-provision-vms.yml {{.CLI_ARGS}}
+
+  deploy:
+    desc: Deploy/refresh the k3s cluster (servers, agents, kube-vip)
+    dir: "{{.ANSIBLE_DIR}}"
+    env:
+      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
+      SMTP_RELAY_USER: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'username') }}{% raw %}
+      SMTP_RELAY_PASSWORD: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'password') }}{% raw %}
+      K3S_TOKEN: {% endraw %}{{ secret_ref('K3s Cluster Token', 'credential') }}{% raw %}
+      # Agents join with the lower-privilege worker token, which the servers
+      # advertise as agent-token.
+      K3S_AGENT_TOKEN: {% endraw %}{{ secret_ref('K3s Agent Token', 'credential') }}{% raw %}
+      LOKI_PUSH_USER: {% endraw %}{{ secret_ref('Loki Push Auth', 'username') }}{% raw %}
+      LOKI_PUSH_PASSWORD: {% endraw %}{{ secret_ref('Loki Push Auth', 'password') }}{% raw %}
+    preconditions: *op_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/k3s.yml {{.CLI_ARGS}}
+
+  kubeconfig:
+    desc: Fetch the cluster kubeconfig into ~/.kube/config-k3s (rewritten to the API VIP)
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -z "$K3S_SERVERS" ]; then
+          echo "ERROR: K3S_SERVERS is empty — fill in the inventory and run: task hosts:sync"
+          exit 1
+        fi
+        TARGETS=""
+        for ip in $K3S_SERVERS; do TARGETS="$TARGETS {{.ADMIN_USER}}@$ip"; done
+        # shellcheck disable=SC2086
+        SERVER=$(scripts/find-reachable-host.sh $TARGETS) || {
+          echo "ERROR: cannot reach any k3s server ($K3S_SERVERS)"
+          exit 1
+        }
+        ERR=$(mktemp)
+        trap 'rm -f "$ERR"' EXIT
+        # `if !` so go-task's errexit cannot pre-empt the handler that prints
+        # the captured ssh diagnostics.
+        if ! DATA=$(ssh "$SERVER" "sudo cat /etc/rancher/k3s/k3s.yaml" 2>"$ERR"); then
+          echo "ERROR: cannot read the kubeconfig on k3s server $SERVER"
+          cat "$ERR"
+          exit 1
+        fi
+        [ -n "$DATA" ] || { echo "ERROR: kubeconfig came back empty"; exit 1; }
+        mkdir -p -m 700 ~/.kube
+        # The server writes 127.0.0.1; clients go through the VIP so a failover
+        # does not invalidate the file. umask and chmod keep the cluster-admin
+        # credentials out of a world-readable window.
+        (umask 077; echo "$DATA" | sed 's/127.0.0.1/{{.API_VIP}}/g; s/0.0.0.0/{{.API_VIP}}/g' > ~/.kube/config-k3s)
+        chmod 600 ~/.kube/config-k3s
+        echo "Wrote ~/.kube/config-k3s — export KUBECONFIG=~/.kube/config-k3s"
+
+  status:
+    desc: Show cluster nodes and platform service health
+    preconditions:
+      - sh: command -v kubectl
+        msg: "kubectl not installed: https://kubernetes.io/docs/tasks/tools/"
+      - sh: kubectl cluster-info 2>/dev/null
+        msg: "Cannot reach the cluster. Run: export KUBECONFIG=~/.kube/config-k3s"
+    cmds:
+      - kubectl get nodes -o wide
+      - kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded
+      - kubectl get svc -A --field-selector spec.type=LoadBalancer
+      - kubectl get ingressroute -A 2>/dev/null || true
+
+  backup:
+    desc: Take an on-demand etcd snapshot on a reachable server
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -z "$K3S_SERVERS" ]; then
+          echo "ERROR: K3S_SERVERS is empty — run: task hosts:sync"
+          exit 1
+        fi
+        SNAPSHOT="manual-$(date +%Y%m%d-%H%M%S)"
+        TARGETS=""
+        for ip in $K3S_SERVERS; do TARGETS="$TARGETS {{.ADMIN_USER}}@$ip"; done
+        # shellcheck disable=SC2086
+        SERVER=$(scripts/find-reachable-host.sh $TARGETS) || {
+          echo "ERROR: cannot reach any k3s server"
+          exit 1
+        }
+        ssh "$SERVER" "sudo k3s etcd-snapshot save --name $SNAPSHOT"
+        echo "Snapshot $SNAPSHOT created; list with: ssh $SERVER 'sudo k3s etcd-snapshot ls'"
+{%- endraw %}

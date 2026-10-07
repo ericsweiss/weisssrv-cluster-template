@@ -19,8 +19,12 @@ spec:
         namespace: flux-system
       interval: 12h
   install:
-    remediation:
-      retries: 3
+    # RetryOnFailure, not the default RemediateOnFailure: install remediation
+    # uninstalls the release, tearing down the speaker and controller. Retrying in
+    # place does not; the CRDs are separately pinned by the keep policy below.
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
   upgrade:
     remediation:
       retries: 3
@@ -43,9 +47,11 @@ spec:
       # `platform` (sources/priorityclasses.yaml). The chart has no global key,
       # so controller and speaker are set separately.
       priorityClassName: platform
-      # No nodeSelector: the speaker is the ARP announcer and should run on
-      # every node that can carry a VIP. Restrict it only if your VIPs must
-      # live on a specific uplink.
+      # A VIP flow is filtered by the ANNOUNCING guest's firewall, so only nodes
+      # carrying sg-k3s-ingress-* may announce one. Label them in hosts.yml
+      # (k3s_labels) before bootstrap: with no carrier, no VIP is announced.
+      nodeSelector:
+        ${cluster_node_label_domain}/ingress: "true"
       tolerations: []
       resources:
         requests:
@@ -70,3 +76,46 @@ spec:
           memory: 64Mi
         limits:
           memory: 256Mi
+  # The chart owns the metallb.io CRDs, so a helm uninstall cascade-deletes
+  # every IPAddressPool and L2Advertisement. The keep policy stops that; a
+  # strategic merge creates metadata.annotations.
+  postRenderers:
+    - kustomize:
+        patches:
+          - target:
+              group: apiextensions.k8s.io
+              kind: CustomResourceDefinition
+              name: ".*\\.metallb\\.io"
+            patch: |
+              apiVersion: apiextensions.k8s.io/v1
+              kind: CustomResourceDefinition
+              metadata:
+                name: placeholder
+                annotations:
+                  helm.sh/resource-policy: keep
+          # The chart exposes no values key for the speaker's reloader and
+          # frr-metrics sidecars, so bound them here.
+          - target:
+              group: apps
+              version: v1
+              kind: DaemonSet
+              name: metallb-speaker
+            patch: |
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: metallb-speaker
+              spec:
+                template:
+                  spec:
+                    containers:
+                      - name: reloader
+                        resources:
+                          limits:
+                            memory: 64Mi
+                      - name: frr-metrics
+                        resources:
+                          requests:
+                            memory: 64Mi
+                          limits:
+                            memory: 128Mi

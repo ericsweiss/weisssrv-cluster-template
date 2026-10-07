@@ -1,0 +1,5 @@
+---
+# Guests Ansible never connects to: ansible_connection is local, so a
+# non-delegated task would sudo on the controller itself. Group-level, so a
+# task that skips delegation cannot pick up the fleet-wide ansible_become.
+ansible_become: false

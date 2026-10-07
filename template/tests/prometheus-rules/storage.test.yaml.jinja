@@ -1,0 +1,46 @@
+{% set gc_alert = [k3s_image_gc_high_threshold | int + 5, 79] | min %}---
+# promtool unit tests for KubeletImageGCIneffective. The rule watches the
+# in-cluster DaemonSet's view of each node root filesystem, so a host-exporter
+# target, a node under the watermark and a node where GC works all stay silent.
+rule_files:
+  - rules.yaml
+# The input series are constant, so 5m ticks separate the 2h pending/firing
+# boundary as well as 1m ones, at a fifth of the evaluations.
+evaluation_interval: 5m
+tests:
+  - interval: 1m
+    input_series:
+      # Above the alert threshold, which sits over the image-gc watermark.
+      - series: 'node_filesystem_avail_bytes{job="node-exporter", instance="10.42.1.7:9100", mountpoint="/"}'
+        values: '{{ 90 - k3s_image_gc_high_threshold }}+0x180'
+      - series: 'node_filesystem_size_bytes{job="node-exporter", instance="10.42.1.7:9100", mountpoint="/"}'
+        values: '100+0x180'
+      # Under the watermark.
+      - series: 'node_filesystem_avail_bytes{job="node-exporter", instance="10.42.1.8:9100", mountpoint="/"}'
+        values: '{{ 110 - k3s_image_gc_high_threshold }}+0x180'
+      - series: 'node_filesystem_size_bytes{job="node-exporter", instance="10.42.1.8:9100", mountpoint="/"}'
+        values: '100+0x180'
+      # Just over the image-gc watermark: GC is running and keeping up, which is
+      # the node's normal operating band, so this must never page.
+      - series: 'node_filesystem_avail_bytes{job="node-exporter", instance="10.42.1.9:9100", mountpoint="/"}'
+        values: '{{ 101 - gc_alert }}+0x180'
+      - series: 'node_filesystem_size_bytes{job="node-exporter", instance="10.42.1.9:9100", mountpoint="/"}'
+        values: '100+0x180'
+      # A host exporter at the same fill: not a kubelet image filesystem.
+      - series: 'node_filesystem_avail_bytes{job="node-exporter-host", instance="192.0.2.11:9101", mountpoint="/"}'
+        values: '{{ 90 - k3s_image_gc_high_threshold }}+0x180'
+      - series: 'node_filesystem_size_bytes{job="node-exporter-host", instance="192.0.2.11:9101", mountpoint="/"}'
+        values: '100+0x180'
+    alert_rule_test:
+      # Inside the 2h hold.
+      - eval_time: 90m
+        alertname: KubeletImageGCIneffective
+        exp_alerts: []
+      - eval_time: 150m
+        alertname: KubeletImageGCIneffective
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter
+              instance: '10.42.1.7:9100'
+              mountpoint: /

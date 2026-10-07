@@ -1,14 +1,11 @@
-{#- CI capacity, derived so the shipped numbers match the roster this cluster was
-    generated for rather than a reference cluster's. The model — pool, per-job
-    cost, and every quota dimension for BOTH tiers — lives in one place,
-    partials/ci-sizing.jinja, which resourcequota.yaml.jinja imports too, so the
-    two files cannot drift apart. README § Sizing is the prose. -#}
+{#- CI capacity for both runner tiers comes from partials/ci-sizing.jinja, which
+    resourcequota.yaml.jinja imports too, so the two files cannot drift.
+    docs/ARCHITECTURE.md § CI runner capacity is the model. -#}
 {%- import "partials/ci-sizing.jinja" as sizing with context -%}
 ---
-# Shared, non-privileged GitLab Runner. The fields shared with the privileged
-# sibling (chart, timeouts, gitlabUrl, replicas, rbac, manager resources,
-# affinity, tolerations) come from components/gitlab-runner-common; only this
-# runner's deltas live here.
+# Shared, non-privileged GitLab Runner. The fields common to both runners (chart,
+# timeouts, gitlabUrl, replicas, rbac, manager resources, affinity, tolerations)
+# come from components/gitlab-runner-common; only the deltas live here.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -17,12 +14,9 @@ metadata:
 spec:
   releaseName: gitlab-runner
   values:
-    # MUST stay at or below what the ResourceQuota admits: a job pod sums to
-    # ~5Gi of memory limits and the manager counts too. Set it higher and the
-    # runner submits pods the quota 403s — GitLab reports that as a job failure
-    # with no retry. At the right value the overflow waits in GitLab's queue
-    # instead. Derived from the roster (header above); the ResourceQuota is
-    # derived from the same figure, so the two cannot drift.
+    # MUST stay at or below what the ResourceQuota admits: above it the runner
+    # submits pods the quota 403s, which GitLab reports as a job failure with no
+    # retry. Derived from the compute_node_count answer, as the quota is.
     concurrent: {{ sizing.shared_concurrent }}
 
     runners:
@@ -38,15 +32,19 @@ spec:
       runUntagged: true
 
       # ACCEPTED RISK: protected:false lets this runner accept jobs from
-      # unprotected branches, which is what makes MR pipelines work. It is
-      # acceptable ONLY because this runner is non-privileged and its job pods are
-      # egress-contained (see networkpolicy.yaml). Set true in a team environment.
+      # unprotected branches, which is what makes MR pipelines work. Acceptable
+      # only while it stays non-privileged and egress-contained (networkpolicy).
       protected: false
 
       executor: kubernetes
 
       config: |
         [[runners]]
+          # request_concurrency 1 serializes job acquisition behind GitLab's
+          # long-poll window and surfaces as runner_system_failure bursts; the
+          # runner's own startup warning recommends 2-4.
+          request_concurrency = 3
+
           # Keep clones on the internal path too (see gitlabUrl in the shared
           # component). A [[runners]] scalar — must precede any sub-table.
           clone_url = "https://${cluster_git_host}"
@@ -56,28 +54,38 @@ spec:
           # path (the emptyDir mounted at the bottom of this config).
           environment = ["HOME=/home/gitlab-runner", "GIT_CONFIG_GLOBAL=/home/gitlab-runner/.gitconfig"]
 
-          # TOML sections are POSITIONAL: every key after a [section] header
-          # belongs to that section until the next header, so all scalar keys
-          # must precede any sub-table or they are silently swallowed by it.
+          # TOML sections are positional: scalar keys first, sub-tables last.
           [runners.kubernetes]
             namespace = "gitlab-runner"
+            # A start burst can transiently exceed placement capacity; the
+            # default poll_timeout (180s) would fail a merely-Pending pod as
+            # runner_system_failure. A scalar key — keep it above the sub-tables.
+            poll_timeout = 1200
             # Default CI job image, digest-pinned for reproducibility (the tag is
             # kept for readability; the digest is authoritative). Refresh with
             # `docker buildx imagetools inspect <image>:<tag>`.
             image = "debian:trixie@sha256:d07d1b51c39f51188e60be9b64e6bf769fa94e187f092bc32b91305cfa34ba5a"
             privileged = false
 
-            # Rank job pods below every unclassed workload and never preempt
-            # (sources/priorityclasses.yaml): the namespace quotas admit more CPU
-            # requests than the cluster has allocatable, so a burst would otherwise
-            # compete with platform pods on arrival order alone. A scalar key —
-            # must stay above the first sub-table.
+            # ci-jobs ranks job pods below unclassed pods and never preempts. A
+            # scalar key — keep it above the first sub-table.
             priority_class_name = "ci-jobs"
 
-            cpu_limit = "2"
+            # No cpu_limit: CPU is compressible, so cpu_request sets the
+            # contention share and the namespace ResourceQuota's requests.cpu
+            # bounds the aggregate. A limit would only buy CFS throttling.
             cpu_request = "500m"
             memory_limit = "4Gi"
             memory_request = "1Gi"
+
+            # Ceilings equal the defaults, so a per-job KUBERNETES_* override can
+            # only shrink a pod, never grow it past the namespace quota. Without
+            # them the runner ignores such an override outright.
+            memory_limit_overwrite_max_allowed = "4Gi"
+            memory_request_overwrite_max_allowed = "1Gi"
+            service_memory_limit_overwrite_max_allowed = "4Gi"
+            service_memory_request_overwrite_max_allowed = "1Gi"
+            cpu_request_overwrite_max_allowed = "500m"
 
             # Token-less, RBAC-less job SA — NOT the manager SA, whose Role could
             # read the runner token and exec into concurrent jobs.
@@ -88,7 +96,7 @@ spec:
             # Let a job pick a CPU-compatibility class and nothing else. The regex
             # constrains the LABEL KEY shape, so a job cannot target an arbitrary
             # node by, say, kubernetes.io/hostname.
-            node_selector_overwrite_allowed = "^[a-z0-9.-]+/cpu=(modern|legacy)$"
+            node_selector_overwrite_allowed = "^${cluster_node_label_domain}/cpu=(modern|legacy)$"
 
             # NetworkPolicy selector: shared job pods get internet-only egress.
             # Keep pod_labels LAST (TOML positionality note above).

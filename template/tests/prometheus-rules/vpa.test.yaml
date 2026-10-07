@@ -1,0 +1,87 @@
+---
+# promtool unit tests for VPARecommendationCapped: the memory arm needs both the
+# 1.25 factor and the 128Mi floor, and the five-label `max by` composition drops
+# the comparison entirely if either side stops carrying one of those labels.
+rule_files:
+  - rules.yaml
+evaluation_interval: 5m
+tests:
+  # Capped over the factor and over the floor: 2Gi wanted, 512Mi allowed.
+  - interval: 5m
+    input_series:
+      - series: 'vpa_recommendation_uncappedtarget{exported_namespace="media", verticalpodautoscaler="sonarr", container="sonarr", resource="memory", unit="byte"}'
+        values: '2147483648+0x320'
+      - series: 'vpa_recommendation_target{exported_namespace="media", verticalpodautoscaler="sonarr", container="sonarr", resource="memory", unit="byte"}'
+        values: '536870912+0x320'
+    alert_rule_test:
+      # Inside the 24h hold.
+      - eval_time: 23h
+        alertname: VPARecommendationCapped
+        exp_alerts: []
+      - eval_time: 25h
+        alertname: VPARecommendationCapped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              exported_namespace: media
+              verticalpodautoscaler: sonarr
+              container: sonarr
+              resource: memory
+              unit: byte
+
+  # Over the factor but under the 128Mi floor: 256Mi wanted, 192Mi allowed.
+  - interval: 5m
+    input_series:
+      - series: 'vpa_recommendation_uncappedtarget{exported_namespace="media", verticalpodautoscaler="sonarr", container="sonarr", resource="memory", unit="byte"}'
+        values: '268435456+0x320'
+      - series: 'vpa_recommendation_target{exported_namespace="media", verticalpodautoscaler="sonarr", container="sonarr", resource="memory", unit="byte"}'
+        values: '201326592+0x320'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: VPARecommendationCapped
+        exp_alerts: []
+
+  # The CPU arm has no floor: the factor alone fires it.
+  - interval: 5m
+    input_series:
+      - series: 'vpa_recommendation_uncappedtarget{exported_namespace="media", verticalpodautoscaler="sonarr", container="sonarr", resource="cpu", unit="core"}'
+        values: '2+0x320'
+      - series: 'vpa_recommendation_target{exported_namespace="media", verticalpodautoscaler="sonarr", container="sonarr", resource="cpu", unit="core"}'
+        values: '0.5+0x320'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: VPARecommendationCapped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              exported_namespace: media
+              verticalpodautoscaler: sonarr
+              container: sonarr
+              resource: cpu
+              unit: core
+
+  # One side stops carrying `container`: the grouping no longer matches, so the
+  # comparison yields nothing and a capped recommendation goes unreported.
+  - interval: 5m
+    input_series:
+      - series: 'vpa_recommendation_uncappedtarget{exported_namespace="media", verticalpodautoscaler="sonarr", container="sonarr", resource="memory", unit="byte"}'
+        values: '2147483648+0x320'
+      - series: 'vpa_recommendation_target{exported_namespace="media", verticalpodautoscaler="sonarr", resource="memory", unit="byte"}'
+        values: '536870912+0x320'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: VPARecommendationCapped
+        exp_alerts: []
+
+  # 2.25Gi wanted against a 2Gi cap: the 256Mi gap clears the 128Mi floor, so
+  # the 1.25 factor is the only thing keeping this quiet.
+  - interval: 5m
+    input_series:
+      - series: 'vpa_recommendation_uncappedtarget{exported_namespace="media", verticalpodautoscaler="sonarr", container="sonarr", resource="memory", unit="byte"}'
+        values: '2415919104+0x320'
+      - series: 'vpa_recommendation_target{exported_namespace="media", verticalpodautoscaler="sonarr", container="sonarr", resource="memory", unit="byte"}'
+        values: '2147483648+0x320'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: VPARecommendationCapped
+        exp_alerts: []

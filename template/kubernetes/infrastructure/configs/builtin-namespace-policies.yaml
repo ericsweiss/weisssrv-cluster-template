@@ -1,19 +1,31 @@
 ---
-# Fail-closed policies for the two pod-free built-in namespaces. Neither holds a
-# workload — kube-public carries only kube-root-ca.crt and the bootstrap-signer
-# RoleBinding, kube-node-lease only the node Leases — so this costs nothing and
-# guards the case it exists for: a pod created there by hand or by a future
-# chart would otherwise be completely unguarded, and neither namespace owns a
-# workload the coverage gate would flag (`scripts/check-default-deny-coverage.py`
-# only examines namespaces that do).
-#
-# Ingress AND egress, mirroring `default` in default-namespace.yaml — the same
-# reasoning applies, and there is no traffic to preserve.
-#
-# The Namespace objects themselves are deliberately NOT adopted here. `default`
-# is adopted to gain PSA labels because manifests in this repo really do put
-# Services there; these two hold nothing of ours, so the narrower change is the
-# right blast radius.
+# Fail-closed PSA labels plus ingress+egress default-deny for kube-public and
+# kube-node-lease, which hold no pods. Both admit at `privileged` and unfenced
+# without this. prune: disabled - Flux must never delete a built-in namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-public
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-node-lease
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

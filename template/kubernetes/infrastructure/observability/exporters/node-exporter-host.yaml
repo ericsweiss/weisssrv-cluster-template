@@ -1,15 +1,7 @@
 ---
-# Host node-exporter scrape target on :9101 (9100 belongs to the in-cluster
-# DaemonSet; a k3s server runs both). Covers what the DaemonSet cannot see:
-# bare-metal hardware metrics and the LXC/VM TEXTFILE metrics (etcd-snapshot
-# freshness, offsite-backup timestamps) that `platform.backups` alerts on.
-#
-# Selectorless headless Service + hand-written EndpointSlice: the addresses are
-# outside the cluster, so no controller fills the slice in.
-#
-# `jobLabel: app.kubernetes.io/name` is what labels these series
-# `job="node-exporter-host"`; `${cluster_node_exporter_job_regex}` must include
-# that job or every host rule matches nothing.
+# Host node-exporter on :9101 (9100 is the in-cluster DaemonSet). Covers
+# bare-metal and textfile metrics the DaemonSet cannot see. jobLabel makes the
+# job "node-exporter-host"; ${cluster_node_exporter_job_regex} must include it.
 apiVersion: v1
 kind: Service
 metadata:
@@ -26,19 +18,8 @@ spec:
       targetPort: 9101
 
 ---
-# discovery.k8s.io/v1, not the deprecated core/v1 Endpoints. The
-# kubernetes.io/service-name label binds the slice to the Service above, and
-# each entry sets conditions.ready explicitly — no controller fills it in.
-#
-# The roster is substituted from cluster-config as a JSON flow sequence (a real
-# YAML list is required here and Flux substitutes text). The per-host annotation
-# of who is who lives with the key in infrastructure/sources/cluster-config.yaml
-# — edit it there, never here.
-#
-# A host that is listed but not yet running the role scrapes as `up == 0`, which
-# is the correct, visible failure. A host that runs the role but is missing from
-# the list is invisible, which is not — re-check this roster whenever the
-# inventory grows a machine.
+# Roster substituted from infrastructure/sources/cluster-config.yaml — edit it
+# there. A listed host not yet running the role scrapes up == 0.
 apiVersion: discovery.k8s.io/v1
 kind: EndpointSlice
 metadata:

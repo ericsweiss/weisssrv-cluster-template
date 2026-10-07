@@ -1,11 +1,9 @@
-# Forked from weisssrv-lib `lint/ruff.toml` (narrower target set) so `ruff
-# check` locally and the python-lint CI job, which uses ruff's own config
-# discovery, agree.
-#
+# Mirrors weisssrv-lib `lint/ruff.toml`: same target-version and rule selection,
+# so local `ruff check` and the python-lint CI job agree.
 # `target-version` matches the lowest Python the render tests run on.
 target-version = "py39"
 
 [lint]
-# Correctness-first selection; formatting-only rules are deliberately out.
+# Correctness-first selection; formatting-only rules are excluded.
 # Rationale: weisssrv-lib lint/ruff.toml.
 select = ["E4", "E7", "E9", "F", "W", "B"]

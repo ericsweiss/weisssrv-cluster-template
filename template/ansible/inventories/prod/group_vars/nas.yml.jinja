@@ -1,37 +1,12 @@
 ---
-{%- set n_compute = compute_node_count | default(2) | int %}
-{%- set n_hosts = n_compute + 1 %}
-{%- set n_srv = 3 if n_hosts >= 3 else 1 %}
-{%- set k3s_server_ips = [] %}
-{%- for j in range(1, n_srv + 1) %}
-{%- set _ = k3s_server_ips.append('%s.%d' | format(lan_prefix, 30 + j)) %}
-{%- endfor %}
-{%- set k3s_agent_ips = [] %}
-{%- for k in range(1, n_hosts + 1) %}
-{%- set _ = k3s_agent_ips.append('%s.%d' | format(lan_prefix, 40 + k)) %}
-{%- endfor %}
+{%- from "partials/roster.jinja" import k3s_server_ips, k3s_agent_ips
+    with context %}
 # The storage host: ZFS properties, NFS exports, Samba, backups.
-#
-# ZFS POOLS AND DATASETS ARE NEVER CREATED BY ANSIBLE — too destructive to
-# automate. Build them by hand once (docs/), then declare them here: the role
-# only enforces properties, and a declared dataset that does not exist fails the
-# deploy loudly rather than silently skipping it.
-#
-# WHAT THE CLUSTER MOUNTS FROM HERE. Every always-on Kubernetes stage that keeps
-# state names a path on this host; all four are provisioned below and none of
-# them needs a dataset beyond the four declared in nas_storage_zfs_pools:
-#
-#   /appdata/grafana            NFS  grafana-data PV        <- appdata dir
-#   /backups-apps/authentik     NFS  authentik-pg-dump PV   <- scoped export
-#   /k3s-etcd                   NFS  off-node etcd copies   <- scoped export
-#   (/mnt/{prometheus,loki,postgres}-data are zvols on the NAS-labelled k3s
-#    agent, declared in hosts.yml — not exports)
-#
-# Deleting one of the three exports below leaves its PV or mount permanently
-# unbound, so remove it only with the manifest that claims it.
+# Pools and datasets are created BY HAND, never by Ansible; a declared dataset
+# that does not exist fails the deploy. Bootstrap: docs/RUNBOOKS.md Storage.
 
-# REQUIRED: your pool and dataset layout. Two pools is the shape the rest of this
-# template assumes — a bulk pool for media/backups and a fast pool for app data.
+# REQUIRED: your pool and dataset layout. The rest of this template assumes two
+# pools - a bulk one for media and backups, a fast one for app data.
 nas_storage_zfs_pools:
   - name: tank
     datasets:
@@ -46,10 +21,8 @@ nas_storage_zfs_pools:
           mountpoint: /mnt/tank/share
           atime: "off"
           compression: zstd
-      # Backup landing zone. Two exports below live inside it as plain
-      # subdirectories (created and owned by the role, not separate datasets):
-      # backups/apps/<app> for the logical dumps, backups/k3s-etcd for the
-      # off-node etcd snapshot copies.
+      # Backup landing zone. The apps and k3s-etcd exports below are plain
+      # subdirectories of it, created and owned by the role.
       - name: tank/backups
         properties:
           mountpoint: /mnt/tank/backups
@@ -62,29 +35,27 @@ nas_storage_zfs_pools:
           mountpoint: /mnt/ssd/appdata
           atime: "off"
           compression: lz4     # latency over ratio for live app data
-      # proxmox_vm's `zfs create -p` materializes a parent FILESYSTEM under here
-      # per app zvol in hosts.yml, and it mounts inside the /export/appdata bind
-      # unless canmount=off. Add those datasets here once the k3s VMs exist — a
-      # declared dataset that does not exist yet HARD-FAILS this deploy, so they
-      # are deliberately absent on a first run.
+      # proxmox_vm materializes a parent filesystem per app zvol, which mounts
+      # inside the /export/appdata bind unless canmount=off. Declare those
+      # datasets here only once the k3s VMs exist.
 
-# Unified media directory across tiers. Leave as an empty list if you have one
-# media pool. inodecalc/noforget are not optional when the branch is re-exported
-# over NFS: without them clients hit ESTALE.
+# Unified media directory across tiers; empty with a single media pool. When the
+# branch is re-exported over NFS, inodecalc/noforget are required or clients
+# hit ESTALE.
 nas_storage_mergerfs_mounts: []
 
-# NFS exports. /export is an NFSv4 pseudo-root (fsid=0, traversal only); every
-# real export is a bind of a dataset under it. `xprtsec: tls` REQUIRES kernel
-# TLS and rejects plaintext mounts — set per export or per client. Clients mount
-# by HOSTNAME (the wildcard cert has no IP SAN, so an IP mount fails the
-# handshake). crossmnt is deliberately absent: it would implicitly export every
-# child filesystem with this line's options, bypassing the per-child client lists.
+# NFS exports. /export is an NFSv4 pseudo-root; every real export binds a
+# dataset under it. `xprtsec: tls` rejects plaintext, and clients mount by
+# HOSTNAME - the wildcard cert has no IP SAN, so an IP mount fails the handshake.
 nas_storage_exports:
   - path: /export
     clients:
       - spec: "{{ lan_cidr }}"
         options: "ro,sync,hide,no_subtree_check,fsid=0,sec=sys,root_squash"
 
+  # CRITICAL: all_squash maps every client to 1000:2000, so a LAN-wide rw
+  # client here is LAN-wide write access to app state. A non-k3s consumer gets
+  # its own line here AND in the nfs_clients ipset.
   - path: /export/appdata
     bind_source: /mnt/ssd/appdata
     owner: 1000
@@ -92,9 +63,13 @@ nas_storage_exports:
     mode: "02775"
     xprtsec: "tls"
     clients:
-      - spec: "{{ lan_cidr }}"
+{%- for ip in k3s_server_ips + k3s_agent_ips %}
+      - spec: "{{ ip }}/32"
         options: "rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=2000,fsid=11"
+{%- endfor %}
 
+  # The household share, k3s nodes only. A LAN consumer belongs in
+  # nas_storage_samba_shares, since `xprtsec: tls` rejects plaintext here.
   - path: /export/share
     bind_source: /mnt/tank/share
     owner: 1000
@@ -102,17 +77,13 @@ nas_storage_exports:
     mode: "02775"
     xprtsec: "tls"
     clients:
-      - spec: "{{ lan_cidr }}"
-        options: "rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=2000,fsid=12"
+{%- for ip in k3s_server_ips + k3s_agent_ips %}
+      - spec: "{{ ip }}/32"
+        options: "rw,sync,no_subtree_check,root_squash,fsid=12"
+{%- endfor %}
 
-  # REQUIRED by k3s_etcd_snapshot_offnode_enabled (group_vars/k3s.yml): every
-  # server copies its newest etcd snapshot here, so a lost control-plane node is
-  # recoverable from another host. The servers mount it as /k3s-etcd
-  # (pseudo-root-relative — the fsid=0 root is at /export) by HOSTNAME with
-  # xprtsec=tls. no_root_squash because the copy runs as root; 0700 root:root
-  # and a server-only client list because an etcd snapshot is a full copy of
-  # every Secret in the cluster. A plain subdirectory of tank/backups, so
-  # bind_source_check points the mounted-dataset guard at the parent dataset.
+  # REQUIRED by k3s_etcd_snapshot_offnode_enabled. A snapshot is a full copy of
+  # every Secret, hence 0700 root:root and a server-only client list.
   - path: /export/k3s-etcd
     bind_source: /mnt/tank/backups/k3s-etcd
     bind_source_check: /mnt/tank/backups
@@ -126,11 +97,8 @@ nas_storage_exports:
         options: "rw,sync,no_subtree_check,no_root_squash,fsid=13"
 {%- endfor %}
 
-  # REQUIRED by the authentik-pg-dump PV: landing zone for the nightly logical
-  # dump, which is the restorable copy (the postgres block device is only
-  # crash-consistent) and the one an offsite backup can walk. Each app gets its
-  # OWN export under /export/backups-apps/<app> so one app's client cannot read
-  # another's dumps — add a sibling block per app, with a fresh fsid.
+  # REQUIRED by the authentik-pg-dump PV. Each app gets its own export with a
+  # fresh fsid, so one app's client cannot read another's dumps.
   - path: /export/backups-apps/authentik
     bind_source: /mnt/tank/backups/apps/authentik
     bind_source_check: /mnt/tank/backups
@@ -144,12 +112,9 @@ nas_storage_exports:
         options: "rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=2000,fsid=14"
 {%- endfor %}
 
-# Per-app directories created under the appdata bind source, owned to match the
-# export's anonuid/anongid squash. `grafana` is REQUIRED by the grafana-data PV
-# (NFS {{ nas_host }}:/appdata/grafana): Grafana's SQLite state lives there so
-# the pod can float to any node. Add a name here for every app that persists
-# config on the appdata export — an app whose data lives on its own block device
-# does NOT belong here.
+# Per-app directories under the appdata bind source, owned to match the export's
+# squash. `grafana` is REQUIRED by the grafana-data PV; an app with its own
+# block device does not belong here.
 nas_storage_appdata_dirs:
   - grafana
 
@@ -167,49 +132,56 @@ nas_storage_smartd_nvme_disks: []
 nas_storage_zfs_scrub_enabled: true
 nas_storage_zfs_scrub_schedule: "Sun *-*-1..7 04:00:00"   # first Sunday, monthly
 
-# ARC ceiling in bytes on the NAS specifically (nas_storage owns it here, not
-# zfs_arc_cap). Empty leaves the ZFS default of roughly half of RAM, which
-# competes with the guests this host runs. Example: 4294967296 (4 GiB).
+# ARC ceiling in bytes, owned by nas_storage here rather than zfs_arc_cap. Empty
+# leaves the ZFS default of about half of RAM. Example: 4294967296 (4 GiB).
 nas_storage_zfs_arc_max_bytes: ""
 
-# Datasets on encrypted pools whose bind mounts must wait for the key load. The
-# NFS export of an unlocked-later dataset would otherwise publish an empty
-# directory at boot.
+# Datasets on encrypted pools whose bind mounts wait for the key load, so an
+# export does not publish an empty directory at boot.
 nas_storage_encrypted_bind_sources: []
 
-# Independent "the dump actually landed" signal: stats the newest file under
-# /mnt/tank/backups/apps/<app> and emits backup_artifact_last_mtime_seconds.
-# An app's own wrapper can report success while the dump never reached this host
-# (broken mount, wrong path), so this is measured NAS-side. One entry per app
-# with a landing zone above.
-# Each entry is `name` + the `pattern` the collector globs for (the role renders
-# `app.name`/`app.pattern`, so a bare string emits no series at all).
+# NAS-side "the dump landed" signal, one entry per app with a landing zone
+# above. Each needs `name` and `pattern`; a bare string emits no series.
 nas_storage_backup_artifact_apps:
   - name: authentik
     pattern: "authentik-*.sql.gz"
 
 # --- Backups ----------------------------------------------------------------
-# NOTHING BELOW IS ON BY DEFAULT, so a generated cluster has NO backups until
-# you fill these in. Four tiers, weakest to strongest: logical dumps (wired
-# already) -> vzdump -> local ZFS replication to a detachable `archive` pool ->
-# offsite restic. Tier 4 hard-requires tier 3 — restic walks the archsync-*
-# snapshots and ABORTS on a stale one. Enable in order, and only after testing a
-# RESTORE, not just a backup.
+# vzdump, archive and offsite ship OFF until configured; ZFS snapshots and the
+# per-app dumps above ship on, with the BackupArtifact* alerts armed.
 
-# Cluster-wide vzdump target and jobs. storage.cfg is clustered, so this runs
-# from the NAS only; empty leaves both unmanaged, and the NFS target must
-# already exist. Keys in docs/RUNBOOKS.md "Backups and restore".
+# Cluster-wide vzdump target and jobs, applied from the NAS because storage.cfg
+# is clustered. Empty leaves both unmanaged; the NFS target must already exist.
 proxmox_backup_storage: []
 proxmox_backup_vzdump_jobs: []
 
 # Nightly ZFS replication to a detachable archive pool. OFF by default: the
-# control script rewrites the destination pool's root properties and destroys
-# its own snapshots there, so it must never run against a pool this site did not
-# nominate. Keys in docs/RUNBOOKS.md "Backups and restore".
+# control script rewrites the destination pool's root properties.
 nas_storage_archive_backup_enabled: false
 
 # Offsite backup (restic over rclone). Off until the archive tier above runs and
-# you have tested a RESTORE. A half-configured enable fails the deploy; the full
-# key set, and the cluster_offsite_backup_probe_metric flip that must land in
-# the same change, are in docs/RUNBOOKS.md "Backups and restore".
+# a RESTORE is tested; a half-configured enable fails the deploy.
 restic_offsite_enabled: false
+
+# Hard kill timer on the backup and restore-drill units. Size it above the
+# longest expected run for this repo and uplink; the deep verify has its own.
+restic_offsite_timeout_start_sec: 6h
+
+# The other half of the swap-clean interlock below: without it a swap-clean
+# night starting after the upload took the lock still stops guests underneath
+# it. restic_offsite asserts this once nas_storage_swap_clean_enabled is true.
+restic_offsite_conflicting_units:
+  - swap-clean.service
+
+# restic_offsite is a separate role, so its unit is named here. The OnSuccess
+# chain is the primary trigger; the offsite timer is the fallback.
+nas_storage_archive_backup_on_success_units:
+  - restic-offsite.service
+
+# CRITICAL: without restic-offsite.service here, swap-clean shrinks the ARC and
+# stops guests under an in-flight upload. The other two are the role defaults,
+# repeated because naming any unit replaces the whole list.
+nas_storage_swap_clean_conflicting_units:
+  - archive-backup.service
+  - media-mover.service
+  - restic-offsite.service

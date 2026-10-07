@@ -1,13 +1,16 @@
 ---
-# Holds the HelmRelease bookkeeping for a chart of cluster-scoped CRDs — no pod
-# ever runs here. The PSA labels are still declared (at the strictest level)
-# rather than left to the cluster default, for the same reason `default` is
-# hardened in configs/default-namespace.yaml: a pod that lands here by accident
-# should be refused, not silently admitted under whatever default is in force.
+# Holds the HelmRelease bookkeeping for a chart of cluster-scoped CRDs; no pod
+# runs here. PSA is declared at the strictest level so a pod that lands here by
+# accident is refused rather than admitted under the cluster default.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: prometheus-operator-crds
+  annotations:
+    # CRITICAL: same opt-out as the HelmRelease (release.yaml). Pruning this
+    # Namespace cascade-deletes the namespaced HelmRelease, which triggers a
+    # `helm uninstall` of every monitoring.coreos.com CRD and CR.
+    kustomize.toolkit.fluxcd.io/prune: disabled
   labels:
     app.kubernetes.io/name: prometheus-operator-crds
     app.kubernetes.io/part-of: kube-prometheus-stack

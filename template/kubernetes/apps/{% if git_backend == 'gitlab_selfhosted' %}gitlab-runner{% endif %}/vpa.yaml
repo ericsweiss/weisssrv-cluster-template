@@ -11,7 +11,11 @@ spec:
   updatePolicy: {updateMode: Initial}
   resourcePolicy:
     containerPolicies:
+      # RequestsOnly: maxAllowed.memory equals the hand-set manager memory
+      # limit in the shared component, so move both together. No CPU limit
+      # there by design, so the CPU cap is request headroom only.
       - containerName: "*"
+        controlledValues: RequestsOnly
         minAllowed: {cpu: 25m, memory: 64Mi}
         maxAllowed: {cpu: 500m, memory: 512Mi}
         controlledResources: [cpu, memory]

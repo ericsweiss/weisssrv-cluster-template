@@ -1,0 +1,14 @@
+---
+description: Always follow the cluster-development skill.
+globs:
+alwaysApply: true
+---
+
+# Cluster development
+
+Before making any change in this repo, read and follow
+`.claude/skills/cluster-development/SKILL.md` — the authoritative workflow for
+this Proxmox + Ansible + Terraform + k3s/Flux cluster. It carries the
+invariants, the change-type decision tree and the pre-merge gates. `CLAUDE.md`
+and `AGENTS.md` point at the same skill, and nothing from it is restated here:
+a second copy of the rules is a second copy to keep current.

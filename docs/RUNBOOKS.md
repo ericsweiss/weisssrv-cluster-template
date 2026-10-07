@@ -21,6 +21,7 @@ repository afterwards.
 | Section | Anchor | Linked from |
 |---|---|---|
 | Where to look first | `#where-to-look-first` | every alert with no more specific runbook |
+| Alerts that link here | — | — |
 | The change workflow | — | — |
 | Making Flux act now | — | — |
 | Deploying an Ansible change | — | — |
@@ -28,22 +29,29 @@ repository afterwards.
 | Adding a node | — | — |
 | Making a guest highly available | — | — |
 | Guest autostart and boot order | — | — |
-| Per-host log-shipping alerts | — | — |
+| Per-host log-shipping alerts | `#per-host-log-shipping-alerts` | the host log-shipping alert |
 | Adding an application | — | — |
+| Registry pull-through cache | `#registry-pull-through-cache` | `RegistryCacheDown` |
+| Adding DCGM GPU telemetry | — | — |
 | Rotating a secret | — | — |
+| Adding or changing a DNS record | — | — |
+| Mail relay | — | — |
 | Certificates | `#certificates` | the certificate-expiry alerts |
 | Suspending, rolling back, and breaking glass | — | — |
-| Storage | — | — |
+| Storage | `#storage` | the ZFS pool alerts |
 | Backups and restore | `#backups-and-restore` | the backup-failed / stale alerts |
+| kube-system fencing | — | — |
 | When Flux is unhappy | — | — |
 | Post-failover reconciliation | — | — |
 | Updating the template | — | — |
 | Where the platform is documented | — | — |
 
-The three anchors are a contract with the alert rules in
-`template/kubernetes/infrastructure/observability/`. Renaming one of those
-headings breaks the links; if you rename it, change the annotations in the same
-commit.
+The anchored rows above are the top-level sections alerts link to. Subsection
+anchors are load-bearing too — `#kubelet-image-store-on-a-node-root-filesystem`
+and `#loki-push-emergency-fallback` are both linked from alert rules — and
+`tests/test_render.py::test_runbook_urls_resolve` is the contract of record:
+rename a heading and that gate fails, so rename it and the annotations in the
+same commit.
 
 ## Anchors are load-bearing, and so are task names
 

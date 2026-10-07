@@ -1,0 +1,123 @@
+# https://taskfile.dev
+# Observability namespace operations: the stack's own workloads and scrape config.
+version: '3'
+
+{% raw -%}
+# Anchors aliased by the tasks below. YAML anchors do not cross files, so each
+# namespace file carries the precondition list it uses.
+x-preconditions:
+  kubectl: &kubectl_preconditions
+    - sh: command -v kubectl
+      msg: "kubectl not installed: https://kubernetes.io/docs/tasks/tools/"
+    - sh: kubectl cluster-info 2>/dev/null
+      msg: "Cannot reach the cluster. Run: export KUBECONFIG=~/.kube/config-k3s"
+
+tasks:
+  status:
+    desc: Show the observability namespace's workloads and scrape config
+    preconditions: *kubectl_preconditions
+    cmds:
+      - kubectl get pods -n observability -o wide
+      - kubectl get pvc -n observability
+      - kubectl get helmreleases -n observability
+      - kubectl get servicemonitors -n observability
+
+  logs:
+    desc: "Tail an observability component (COMPONENT=prometheus)"
+    vars:
+      COMPONENT: '{{.COMPONENT | default "prometheus"}}'
+    preconditions: *kubectl_preconditions
+    cmds:
+      - kubectl logs -n observability -l app.kubernetes.io/name={{.COMPONENT}} --tail=100 -f {{.CLI_ARGS}}
+
+  restart:
+    desc: Restart every observability workload
+    vars:
+      KS_SELECTOR: kustomize.toolkit.fluxcd.io/name=infrastructure-observability
+    preconditions: *kubectl_preconditions
+    cmds:
+      # Pod delete for what kustomize-controller applies, rollout restart for the
+      # HelmRelease-backed rest: a restart annotation on a kustomize-managed
+      # workload is drift and gets reverted on the next reconcile.
+      - |
+        set -eu
+        # Pods do not inherit the Flux label, so the app names come off the
+        # workloads and then select the pods.
+        NAMES=$(kubectl get deployment,statefulset,daemonset -n observability \
+          -l '{{.KS_SELECTOR}}' \
+          -o jsonpath='{range .items[*]}{.metadata.labels.app\.kubernetes\.io/name}{"\n"}{end}' \
+          | grep -v '^$' | sort -u | paste -sd, -)
+        if [ -z "$NAMES" ]; then
+          echo "ERROR: no kustomize-managed workloads in observability — refusing to guess the partition"
+          exit 1
+        fi
+        kubectl delete pod -n observability -l "app.kubernetes.io/name in ($NAMES)"
+      # `notin` also matches objects with no such label, which is every
+      # HelmRelease-backed workload here.
+      - kubectl rollout restart deployment,statefulset,daemonset -n observability -l 'kustomize.toolkit.fluxcd.io/name notin (infrastructure-observability)'
+  silence:
+    desc: "Create an Alertmanager silence (ALERT=alertname, DURATION=2H — units S/M/H/d; works with BSD or GNU date)"
+    vars:
+      ALERT: '{{.ALERT | default "Watchdog"}}'
+      DURATION: '{{.DURATION | default "2H"}}'
+    preconditions: *kubectl_preconditions
+    cmds:
+      - |
+        RESP=$(mktemp)
+        PF_PID=""
+        cleanup() { [ -n "$PF_PID" ] && kill "$PF_PID" 2>/dev/null; rm -f "$RESP"; }
+        trap cleanup EXIT
+        # Portable end-time: BSD date (macOS) first, GNU date (Linux/CI) as the
+        # fallback. The unit is validated before either arm, because BSD `date
+        # -v` also takes y/m/w and would read a lowercase m as MONTHS.
+        printf '%s' '{{.DURATION}}' | grep -qE '^[0-9]+[SMHd]$' || {
+          echo "ERROR: Invalid DURATION '{{.DURATION}}' (use S/M/H/d, e.g. 2H)"; exit 1;
+        }
+        END=$(date -u -v+{{.DURATION}} '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null || true)
+        if [ -z "$END" ]; then
+          GNU_DUR=$(printf '%s' '{{.DURATION}}' | sed -E 's/^([0-9]+)S$/\1 seconds/; s/^([0-9]+)M$/\1 minutes/; s/^([0-9]+)H$/\1 hours/; s/^([0-9]+)d$/\1 days/')
+          case "$GNU_DUR" in
+            *' seconds'|*' minutes'|*' hours'|*' days') ;;
+            *) echo "ERROR: Invalid DURATION '{{.DURATION}}' (use S/M/H/d, e.g. 2H)"; exit 1 ;;
+          esac
+          END=$(date -u -d "+$GNU_DUR" '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null || true)
+        fi
+        if [ -z "$END" ]; then echo "ERROR: could not compute an end time for DURATION '{{.DURATION}}' with either BSD or GNU date"; exit 1; fi
+        START=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
+        # Ephemeral local port, not a fixed 9093: a pre-existing forward there
+        # would answer the probe below and take the silence POST. The liveness
+        # check runs BEFORE each curl so a dead forward is reported, not raced.
+        LPORT=$((20000 + RANDOM % 9000))
+        kubectl port-forward -n observability svc/kube-prometheus-stack-alertmanager "$LPORT":9093 &
+        PF_PID=$!
+        READY=false
+        for _i in 1 2 3 4 5; do
+          if ! kill -0 "$PF_PID" 2>/dev/null; then
+            echo "ERROR: port-forward process died — is Alertmanager running?"
+            exit 1
+          fi
+          if curl -s -o /dev/null "http://localhost:$LPORT/" 2>/dev/null; then READY=true; break; fi
+          sleep 1
+        done
+        if [ "$READY" != "true" ]; then
+          echo "ERROR: port-forward not ready after 5s — is Alertmanager running?"
+          exit 1
+        fi
+        ALERT_VALUE=$(printf '%s' '{{.ALERT}}' | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])') || {
+          echo "ERROR: Failed to JSON-encode alert name"; exit 1;
+        }
+        if [ -z "$ALERT_VALUE" ]; then echo "ERROR: Alert name resolved to empty string"; exit 1; fi
+        HTTP_CODE=$(curl -s -o "$RESP" -w '%{http_code}' -X POST "http://localhost:$LPORT/api/v2/silences" -H "Content-Type: application/json" -d "{
+          \"matchers\": [{\"name\": \"alertname\", \"value\": \"$ALERT_VALUE\", \"isRegex\": false}],
+          \"startsAt\": \"$START\",
+          \"endsAt\": \"$END\",
+          \"createdBy\": \"task-cli\",
+          \"comment\": \"Silenced via task observability:silence\"
+        }")
+        if [ "$HTTP_CODE" -ne 200 ]; then
+          echo "ERROR: Alertmanager API returned HTTP $HTTP_CODE"
+          cat "$RESP" 2>/dev/null
+          exit 1
+        fi
+        python3 -m json.tool "$RESP"
+{%- endraw %}
