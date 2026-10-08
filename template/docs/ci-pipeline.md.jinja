@@ -412,9 +412,11 @@ so the setting means something.
 `version-bump-bot` runs only from a schedule or a web run on `main`, so its PAT
 must be Protected as well as Masked.
 
-Every deploy rule is gated on `$OP_SERVICE_ACCOUNT_TOKEN`, so a fork with no
-token gets a green pipeline that creates no deploy jobs rather than a broken
-one. Protecting it also removes `terraform-plan` from merge requests — the
+Every deploy rule is gated on `$OP_SERVICE_ACCOUNT_TOKEN`, so an unset token
+creates no deploy jobs. `validation-gate` carries no token clause and fails on
+every main pipeline without it, so a fork or a freshly generated repo reds main
+until the variable is set rather than reporting a green pipeline that deployed
+nothing. Protecting it also removes `terraform-plan` from merge requests — the
 trade-off is under "Deploy jobs".
 
 ### {{ onepassword_vault }} vault items

@@ -363,7 +363,7 @@ tasks:
       - python3 scripts/check-tenant-traefik-isolation.py
 
   upstream-rule-mirror:
-    desc: Assert every mirrored upstream rule names the chart version it was taken at
+    desc: Assert every rule the chart disables has an in-tree replacement at the pinned chart version
     preconditions:
       - *needs_pyyaml
     cmds:

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Hold every mirrored upstream rule to the chart version it was taken at.
+"""Every alert the chart disables needs an in-tree copy at the pinned version.
 
-A rule replaced in-tree declares `# Taken from <chart> <version>`, matched
-against the inventory's chart pins. Exit 0 clean, 1 drifted, 2 cannot inspect.
+The copy declares `# Taken from <chart> <version>`, matched against the
+inventory's chart pins. Exit 0 clean, 1 drifted, 2 cannot inspect.
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ def _version_problem(rel, name: str, match: re.Match, pinned: dict[str, str]) ->
 
 
 def in_tree_problems(root: Path, pinned: dict[str, str]) -> list[str]:
-    """Every local copy of a disabled upstream alert names its chart version."""
+    """Every alert the chart disables has a local copy naming its chart version."""
     disabled = disabled_alerts(root)
     problems = []
     for name, reason in sorted(NOT_MIRRORED.items()):
@@ -112,7 +112,9 @@ def in_tree_problems(root: Path, pinned: dict[str, str]) -> list[str]:
             "the in-tree check would pass vacuously"
         )
     tree = root / RULE_TREE
-    for path in sorted({p for glob in RULE_GLOBS for p in tree.rglob(glob)}):
+    scanned = sorted({p for glob in RULE_GLOBS for p in tree.rglob(glob)})
+    seen: set[str] = set()
+    for path in scanned:
         rel = path.relative_to(root)
         lines = path.read_text(encoding="utf-8").splitlines()
         for index, line in enumerate(lines):
@@ -120,6 +122,7 @@ def in_tree_problems(root: Path, pinned: dict[str, str]) -> list[str]:
             if not match or match.group("name") not in required:
                 continue
             name = match.group("name")
+            seen.add(name)
             marker = _marker_above(lines, index)
             if marker is None:
                 problems.append(
@@ -131,6 +134,13 @@ def in_tree_problems(root: Path, pinned: dict[str, str]) -> list[str]:
             problem = _version_problem(rel, name, marker, pinned)
             if problem:
                 problems.append(problem)
+    where = f"{len(scanned)} {'/'.join(RULE_GLOBS)} file(s) under {RULE_TREE}"
+    for name in sorted(required - seen):
+        problems.append(
+            f"{CHART_RELEASE} disables {name} but none of the {where} defines it — "
+            "restore the replacement, stop disabling the upstream rule, or exempt it "
+            "in NOT_MIRRORED with its reason"
+        )
     return problems
 
 

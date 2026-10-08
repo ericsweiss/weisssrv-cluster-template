@@ -91,7 +91,30 @@ def test_an_unknown_chart_name_fails_rather_than_passing_silently(tmp_path):
 
 def test_a_rule_the_chart_still_ships_needs_no_marker(tmp_path):
     """Only the alerts `defaultRules.disabled` turns off are mirrors."""
-    assert gate.check(_tree(tmp_path, release_text=_release(None, alert="DiskUsageWarning"))) == []
+    release = _release("Taken from kube-prometheus-stack 91.3.0") + (
+        "              - alert: DiskUsageWarning\n                expr: vector(1) > 0\n"
+    )
+    assert gate.check(_tree(tmp_path, release_text=release)) == []
+
+
+def test_a_disabled_alert_with_no_replacement_anywhere_fails(tmp_path):
+    """Mutation case: deleting the mirrored rule while the chart still disables
+    it drops the alert, so every required name must be accounted for."""
+    problems = gate.check(_tree(tmp_path, release_text=RELEASE_HEAD))
+    assert len(problems) == 1
+    assert "AlertmanagerClusterFailedToSendAlerts" in problems[0]
+    assert "NOT_MIRRORED" in problems[0]
+    assert gate.RULE_TREE in problems[0]
+
+
+def test_an_exempt_disabled_alert_needs_no_replacement(tmp_path, monkeypatch):
+    """The NOT_MIRRORED escape hatch still covers a deliberate non-mirror."""
+    monkeypatch.setitem(gate.NOT_MIRRORED, "KubeletDown", "replaced by a node-level probe")
+    release = _release("Taken from kube-prometheus-stack 91.3.0").replace(
+        "        AlertmanagerClusterFailedToSendAlerts: true\n",
+        "        AlertmanagerClusterFailedToSendAlerts: true\n        KubeletDown: true\n",
+    )
+    assert gate.check(_tree(tmp_path, release_text=release)) == []
 
 
 def test_a_supplementary_mirror_with_no_taken_from_line_fails(tmp_path):
