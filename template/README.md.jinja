@@ -155,7 +155,7 @@ requirements.txt`. Every gate's precondition names the tool it is missing.
 - **Secrets**: never in git. Host tooling reads
   {% if secrets_backend == 'onepassword' %}`op://{{ onepassword_vault }}/<item>/<field>`{% else %}the secrets backend{% endif %}
   at run time; workloads read a Secret produced from an `ExternalSecret`.
-- **Roles**: no `ansible/roles/` directory. Playbooks address
+- **Roles**: this repository ships no roles directory. Playbooks address
   `weisssrv.infra.<role>` by FQCN, pinned at `{{ lib_ref }}` in
   `ansible/requirements.yml`. A role change happens in the library, not here.
 

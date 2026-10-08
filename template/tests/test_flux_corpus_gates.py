@@ -42,6 +42,7 @@ GATE_HEADERS = (
     "Checking ingress default-deny coverage",
     "Checking ClusterSecretStore scoping",
     "Checking PVC storageClassName",
+    "Checking NFS PersistentVolume TLS",
     "Checking backup-artifact apps against their alert arms",
 )
 

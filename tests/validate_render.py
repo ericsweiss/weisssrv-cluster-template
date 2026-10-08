@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import difflib
 import json
 import os
@@ -515,7 +514,12 @@ def _prometheus_config(render: Path) -> str | None:
     result = _run(
         ["bash", "scripts/lint-prometheus-config.sh"],
         cwd=render,
-        env=dict(os.environ, RULE_TESTS_DIR="tests/prometheus-rules"),
+        env=dict(
+            os.environ,
+            RULE_TESTS_DIR="tests/prometheus-rules",
+            RULES_DIR="kubernetes/apps",
+            REQUIRE_RELEASE_RULES="1",
+        ),
     )
     if result.returncode:
         return f"lint-prometheus-config.sh:\n{result.stdout}{result.stderr}"
@@ -577,13 +581,17 @@ def check_cluster_gates(render: Path, **_kw) -> None:
     if netpol.returncode:
         failures.append(f"check-netpol-except-parity.py:\n{netpol.stdout}{netpol.stderr}")
 
+    dashboards = _run([sys.executable, "scripts/check-dashboards.py"], cwd=render)
+    if dashboards.returncode:
+        failures.append(f"check-dashboards.py:\n{dashboards.stdout}{dashboards.stderr}")
+
     prometheus = _prometheus_config(render)
     if prometheus:
         failures.append(prometheus)
 
     if failures:
         raise Failure("\n".join(failures))
-    print(f"  cluster gates ok ({_CORPUS_GATE_WRAPPER} + 2 over {len(corpus)} builds)")
+    print(f"  cluster gates ok ({_CORPUS_GATE_WRAPPER} + 3 over {len(corpus)} builds)")
 
 
 _SITE_DATA_SUFFIXES = {".yml", ".yaml", ".env", ".conf", ".toml"}
@@ -1028,397 +1036,77 @@ def _assert_one_lib_ref() -> list[str]:
     return []
 
 
-_ASSIGNMENT = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*:", re.MULTILINE)
+# The render's own copy of the library gate, so what runs here is the wiring a
+# generated cluster ships. --allow-unknown mirrors its `task lint:role-inputs`.
+_ROLE_INPUT_GATE = "scripts/check-role-inputs.py"
+_ALLOW_UNKNOWN = (
+    "gitlab_runner_helm_version=a chart version the Flux substitution reads, "
+    "not a role variable",
+    "tailscale_operator=a helm_chart_versions key the Flux substitution reads, "
+    "not a role variable",
+)
 
 
-def _opt_in_roles(roles_dir: Path) -> set[str]:
-    """Library roles that ship `<role>_enabled: false` in defaults/main.yml.
+def _role_inputs(render: Path, lib_path: Path | None, skip: tuple[str, ...]) -> str:
+    """One arm of the render's check-role-inputs.py over the library's roles.
 
-    Every task in such a role is gated on the flag, so invoking it without
-    setting the flag runs a play that does nothing, successfully.
+    No --allow-empty: an arm that examined nothing exits 2, which is the floor
+    the two checks below rely on.
     """
-    found = set()
-    for role in sorted(p for p in roles_dir.iterdir() if p.is_dir()):
-        defaults = role / "defaults" / "main.yml"
-        if not defaults.is_file():
-            continue
-        doc = yaml.safe_load(defaults.read_text()) or {}
-        flag = f"{role.name}_enabled"
-        if flag in doc and not doc[flag]:
-            found.add(role.name)
-    return found
-
-
-def _role_invocations(playbooks_dir: Path):
-    """(playbook, role-name, when-clause-text) for every library role a shipped
-    playbook invokes, from `roles:` entries and include_role/import_role tasks."""
-    def when_text(entry: dict) -> str:
-        clause = entry.get("when")
-        return " ".join(clause) if isinstance(clause, list) else str(clause or "")
-
-    for path in _yaml_paths(playbooks_dir):
-        try:
-            plays = yaml.safe_load(path.read_text())
-        except yaml.YAMLError:
-            continue
-        for play in plays if isinstance(plays, list) else []:
-            if not isinstance(play, dict):
-                continue
-            for entry in play.get("roles") or []:
-                if isinstance(entry, dict):
-                    yield path, str(entry.get("role", "")), when_text(entry)
-                elif isinstance(entry, str):
-                    yield path, entry, ""
-            for block in ("pre_tasks", "tasks", "post_tasks"):
-                for task in play.get(block) or []:
-                    if not isinstance(task, dict):
-                        continue
-                    for verb in ("include_role", "import_role"):
-                        if isinstance(task.get(verb), dict):
-                            yield path, str(task[verb].get("name", "")), when_text(task)
+    if not lib_path:
+        raise Failure("--lib-path is required to read the collection's role conventions")
+    roles_dir = lib_path / "ansible_collections" / "weisssrv" / "infra" / "roles"
+    if not roles_dir.is_dir():
+        raise Failure(f"{roles_dir} does not exist (is --lib-path a weisssrv-lib checkout?)")
+    if not (render / _ROLE_INPUT_GATE).is_file():
+        raise Failure(f"{_ROLE_INPUT_GATE} is in the render's lint list but not shipped")
+    argv = [
+        sys.executable,
+        _ROLE_INPUT_GATE,
+        "--roles-dir",
+        str(roles_dir.resolve()),
+        "--inventory",
+        "ansible/inventories/prod",
+        "--playbooks",
+        "ansible/playbooks",
+    ]
+    for exemption in _ALLOW_UNKNOWN:
+        argv += ["--allow-unknown", exemption]
+    for arm in skip:
+        argv += ["--skip", arm]
+    result = _run(argv, cwd=render)
+    if result.returncode:
+        raise Failure(f"{_ROLE_INPUT_GATE}:\n{result.stdout}{result.stderr}")
+    return "; ".join(line.strip() for line in result.stdout.splitlines() if line.strip())
 
 
 def check_role_opt_ins(
     render: Path, lib_path: Path | None = None, ref_verified: bool = True, **_kw
 ) -> None:
     """An opt-in role invoked unconditionally must have its flag set in the
-    inventory, or the play reports ok with every task skipped. An invocation
-    guarded by the flag itself is the deliberate off-unless-set case.
+    inventory, or the play reports ok with every task skipped.
     """
-    if not lib_path:
-        raise Failure("--lib-path is required to read the roles' opt-in defaults")
-    roles_dir = lib_path / "ansible_collections" / "weisssrv" / "infra" / "roles"
-    if not roles_dir.is_dir():
-        raise Failure(f"{roles_dir} does not exist (is --lib-path a weisssrv-lib checkout?)")
-    opt_in = _opt_in_roles(roles_dir)
-    if not opt_in:
-        raise Failure(
-            "no role in the collection declares `<role>_enabled: false` — the "
-            "opt-in convention this check reads has changed, and it is now "
-            "examining nothing"
-        )
-
-    inventory = render / "ansible" / "inventories" / "prod"
-    assigned: set[str] = set()
-    for path in _yaml_paths(inventory):
-        for line in path.read_text().splitlines():
-            if line.lstrip().startswith("#"):
-                continue
-            assigned.update(_ASSIGNMENT.findall(line))
-
-    checked, problems = 0, []
-    for path, role, when in _role_invocations(render / "ansible" / "playbooks"):
-        name = role.rsplit(".", 1)[-1]
-        if name not in opt_in:
-            continue
-        checked += 1
-        flag = f"{name}_enabled"
-        if flag in assigned or flag in when:
-            continue
-        problems.append(
-            f"{path.relative_to(render)} invokes {role} unconditionally, but "
-            f"{flag} is set nowhere in inventories/prod — every task in the role "
-            "will skip and the play will still report success"
-        )
-    if not checked:
-        raise Failure(
-            "no opt-in role invocation was examined — either the playbooks stopped "
-            f"using the collection's opt-in roles ({', '.join(sorted(opt_in))}) or "
-            "the invocation scan is stale"
-        )
-    if problems:
-        raise Failure("\n".join(problems))
+    verdict = _role_inputs(render, lib_path, ("required-inputs", "unknown-inputs"))
     print(
         _lib_verdict(
-            f"role opt-ins ok ({checked} invocations of {len(opt_in)} opt-in roles)",
-            f"role opt-ins (ref unverified): {checked} invocations of {len(opt_in)} opt-in "
-            "roles, read from the library checkout on disk",
+            verdict,
+            f"{verdict} (ref unverified: read from the library checkout on disk)",
             ref_verified,
         )
     )
 
 
-# `<var> | default('') | length > 0` / `<var> | default([]) | length > 0` — the
-# shape every weisssrv.infra role uses to say "this input is required".
-_ASSERTED_NONEMPTY = re.compile(
-    r"\b([a-z_][a-z0-9_]*)\s*\|\s*default\(\s*(?:''|\"\"|\[\]|\{\})\s*\)\s*\|\s*length\s*>\s*0"
-)
-_FALSEY_STRINGS = {"", "false", "no", "off", "0", "none"}
-
-
-def _ansible_bool(value) -> bool:
-    """Ansible's `| bool`, which plain Jinja does not have. Feature flags in the
-    collection are written `<flag> | bool`, so the gate below cannot read a
-    role's own gating without it."""
-    if isinstance(value, str):
-        return value.strip().lower() not in _FALSEY_STRINGS
-    return bool(value)
-
-
-class _Unmodelled(Exception):
-    """An expression needs an Ansible behaviour this evaluator does not carry."""
-
-
-_ENV_SUPPLIED = "<supplied from the environment>"
-
-
-def _env_lookup(name, *_args, **_kwargs):
-    """Ansible's `lookup()`, limited to the env plugin the collection's defaults
-    use: an input defaulted to an env lookup is supplied outside the inventory,
-    so it counts as given. Any other lookup is unmodelled."""
-    if str(name).rsplit(".", 1)[-1] != "env":
-        raise _Unmodelled(f"lookup({name!r}, ...)")
-    return _ENV_SUPPLIED
-
-
-def _jinja_env():
-    """Jinja carrying the Ansible-only filters, tests and lookups the
-    collection's `when:` expressions and defaults use. Anything else raises, and
-    the caller records it rather than guessing an answer."""
-    import jinja2
-
-    env = jinja2.Environment(undefined=jinja2.ChainableUndefined)  # noqa: S701
-    env.filters["bool"] = _ansible_bool
-    env.filters["from_json"] = json.loads
-    env.tests["match"] = lambda value, pattern: bool(re.match(pattern, str(value)))
-    env.tests["search"] = lambda value, pattern: bool(re.search(pattern, str(value)))
-    env.globals["lookup"] = _env_lookup
-    return env
-
-
-def _walk_tasks(tasks, inherited: tuple[str, ...] = ()):
-    """(task, accumulated when-conditions) for every task, descending into
-    block/rescue/always so a `when:` on the enclosing block is not lost — which
-    is where every optional feature in this collection is actually gated."""
-    for task in tasks if isinstance(tasks, list) else []:
-        if not isinstance(task, dict):
-            continue
-        clause = task.get("when")
-        conditions = inherited + tuple(
-            str(c) for c in (clause if isinstance(clause, list) else [clause] if clause else [])
-        )
-        nested = False
-        for key in ("block", "rescue", "always"):
-            if key in task:
-                nested = True
-                yield from _walk_tasks(task[key], conditions)
-        if not nested:
-            yield task, conditions
-
-
-def _reachable_by_default(
-    conditions: tuple[str, ...],
-    defaults: dict,
-    unmodelled: list[str] | None = None,
-    source: str = "",
-) -> bool | None:
-    """Would this task run on a host that sets none of the role's own inputs?
-
-    None when the expression is outside what this evaluator models; it goes to
-    `unmodelled`, because that answer silently drops the role's asserted inputs.
-    """
-    env = _jinja_env()
-    for condition in conditions:
-        try:
-            verdict = env.from_string(
-                "{% if " + condition + " %}yes{% else %}no{% endif %}"
-            ).render(**defaults)
-        except Exception as exc:  # noqa: BLE001 - recorded, not guessed
-            if unmodelled is not None:
-                unmodelled.append(
-                    f"{source}: when {condition!r} is outside this evaluator: {exc}"
-                )
-            return None
-        if verdict != "yes":
-            return False
-    return True
-
-
-def _asserted_inputs(
-    role: Path, defaults: dict, unmodelled: list[str] | None = None
-) -> set[str]:
-    """Role-prefixed variables the role asserts non-empty on its DEFAULT path.
-
-    `<role_name>_*` only, `assert` tasks only, and only asserts reachable with
-    nothing set: an opt-in feature's assert is a contract, not a requirement.
-    """
-    found: set[str] = set()
-    tasks_dir = role / "tasks"
-    for path in _yaml_paths(tasks_dir) if tasks_dir.is_dir() else []:
-        where = f"{role.name}/{path.relative_to(role).as_posix()}"
-        try:
-            doc = yaml.safe_load(path.read_text())
-        except yaml.YAMLError as exc:
-            if unmodelled is not None:
-                unmodelled.append(f"{where}: unparseable, its asserts were not scanned: {exc}")
-            continue
-        for task, conditions in _walk_tasks(doc):
-            spec = task.get("ansible.builtin.assert") or task.get("assert")
-            if not isinstance(spec, dict):
-                continue
-            if _reachable_by_default(conditions, defaults, unmodelled, where) is not True:
-                continue
-            that = spec.get("that")
-            for clause in that if isinstance(that, list) else [that] if that else []:
-                for name in _ASSERTED_NONEMPTY.findall(str(clause)):
-                    if name.startswith(role.name + "_"):
-                        found.add(name)
-    return found
-
-
-def _role_defaults(role: Path) -> dict:
-    defaults = role / "defaults" / "main.yml"
-    doc = yaml.safe_load(defaults.read_text()) if defaults.is_file() else {}
-    return doc if isinstance(doc, dict) else {}
-
-
-_UNMODELLED = object()
-
-
-def _render_default(
-    value, context: dict, unmodelled: list[str] | None = None, source: str = ""
-):
-    """The value a role default takes on an inventory holding `context`, with
-    whole-template results converted back to native types as Ansible does.
-    `_UNMODELLED`, and a line in `unmodelled`, when it cannot be rendered."""
-    if not isinstance(value, str) or "{{" not in value:
-        return value
-    try:
-        rendered = _jinja_env().from_string(value).render(**context)
-    except Exception as exc:  # noqa: BLE001 - recorded, not guessed
-        if unmodelled is not None:
-            unmodelled.append(f"{source} is outside this evaluator: {exc}")
-        return _UNMODELLED
-    try:
-        return ast.literal_eval(rendered)
-    except (ValueError, SyntaxError):
-        return rendered
-
-
-def _referenced_names(
-    value, unmodelled: list[str] | None = None, source: str = ""
-) -> set[str]:
-    """Inventory variables a default's expression reads."""
-    if not isinstance(value, str) or "{{" not in value:
-        return set()
-    from jinja2 import meta
-
-    try:
-        return meta.find_undeclared_variables(_jinja_env().parse(value))
-    except Exception as exc:  # noqa: BLE001 - recorded, not guessed
-        if unmodelled is not None:
-            unmodelled.append(f"{source} does not parse: {exc}")
-        return set()
-
-
-def _is_empty(value) -> bool:
-    if isinstance(value, str):
-        return not value.strip()
-    return value in (None, [], {}, ())
-
-
-def _default_gap(
-    defaults: dict,
-    var: str,
-    context: dict,
-    assigned: set[str],
-    unmodelled: list[str] | None = None,
-    role_name: str = "",
-) -> str | None:
-    """None when defaults/main.yml gives `var` a non-empty value once rendered
-    against this inventory; otherwise the reason it does not. Two gaps: the key
-    is absent, or its expression renders empty.
-    """
-    if var not in defaults:
-        return "gives it no default in defaults/main.yml"
-    raw = defaults[var]
-    source = f"{role_name}: the default for {var}"
-    value = _render_default(raw, context, unmodelled, source)
-    if value is _UNMODELLED or not _is_empty(value):
-        return None
-    if (_referenced_names(raw, unmodelled, source) & assigned) - set(context):
-        return None
-    if isinstance(raw, str) and "{{" in raw:
-        return f"defaults it to {raw!r}, which renders EMPTY against this inventory"
-    return f"defaults it to {raw!r}, which is empty"
-
-
 def check_required_role_inputs(
     render: Path, lib_path: Path | None = None, ref_verified: bool = True, **_kw
 ) -> None:
-    """A role input the role asserts and has no usable default for must be set
-    in the inventory. "Usable" is decided by RENDERING the default (see
-    `_default_gap`). Static: it reads the library, it does not replay a play.
+    """A role input the role asserts and has no usable default for must be set in
+    the inventory, and a role-prefixed inventory variable must be one a role reads.
     """
-    if not lib_path:
-        raise Failure("--lib-path is required to read the roles' required inputs")
-    roles_dir = lib_path / "ansible_collections" / "weisssrv" / "infra" / "roles"
-    if not roles_dir.is_dir():
-        raise Failure(f"{roles_dir} does not exist (is --lib-path a weisssrv-lib checkout?)")
-
-    inventory = render / "ansible" / "inventories" / "prod"
-    assigned: set[str] = set()
-    for path in _yaml_paths(inventory):
-        for line in path.read_text().splitlines():
-            if line.lstrip().startswith("#"):
-                continue
-            assigned.update(_ASSIGNMENT.findall(line))
-
-    # Group vars as values, not just names: a role feature flag can default
-    # differently in the library and here, so an assert's `when:` is only
-    # judgeable with the inventory's answer in hand.
-    group_values: dict = {}
-    for path in _yaml_paths(inventory / "group_vars", recursive=False):
-        doc = yaml.safe_load(path.read_text())
-        if isinstance(doc, dict):
-            group_values.update(doc)
-
-    invoked = {
-        role.rsplit(".", 1)[-1]: path
-        for path, role, _when in _role_invocations(render / "ansible" / "playbooks")
-        if role
-    }
-    required, problems = 0, []
-    unmodelled: list[str] = []
-    for name, playbook in sorted(invoked.items()):
-        role = roles_dir / name
-        if not role.is_dir():
-            continue
-        defaults = _role_defaults(role)
-        context = {**defaults, **group_values}
-        for var in sorted(_asserted_inputs(role, context, unmodelled)):
-            gap = _default_gap(defaults, var, context, assigned, unmodelled, name)
-            if gap is None:
-                continue
-            required += 1
-            if var in assigned:
-                continue
-            problems.append(
-                f"{playbook.relative_to(render)} invokes weisssrv.infra.{name}, which "
-                f"asserts {var} and {gap} — and {var} is set nowhere in "
-                "inventories/prod, so the role's opening assert fails on every host "
-                "it touches"
-            )
-    if unmodelled:
-        raise Failure(
-            "these expressions are outside this evaluator, so the inputs behind them "
-            "left the required set unchecked — teach _jinja_env() the behaviour they "
-            "need:\n" + "\n".join(sorted(set(unmodelled)))
-        )
-    if not required:
-        raise Failure(
-            "no invoked role declares an asserted input without a usable default — "
-            "either the collection dropped the convention or the assert scan is "
-            "stale; this check is now examining nothing"
-        )
-    if problems:
-        raise Failure("\n".join(sorted(set(problems))))
+    verdict = _role_inputs(render, lib_path, ("opt-ins",))
     print(
         _lib_verdict(
-            f"required role inputs ok ({required} asserted inputs with no usable default "
-            "assigned, every expression modelled)",
-            f"required role inputs (ref unverified): {required} asserted inputs assigned, "
-            "read from the library checkout on disk",
+            verdict,
+            f"{verdict} (ref unverified: read from the library checkout on disk)",
             ref_verified,
         )
     )

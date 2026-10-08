@@ -572,8 +572,8 @@ kubectl get externalsecrets -A             # SecretSynced
 task flux:verify
 ```
 
-If a stage is stuck, `docs/RUNBOOKS.md` § When Flux is unhappy — in the
-repository you just generated — is the entry point
+If a stage is stuck, the generated repository's own `docs/RUNBOOKS.md` has a
+"When Flux is unhappy" section, which is the entry point
 ([index and source](RUNBOOKS.md)). The two failures that account for most first
 bootstraps are a missing vault item (the ExternalSecret names the item it
 wanted) and a DNS-01 challenge that cannot complete because the API token lacks

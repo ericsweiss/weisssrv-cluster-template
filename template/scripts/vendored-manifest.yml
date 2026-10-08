@@ -14,30 +14,52 @@ vendored:
   - lib: ansible_collections/weisssrv/infra/molecule-shared/tasks/prepare-base.yml
     consumer: ansible/molecule/tasks/prepare-base.yml
   - scripts/check-backup-artifact-apps.py
+  - scripts/check-cluster-invariants.py
+  - scripts/check-comment-length.py
+  - scripts/check-dashboards.py
   - scripts/check-default-deny-coverage.py
   - scripts/check-deploy-coverage.sh
   - scripts/check-doc-links.py
+  - scripts/check-helm-repo-parity.py
   - scripts/check-hpa-vpa-invariant.py
   - scripts/check-lib-pins.py
   - scripts/check-netpol-except-parity.py
+  - scripts/check-nfs-tls.py
   - scripts/check-pvc-storageclass.py
+  - scripts/check-role-inputs.py
   - scripts/check-scrape-netpol.py
   - scripts/check-secretstore-scope.py
   - scripts/check-taskfile.sh
+  - scripts/check-version-checksums.py
   - scripts/check-versions.py
+  - scripts/ci-fetch-tools.py
+  # Companion modules: each is imported from the importing gate's own directory.
+  - scripts/ci_playbook_invocations.py
+  - scripts/ci_yaml.py
+  - scripts/cluster-config-value.sh
+  - scripts/collect-state-lib.sh
+  - scripts/deploy-verify-lib.sh
   - scripts/extract-prometheus-config.py
   - scripts/find-reachable-host.sh
   - scripts/flux-env.sh
   - scripts/flux-render.sh
+  - scripts/gate_common.py
   - scripts/generate-hosts-env.py
   - scripts/generate-versions-configmap.py
+  - scripts/inventory_tree.py
   - scripts/kubeconform-skipped.py
   - scripts/lint-prometheus-config.sh
+  - scripts/maintenance-run-with-verify.sh
   - scripts/molecule-retry.sh
   - scripts/resolve-tool.sh
   - scripts/sanitize-junit-expected-failures.py
   - scripts/semantic-release.py
   - scripts/shell-lib.sh
+  - scripts/supervised-apply-guard.sh
+  # pre-commit, the yaml-lint job and `task lint` all point at this profile.
+  # Kept at lint/, never as a repo-root `.yamllint`: ansible-lint discovers one
+  # there and replaces its own yaml rule.
+  - lint/yamllint-relaxed.yml
   - scripts/validate-helm-values.py
   - scripts/version-bump-mr.py
   # A script the library's working tree has but the pinned ref does not joins
@@ -48,19 +70,42 @@ vendored:
 # quiet kind: the library tightens a rule, this repository never absorbs it, and
 # the local lint keeps passing on the old profile.
 forked:
+  # Cluster-owned gates the library now offers under the same names. Each keeps
+  # its own CLI and its own test suite, so it is held to the library by
+  # reconciled_sha256 rather than by byte-identity.
+  - lib: scripts/check-flux-version-pin.py
+    consumer: scripts/check-flux-version-pin.py
+    reason: >-
+      Takes --root and --components where the library's takes --repo-root,
+      --ci-file, --versions-configmap, --gotk-glob and --runbook.
+    reconciled_sha256: 5353b33732feddc81d617138783f5fc65f09b13efc35a2f0dc0b878932e9d51c
+  - lib: scripts/check-secret-rotation-coverage.py
+    consumer: scripts/check-secret-rotation-coverage.py
+    reason: >-
+      Hard-codes the rotation document and the manual-rotation map, where the
+      library's requires --doc and accepts --declared-manual.
+    reconciled_sha256: 12e1a976a246b8067aea3da8441dec1c2c0be18604fb9b585a72030bb24931c7
+  - lib: scripts/flux-child-kustomizations.py
+    consumer: scripts/flux-child-kustomizations.py
+    reason: >-
+      Prints a bare spec.path for --paths, globs *.yaml only, and exposes
+      child_kustomizations() rather than the library's name<TAB>path output,
+      --exclude/--allow-missing-paths flags and child_kustomization_paths().
+    reconciled_sha256: 965d08702267f3f03d3213fdb623038178d874f89ef0486fe8b03fe2a37ded4b
   - lib: lint/ruff.toml
     consumer: ruff.toml
     reason: >-
       Same rule selection, cluster-scoped header — it documents that the
       python-lint job relies on ruff's own config discovery finding this file at
       the repository root.
-    reconciled_sha256: ccf4e857a9d7e20039ef8f68be7080210e6703d1400c23586ec6f5679e2fbfb2
+    comment_only: true
+    reconciled_sha256: 17ffa1185a44dbc93e14f20bca60af1610702b1b03681691b6f602bd21ce9098
   - lib: lint/editorconfig
     consumer: .editorconfig
     reason: >-
       Per-repo file-type sections on a shared base — `[Dockerfile*]` rather than
       `[Dockerfile]`, to cover per-app Dockerfile suffixes.
-    reconciled_sha256: 911171d9f26ba0bb47300c97a9e46b078d48eb852dfe9a050fbc3c8e41cc2944
+    reconciled_sha256: 9873966d0ce8a80d7ed84ecce449107b2a20387a146692ffb9aec28dd505fe02
   - lib: lint/pre-commit-config.yaml
     consumer: .pre-commit-config.yaml
     reason: >-
@@ -68,24 +113,15 @@ forked:
       lint/yamllint-relaxed.yml, a local block running this cluster's
       tool-light gates, and the whitespace hooks excluded from scripts/; the
       upstream hook set and the pinned revs are the library's.
-    reconciled_sha256: 39e7c3a5fbc7d2185ad73c436cbba736cae1e2b2b88f7f50387f041cbd87323c
+    reconciled_sha256: f7e2dff0acee6c4787e1d89311fa72e5d089b13681ed9cd94e8b92bdcada519c
   - lib: lint/gitleaks.toml
     consumer: .gitleaks.toml
     reason: Allowlist paths and this cluster's own false-positive anchors.
-    reconciled_sha256: bffbe70c94436f4442aaeecc1f1f5715315fc5908b1486b2198796b9e097ff0d
+    reconciled_sha256: a70051101f8045b94172594a0a89c5cf7e17aa6ad56c184843ffc5eac29891ec
   - lib: lint/secret-detection-ruleset.toml
     consumer: .gitlab/secret-detection-ruleset.toml
     reason: The passthrough names this cluster's gitleaks config and description.
-    reconciled_sha256: d6413e69a2d8a6f7d0c468d4370a406299894ad9e3fe274eb7f69eb30a7c936d
-  - lib: lint/yamllint-relaxed.yml
-    consumer: lint/yamllint-relaxed.yml
-    reason: >-
-      Cluster-scoped header plus an ignore block for local .terraform module
-      checkouts; the rules are the library's. It is what pre-commit, the
-      yaml-lint job and `task lint` all point at. Kept at lint/, not the
-      repo-root `.yamllint` the library documents, so ansible-lint cannot
-      discover it and replace its yaml rule.
-    reconciled_sha256: 7fcb8f02aadf68b97cd334a69a889c8cd87ac4796927c086bf77702a247ae2d5
+    reconciled_sha256: 778c939138d015867a1d0e42846994bd03a127c1ded1616eee7136b7e2ecfc75
   - lib: lint/gitattributes
     consumer: .gitattributes
     reason: >-

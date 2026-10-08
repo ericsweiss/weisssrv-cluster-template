@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Pure-logic helpers for collect-state.sh: secret redaction, the tri-state
-# health classifiers, the section emitters. Functions and patterns only, so
-# collect-state.sh and scripts/test_collect_state_lib.py can both source it.
+# Pure-logic helpers a consumer's collect-state.sh sources: secret redaction,
+# the tri-state health classifiers, the section emitters. Functions and patterns
+# only. Contract: weisssrv-lib docs/SCRIPTS.md - collect-state-lib.sh.
 
 # secret redaction
 

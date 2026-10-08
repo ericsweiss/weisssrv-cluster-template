@@ -1,33 +1,19 @@
 #!/usr/bin/env python3
 """Keep exactly one open bot MR in sync with the working tree's version bumps.
 
-Run after a consumer-supplied command has rewritten the repo's version pins
-(scheduled pipeline). Three outcomes, all idempotent:
-
-  bumps present, branch content changed -> force-push the bot branch, then
-                                           create the MR or refresh the open one
-  bumps present, branch content identical -> nothing (no push, no MR churn, so a
-                                           weekly run does not re-notify)
-  no bumps, an open bot MR exists        -> close it
-
-It NEVER merges. Untracked files (report artifacts a check command drops) are
-ignored, so only tracked pins are committed.
-
-Stdlib only: `git` for the branch, urllib for the MR API. The decision helpers
-(`changed_paths`, `select_open_mr`, `build_description`) and `GitLabClient` (which
-takes an injectable transport) are unit-tested without a repo or a server.
-
-Usage (see ci/maintenance/version-bump-bot.yml):
-  version-bump-mr.py --title "chore(deps): version bumps" --paths "ansible/ kubernetes/"
+Idempotent and never merges. Stdlib only. Outcomes, staging rules and usage:
+docs/SCRIPTS.md - version-bump-mr.py.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,16 +21,10 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 
 def changed_paths(porcelain: str, include_untracked: bool = False) -> List[str]:
-    """Tracked paths modified in `git status --porcelain -z` output (renames -> new path).
+    """Tracked paths from `git status --porcelain -z` output (renames -> the new path).
 
-    `-z` (not the default line format) because these paths are STAGED, not just
-    displayed: the default format C-quotes any path holding non-ASCII, a quote, a
-    backslash or a control character (`"ansible/r\\303\\264le/main.yml"`), and a
-    parser that only strips the quotes hands `git add` an undecoded literal that
-    matches nothing — rc 128, mid-run, on a repo that is otherwise fine. `-z`
-    emits the raw bytes NUL-terminated and never quotes, so no decoding step can
-    be wrong. A rename record is two fields, `<new>\\0<old>\\0` (`-z` drops the
-    `->` and reverses the pair), so the second one is consumed, not parsed.
+    `-z` because these paths are handed to `git add`: the default format C-quotes
+    non-ASCII, and a rename record's trailing old-path field is consumed.
     """
     fields = [field for field in porcelain.split("\0") if field]
     paths = []
@@ -78,13 +58,9 @@ def select_open_mr(
 
 
 def neutralize_quick_actions(text: str) -> str:
-    """Indent lines that start with `/` so GitLab cannot read them as commands.
+    """Indent lines starting with `/` so GitLab cannot read them as quick actions.
 
-    The report is third-party text (upstream version names, registry error
-    bodies) embedded in a description the bot POSTs. GitLab executes a quick
-    action only on a line whose FIRST character is `/`, and only outside a code
-    fence — so this is the second layer behind `fence_for`: even if a fence is
-    ever broken, `/merge` in a report stays inert text.
+    Second layer behind fence_for, for third-party text in the bot's description.
     """
     return "\n".join(" " + line if line.startswith("/") else line for line in text.splitlines())
 
@@ -191,12 +167,18 @@ def redact(text: str) -> str:
     return text
 
 
-def git(args: Sequence[str], repo_dir: str = ".", check: bool = True) -> str:
+def git(
+    args: Sequence[str],
+    repo_dir: str = ".",
+    check: bool = True,
+    env: Optional[Dict[str, str]] = None,
+) -> str:
     result = subprocess.run(
         ["git", "-C", repo_dir] + list(args),
         check=check,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
         # surrogateescape: porcelain -z streams raw path bytes; a non-UTF-8
         # filename must round-trip to the staging pathspec, not raise.
         encoding="utf-8",
@@ -205,10 +187,40 @@ def git(args: Sequence[str], repo_dir: str = ".", check: bool = True) -> str:
     return result.stdout
 
 
-def push_branch(repo_dir: str, branch: str, remote_url: str) -> None:
+@contextlib.contextmanager
+def askpass_env(secret: str):
+    """Env feeding `secret` to git as the password, keeping it out of argv.
+
+    A credential in the push URL is readable in the runner's process table;
+    GIT_ASKPASS is not. Yields None when there is no secret.
+    """
+    if not secret:
+        yield None
+        return
+    handle, path = tempfile.mkstemp(prefix="git-askpass-")
+    os.write(handle, b'#!/bin/sh\nprintf \'%s\' "$GIT_BOT_SECRET"\n')
+    os.close(handle)
+    os.chmod(path, 0o700)
+    try:
+        yield {
+            **os.environ,
+            "GIT_ASKPASS": path,
+            "GIT_BOT_SECRET": secret,
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def push_branch(
+    repo_dir: str, branch: str, remote_url: str, env: Optional[Dict[str, str]] = None
+) -> None:
     """Force-push the current commit as `branch` — the branch is always a fresh
     re-base on the target, so its history is disposable by design."""
-    git(["push", "--force", "--quiet", remote_url, "HEAD:refs/heads/%s" % branch], repo_dir)
+    git(["push", "--force", "--quiet", remote_url, "HEAD:refs/heads/%s" % branch], repo_dir, env=env)
 
 
 class GitRemoteError(RuntimeError):
@@ -220,17 +232,18 @@ class GitRemoteError(RuntimeError):
 _MISSING_REF_MARKER = "couldn't find remote ref"
 
 
-def remote_tree(repo_dir: str, branch: str, remote_url: str) -> str:
-    """Tree hash of the remote bot branch, or "" when it does not exist.
+def remote_tree(
+    repo_dir: str, branch: str, remote_url: str, env: Optional[Dict[str, str]] = None
+) -> str:
+    """Tree hash of the remote bot branch, or "" when the ref is absent.
 
-    Only an absent ref returns "": degrading a transient fetch failure into
-    "branch does not exist" would force-push a freshly-timestamped commit and
-    re-notify the MR on every blip, which is exactly the churn this bot avoids.
+    Any other fetch failure raises: a blip must not read as "no branch".
     """
     fetched = subprocess.run(
         ["git", "-C", repo_dir, "fetch", "--quiet", remote_url, "refs/heads/%s" % branch],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
         universal_newlines=True,
     )
     if fetched.returncode != 0:
@@ -312,32 +325,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("--dry-run: would push %s and open/refresh the MR.\n\n%s" % (args.branch, description))
         return 0
 
-    remote_url = args.remote_url or "https://gitlab-ci-token:%s@%s/%s.git" % (
-        token,
-        os.environ.get("CI_SERVER_HOST", ""),
-        os.environ.get("CI_PROJECT_PATH", ""),
-    )
+    # The default URL carries the username only; the token reaches git through
+    # askpass_env below. A --remote-url is used verbatim (the escape hatch), so
+    # any credential in it is registered for redaction.
+    push_secret = ""
+    if args.remote_url:
+        remote_url = args.remote_url
+        parsed = urllib.parse.urlsplit(remote_url)
+        _SECRETS.extend(
+            part for part in (parsed.password, parsed.username)
+            if part and part != "gitlab-ci-token"
+        )
+    else:
+        remote_url = "https://gitlab-ci-token@%s/%s.git" % (
+            os.environ.get("CI_SERVER_HOST", ""),
+            os.environ.get("CI_PROJECT_PATH", ""),
+        )
+        push_secret = token
     git(["config", "user.name", args.git_user_name], repo)
     git(["config", "user.email", args.git_user_email], repo)
     git(["checkout", "-B", args.branch], repo)
-    # Stage the DETECTED paths, not the raw --paths pathspecs: `git add` exits
-    # 128 on a pathspec matching no tracked file. --update keeps it to tracked
-    # modifications/deletions, so generated report artifacts stay out of the
-    # commit. `:(top)` anchors each pathspec to the repo root — the base
-    # `git status --porcelain` answers in — so a --repo-dir pointing at a
-    # subdirectory still matches.
-    git(["add", "--update", "--"] + [":(top)" + path for path in changed], repo)
-    git(["commit", "--quiet", "-m", args.commit_message], repo)
+    # Stage the DETECTED paths: `git add` exits 128 on a pathspec matching no
+    # tracked file. --update keeps report artifacts out; `:(top)` anchors each
+    # pathspec to the repo root that `git status` answers in.
+    pathspecs = [":(top)" + path for path in changed]
+    git(["add", "--update", "--"] + pathspecs, repo)
+    # Pathspec commit: the tree is HEAD plus these paths' worktree content, so
+    # anything a consumer command staged outside --paths stays out.
+    git(["commit", "--quiet", "-m", args.commit_message, "--"] + pathspecs, repo)
 
-    branch_is_current = (
-        remote_tree(repo, args.branch, remote_url) == git(["rev-parse", "HEAD^{tree}"], repo).strip()
-    )
-    if branch_is_current and open_mr:
-        print("Bot branch already carries these exact bumps — leaving it (and the MR) untouched.")
-        return 0
-    if not branch_is_current:
-        # An identical branch with no open MR still needs the MR (re)opened below.
-        push_branch(repo, args.branch, remote_url)
+    with askpass_env(push_secret) as git_env:
+        branch_is_current = (
+            remote_tree(repo, args.branch, remote_url, git_env)
+            == git(["rev-parse", "HEAD^{tree}"], repo).strip()
+        )
+        if branch_is_current and open_mr:
+            print("Bot branch already carries these exact bumps — leaving it (and the MR) untouched.")
+            return 0
+        if not branch_is_current:
+            # An identical branch with no open MR still needs the MR (re)opened below.
+            push_branch(repo, args.branch, remote_url, git_env)
 
     if open_mr:
         print("Refreshing bot MR !%s." % open_mr["iid"])

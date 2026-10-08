@@ -299,12 +299,12 @@ def test_an_unparseable_cluster_config_exits_2_naming_the_file(repo: Path, capsy
     assert "cluster-config.yaml" in capsys.readouterr().err
 
 
-def test_a_cluster_config_that_is_not_a_mapping_exits_2(repo: Path, capsys) -> None:
+def test_a_cluster_config_carrying_no_data_map_exits_2(repo: Path, capsys) -> None:
     write(repo, gate.CLUSTER_CONFIG, "- not: a mapping\n")
     with pytest.raises(gate.Vacuous):
         gate.check(repo)
     assert gate.main(["--repo-root", str(repo)]) == 2
-    assert "not a mapping" in capsys.readouterr().err
+    assert "no data keys" in capsys.readouterr().err
 
 
 K3S_HOSTS = textwrap.dedent(

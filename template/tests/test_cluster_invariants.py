@@ -1,17 +1,21 @@
 """Layout invariants this cluster keeps, in PyYAML alone: site values stay out
-of the manifests and agree with the inventory, addresses and vmids are unique,
+of the manifests and agree with the inventory, the Proxmox HA triad is one node,
 and every playbook is classified for deploy coverage. See docs/ci-pipeline.md."""
 
 from __future__ import annotations
 
-import ipaddress
 import re
 from pathlib import Path
 
 import pytest
 import yaml
 from conftest import REPO as REPO_ROOT
-from conftest import CONFIGMAP_INVENTORY_MIRROR, assert_all_parsed, k8s_documents
+from conftest import (
+    CONFIGMAP_INVENTORY_MIRROR,
+    assert_all_parsed,
+    k8s_documents,
+    load_script,
+)
 
 K8S_ROOT = REPO_ROOT / "kubernetes"
 SOURCES_DIR = K8S_ROOT / "infrastructure" / "sources"
@@ -780,125 +784,12 @@ def _inventory_hosts() -> dict[str, dict]:
     return hosts
 
 
-def _duplicate_report(hosts: dict[str, dict], field: str) -> tuple[list[str], int]:
-    """(clash reports, how many hosts declare `field`). The count comes back so a
-    caller can refuse a vacuous pass: a field nothing declares yields no clashes
-    for the same reason a correct inventory does."""
-    owners: dict[str, list[str]] = {}
-    for name, host_vars in sorted(hosts.items()):
-        value = host_vars.get(field)
-        if value is not None:
-            owners.setdefault(str(value), []).append(name)
-    clashes = [
-        f"{field} {value} is claimed by {', '.join(names)}"
-        for value, names in sorted(owners.items())
-        if len(names) > 1
-    ]
-    return clashes, sum(len(names) for names in owners.values())
-
-
-def _duplicates(field: str) -> tuple[list[str], int]:
-    return _duplicate_report(_inventory_hosts(), field)
-
-
 @needs_inventory
 def test_inventory_declares_hosts():
-    """The three tests below are vacuously true on an empty inventory."""
+    """The HA-triad arm below is vacuously true on an empty inventory. Duplicate
+    vmids and addresses, a host on a VIP and a host outside cluster_lan_cidr are
+    `task lint:cluster-invariants`."""
     assert _inventory_hosts(), f"{INVENTORY_HOSTS} declares no hosts"
-
-
-@needs_inventory
-def test_every_vmid_is_unique():
-    """vmids are unique: `pct` and `qm` share one namespace, and a resolver's
-    vmid follows its address, so re-addressing one can collide with a k3s
-    server and make the reconcile path adopt the wrong guest."""
-    clashes, declaring = _duplicates("vmid")
-    assert declaring, (
-        "no inventory host declares a vmid, so nothing was compared — a cluster "
-        "keeping vmids in host_vars has this check inspecting nothing."
-    )
-    assert not clashes, "duplicate vmids in the inventory:\n  " + "\n  ".join(clashes)
-
-
-@needs_inventory
-def test_every_ansible_host_is_unique():
-    clashes, declaring = _duplicates("ansible_host")
-    assert declaring, (
-        "no inventory host declares ansible_host, so nothing was compared — the "
-        "inventory addresses hosts some other way and this check is inert."
-    )
-    assert not clashes, (
-        "two hosts configured on one address:\n  "
-        + "\n  ".join(clashes)
-        + "\nWhichever is provisioned second takes the address."
-    )
-
-
-def test_a_field_no_host_declares_is_not_a_clean_run():
-    """Mutation case for the floor above: an undeclared field must report zero
-    declaring hosts, not an empty clash list that reads as a pass."""
-    hosts = {"alpha": {"vmid": 101}, "beta": {"vmid": 101}, "gamma": {}}
-    clashes, declaring = _duplicate_report(hosts, "vmid")
-    assert declaring == 2 and len(clashes) == 1
-    assert _duplicate_report(hosts, "no_such_field") == ([], 0)
-
-
-@needs_inventory
-def test_no_host_claims_a_cluster_vip():
-    """No inventory host takes a VIP address. kube-vip and MetalLB answer ARP
-    for the VIPs, so a guest on the same address is an ARP fight that surfaces
-    as an intermittent API or ingress endpoint."""
-    if "cluster-config" not in CONFIGMAPS:
-        pytest.skip("no cluster-config ConfigMap to read the VIPs from")
-    data = CONFIGMAPS["cluster-config"][1]
-    # Every *_vip key, so a VIP added to the ConfigMap is covered here.
-    claimed = {
-        str(value): key
-        for key, value in data.items()
-        if key.endswith("_vip") and str(value) and IPV4_RE.match(str(value))
-    }
-    assert claimed, "cluster-config declares no VIPs — this gate is examining nothing"
-    collisions = [
-        f"{name} is on {addr}, {claimed[addr]}"
-        for name, host_vars in sorted(_inventory_hosts().items())
-        if (addr := str(host_vars.get("ansible_host") or "")) in claimed
-    ]
-    assert not collisions, (
-        "inventory hosts configured on a cluster VIP:\n  " + "\n  ".join(collisions)
-    )
-
-
-@needs_inventory
-def test_every_ansible_host_is_inside_the_lan():
-    """Guests are created on the flat LAN and route through its gateway; an
-    address outside it is unreachable from everything that manages it."""
-    if "cluster-config" not in CONFIGMAPS:
-        pytest.skip("no cluster-config ConfigMap to read cluster_lan_cidr from")
-    cidr = CONFIGMAPS["cluster-config"][1].get("cluster_lan_cidr")
-    if not cidr:
-        pytest.skip("cluster-config declares no cluster_lan_cidr")
-    network = ipaddress.ip_network(cidr, strict=False)
-    outside: list[str] = []
-    compared = 0
-    for name, host_vars in sorted(_inventory_hosts().items()):
-        addr = host_vars.get("ansible_host")
-        if addr is None:
-            continue
-        try:
-            address = ipaddress.ip_address(str(addr))
-        except ValueError:
-            continue  # a name rather than an address; DNS resolves it
-        compared += 1
-        if address not in network:
-            outside.append(f"{name}: {addr}")
-    assert compared, (
-        f"no inventory host parsed as an IP address, so none was compared against "
-        f"cluster_lan_cidr ({network}). A cluster that addresses every host by DNS "
-        "name has nothing for this gate to check — drop it rather than keep it green."
-    )
-    assert not outside, (
-        f"hosts addressed outside cluster_lan_cidr ({network}):\n  " + "\n  ".join(outside)
-    )
 
 
 # Proxmox HA: the guest's host, the affinity rule's home and the replication
@@ -1058,23 +949,14 @@ def test_every_taskfile_playbook_exists():
     )
 
 
-class _CILoader(yaml.SafeLoader):
-    """SafeLoader that tolerates GitLab's `!reference` tags.
-
-    Subclassed so the constructor never lands on the global SafeLoader.
-    """
-
-
-_CILoader.add_multi_constructor("!", lambda loader, suffix, node: None)
-
-
 def _deploy_job_playbooks() -> set[str]:
     """Playbook paths named verbatim in a deploy job's `changes:` list.
 
     Same rule as check-deploy-coverage.sh: a wildcard confers no coverage, so a
     single `ansible/playbooks/**` cannot mask a missing trigger.
     """
-    ci = yaml.load(CI_FILE.read_text(encoding="utf-8"), Loader=_CILoader) or {}
+    ci_yaml = load_script("ci_yaml.py")
+    ci = ci_yaml.load_ci(CI_FILE, loader=ci_yaml.NullTagCILoader) or {}
     prefix = "ansible/playbooks/"
     mapped: set[str] = set()
     for name, job in ci.items():

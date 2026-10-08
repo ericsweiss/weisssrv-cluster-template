@@ -17,30 +17,49 @@ exclude:
   - lint/yamllint-relaxed.yml
   - ruff.toml
   - scripts/check-backup-artifact-apps.py
+  - scripts/check-cluster-invariants.py
   - scripts/check-comment-length.py
+  - scripts/check-dashboards.py
   - scripts/check-default-deny-coverage.py
   - scripts/check-deploy-coverage.sh
   - scripts/check-doc-links.py
+  - scripts/check-helm-repo-parity.py
+  - scripts/check-flux-version-pin.py
   - scripts/check-hpa-vpa-invariant.py
   - scripts/check-lib-pins.py
   - scripts/check-netpol-except-parity.py
+  - scripts/check-nfs-tls.py
   - scripts/check-pvc-storageclass.py
+  - scripts/check-role-inputs.py
   - scripts/check-scrape-netpol.py
+  - scripts/check-secret-rotation-coverage.py
   - scripts/check-secretstore-scope.py
   - scripts/check-taskfile.sh
+  - scripts/check-version-checksums.py
   - scripts/check-versions.py
+  - scripts/ci-fetch-tools.py
+  - scripts/ci_playbook_invocations.py
+  - scripts/ci_yaml.py
+  - scripts/cluster-config-value.sh
+  - scripts/collect-state-lib.sh
+  - scripts/deploy-verify-lib.sh
   - scripts/extract-prometheus-config.py
   - scripts/find-reachable-host.sh
+  - scripts/flux-child-kustomizations.py
   - scripts/flux-env.sh
   - scripts/flux-render.sh
+  - scripts/gate_common.py
   - scripts/generate-hosts-env.py
   - scripts/generate-versions-configmap.py
+  - scripts/inventory_tree.py
   - scripts/kubeconform-skipped.py
   - scripts/lint-prometheus-config.sh
+  - scripts/maintenance-run-with-verify.sh
   - scripts/molecule-retry.sh
   - scripts/resolve-tool.sh
   - scripts/sanitize-junit-expected-failures.py
   - scripts/semantic-release.py
   - scripts/shell-lib.sh
+  - scripts/supervised-apply-guard.sh
   - scripts/validate-helm-values.py
   - scripts/version-bump-mr.py

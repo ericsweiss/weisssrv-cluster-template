@@ -1,20 +1,8 @@
 #!/usr/bin/env python3
 """Assert the backup-artifact app list and its alert arms stay paired.
 
-The collector's app list is site data (`nas_storage_backup_artifact_apps`); the
-matching `absent(backup_artifact_last_mtime_seconds{app="..."})` arms are
-hand-enumerated in the BackupArtifactStale rule. They live in different
-lifecycles (Ansible deploy vs Flux reconcile) and both directions fail silently:
-an app with no absent() arm emits NO series when its landing dir is never
-created, so the freshness arm has nothing to fire on; an arm left behind fires
-forever. `companions:` and BackupArtifactCompanionMissing are the same pairing —
-a companion rule with no declaring app reads as active DR coverage that can
-never fire.
-
-Both file paths are site data and come from flags. Exit 0 when the sets match,
-1 otherwise.
-
-  check-backup-artifact-apps.py --host-vars FILE --rules FILE
+The collector's app list is site data and the matching absent() arms are
+hand-enumerated in the alert rules. Contract: docs/SCRIPTS.md.
 """
 
 from __future__ import annotations
@@ -24,7 +12,11 @@ import re
 import sys
 from pathlib import Path
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
+    raise SystemExit(2) from None
 
 ALERT = "BackupArtifactStale"
 COMPANION_ALERT = "BackupArtifactCompanionMissing"
@@ -74,15 +66,13 @@ def alert_exists(rules_text: str, alert: str) -> bool:
 def alert_arm_apps(rules_text: str) -> set[str]:
     """The app labels named by BackupArtifactStale's absent() arms.
 
-    Read as text rather than through the YAML tree: the rule lives inside a
-    HelmRelease `values:` blob whose PrometheusRule groups are several levels
-    deep and carry Go-template `{{ $labels }}` strings, so a structural walk
-    buys nothing over scoping to the alert's own block.
+    Read as text, because the rule sits inside a HelmRelease `values:` blob
+    carrying Go templates. Raises LookupError when the alert is absent.
     """
     lines = rules_text.splitlines()
     start = _alert_start(lines, ALERT)
     if start is None:
-        raise SystemExit(f"ERROR: no `alert: {ALERT}` rule found in the rules file")
+        raise LookupError(f"no `alert: {ALERT}` rule found in the rules file")
     # The expr block ends at the alert's `for:` key — or at the NEXT alert
     # declaration, since `for:` is optional and its absence must not let a
     # later alert's arms satisfy this one.
@@ -104,23 +94,18 @@ def check_companions(
     if have_alert and not declared:
         problems.append(
             f"{COMPANION_ALERT} is defined but no app in "
-            f"nas_storage_backup_artifact_apps declares `companions:`. The "
-            f"collector emits backup_artifact_companion_* only per declared "
-            f"companion, so the rule has zero series to match and can NEVER "
-            f"fire — it reads as active restore-dependency coverage and is "
-            f"not.\n"
-            f"    Fix: declare the companion(s) in {host_vars} "
-            f"(e.g. gitlab-secrets.json on the gitlab entry), or delete the "
+            f"nas_storage_backup_artifact_apps declares `companions:`, so the "
+            f"rule has no series and can never fire.\n"
+            f"    Fix: declare the companion(s) in {host_vars}, or delete the "
             f"rule from {rules}."
         )
     if declared and not have_alert:
         named = ", ".join(f"{a} ({', '.join(g)})" for a, g in sorted(declared.items()))
         problems.append(
-            f"apps declare `companions:` but {COMPANION_ALERT} does not exist: "
-            f"{named}. The collector emits the series and nothing alerts on "
-            f"them, so a missing restore dependency is silent.\n"
-            f"    Fix: restore the rule in {rules}, or drop "
-            f"the `companions:` keys."
+            f"apps declare `companions:` but {COMPANION_ALERT} does not "
+            f"exist, so a missing restore dependency is silent: {named}.\n"
+            f"    Fix: restore the rule in {rules}, or drop the `companions:` "
+            f"keys."
         )
     return problems
 
@@ -138,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
         "--rules", type=Path, required=True,
         help=f"manifest defining the {ALERT} rule",
     )
+    parser.add_argument(
+        "--allow-empty", action="store_true",
+        help="a consumer that collects no backup artefacts passes with nothing paired",
+    )
     args = parser.parse_args(argv)
 
     for path in (args.host_vars, args.rules):
@@ -148,13 +137,44 @@ def main(argv: list[str] | None = None) -> int:
     host_vars_text = args.host_vars.read_text()
     rules_text = args.rules.read_text()
     collector = collector_apps(host_vars_text)
-    arms = alert_arm_apps(rules_text)
+    stale_alert_present = True
+    try:
+        arms = alert_arm_apps(rules_text)
+    except LookupError as exc:
+        # A consumer collecting no artefacts has no such alert by definition.
+        if not args.allow_empty:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        arms = set()
+        stale_alert_present = False
     companion_problems = check_companions(host_vars_text, rules_text, args.host_vars, args.rules)
+
+    if not collector and not arms:
+        if not args.allow_empty:
+            print(
+                f"ERROR: no app in {args.host_vars} declares "
+                f"nas_storage_backup_artifact_apps and {ALERT} has no absent() arm — "
+                f"the gate paired nothing; pass --allow-empty if this consumer "
+                f"collects no backup artefacts",
+                file=sys.stderr,
+            )
+            return 2
+        if stale_alert_present:
+            print(
+                f"ERROR: {ALERT} exists in {args.rules} but has no absent() arm, so "
+                f"it guards nothing; --allow-empty covers a consumer with no backup "
+                f"artefacts, which ships no such rule at all.\n"
+                f"    Fix: delete the rule, or declare the app(s) it must guard in "
+                f"{args.host_vars} and add the matching arm(s)",
+                file=sys.stderr,
+            )
+            return 2
 
     if collector == arms and not companion_problems:
         declared = collector_companions(host_vars_text)
+        empty_note = " (--allow-empty)" if not collector else ""
         print(
-            f"backup-artifact apps in sync: {len(collector)} app(s) "
+            f"backup-artifact apps in sync{empty_note}: {len(collector)} app(s) "
             f"({', '.join(sorted(collector))}); "
             f"{sum(len(v) for v in declared.values())} companion(s) declared "
             f"across {len(declared)} app(s)"

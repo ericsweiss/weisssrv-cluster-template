@@ -13,9 +13,9 @@ useDefault = true
 description = "weisssrv-cluster-template false positives"
 regexes = [
   # 1Password reference URIs — not secrets, just pointers to vault items.
-  '''op://[A-Za-z0-9_ /-]+''',
+  '''^op://[A-Za-z0-9_ /-]+''',
   # Documentation placeholders like [your-cloudflare-api-token].
-  '''\[your-[a-z0-9-]+\]''',
+  '''^\[your-[a-z0-9-]+\]''',
   # Documentation placeholders written as <angle-bracket> tokens. Anchored to
   # the whole token, so a real secret containing <word> is still reported.
   '''^<[a-z][a-z0-9_-]*>$''',

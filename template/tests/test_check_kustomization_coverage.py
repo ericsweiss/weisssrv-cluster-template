@@ -96,6 +96,24 @@ def test_an_exemption_naming_a_vanished_file_is_reported(tree: Path, monkeypatch
     assert any("gone.yaml" in p for p in gate.check(tree))
 
 
+def test_an_emptied_kustomization_is_reported(tree: Path) -> None:
+    """Mutation case: an emptied list prunes every object the file applied."""
+    write(tree.parent, "kubernetes/apps/demo/kustomization.yaml", "resources: []\n")
+    assert any("renders nothing" in p for p in gate.check(tree))
+    assert gate.main([str(tree)]) == 1
+
+
+def test_a_component_carrying_only_patches_is_not_contentless(tree: Path) -> None:
+    """A Component legally names no resources, so `patches` alone is content."""
+    write(tree.parent, "kubernetes/apps/demo/patch.yaml", "kind: Deployment\n")
+    write(
+        tree.parent,
+        "kubernetes/apps/demo/kustomization.yaml",
+        "kind: Component\npatches:\n  - path: patch.yaml\n",
+    )
+    assert gate.contentless(tree) == []
+
+
 def test_a_broken_walk_exits_2(tmp_path: Path, capsys) -> None:
     """A moved or emptied tree must not report clean having inspected nothing."""
     (tmp_path / "kubernetes").mkdir()

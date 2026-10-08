@@ -1,91 +1,127 @@
 #!/usr/bin/env python3
 """Assert every ClusterSecretStore is namespace-scoped and covers its consumers.
 
-A ClusterSecretStore with no `spec.conditions` is referenceable from EVERY
-namespace: any principal that can create an ExternalSecret anywhere can mint any
-item in the backing vault. Both directions are checked — every store declares
-conditions, and every ExternalSecret (plus every namespace a
-ClusterExternalSecret fans out to) sits in a namespace those conditions admit.
-Matching mirrors ESO: any condition matching admits, via exact `namespaces`,
-`namespaceRegexes`, or `namespaceSelector`; a fan-out is the UNION of
-`namespaceSelectors` and literal `namespaces`.
-
-A store REFERENCED but not defined in the corpus is a violation (the
-ExternalSecret never syncs and its Secret goes stale); one that genuinely lives
-outside the linted tree is declared with `--external-store NAME`. Exit 0 clean,
-1 on a finding, 2 on an operator error including a vacuous corpus.
-
-Usage (wired into flux:lint, on the accumulated full corpus):
-  kustomize build <path> | envsubst >> corpus
-  python3 scripts/check-secretstore-scope.py [--external-store NAME] < corpus
+Reads the rendered corpus on stdin, stores outside the tree via
+--external-store; exits 0 clean, 1 finding, 2 error. Contract: docs/SCRIPTS.md.
 """
 from __future__ import annotations
 
 import argparse
 import re
 import sys
+import uuid
+from pathlib import Path
+
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 try:
-    import yaml
+    from gate_common import (  # noqa: E402  (resolved from this script's own directory)
+        load_corpus,
+        selects_all_pods,
+    )
 except ImportError:
-    sys.exit("PyYAML required: pip install pyyaml")
+    print(
+        "ERROR: gate_common.py must be vendored beside this gate "
+        "(see scripts/vendorable-paths.yml)", file=sys.stderr,
+    )
+    raise SystemExit(2) from None
 
 CLUSTER_STORE_KIND = "ClusterSecretStore"
+_EXPRESSION_KEYS = {"key", "operator", "values"}
+_SET_OPERATORS = {"In", "NotIn"}
+_EXISTENCE_OPERATORS = {"Exists", "DoesNotExist"}
 
 
-def _selector_matches(selector: dict, labels: dict) -> bool:
-    """Kubernetes labelSelector semantics (matchLabels + matchExpressions, ANDed)."""
-    if selector is None:
+def _selector_matches(selector: object, labels: dict) -> bool:
+    """Kubernetes labelSelector semantics (matchLabels + matchExpressions, ANDed).
+
+    A term the apiserver would reject never matches: crediting it would admit a
+    namespace ESO itself refuses, leaving the Secret stale while the gate passes.
+    """
+    if not isinstance(selector, dict):
         return False
-    for key, value in (selector.get("matchLabels") or {}).items():
+    match_labels = selector.get("matchLabels")
+    if match_labels is not None and not isinstance(match_labels, dict):
+        return False
+    for key, value in (match_labels or {}).items():
         if labels.get(key) != value:
             return False
-    for expr in selector.get("matchExpressions") or []:
+    exprs = selector.get("matchExpressions")
+    if exprs is not None and not isinstance(exprs, list):
+        return False
+    for expr in exprs or []:
+        if not isinstance(expr, dict) or set(expr) - _EXPRESSION_KEYS:
+            return False
         key = expr.get("key")
         op = expr.get("operator")
-        values = expr.get("values") or []
+        values = expr.get("values")
         present = key in labels
-        if op == "In" and labels.get(key) not in values:
-            return False
-        if op == "NotIn" and labels.get(key) in values:
-            return False
-        if op == "Exists" and not present:
-            return False
-        if op == "DoesNotExist" and present:
+        if op in _SET_OPERATORS:
+            if not isinstance(values, list) or not values:
+                return False
+            if op == "In" and labels.get(key) not in values:
+                return False
+            if op == "NotIn" and labels.get(key) in values:
+                return False
+        elif op in _EXISTENCE_OPERATORS:
+            if op == "Exists" and not present:
+                return False
+            if op == "DoesNotExist" and present:
+                return False
+        else:
             return False
     return True
 
 
-def _condition_admits(condition: dict, namespace: str, labels: dict) -> bool:
+def _condition_admits(
+    condition: object,
+    namespace: str,
+    labels: dict,
+    bad_patterns: list[tuple[str, re.error]] | None = None,
+) -> bool:
+    if not isinstance(condition, dict):
+        return False
     if namespace in (condition.get("namespaces") or []):
         return True
     for pattern in condition.get("namespaceRegexes") or []:
-        if re.search(pattern, namespace):
-            return True
+        try:
+            if re.search(str(pattern), namespace):
+                return True
+        except re.error as exc:
+            if bad_patterns is not None:
+                bad_patterns.append((str(pattern), exc))
+            continue
     selector = condition.get("namespaceSelector")
     if selector is not None and _selector_matches(selector, labels):
         return True
     return False
 
 
-class CorpusError(RuntimeError):
-    """Unparseable input — an operator error (exit 2), not a violation (exit 1)."""
+def _condition_is_universal(
+    condition: object,
+    bad_patterns: list[tuple[str, re.error]] | None = None,
+) -> bool:
+    """True when one condition admits every namespace, so the store is unscoped.
 
-
-def _load(stream) -> list[dict]:
-    docs: list[dict] = []
-    try:
-        for raw in yaml.safe_load_all(stream):
-            if isinstance(raw, dict):
-                if raw.get("kind") == "List" and isinstance(raw.get("items"), list):
-                    docs.extend(i for i in raw["items"] if isinstance(i, dict))
-                else:
-                    docs.append(raw)
-            elif isinstance(raw, list):
-                docs.extend(i for i in raw if isinstance(i, dict))
-    except yaml.YAMLError as exc:
-        raise CorpusError(f"Failed to parse YAML input: {exc}") from exc
-    return docs
+    An empty `namespaceSelector` matches everything; a catch-all regex is found
+    by probing two names no cluster would carry, an uncompilable one collected."""
+    if not isinstance(condition, dict):
+        return False
+    selector = condition.get("namespaceSelector")
+    if selector is not None and selects_all_pods(selector):
+        return True
+    probes = [f"probe-{uuid.uuid4().hex}" for _ in range(2)]
+    for pattern in condition.get("namespaceRegexes") or []:
+        try:
+            if all(re.search(str(pattern), probe) for probe in probes):
+                return True
+        except re.error as exc:
+            if bad_patterns is not None:
+                bad_patterns.append((str(pattern), exc))
+            continue
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -103,18 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     external = set(args.external_store)
 
-    try:
-        docs = _load(sys.stdin)
-    except CorpusError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
-    if not docs:
-        print(
-            "ERROR: empty corpus — no manifests on stdin. A gate that passes on nothing "
-            "is not a gate; check the pipe and the `kustomize build` paths feeding it.",
-            file=sys.stderr,
-        )
-        return 2
+    docs = load_corpus()
 
     ns_labels: dict[str, dict] = {}
     stores: dict[str, list] = {}
@@ -131,7 +156,8 @@ def main(argv: list[str] | None = None) -> int:
         if kind == "Namespace":
             ns_labels[name] = meta.get("labels") or {}
         elif kind == CLUSTER_STORE_KIND:
-            stores[name] = spec.get("conditions")
+            conditions = spec.get("conditions")
+            stores[name] = conditions if isinstance(conditions, list) else []
         elif kind == "ExternalSecret":
             ref = spec.get("secretStoreRef") or {}
             if ref.get("kind") == CLUSTER_STORE_KIND:
@@ -141,6 +167,9 @@ def main(argv: list[str] | None = None) -> int:
             cluster_external_secrets.append(doc)
 
     violations: list[str] = []
+    # (store, pattern, error) for every namespaceRegexes entry that will not
+    # compile: an operator error, not a scoping finding.
+    bad_patterns: list[tuple[str, str, re.error]] = []
 
     for name, conditions in sorted(stores.items()):
         if not conditions:
@@ -150,6 +179,20 @@ def main(argv: list[str] | None = None) -> int:
                 f"read the whole backing vault. Add conditions scoping it to the "
                 f"namespaces that legitimately consume it."
             )
+            continue
+        for index, condition in enumerate(conditions):
+            store_bad: list[tuple[str, re.error]] = []
+            universal = _condition_is_universal(condition, store_bad)
+            bad_patterns += [(name, pattern, exc) for pattern, exc in store_bad]
+            if universal:
+                violations.append(
+                    f"  ClusterSecretStore {name}: spec.conditions[{index}] admits "
+                    f"every namespace ({condition!r}), which is exactly as wide as no "
+                    f"conditions at all — any ExternalSecret in the cluster can read "
+                    f"the whole backing vault. Name the namespaces, or anchor the "
+                    f"regex to the ones that legitimately consume it."
+                )
+                break
 
     # A ClusterExternalSecret creates ExternalSecrets in every namespace its
     # selectors match, so those namespaces need the same admission.
@@ -161,19 +204,16 @@ def main(argv: list[str] | None = None) -> int:
             continue
         selectors = spec.get("namespaceSelectors")
         if selectors is None:
-            # ABSENT vs EMPTY: `namespaceSelector: {}` is a label selector with
-            # no terms, which matches EVERY namespace — the widest possible
-            # fan-out. Truthiness would collapse it to "selects nothing" and skip
-            # the one shape that most needs checking.
+            # Absent, not empty: `namespaceSelector: {}` is a selector with no
+            # terms, which matches EVERY namespace - the widest fan-out there is.
             single = spec.get("namespaceSelector")
             selectors = [] if single is None else [single]
         targets = {
             ns for ns, labels in ns_labels.items()
             if any(_selector_matches(sel, labels) for sel in selectors)
         }
-        # ESO UNIONS the selectors with the literal `spec.namespaces` list, and a
-        # CES written with the list alone matched no selector — so it used to
-        # contribute zero consumers and its fan-out was never checked at all.
+        # ESO unions the label selectors with the literal `spec.namespaces` list,
+        # so both must be counted as consumers.
         targets.update(str(ns) for ns in spec.get("namespaces") or [])
         for ns in sorted(targets):
             consumers.append(
@@ -194,7 +234,12 @@ def main(argv: list[str] | None = None) -> int:
         if not conditions:
             continue  # already reported as unscoped above
         labels = ns_labels.get(namespace, {})
-        if not any(_condition_admits(c, namespace, labels) for c in conditions):
+        store_bad = []
+        admitted = any(
+            _condition_admits(c, namespace, labels, store_bad) for c in conditions
+        )
+        bad_patterns += [(store, pattern, exc) for pattern, exc in store_bad]
+        if not admitted:
             violations.append(
                 f"  {description}: namespace {namespace!r} is not admitted by "
                 f"ClusterSecretStore {store}'s spec.conditions — ESO will refuse "
@@ -211,6 +256,15 @@ def main(argv: list[str] | None = None) -> int:
             f"--external-store {store} if it is genuinely managed elsewhere."
         )
 
+    if bad_patterns:
+        for store, pattern, exc in sorted(set((s, p, str(e)) for s, p, e in bad_patterns)):
+            print(
+                f"ERROR: ClusterSecretStore {store} declares a namespaceRegexes "
+                f"entry that does not compile: {pattern!r} ({exc})",
+                file=sys.stderr,
+            )
+        return 2
+
     if violations:
         print(
             "ClusterSecretStore scoping invariant violated:", file=sys.stderr
@@ -219,9 +273,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if not stores and not consumers:
-        # A non-empty corpus that holds neither is the likelier wiring failure:
-        # the render loop produced output but never reached the stage defining
-        # the stores, or the accumulator was stale/truncated.
+        # Documents rendered but neither a store nor a consumer found: the render
+        # never reached the stage defining the stores.
         print(
             f"ERROR: inspected 0 ClusterSecretStores and 0 namespace consumers in "
             f"{len(docs)} document(s) — a gate that checks nothing is not a gate. "
@@ -231,6 +284,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    referenced = {store for store, _ns, _description in consumers}
+    unused = sorted(name for name in external if name not in referenced)
+    if unused:
+        print(
+            f"(--external-store declared but not referenced by this corpus: "
+            f"{', '.join(unused)})"
+        )
     external_note = f", {len(external)} declared external" if external else ""
     print(
         f"ClusterSecretStore scoping OK ({len(stores)} cluster stores, "

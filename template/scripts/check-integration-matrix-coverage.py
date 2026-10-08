@@ -10,10 +10,22 @@ import argparse
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 try:
     import yaml
 except ImportError:  # pragma: no cover - environment guard
     print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
+    raise SystemExit(2) from None
+
+try:
+    from ci_yaml import load_ci  # noqa: E402
+except ImportError as exc:
+    print(
+        f"ERROR: {exc.name or 'the companion module'}.py must sit next to this "
+        "script — re-vendor it from weisssrv-lib.",
+        file=sys.stderr,
+    )
     raise SystemExit(2) from None
 
 REPO = Path(__file__).resolve().parent.parent
@@ -21,42 +33,6 @@ REPO = Path(__file__).resolve().parent.parent
 DEFAULT_CI_FILE = ".gitlab/ci/integration-jobs.yml"
 DEFAULT_INTEGRATION_DIR = "ansible/integration-tests"
 DEFAULT_INTEGRATION_JOB = "integration-tests"
-
-
-class CILoader(yaml.SafeLoader):
-    """SafeLoader tolerating GitLab's `!reference` tags.
-
-    Subclassed so the constructor is not registered on the global SafeLoader.
-    """
-
-
-def _tag_passthrough(loader, suffix, node):
-    # Keep the node's structure: a tagged node near the matrix collapsing to
-    # None would read as a missing entry.
-    if isinstance(node, yaml.ScalarNode):
-        return loader.construct_scalar(node)
-    if isinstance(node, yaml.SequenceNode):
-        return loader.construct_sequence(node)
-    if isinstance(node, yaml.MappingNode):
-        return loader.construct_mapping(node)
-    return None
-
-
-CILoader.add_multi_constructor("!", _tag_passthrough)
-
-
-def jobs_document(path: Path) -> dict:
-    """The last mapping document of a pipeline file.
-
-    GitLab's inputs syntax makes a pipeline file two documents, `spec:` then the
-    jobs, so the last mapping is the one this gate wants.
-    """
-    docs = [
-        doc
-        for doc in yaml.load_all(path.read_text(), Loader=CILoader)
-        if isinstance(doc, dict)
-    ]
-    return docs[-1] if docs else {}
 
 
 def matrix_tests(job: dict) -> set[str]:
@@ -109,7 +85,7 @@ def main() -> int:
 
     ci_file = _resolve(opts.ci_file)
     try:
-        ci = jobs_document(ci_file)
+        ci = load_ci(ci_file)
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         print(f"ERROR: cannot read {opts.ci_file}: {exc}", file=sys.stderr)
         return 2

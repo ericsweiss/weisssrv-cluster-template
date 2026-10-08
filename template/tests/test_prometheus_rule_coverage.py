@@ -59,6 +59,7 @@ UNTESTED_SHAPES_OWED = {
     "LokiRulerNotificationFailures",
     "LokiRulerRulesMissing",
     "OffsiteBackupVerifyStale",
+    "RegistryCacheDown",
     "SecretsProviderDown",
     "ZFSPoolDeviceErrors",
 }
@@ -74,13 +75,6 @@ UNTESTED_PLACEHOLDER_GATED = {
     "VzdumpBackupStale",
 }
 
-# The promtool corpus is extracted from the kube-prometheus-stack values, so a
-# rule shipping as its own PrometheusRule CR has nothing to load it: these
-# expressions are unparsed by promtool as well as untested.
-UNTESTED_NOT_EXTRACTED = {
-    "RegistryCacheDown",
-}
-
 # LogQL rule files the Loki ruler loads, not PrometheusRule CRs. promtool can
 # neither parse nor evaluate them, so coverage needs a logcli suite.
 UNTESTED_LOGQL = {
@@ -92,7 +86,6 @@ UNTESTED = (
     UNTESTED_BARE
     | UNTESTED_SHAPES_OWED
     | UNTESTED_PLACEHOLDER_GATED
-    | UNTESTED_NOT_EXTRACTED
     | UNTESTED_LOGQL
 )
 
@@ -208,7 +201,6 @@ def test_the_untested_groups_are_disjoint():
         "UNTESTED_BARE": UNTESTED_BARE,
         "UNTESTED_SHAPES_OWED": UNTESTED_SHAPES_OWED,
         "UNTESTED_PLACEHOLDER_GATED": UNTESTED_PLACEHOLDER_GATED,
-        "UNTESTED_NOT_EXTRACTED": UNTESTED_NOT_EXTRACTED,
         "UNTESTED_LOGQL": UNTESTED_LOGQL,
     }
     overlaps = [

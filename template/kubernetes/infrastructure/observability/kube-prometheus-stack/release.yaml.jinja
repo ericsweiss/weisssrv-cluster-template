@@ -1200,8 +1200,8 @@ spec:
                     normally auto-renews — investigate if it does not clear.
 
               # The host-side renewal's own gauges, read from the node-exporter
-              # textfile. At the pinned library a failed distribution target
-              # zeroes this bit too; v0.18.0 narrows it to the local certificate.
+              # textfile. The run bit covers the local certificate only; a dead
+              # distribution target is the per-target arm below.
               - alert: CertRenewalFailed
                 expr: cert_renewal_last_run_success == 0
                 for: 1h
@@ -1211,10 +1211,10 @@ spec:
                   runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#certificates'
                   summary: 'Host-side certificate renewal failed on {{ $labels.instance }}'
                   description: >-
-                    The renewal and local reload on {{ $labels.instance }} did
-                    not complete. A failed distribution target also zeroes this
-                    bit at the pinned library, so read the per-target gauges
-                    before assuming the local certificate is at fault.
+                    The renewal or the local reload on {{ $labels.instance }}
+                    failed. Distribution to the other hosts has its own gauges,
+                    so this is the local certificate: read the acme.sh log and
+                    the reload script's journal on that host.
 
               # A renewal pipeline broken for three days is an incident, not a
               # nudge: the expiry arms below are only the backstop, and weeks of
@@ -1228,10 +1228,10 @@ spec:
                   runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#certificates'
                   summary: 'Host-side certificate renewal has been failing for over 3 days'
                   description: >-
-                    Renewal on {{ $labels.instance }} has failed continuously for
-                    three days. The wildcard certificate still has margin, but
-                    nothing is renewing it — fix the pipeline before the expiry
-                    alerts are the only thing left.
+                    Local renewal on {{ $labels.instance }} has failed
+                    continuously for three days. The wildcard certificate still
+                    has margin, but nothing is renewing it. Fix the pipeline
+                    before the expiry alerts are the only thing left.
 
               # The run bit only moves when the renewal runs, so a dead cron
               # neither renews nor fails. 75d is past the ~60d issuance cycle,
@@ -1251,9 +1251,9 @@ spec:
                     renewal cron entry on that host and the reload script's
                     journal.
 
-              # Per-target gauge: a dead target is otherwise collapsed into the
-              # run-level bit and never named. The 25h hold spans the daily
-              # distribution check, which arrives with the v0.18.0 pin bump.
+              # Per-target gauge: the run-level bit stays 1 for a dead target,
+              # so this is the only arm that names one. The 25h hold spans the
+              # daily distribution check that refreshes the gauges.
               - alert: CertDistributionTargetFailed
                 expr: cert_distribution_target_last_run_success == 0
                 for: 25h
@@ -1458,7 +1458,7 @@ spec:
             rules:
               # Disabled upstream. for: 15m rides out a transient receiver
               # timeout; the inner `> 0` keeps a healthy gossip peer from flooring min().
-              # Taken from kube-prometheus-stack 91.3.0
+              # Taken from kube-prometheus-stack 92.0.0
               - alert: AlertmanagerClusterFailedToSendAlerts
                 expr: >-
                   min by (namespace, service, integration) (

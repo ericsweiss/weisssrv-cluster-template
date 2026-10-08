@@ -20,7 +20,7 @@ sources are unaffected — they fetch over https from `{{ lib_url }}`.
 
 | Stage | Jobs | Source |
 |---|---|---|
-| `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `docs-link-check`, `flux-lint`, `version-check` (library); `version-coverage`, `repo-sync`, `deploy-coverage`, `netpol-parity`, `kustomization-coverage`, `cluster-literals`, `prometheus-config-lint`, `terraform-tflint`, `integration-matrix-coverage`, `flux-version-pin` (this repo) | mixed |
+| `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `docs-link-check`, `comment-length`, `flux-lint`, `version-check` (library); `version-coverage`, `version-checksums`, `repo-sync`, `deploy-coverage`, `netpol-parity`, `kustomization-coverage`, `cluster-literals`, `prometheus-config-lint`, `terraform-tflint`, `integration-matrix-coverage`, `flux-version-pin`, `role-inputs` (this repo) | mixed |
 | `validate` | `terraform-validate` (library); `deploy-preflight`, `terraform-plan`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan`{% if use_unifi %}, `unifi-drift-plan`{% endif %} (this repo) | mixed |
 | `test` | `python-tests` (the cluster invariants in `tests/`, the suites beside the scripts in `scripts/`, the library-pin gate and the vendored-copy gate); `integration-tests` (the multi-role molecule stacks, `.gitlab/ci/integration-jobs.yml`) | mixed |
 | `security` | `secret_detection` | library |
@@ -70,10 +70,15 @@ resolve to one of their keys, and the substituted output is schema-validated
 with kubeconform.
 
 CR schemas come from the datreeio CRD catalog at one pinned revision.
-`taskfiles/flux.yml` holds it as `CRD_CATALOG_REF`, matched to the library
-`flux-lint` job's own default, so the pipeline and `task flux:lint` accept the
-same schema set. It moves with `WEISSSRV_LIB_REF`: a bump that changes the job's
-default needs the Taskfile var changed with it.
+`taskfiles/flux.yml` holds it as `CRD_CATALOG_REF` and the `flux-lint` include
+passes the same sha as `crd_catalog_ref`, so the pipeline and `task flux:lint`
+accept the same schema set. It moves with `WEISSSRV_LIB_REF`: a bump that
+changes the job's default needs both spellings changed with it.
+
+A kind that validates against no schema is a finding, not a note:
+`scripts/kubeconform-expected-skipped.txt` is the baseline of apiVersion/Kind
+pairs allowed to skip, and it ships empty. Add a line only for a kind the
+catalog genuinely lacks, with the reason.
 
 A placeholder that resolves to nothing is the failure this catches before
 merge. In the cluster, strict substitution fails the Kustomization's reconcile
@@ -236,8 +241,31 @@ re-asserts it.
 a renamed or deleted page fails here rather than in a reader's browser. It runs
 as `docs-link-check` in `lint` and as `task lint:doc-links` locally.
 
-A second arm that also resolves the repository paths the docs cite in backticks
-arrives with the next library release.
+`CHECK_DOC_LINKS_PATHS=1` turns on a second arm: a backticked token whose first
+segment is a real repository directory is resolved as a repository path.
+
+A path belonging to another repository must therefore carry that repository in
+the token, or lose its backticks. Write `<tenant-repo>/kubernetes/flux/`, or
+`github.com/org/repo/blob/<tag>/path` for an upstream project. Growing
+`CHECK_DOC_LINKS_IGNORE` is not the fix: that list is for paths this repository
+cites but does not ship, such as the forge-hosted Terraform state.
+
+### comment-length
+
+The comment house rule, enforced on every merge request: a comment block runs to
+three content lines, or eight when it opens `CRITICAL:`. `scripts/comment-length.yaml`
+carries the scan scope and the vendored copies the gate skips, because their
+comments belong to the library. It blocks, so a long block is trimmed or moved
+into a doc before the merge. `task lint:comment-length` is the same check.
+
+### role-inputs
+
+`scripts/check-role-inputs.py` reads the installed collection's roles against
+this inventory. It catches an opt-in role invoked with its flag set nowhere, and
+an asserted role input with no default and no assignment: both fail the role's
+opening assert on every host it touches, after the play has already started.
+`task lint:role-inputs` is the same check, against the collection
+`task ansible:lint` installs.
 
 ### version-coverage
 
@@ -247,6 +275,15 @@ never checked and never mentioned, so a pin with no upstream to check belongs in
 the registry's `untracked_allowlist` **with a rationale** — never in neither
 place. The job needs no credentials and no network, which is why it sits in
 `lint` rather than waiting for the weekly bot.
+
+### version-checksums
+
+`check-version-checksums.py` downloads the artefact each registry entry names in
+`checksum_url`, rendered at the version currently pinned, and compares its
+sha256 to the `checksum_var` beside it. The version-bump bot rewrites a version
+and leaves its paired checksum untouched, which every offline gate passes and
+`task k3s:deploy` then fails on. The job needs network egress, so
+`task lint` leaves it out and `task lint:version-checksums` runs it on demand.
 
 ### repo-sync
 
@@ -267,8 +304,8 @@ file is still readable in the output.
 
 Flux is pinned in three places: `FLUX_VERSION` in the `cluster-verify` job (the
 CLI it downloads, with its sha256), `flux_version` in the cluster-versions
-ConfigMap, and the `# Flux Version:` header of
-`kubernetes/clusters/{{ cluster_name }}/flux-system/gotk-components.yaml`, which
+ConfigMap, and the `# Flux Version:` header of the
+kubernetes/clusters/{{ cluster_name }}/flux-system/gotk-components.yaml that
 `flux bootstrap` wrote. `scripts/check-flux-version-pin.py` compares them, and
 also checks that the manifest still lists the four controllers.
 
@@ -604,6 +641,12 @@ it clones the pinned library, runs its `check-versions.py --update-all` against
 exactly one MR on `bot/version-bumps` in sync — new bumps force-push and create
 or refresh the MR, unchanged content does nothing, and no bumps closes an open
 MR. It never merges.
+
+Only the report step may exit 1. `check_soft_fail_exit_codes: "1"` tells the
+include that "updates available" is not a failure, and the codes apply to the
+whole `check_command`, so every later step remaps its own failure to 2. A later
+step that exited 1 would read as "updates found", and the bot would then run
+against an unmodified tree and close the standing MR.
 
 The bot's command list and the Taskfile's must stay in step; CI has no go-task,
 which is why the commands are spelled out in `.gitlab-ci.yml` rather than

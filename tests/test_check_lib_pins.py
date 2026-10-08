@@ -1,15 +1,7 @@
-"""Tests for scripts/check-lib-pins.py (the library pin gate).
+"""Tests for scripts/check-lib-pins.py, the library pin gate.
 
-Exercises the drift, branch-ref and missing-include cases against synthetic CI
-files, plus the --project / --ref-var overrides a consumer needs when it pins a
-fork or names its variable differently.
-
-CANONICAL SUITE. The library's own .gitlab-ci.yml uses `local:` includes rather
-than pinning itself, so there is no self-check here. A consumer that vendors
-check-lib-pins.py vendors this file too, and adds only its own smoke test
-asserting the real .gitlab-ci.yml passes — behavioural cases belong here, not in
-a consumer's copy. Those copies are byte-gated: each consumer lists them in
-its scripts/vendored-manifest.yml, compared by scripts/check-vendored-copies.py.
+Canonical suite: a consumer vendors this file with the script (see
+scripts/README.md) and adds only its own smoke test.
 """
 
 from __future__ import annotations
@@ -57,6 +49,43 @@ def _write(tmp_path: Path, content: str) -> Path:
 
 def test_consistent_pins_pass(tmp_path: Path) -> None:
     assert clp.check(_write(tmp_path, _ci())) == []
+
+
+def _spec_headed_ci(ref: str = "v0.3.2") -> str:
+    """A pipeline using GitLab inputs: a `spec:` document, then the jobs."""
+    return textwrap.dedent(
+        f"""\
+        spec:
+          inputs:
+            env:
+              default: prod
+        ---
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.0"
+        include:
+          - project: eric/weisssrv-lib
+            ref: {ref}
+            file: /ci/lint/yaml-lint.yml
+        """
+    )
+
+
+def test_a_spec_headed_pipeline_is_read_not_refused(tmp_path: Path) -> None:
+    """A `spec:`-headed file is two documents; the jobs are the second one."""
+    p = _write(tmp_path, _spec_headed_ci())
+    problems = clp.check(p)
+    assert len(problems) == 1
+    assert "v0.3.2" in problems[0]
+    assert clp.check(_write(tmp_path, _spec_headed_ci(ref="v0.5.0"))) == []
+
+
+def test_fix_rewrites_a_spec_headed_pipeline(tmp_path: Path) -> None:
+    """--fix locates the `ref:` line in the second document, not the first."""
+    p = _write(tmp_path, _spec_headed_ci())
+    assert clp.fix(p) == 1
+    assert clp.load_ci(p)["include"][0]["ref"] == "v0.5.0"
+    assert clp.check(p) == []
+    assert "inputs:" in p.read_text()
 
 
 def test_drifted_entry_is_reported_per_file(tmp_path: Path) -> None:
@@ -162,11 +191,10 @@ def test_project_and_ref_var_are_overridable(tmp_path: Path) -> None:
 def test_fix_does_not_rewrite_a_project_whose_path_merely_ends_with_ours(
     tmp_path: Path,
 ) -> None:
-    """`--fix` must edit exactly what check() verifies, not a suffix match.
+    """--fix edits exactly what check() verifies, never a suffix match.
 
-    `acme/eric/weisssrv-lib` ends with the library's path but is a different
-    project. check() compares the whole value, so it never reports that entry —
-    a fix() that rewrote it would be editing a pin nothing verifies.
+    `acme/eric/weisssrv-lib` is a different project; check() compares the whole
+    value, so rewriting that entry would edit a pin nothing verifies.
     """
     content = textwrap.dedent(
         """\
@@ -216,12 +244,10 @@ def test_fix_matches_a_quoted_or_commented_project_value(tmp_path: Path) -> None
 def test_fix_refuses_a_branch_source_without_touching_the_file(
     tmp_path: Path,
 ) -> None:
-    """--fix must not propagate a bad source value into the file.
+    """A branch in the single source is validated before anything is written.
 
-    A branch in the single source is not something the rewrite can repair: it
-    would happily make every entry agree with `main` and only then report the
-    violation, leaving the CI file worse than it found it. So the value is
-    validated BEFORE anything is written.
+    The rewrite cannot repair it, so propagating it to every entry and only then
+    reporting would leave the CI file worse than it found it.
     """
     p = _write(tmp_path, _ci("main", ("v0.4.0", "v0.4.0")))
     before = p.read_text()
@@ -234,12 +260,10 @@ def test_fix_refuses_a_branch_source_without_touching_the_file(
 def test_fix_ignores_project_ref_pairs_outside_the_include_block(
     tmp_path: Path,
 ) -> None:
-    """--fix must only touch `include:`, the one thing check() reads.
+    """--fix touches only `include:`, the one thing check() reads.
 
-    A job whose variables happen to carry `project:` and `ref:` keys is not an
-    include entry. Rewriting it would edit a value the gate never verifies, and
-    the post-fix check() cannot catch it either — check() only ever looks at the
-    parsed include list.
+    A job carrying `project:`/`ref:` variables is not an include entry, and the
+    post-fix check() would not catch an edit to it either.
     """
     content = textwrap.dedent(
         """\
@@ -361,11 +385,10 @@ def test_fix_replaces_a_quoted_ref_value(tmp_path: Path) -> None:
 
 
 def test_fix_ignores_a_nested_inputs_project_and_ref_pair(tmp_path: Path) -> None:
-    """`inputs:` may carry `project` and `ref` of its own — they are inputs.
+    """`inputs:` may carry `project` and `ref` of its own - they are inputs.
 
-    This is what defeated every indentation heuristic: the nested pair looks
-    exactly like an entry's own pin to a line scanner, but check() reads only
-    the direct include mappings and never sees it.
+    check() reads only the direct include mappings, so --fix must not rewrite
+    them.
     """
     content = textwrap.dedent(
         """\
@@ -393,10 +416,8 @@ def test_fix_refuses_a_block_scalar_ref_and_leaves_the_file_alone(
 ) -> None:
     """A `ref: >-` body survives a first-line rewrite and breaks the document.
 
-    Rather than special-casing block scalars, fix() re-parses its own output
-    and refuses anything that did not land as the exact intended string. The
-    file must be untouched when it refuses — a half-edited CI file is worse
-    than an unedited one.
+    fix() re-parses its own output and refuses anything that did not land as the
+    exact intended string, leaving the file untouched.
     """
     content = textwrap.dedent(
         """\
@@ -417,12 +438,9 @@ def test_fix_refuses_a_block_scalar_ref_and_leaves_the_file_alone(
     assert p.read_text() == before
 
 
-def test_fix_refuses_a_source_value_yaml_would_retype(tmp_path: Path) -> None:
-    """`on` would parse back as True rather than the string written.
-
-    It is now caught EARLIER than the outcome guard — by the release-tag
-    validation, since `on` is not vX.Y.Z — so this asserts that message rather
-    than claiming to exercise the rewrite verification.
+def test_fix_refuses_a_non_tag_source_value(tmp_path: Path) -> None:
+    """A source value YAML would retype (`on`) is rejected before anything is
+    written - by the release-tag validation, since `on` is not vX.Y.Z.
     """
     content = textwrap.dedent(
         """\
@@ -463,9 +481,8 @@ def test_fix_ignores_a_ref_reached_through_an_alias_outside_include(
 ) -> None:
     """An alias resolves to its anchor, whose marks may be anywhere in the file.
 
-    Rewriting at the anchor would edit shared configuration, and the post-fix
-    re-parse would still agree — the alias makes the include read back
-    correctly. Targets are therefore bounded to the include block's own span.
+    Rewriting there would edit shared configuration and still re-parse cleanly,
+    so targets are bounded to the include block's own span.
     """
     content = textwrap.dedent(
         """\
@@ -545,8 +562,7 @@ def test_check_names_an_entry_that_has_no_file_key(tmp_path: Path) -> None:
 class TestCliErrors:
     """Operator errors exit 2 with one line, matching the sibling checkers.
 
-    CI has to tell "this file has drifted pins" (1) from "I could not read the
-    file you pointed me at" (2); a traceback says neither clearly.
+    CI must tell drifted pins (1) from an unreadable file (2).
     """
 
     def test_missing_file_exits_two_without_traceback(self, tmp_path, capsys):
@@ -581,11 +597,10 @@ class TestCliErrors:
 def test_fix_refuses_an_alias_anchored_inside_the_include_block(
     tmp_path: Path,
 ) -> None:
-    """The span bound alone does not cover an anchor that is ALSO in include:.
+    """An alias anchored inside `include:` passes the bounds check.
 
-    Such an alias passes the bounds check while still pointing the rewrite at a
-    line belonging to another entry's nested config, so the whole block is
-    refused rather than edited.
+    It still points the rewrite at another entry's nested config, so the whole
+    block is refused rather than edited.
     """
     content = textwrap.dedent(
         """\
@@ -669,10 +684,8 @@ def test_non_mapping_document_is_an_operator_error(tmp_path, capsys) -> None:
 def test_fix_refuses_an_anchor_defined_inside_the_include_block(
     tmp_path: Path,
 ) -> None:
-    """An anchor defined here can be referenced from OUTSIDE the block.
-
-    Rewriting the pin would then change what that outside reference resolves
-    to, so the block is refused even though no alias appears within it.
+    """An anchor defined here can be referenced from outside the block, so the
+    block is refused even though no alias appears within it.
     """
     content = textwrap.dedent(
         """\
@@ -696,7 +709,7 @@ def test_fix_refuses_an_anchor_defined_inside_the_include_block(
 
 
 def test_non_mapping_variables_is_an_operator_error(tmp_path, capsys) -> None:
-    """`variables: invalid` cleared the document check, then hit .get() on a str."""
+    """A non-mapping `variables:` is an operator error (exit 2), not a crash."""
     p = tmp_path / ".gitlab-ci.yml"
     p.write_text(
         "variables: invalid\n"
@@ -715,11 +728,10 @@ def test_non_mapping_variables_is_an_operator_error(tmp_path, capsys) -> None:
 def test_a_file_removed_after_the_guard_starts_still_exits_two(
     tmp_path, capsys
 ) -> None:
-    """The handler must wrap the REAL read, not a preflight that proved nothing.
+    """The handler wraps the real read, not a preflight.
 
-    A preflight only shows the file was readable a moment ago; the work
-    re-reads it afterwards. Deleting between the two is the cheap way to prove
-    the guard covers the read that matters.
+    A preflight only shows the file was readable a moment ago; deleting between
+    the two proves the guard covers the read that matters.
     """
     p = tmp_path / ".gitlab-ci.yml"
     p.write_text("include: []\n")
@@ -730,11 +742,7 @@ def test_a_file_removed_after_the_guard_starts_still_exits_two(
 
 
 def test_a_scalar_include_is_reported_not_crashed(tmp_path, capsys) -> None:
-    """`include: 5` iterated a non-iterable and raised TypeError.
-
-    A string include (`include: local.yml`) hid this — strings ARE iterable, so
-    it degraded to an empty result by accident rather than by design.
-    """
+    """A scalar `include:` is reported, not iterated."""
     p = tmp_path / ".gitlab-ci.yml"
     p.write_text('variables:\n  WEISSSRV_LIB_REF: "v0.5.2"\ninclude: 5\n')
     rc = clp.main(["--ci-file", str(p)])
@@ -756,9 +764,8 @@ def test_a_string_include_is_reported_not_iterated_character_wise(
 def test_fix_refuses_duplicate_top_level_include_keys(tmp_path: Path) -> None:
     """check() reads the LAST duplicate; rewriting the first would disagree.
 
-    PyYAML silently keeps the last duplicate key, so an earlier `include:` is
-    ignored by both GitLab and check(). Rewriting it would edit a dead block
-    and still pass verification against the live one.
+    An earlier `include:` is ignored by both GitLab and check(), so editing it
+    would change a dead block and still pass verification.
     """
     content = textwrap.dedent(
         """\
@@ -778,19 +785,16 @@ def test_fix_refuses_duplicate_top_level_include_keys(tmp_path: Path) -> None:
     before = p.read_text()
     with pytest.raises(SystemExit) as excinfo:
         clp.fix(p)
-    # The MESSAGE matters, not just that it raised. Without the ambiguity
-    # guard, fix() rewrites the dead block and the outcome check then rejects
-    # the result against the live one — also a SystemExit, for a different
-    # reason, which would let this test pass while the defect remained.
+    # The message matters: a different SystemExit would let this pass.
     assert "multiple top-level `include:`" in str(excinfo.value)
     assert p.read_text() == before
 
 
 def test_fix_succeeds_when_a_later_job_uses_an_alias(tmp_path: Path) -> None:
-    """An alias AFTER the include block must not be pulled into its span.
+    """An alias after the include block is outside its span.
 
-    The span is bounded by the include node's own end mark; an over-wide bound
-    would drag this job's `<<: *base` in and refuse a perfectly safe rewrite.
+    The bound is the include node's own end mark; a wider one would drag this
+    job's `<<: *base` in and refuse a safe rewrite.
     """
     content = textwrap.dedent(
         """\
@@ -817,14 +821,17 @@ def test_fix_succeeds_when_a_later_job_uses_an_alias(tmp_path: Path) -> None:
 # SAME single source as the include refs.
 
 
-def _requirements(version: str | None = "v0.4.0") -> str:
+_LIB_URL = "git+https://git.ericsweiss.com/eric/weisssrv-lib.git#/ansible_collections/weisssrv/infra"
+
+
+def _requirements(version: str | None = "v0.4.0", url: str = _LIB_URL) -> str:
     """A requirements.yml installing the library collection plus an unrelated
     Galaxy collection. version=None omits the library's `version:` (a floating
     pin); the unrelated collection always carries its own version constraint."""
     lines = [
         "---",
         "collections:",
-        "  - name: git+https://git.ericsweiss.com/eric/weisssrv-lib.git#/ansible_collections/weisssrv/infra",
+        f"  - name: {url}",
         "    type: git",
     ]
     if version is not None:
@@ -899,3 +906,69 @@ def test_run_fix_syncs_both_the_includes_and_requirements(tmp_path: Path) -> Non
     assert clp._run(args) == 0
     assert clp.check(ci) == []
     assert clp.check_requirements(ci, "v0.4.0") == []
+
+
+def test_requirements_matches_on_the_repository_name(tmp_path: Path) -> None:
+    """The include project path resolves instance-locally, so it need not be a
+    substring of the clone URL: an instance-local mirror is still gated."""
+    ci = _write(tmp_path, _ci())
+    _write_requirements(
+        tmp_path,
+        _requirements("v0.3.2", url=_LIB_URL.replace("eric/", "mirrors/")),
+    )
+    problems = clp.check_requirements(ci, "v0.4.0", project="eric/weisssrv-lib")
+    assert len(problems) == 1
+    assert "v0.3.2" in problems[0]
+
+
+def test_a_git_collection_matching_nothing_is_reported(tmp_path: Path) -> None:
+    """The gate never passes by failing to find its subject."""
+    ci = _write(tmp_path, _ci())
+    _write_requirements(
+        tmp_path,
+        _requirements("v0.3.2", url="git+https://example.com/other/tooling.git"),
+    )
+    problems = clp.check_requirements(ci, "v0.4.0")
+    assert len(problems) == 1
+    assert "is not being checked" in problems[0]
+
+
+def test_requirements_without_any_git_collection_is_a_noop(tmp_path: Path) -> None:
+    ci = _write(tmp_path, _ci())
+    _write_requirements(
+        tmp_path,
+        "---\ncollections:\n  - name: ansible.posix\n    version: \">=2.1.0\"\n",
+    )
+    assert clp.check_requirements(ci, "v0.4.0") == []
+
+
+def test_requirements_project_override_scopes_the_fork(tmp_path: Path) -> None:
+    """--project reaches the requirements half too, not just the includes."""
+    ci = _write(tmp_path, _ci())
+    fork = "git+https://git.example.com/acme/my-lib.git#/ansible_collections/acme/infra"
+    _write_requirements(tmp_path, _requirements("v1.0.0", url=fork))
+
+    problems = clp.check_requirements(ci, "v1.2.3", project="acme/my-lib")
+    assert len(problems) == 1
+    assert "v1.0.0" in problems[0]
+
+    assert clp.fix_requirements(ci, "v1.2.3", project="acme/my-lib") == 1
+    text = (tmp_path / "ansible" / "requirements.yml").read_text()
+    assert "version: v1.2.3" in text
+    assert 'version: ">=2.1.0,<3.0.0"' in text  # unrelated collection untouched
+    assert clp.check_requirements(ci, "v1.2.3", project="acme/my-lib") == []
+
+
+def test_source_key_is_matched_like_name(tmp_path: Path) -> None:
+    ci = _write(tmp_path, _ci())
+    _write_requirements(
+        tmp_path,
+        "---\ncollections:\n"
+        "  - name: weisssrv.infra\n"
+        "    source: git+https://git.ericsweiss.com/eric/weisssrv-lib.git\n"
+        "    type: git\n"
+        "    version: v0.3.2\n",
+    )
+    problems = clp.check_requirements(ci, "v0.4.0")
+    assert len(problems) == 1
+    assert "v0.3.2" in problems[0]

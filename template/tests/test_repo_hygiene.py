@@ -158,7 +158,7 @@ _ENV_NAME = re.compile(r"\bCHECK_DOC_LINKS_[A-Z_]+\b")
 
 # Variables set ahead of the library release that reads them: inert until the
 # pin moves, and each entry expires at that bump.
-PRESTAGED = {"CHECK_DOC_LINKS_PATHS", "CHECK_DOC_LINKS_IGNORE"}
+PRESTAGED: set[str] = set()
 
 
 def doc_link_vars_the_script_ignores(setters: dict[str, str], script: str) -> set[str]:

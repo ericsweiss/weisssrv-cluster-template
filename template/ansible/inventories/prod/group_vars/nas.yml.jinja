@@ -163,9 +163,9 @@ nas_storage_archive_backup_enabled: false
 # a RESTORE is tested; a half-configured enable fails the deploy.
 restic_offsite_enabled: false
 
-# Hard kill timer on the backup and restore-drill units. Size it above the
-# longest expected run for this repo and uplink; the deep verify has its own.
-restic_offsite_timeout_start_sec: 6h
+# Hard kill timer on the backup and restore-drill units, 6h in the role. Raise
+# it above the longest expected run; the deep verify has its own.
+# restic_offsite_timeout_start_sec: 6h
 
 # The other half of the swap-clean interlock below: without it a swap-clean
 # night starting after the upload took the lock still stops guests underneath

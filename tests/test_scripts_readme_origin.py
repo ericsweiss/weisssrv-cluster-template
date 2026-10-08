@@ -158,10 +158,15 @@ def test_every_companion_module_is_registered():
 
 
 def test_an_unregistered_companion_import_is_caught():
-    """Mutation case: the shape a library gate takes when it grows a companion."""
-    found = companions("check-made-up.py", "import ci_yaml\nfrom ci_yaml import parse_ci\n")
-    assert found == {"ci_yaml.py"}
-    assert found - registered_vendored() == {"ci_yaml.py"}
+    """Mutation case: the shape a library gate takes when it grows a companion.
+
+    The module name is one nothing registers, so the gap is the companion
+    itself and not a stale expectation about which modules are vendored.
+    """
+    source = "import gate_invented\nfrom gate_invented import load\n"
+    found = companions("check-made-up.py", source)
+    assert found == {"gate_invented.py"}
+    assert found - registered_vendored() == {"gate_invented.py"}
 
 
 def test_a_sibling_file_read_by_name_counts_as_a_companion():
@@ -186,26 +191,19 @@ TEMPLATE_OWNED = {
     "template/scripts/check-ansible-service-names.py",
     "template/scripts/check-cluster-literals.py.jinja",
     "template/scripts/check-collection-pin-trigger.py",
-    "template/scripts/check-comment-length.py",
     "template/scripts/check-deploy-host-coverage.py",
-    "template/scripts/check-flux-version-pin.py",
     "template/scripts/check-guest-endpoint-parity.py",
     "template/scripts/check-integration-matrix-coverage.py",
     "template/scripts/check-kustomization-coverage.py",
-    "template/scripts/check-secret-rotation-coverage.py",
     "template/scripts/check-skill-refs.py",
     "template/scripts/check-tenant-wiring.py.jinja",
     "template/scripts/check-role-default-flips.py",
     "template/scripts/check-unmanaged-secrets.py",
     "template/scripts/check-tenant-traefik-isolation.py.jinja",
     "template/scripts/check-upstream-rule-mirror.py",
-    "template/scripts/ci_playbook_invocations.py",
-    "template/scripts/ci_yaml.py",
     "template/scripts/deploy-preflight.py",
-    "template/scripts/flux-child-kustomizations.py",
     "template/scripts/flux-secret-consumers.py",
     "template/scripts/generate-host-log-staleness.py",
-    "template/scripts/inventory_tree.py",
     "template/scripts/taskfile_tree.py",
     "template/scripts/version-registry.py.jinja",
     "template/scripts/{% if use_unifi %}check-unifi-doc-parity.py{% endif %}",

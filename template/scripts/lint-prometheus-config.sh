@@ -1,24 +1,33 @@
 #!/usr/bin/env bash
-# Lint the kube-prometheus-stack alert rules + Alertmanager config that
-# kubeconform/flux-lint can't reach (PromQL inside HelmRelease values; the
-# Alertmanager config inside an ExternalSecret template). Extracts them with
-# extract-prometheus-config.py, then validates with promtool / amtool and runs
-# the promtool alert unit tests.
-#
-# Requires promtool + amtool on PATH. Run from the repo root. Non-zero on any
-# failure. Environment overrides:
-#   EXTRACT_SCRIPT  path to extract-prometheus-config.py
-#   RULE_TESTS_DIR  dir of *.test.yaml unit tests (+ any *.rules.yaml they load);
-#                   the unit-test step is skipped when it holds no *.test.yaml
-#   HELM_RELEASE    HelmRelease manifest holding additionalPrometheusRulesMap
-#   AM_CONFIG       ExternalSecret manifest holding the alertmanager.yaml template
-set -eo pipefail
+# Lint the alert rules and Alertmanager config that kubeconform cannot reach,
+# with promtool / amtool plus the promtool alert unit tests. Run from the repo
+# root; contract + env: weisssrv-lib docs/SCRIPTS.md - lint-prometheus-config.
+set -euo pipefail
 
 EXTRACT_SCRIPT="${EXTRACT_SCRIPT:-scripts/extract-prometheus-config.py}"
 RULE_TESTS_DIR="${RULE_TESTS_DIR:-scripts/prometheus-rule-tests}"
 
 rules_args=()
-[ -n "${HELM_RELEASE:-}" ] && rules_args=(--release "$HELM_RELEASE")
+[ -n "${HELM_RELEASE:-}" ] && rules_args+=(--release "$HELM_RELEASE")
+# Whitespace-separated: one --rules-dir per PrometheusRule tree the consumer
+# ships, so a per-app tree is linted alongside the shared one.
+if [ -n "${RULES_DIR:-}" ]; then
+    read -ra rules_dirs <<<"$RULES_DIR"
+    for rules_dir in "${rules_dirs[@]}"; do
+        rules_args+=(--rules-dir "$rules_dir")
+    done
+fi
+# Set where the HelmRelease is a rule source: a mistyped
+# additionalPrometheusRulesMap then reds the gate instead of dropping alerts.
+[ -n "${REQUIRE_RELEASE_RULES:-}" ] && rules_args+=(--require-release-rules)
+# Set where a PrometheusRule tree is a rule source: an absent tree then reds
+# the gate instead of linting a subset.
+[ -n "${REQUIRE_RULES_DIR:-}" ] && rules_args+=(--require-rules-dir)
+# Extractor flags for a shape neither variable covers.
+if [ -n "${EXTRACT_ARGS:-}" ]; then
+    read -ra extract_args <<<"$EXTRACT_ARGS"
+    rules_args+=("${extract_args[@]}")
+fi
 am_args=()
 [ -n "${AM_CONFIG:-}" ] && am_args=(--am-config "$AM_CONFIG")
 
@@ -33,17 +42,24 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 echo "=== Extracting + checking Prometheus alert rules ==="
-python3 "$EXTRACT_SCRIPT" rules "$work/rules.yaml" "${rules_args[@]}"
+python3 "$EXTRACT_SCRIPT" rules "$work/rules.yaml" ${rules_args[@]+"${rules_args[@]}"}
 promtool check rules "$work/rules.yaml"
 
 echo ""
 echo "=== Extracting + checking Alertmanager config ==="
-python3 "$EXTRACT_SCRIPT" alertmanager "$work/alertmanager.yaml" "${am_args[@]}"
+python3 "$EXTRACT_SCRIPT" alertmanager "$work/alertmanager.yaml" ${am_args[@]+"${am_args[@]}"}
 amtool check-config "$work/alertmanager.yaml"
 
 echo ""
 if ! compgen -G "${RULE_TESTS_DIR}/*.test.yaml" >/dev/null; then
-    echo "No *.test.yaml in ${RULE_TESTS_DIR}; skipping promtool alert unit tests."
+    # Skipping is opt-in: a dropped RULE_TESTS_DIR otherwise greens a gate that
+    # ran zero alert unit tests.
+    if [ -z "${ALLOW_NO_RULE_TESTS:-}" ]; then
+        echo "ERROR: no *.test.yaml in ${RULE_TESTS_DIR}; set RULE_TESTS_DIR to the" >&2
+        echo "       unit-test directory, or ALLOW_NO_RULE_TESTS=1 to skip them." >&2
+        exit 1
+    fi
+    echo "No *.test.yaml in ${RULE_TESTS_DIR}; skipping promtool alert unit tests (ALLOW_NO_RULE_TESTS)."
     echo "Prometheus rules + Alertmanager config are valid."
     exit 0
 fi

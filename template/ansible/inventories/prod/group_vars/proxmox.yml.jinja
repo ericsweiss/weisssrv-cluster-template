@@ -18,9 +18,16 @@ nfs_tls_enabled: true
 # leaves the ZFS default of about half of RAM. Example: 8589934592 (8 GiB).
 zfs_arc_cap_max_bytes: ""
 
+# 1Password vault holding the encrypted-pool passphrase items, asserted
+# non-empty on any host declaring zfs_encryption_pools. docs/SETUP.md.
+# zfs_encryption_connect_vault: ""
+
 # Default-deny OUT on the node plus the sg-host-egress allowlist. Off so a first
 # deploy cannot lock a host out of apt or the cluster. Guest egress is untouched.
 proxmox_firewall_egress_filtering: false
+# Ports sg-host-egress does not build in, such as a non-standard forge SSH port.
+# proxmox_firewall_host_egress_extra_ports:
+#   - {port: 2222, proto: tcp, comment: forge SSH}
 
 # vfio_passthrough reconciles both ways: false also removes the drop-ins it
 # owns, and a hand-written one is reported and kept. The GPU host overrides this

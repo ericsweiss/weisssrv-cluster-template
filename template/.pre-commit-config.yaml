@@ -26,17 +26,24 @@ repos:
           (?x)^( ansible/molecule/prepare-common\.yml |
           ansible/molecule/tasks/container-warmup\.yml |
           ansible/molecule/tasks/prepare-apt-disable\.yml |
-          ansible/molecule/tasks/prepare-base\.yml | scripts/(
-          check-backup-artifact-apps\.py | check-default-deny-coverage\.py |
-          check-deploy-coverage\.sh | check-doc-links\.py | check-hpa-vpa-invariant\.py
-          | check-lib-pins\.py | check-netpol-except-parity\.py |
-          check-pvc-storageclass\.py | check-scrape-netpol\.py |
-          check-secretstore-scope\.py | check-taskfile\.sh | check-versions\.py |
-          extract-prometheus-config\.py | find-reachable-host\.sh | flux-env\.sh |
-          flux-render\.sh | generate-hosts-env\.py | generate-versions-configmap\.py |
-          kubeconform-skipped\.py | lint-prometheus-config\.sh | molecule-retry\.sh |
-          resolve-tool\.sh | sanitize-junit-expected-failures\.py | semantic-release\.py
-          | shell-lib\.sh | validate-helm-values\.py | version-bump-mr\.py ) )$
+          ansible/molecule/tasks/prepare-base\.yml | lint/yamllint-relaxed\.yml | scripts/(
+          check-backup-artifact-apps\.py | check-cluster-invariants\.py |
+          check-comment-length\.py | check-dashboards\.py |
+          check-default-deny-coverage\.py | check-deploy-coverage\.sh | check-doc-links\.py
+          | check-helm-repo-parity\.py | check-hpa-vpa-invariant\.py | check-lib-pins\.py |
+          check-netpol-except-parity\.py | check-nfs-tls\.py | check-pvc-storageclass\.py |
+          check-role-inputs\.py |
+          check-scrape-netpol\.py | check-secretstore-scope\.py | check-taskfile\.sh |
+          check-version-checksums\.py | check-versions\.py | ci-fetch-tools\.py |
+          ci_playbook_invocations\.py |
+          ci_yaml\.py | cluster-config-value\.sh | collect-state-lib\.sh |
+          deploy-verify-lib\.sh | extract-prometheus-config\.py | find-reachable-host\.sh |
+          flux-env\.sh | flux-render\.sh | gate_common\.py | generate-hosts-env\.py |
+          generate-versions-configmap\.py | inventory_tree\.py | kubeconform-skipped\.py |
+          lint-prometheus-config\.sh | maintenance-run-with-verify\.sh | molecule-retry\.sh
+          | resolve-tool\.sh | sanitize-junit-expected-failures\.py | semantic-release\.py |
+          shell-lib\.sh | supervised-apply-guard\.sh | validate-helm-values\.py |
+          version-bump-mr\.py ) )$
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
         exclude: *vendored_copies
@@ -96,6 +103,14 @@ repos:
         language: python
         additional_dependencies: ["pyyaml==6.0.2"]
         files: ^(ansible/inventories/prod/group_vars/all\.yml|scripts/version-registry\.py|scripts/check-versions\.py)
+        pass_filenames: false
+        always_run: true
+      - id: comment-length
+        name: comment blocks within the house limit
+        entry: python scripts/check-comment-length.py --config scripts/comment-length.yaml
+        language: python
+        additional_dependencies: ["pyyaml==6.0.2"]
+        files: ^(ansible/|docker/|kubernetes/|scripts/|taskfiles/|Taskfile\.yml)
         pass_filenames: false
         always_run: true
       - id: doc-links

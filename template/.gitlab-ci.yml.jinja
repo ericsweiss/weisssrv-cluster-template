@@ -137,17 +137,12 @@ variables:
   # Single source for the Ansible the local jobs pip-install. `include:` inputs
   # cannot read it (they resolve before this block exists), so the deploy-base
   # entry below repeats the literal — bump the two together.
-  ANSIBLE_VERSION: "11.6.0"
-  # promtool + amtool for prometheus-config-lint, pinned with the sha256 the job
-  # verifies the downloaded tarball against.
-  PROMTOOL_VERSION: "3.6.0"
-  PROMTOOL_SHA256: "2002ef4a55a64161affccd2786c7081d4e3b3a8d08786a98b3bb110971414916"
-  AMTOOL_VERSION: "0.28.1"
-  AMTOOL_SHA256: "5ac7ab5e4b8ee5ce4d8fb0988f9cb275efcc3f181b4b408179fafee121693311"
+  ANSIBLE_VERSION: "14.4.0"
   # kustomize for the cluster-verify server-side dry-run, pinned with the
-  # sha256 the script verifies the downloaded tarball against.
-  KUSTOMIZE_VERSION: "5.4.3"
-  KUSTOMIZE_SHA256: "3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7"
+  # sha256 the script verifies the downloaded tarball against. Same pin as
+  # scripts/ci-fetch-tools.py, so one kustomize version runs in every job.
+  KUSTOMIZE_VERSION: "5.8.2"
+  KUSTOMIZE_SHA256: "06af0a202c2b831207d0173f9c9cdb1b30abceca0747cb3fbb72792d26055c95"
   # The command that resolves a job's secret references. Every deploy script
   # goes through it rather than naming a backend CLI, so `secrets_backend` has
   # one runtime half here and one render-time half in the secret_ref macro.
@@ -223,8 +218,8 @@ include:
       # Pinned here, not left to the include's default, so it is reviewable next
       # to k3s_version in group_vars/all.yml: keep it within one minor of that.
       # sha256 is the linux/amd64 binary, from <version>/bin/linux/amd64/kubectl.sha256.
-      kubectl_version: "v1.36.2"
-      kubectl_sha256: "1e9045ec32bea85da43de85f0065358529ea7c7a152eca78154fba5b58c27d82"
+      kubectl_version: "v1.37.1"
+      kubectl_sha256: "65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8"
 
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
@@ -272,11 +267,12 @@ include:
       tags: ["{{ runner_tag }}"]
       image: python:3.13
       # jq: test_collect_state_lib.py drives the collector's jq filters.
-      # ansible-core: test_deploy_preflight.py fails rather than skips without it.
+      # ansible-core: test_deploy_preflight.py fails rather than skips without it,
+      # and the pin is the core line requirements.txt's `ansible==` resolves to.
       apt_packages: "jq"
-      pip_packages: "ansible-core==2.18.18"
+      pip_packages: "ansible-core==2.21.5"
       test_dir: "tests scripts"
-      setup_command: 'mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/{{ lib_project }}.git" "$WEISSSRV_LIB_PATH"'
+      setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/{{ lib_project }}.git" "$WEISSSRV_LIB_PATH"'
       changes:
         - "tests/**/*"
         - "kubernetes/**/*"
@@ -334,6 +330,12 @@ include:
       versions_configmap: "{{ versions_cm }}"
       flux_render_script: "scripts/flux-env.sh"
       skipped_script: "scripts/kubeconform-skipped.py"
+      # The revision taskfiles/flux.yml pins as CRD_CATALOG_REF, so `task
+      # flux:lint` and this job resolve CR schemas against one catalog.
+      crd_catalog_ref: "ad3b08c5045129d7bb1eeffd8e61719b2c8dd1e2"
+      # With a baseline set, a kind skipped outside it fails the job rather than
+      # degrading the run to core kinds in silence.
+      expected_skipped_file: "scripts/kubeconform-expected-skipped.txt"
       extra_validation: 'bash scripts/flux-corpus-gates.sh "$RENDER_ALL" "{{ versions_cm }}" || FAILED=1'
       changes:
         - "kubernetes/**/*"
@@ -347,10 +349,13 @@ include:
         - "scripts/check-default-deny-coverage.py"
         - "scripts/check-secretstore-scope.py"
         - "scripts/check-pvc-storageclass.py"
+        - "scripts/check-nfs-tls.py"
+        - "scripts/gate_common.py"
         - "scripts/validate-helm-values.py"
         - "scripts/flux-corpus-gates.sh"
         - "scripts/flux-env.sh"
         - "scripts/kubeconform-skipped.py"
+        - "scripts/kubeconform-expected-skipped.txt"
         - ".gitlab-ci.yml"
 
   # Doc-link rot: the checker is vendored (scripts/check-doc-links.py) and
@@ -365,6 +370,18 @@ include:
         - "**/*.md"
         - "scripts/check-doc-links.py"
         - ".gitlab-ci.yml"
+
+  # The comment-length house rule, the CI half of `task lint:comment-length`.
+  # scripts/comment-length.yaml carries the scan scope and the vendored copies
+  # the gate skips, because their comments are the library's.
+  - project: {{ lib_project }}
+    ref: {{ lib_ref }}
+    file: /ci/lint/comment-length.yml
+    inputs:
+      tags: ["{{ runner_tag }}"]
+      config: "--config scripts/comment-length.yaml"
+      changes:
+        - "**/*"
 
   # Findings block. The paired allowlists .gitleaks.toml and
   # .gitlab/secret-detection-ruleset.toml keep the secret references and sha256
@@ -410,6 +427,9 @@ include:
         [ -s "$REPORT_PATH" ] ||
         { echo "check-versions wrote no report (rc=$RC)"; exit 2; };
         exit "$RC"
+      # Stated, not inherited: rc=1 is "updates available", rc=2 a checker
+      # error, and the weekly sweep must red on the second.
+      soft_fail_exit_codes: [1]
       changes:
         - "ansible/inventories/prod/group_vars/all.yml"
         - "kubernetes/**/*"
@@ -478,7 +498,7 @@ include:
     inputs:
       tags: ["{{ runner_tag }}"]
       op_vault: "{{ secret_vault() }}"
-      ansible_version: "11.6.0"
+      ansible_version: "14.4.0"
 
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
@@ -555,6 +575,26 @@ version-coverage:
         - "scripts/version-registry.py"
         - "scripts/check-versions.py"
         - ".gitlab-ci.yml"
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# The bump bot rewrites a version pin and leaves the checksum paired with it
+# alone, so a stale hash passes every offline gate and fails at deploy time.
+# Needs network egress, which is why `task lint` does not run it.
+version-checksums:
+  extends: .pyyaml-gate
+  script:
+    - python3 scripts/check-version-checksums.py --allow-empty
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &version_checksum_paths
+        - "ansible/inventories/prod/group_vars/all.yml"
+        - "scripts/version-registry.py"
+        - "scripts/check-version-checksums.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *version_checksum_paths
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 # The flux CLI cluster-verify downloads, the versions ConfigMap and the committed
@@ -762,9 +802,9 @@ terraform-tflint:
       changes: *terraform_lint_paths
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
-# Runs promtool/amtool over the platform alert rules and Alertmanager config,
-# which live inside the kube-prometheus-stack HelmRelease values and an
-# ExternalSecret template that no other gate parses. App CRs are not extracted.
+# Runs promtool/amtool over the alert rules and Alertmanager config: the
+# kube-prometheus-stack HelmRelease values, an ExternalSecret template no other
+# gate parses, and the per-app PrometheusRule CRs.
 prometheus-config-lint:
   extends: .lint-gate
   # The promtool unit tests dominate this job: promtool re-evaluates the whole
@@ -776,37 +816,18 @@ prometheus-config-lint:
     # the Taskfile points at the same directory. A new platform alert rule gets
     # a case there.
     RULE_TESTS_DIR: "tests/prometheus-rules"
-  # The cache holds VERIFIED TARBALLS: every run re-checks the pinned sha256, so
-  # a mutated runner cache cannot smuggle in an unverified binary.
-  cache:
-    key:
-      prefix: prom-tools
-      files:
-        - .gitlab-ci.yml
-    paths:
-      - .cache/prom-tools
+    # The per-app PrometheusRule CRs; the platform rules are inline in the
+    # kube-prometheus-stack release. REQUIRE_RULES_DIR stays unset: this repo
+    # ships no shared rules tree for it to require.
+    RULES_DIR: "kubernetes/apps"
+    REQUIRE_RELEASE_RULES: "1"
   before_script:
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl
+    # The binaries come from the vendored fetcher, whose pins and sha256s are
+    # the library's. Each run downloads and verifies them afresh.
+    - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
     - pip install --user --quiet "pyyaml==$PYYAML_VERSION"
-    - |
-      set -eo pipefail
-      TOOLS_CACHE="${CI_PROJECT_DIR}/.cache/prom-tools"
-      mkdir -p "$TOOLS_CACHE"
-      fetch_verified() { # <file> <url> <sha256>
-        if ! echo "$3  $TOOLS_CACHE/$1" | sha256sum -c - >/dev/null 2>&1; then
-          curl -fsSL -o "$TOOLS_CACHE/$1" "$2"
-          echo "$3  $TOOLS_CACHE/$1" | sha256sum -c -
-        fi
-      }
-      fetch_verified prom.tar.gz \
-        "https://github.com/prometheus/prometheus/releases/download/v${PROMTOOL_VERSION}/prometheus-${PROMTOOL_VERSION}.linux-amd64.tar.gz" \
-        "$PROMTOOL_SHA256"
-      tar xzf "$TOOLS_CACHE/prom.tar.gz" -C /usr/local/bin --strip-components=1 "prometheus-${PROMTOOL_VERSION}.linux-amd64/promtool"
-      fetch_verified am.tar.gz \
-        "https://github.com/prometheus/alertmanager/releases/download/v${AMTOOL_VERSION}/alertmanager-${AMTOOL_VERSION}.linux-amd64.tar.gz" \
-        "$AMTOOL_SHA256"
-      tar xzf "$TOOLS_CACHE/am.tar.gz" -C /usr/local/bin --strip-components=1 "alertmanager-${AMTOOL_VERSION}.linux-amd64/amtool"
-      promtool --version && amtool --version
+    - python3 scripts/ci-fetch-tools.py promtool amtool
+    - promtool --version && amtool --version
   script:
     - |
       set -eo pipefail
@@ -835,6 +856,7 @@ prometheus-config-lint:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes: &prometheus_config_paths
         - "kubernetes/infrastructure/observability/kube-prometheus-stack/**/*"
+        - "kubernetes/apps/**/prometheusrule.yaml"
         - "tests/prometheus-rules/**/*"
         - "scripts/extract-prometheus-config.py"
         - "scripts/lint-prometheus-config.sh"
@@ -867,6 +889,7 @@ deploy-coverage:
         - "ansible/**/*"
         - "scripts/deploy-coverage.conf"
         - "scripts/check-deploy-coverage.sh"
+        - "scripts/ci_yaml.py"
         - ".gitlab-ci.yml"
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
@@ -904,9 +927,48 @@ deploy-preflight:
         - "ansible/requirements.yml"
         - "ansible/ansible.cfg"
         - "scripts/deploy-preflight.py"
+        - "scripts/ci_yaml.py"
         - ".gitlab-ci.yml"
     - if: '$CI_COMMIT_BRANCH == "main"'
       changes: *deploy_preflight_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# The collection's roles assert their required inputs. An opt-in role invoked
+# with its flag set nowhere, and an asserted input with no default and no
+# assignment, fail on every host the role touches. Mirrors `task lint:role-inputs`.
+role-inputs:
+  stage: lint
+  needs: []
+  # The FULL python image: ansible-galaxy installs weisssrv.infra from a git+ URL.
+  image: python:3.13
+  tags: ["{{ runner_tag }}"]
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
+    - export PATH="$(python -m site --user-base)/bin:$PATH"
+    - pip install --user --quiet "ansible==$ANSIBLE_VERSION" "pyyaml==$PYYAML_VERSION"
+    - ansible-galaxy collection install --force -r ansible/requirements.yml -p .ansible-home/collections
+  script:
+    # --allow-empty: a starter cluster composes no opt-in role, and an arm with
+    # nothing to examine reports rather than fails. --allow-unknown exempts a
+    # chart version whose name happens to carry a role's prefix.
+    - |
+      python3 scripts/check-role-inputs.py --allow-empty \
+        --allow-unknown "gitlab_runner_helm_version=a chart version the Flux substitution reads, not a role variable" \
+        --roles-dir .ansible-home/collections/ansible_collections/weisssrv/infra/roles \
+        --inventory ansible/inventories/prod \
+        --playbooks ansible/playbooks
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &role_inputs_paths
+        - "ansible/inventories/prod/**/*"
+        - "ansible/playbooks/**/*"
+        - "ansible/requirements.yml"
+        - "scripts/check-role-inputs.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *role_inputs_paths
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 # ==============================================================================
@@ -962,6 +1024,8 @@ validation-gate:
     - job: flux-version-pin
       optional: true
     - job: integration-matrix-coverage
+      optional: true
+    - job: role-inputs
       optional: true
     # Expands to one need per matrix instance, well under GitLab's 50-need cap.
     - job: integration-tests

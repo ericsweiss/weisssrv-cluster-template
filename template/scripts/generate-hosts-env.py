@@ -1,48 +1,8 @@
 #!/usr/bin/env python3
 """Generate a shell-sourceable host roster (`hosts.env`) from an Ansible inventory.
 
-The inventory is the single source of truth for the cluster's host/IP roster.
-This flattens the groups an operator tool actually needs into a small
-shell-sourceable (and go-task `dotenv:`-loadable) env file, so the roster is
-defined once instead of being hand-copied into a Taskfile, ops scripts and a CI
-ssh-keyscan list.
-
-WHICH groups become WHICH variables is consumer data, so it lives in an export
-map (YAML), not here:
-
-    output: scripts/hosts.env
-    exports:
-      - key: PVE_HOSTS
-        group: proxmox
-        value: names          # names | ips | ip
-      - key: PVE_IPS
-        group: proxmox
-        value: ips
-      - key: HOME_ASSISTANT_IP
-        group: services
-        host: home            # a single host inside the group
-        value: ip
-      - key: WINDOWS_IP
-        group: windows_vms
-        host: windows
-        value: ip
-        required: false       # empty string instead of an error when absent
-      - key: ALL_SSH_IPS
-        combine: [PVE_IPS, DNS_IPS]   # union of earlier keys, in order
-
-A `group:` may be a group-of-groups: membership resolves depth-first through
-`children:`, so `group: k3s` yields the union of k3s_servers and k3s_agents.
-
-`required` defaults to true: a group that resolves to zero hosts fails loudly,
-naming which of the three causes applies (group absent, host absent, group
-empty) instead of emitting an empty roster value. A host with no `ansible_host`
-always fails.
-
-Idempotent — pair it with a CI job that regenerates and diffs the committed
-output.
-
-  generate-hosts-env.py --inventory <hosts.yml> --map <exports.yml>
-                        [--output <hosts.env>] [--regen-command "<cmd>"]
+Export value kinds: names, ips, ip, hostvar and groupvar (both with `var:`).
+Idempotent; pair it with a CI regenerate-and-diff job. Contract: docs/SCRIPTS.md.
 """
 from __future__ import annotations
 
@@ -53,60 +13,92 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:
-    sys.exit("PyYAML required: pip install pyyaml")
+    print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
+    raise SystemExit(2) from None
 
-VALUE_KINDS = ("names", "ips", "ip")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from inventory_tree import (  # noqa: E402  (resolved from this script's own directory)
+        declared_groups,
+        group_index,
+        host_vars,
+        resolve_hosts,
+    )
+except ImportError as exc:
+    print(
+        f"ERROR: {exc.name or 'the companion module'}.py must sit next to this "
+        "script — vendor it (see weisssrv-lib scripts/vendorable-paths.yml).",
+        file=sys.stderr,
+    )
+    raise SystemExit(2) from None
+
+VALUE_KINDS = ("names", "ips", "ip", "hostvar", "groupvar")
 
 
-def _all_groups(data: dict) -> dict:
-    return (data.get("all") or {}).get("children") or {}
+def _inventory_group_vars(data: dict, group: str) -> dict:
+    """A group's own `vars:` block from the inventory tree, merged across occurrences."""
+    found: dict = {}
+
+    def walk(name: str, defn) -> None:
+        if not isinstance(defn, dict):
+            return
+        if str(name) == group and isinstance(defn.get("vars"), dict):
+            found.update(defn["vars"])
+        for child, child_defn in (defn.get("children") or {}).items():
+            walk(child, child_defn)
+
+    walk("all", data.get("all") or {})
+    return found
+
+
+def _group_vars_files(group_vars_dir: Path | None, group: str) -> dict:
+    """A group's vars from `group_vars/<group>.yml` and `group_vars/<group>/*.yml`."""
+    merged: dict = {}
+    if group_vars_dir is None:
+        return merged
+    candidates = [group_vars_dir / f"{group}{suffix}" for suffix in (".yml", ".yaml")]
+    nested = group_vars_dir / group
+    if nested.is_dir():
+        candidates += sorted(nested.glob("*.yml")) + sorted(nested.glob("*.yaml"))
+    for path in candidates:
+        if not path.is_file():
+            continue
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if isinstance(doc, dict):
+            merged.update(doc)
+    return merged
+
+
+def _group_var(data: dict, group_vars_dir: Path | None, group: str, var: str) -> list[str]:
+    """One group-level variable as env-file tokens. A list space-joins.
+
+    Loud on a missing or empty value: a silently empty export reaches a script
+    as an unset roster, which is the failure this kind exists to remove.
+    """
+    merged = dict(_group_vars_files(group_vars_dir, group))
+    merged.update(_inventory_group_vars(data, group))
+    if var not in merged:
+        raise ValueError(
+            f"group {group!r} declares no {var!r} in its inventory `vars:` or in "
+            f"group_vars/{group}.yml"
+        )
+    value = merged[var]
+    items = value if isinstance(value, list) else [value]
+    tokens = [str(item) for item in items if item is not None and str(item) != ""]
+    if not tokens:
+        raise ValueError(f"group {group!r} has an empty {var!r}")
+    return tokens
 
 
 def _group_hosts(data: dict, group: str) -> dict:
-    """Return {name: hostvars} for a group, including every nested child group.
+    """{name: hostvars} for a group, every nested child group included.
 
-    A group-of-groups (`children:` with no `hosts:`) resolves to the union of
-    its descendants, depth-first in declaration order; a cycle is ignored via
-    the visited set. First occurrence of a host wins.
+    A group-of-groups resolves to the union of its descendants, depth-first in
+    declaration order.
     """
-    groups = _all_groups(data)
-    hosts: dict = {}
-    seen: set[str] = set()
-
-    def walk(name: str, inline: dict | None) -> None:
-        if name in seen:
-            return
-        seen.add(name)
-        # A child may be defined inline under its parent or at the top level.
-        for node in (groups.get(name), inline):
-            if not isinstance(node, dict):
-                continue
-            for host, hostvars in (node.get("hosts") or {}).items():
-                hosts.setdefault(host, hostvars)
-            for child, child_node in (node.get("children") or {}).items():
-                walk(child, child_node)
-
-    walk(group, None)
-    return hosts
-
-
-def _group_exists(data: dict, group: str) -> bool:
-    """True if `group` is declared anywhere in the inventory tree."""
-    groups = _all_groups(data)
-    if group in groups:
-        return True
-    stack = [node for node in groups.values() if isinstance(node, dict)]
-    seen_nodes: list[int] = []
-    while stack:
-        node = stack.pop()
-        if id(node) in seen_nodes:
-            continue
-        seen_nodes.append(id(node))
-        children = node.get("children") or {}
-        if group in children:
-            return True
-        stack.extend(n for n in children.values() if isinstance(n, dict))
-    return False
+    hostvars = host_vars(data)
+    return {name: hostvars.get(name) for name in resolve_hosts(group, group_index(data))}
 
 
 def _host_ip(name: str, hostvars: dict | None) -> str:
@@ -116,18 +108,46 @@ def _host_ip(name: str, hostvars: dict | None) -> str:
     return str(ip)
 
 
-def _resolve(data: dict, spec: dict) -> list[str]:
+def _host_var(name: str, hostvars: dict | None, var: str) -> str:
+    value = (hostvars or {}).get(var)
+    if value is None or value == "":
+        raise ValueError(f"host {name!r} has no {var!r}")
+    return str(value)
+
+
+def _resolve(data: dict, spec: dict, group_vars_dir: Path | None = None) -> list[str]:
     group = spec.get("group")
     if not group:
         raise ValueError(f"export {spec.get('key')!r} has no group")
-    hosts = _group_hosts(data, group)
+    kind = spec.get("value", "ips")
     host = spec.get("host")
+    if kind == "groupvar":
+        var = spec.get("var")
+        if not var:
+            raise ValueError(f"export {spec.get('key')!r} is a groupvar with no `var:`")
+        try:
+            if group not in declared_groups(data):
+                raise ValueError(f"export {spec.get('key')!r}: {_why_empty(data, spec)}")
+            return _group_var(data, group_vars_dir, group, var)
+        except ValueError:
+            if spec.get("required", True):
+                raise
+            return []
+    hosts = _group_hosts(data, group)
+    if kind == "hostvar":
+        var = spec.get("var")
+        if not var:
+            raise ValueError(f"export {spec.get('key')!r} is a hostvar with no `var:`")
+        if host is not None:
+            hostvars = hosts.get(host)
+            return [] if hostvars is None else [_host_var(host, hostvars, var)]
+        return [_host_var(name, hv, var) for name, hv in hosts.items()]
     if host is not None:
         hostvars = hosts.get(host)
         if hostvars is None:
             return []
-        return [host] if spec.get("value") == "names" else [_host_ip(host, hostvars)]
-    if spec.get("value") == "names":
+        return [host] if kind == "names" else [_host_ip(host, hostvars)]
+    if kind == "names":
         return list(hosts.keys())
     return [_host_ip(name, hv) for name, hv in hosts.items()]
 
@@ -135,7 +155,7 @@ def _resolve(data: dict, spec: dict) -> list[str]:
 def _why_empty(data: dict, spec: dict) -> str:
     """Explain an empty resolution: missing group, missing host, or empty group."""
     group = spec.get("group")
-    if not _group_exists(data, group):
+    if group not in declared_groups(data):
         return f"group {group!r} is not in the inventory (renamed/removed?)"
     host = spec.get("host")
     if host is not None:
@@ -143,7 +163,8 @@ def _why_empty(data: dict, spec: dict) -> str:
     return f"group {group!r} contains no hosts, directly or through its children"
 
 
-def build(data: dict, exports: list[dict]) -> list[tuple[str, str]]:
+def build(data: dict, exports: list[dict],
+          group_vars_dir: Path | None = None) -> list[tuple[str, str]]:
     """Return ordered (KEY, space-joined-value) pairs for the env file."""
     values: dict[str, list[str]] = {}
     pairs: list[tuple[str, str]] = []
@@ -164,7 +185,7 @@ def build(data: dict, exports: list[dict]) -> list[tuple[str, str]]:
             kind = spec.get("value", "ips")
             if kind not in VALUE_KINDS:
                 raise ValueError(f"export {key!r} has unknown value kind {kind!r}")
-            resolved = _resolve(data, spec)
+            resolved = _resolve(data, spec, group_vars_dir)
             if not resolved and spec.get("required", True):
                 raise ValueError(f"required export {key!r} resolved to nothing: {_why_empty(data, spec)}")
         values[key] = resolved
@@ -206,6 +227,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--inventory", type=Path, required=True)
     parser.add_argument("--map", dest="map_file", type=Path, required=True)
     parser.add_argument("--output", type=Path, help="overrides `output:` in the map")
+    parser.add_argument(
+        "--group-vars", type=Path,
+        help="group_vars directory the `groupvar` kind reads "
+             "(default: group_vars/ beside the inventory)",
+    )
     parser.add_argument("--regen-command", default="generate-hosts-env.py")
     args = parser.parse_args(argv)
 
@@ -231,8 +257,9 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(data, dict):
         print(f"ERROR: {args.inventory} top-level is not a mapping", file=sys.stderr)
         return 1
+    group_vars_dir = args.group_vars or (args.inventory.parent / "group_vars")
     try:
-        pairs = build(data, exports)
+        pairs = build(data, exports, group_vars_dir)
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

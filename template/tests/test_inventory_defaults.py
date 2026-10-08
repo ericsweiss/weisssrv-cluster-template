@@ -104,15 +104,7 @@ NOT_ROLE_VARS: set[tuple[str, str]] = {
 
 # Variables staged ahead of the collection release that reads them: inert until
 # the pin moves. Each entry expires at that bump, enforced below.
-PRESTAGED: set[tuple[str, str]] = {
-    ("group_vars/all.yml", "proxmox_firewall_smtp_relay_sources"),
-    ("group_vars/all.yml", "tailscale_require_authkey"),
-    ("group_vars/dns.yml", "acme_certs_ca_server"),
-    ("group_vars/nas.yml", "nas_storage_archive_backup_on_success_units"),
-    ("group_vars/nas.yml", "nas_storage_swap_clean_conflicting_units"),
-    ("group_vars/nas.yml", "restic_offsite_conflicting_units"),
-    ("group_vars/nas.yml", "restic_offsite_timeout_start_sec"),
-}
+PRESTAGED: set[tuple[str, str]] = set()
 
 needs_inventory = pytest.mark.skipif(
     not (INVENTORY / "group_vars").is_dir() or not REQUIREMENTS.is_file(),

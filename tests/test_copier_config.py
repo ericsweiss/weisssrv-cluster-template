@@ -1172,12 +1172,23 @@ def test_copier_pin_is_the_same_in_both_places_this_pipeline_installs_it():
 
 def test_lib_ref_validator_takes_release_tags_only():
     """The include contract forbids a branch pin: a branch deleted after merge
-    takes every include, module source and collection install with it."""
+    takes every include with it. A tag below the default is refused too: the
+    playbooks are written against that release's role contracts."""
     assert not _validator_message("lib_ref", lib_ref=QUESTIONS["lib_ref"]["default"])
     for rejected in ("main", "chore/some-branch", "0.6.0", "v0.6", "v0.6.0-rc1"):
         assert _validator_message("lib_ref", lib_ref=rejected), (
             f"lib_ref accepted {rejected!r}, which is not a release tag"
         )
+    floor = tuple(int(part) for part in QUESTIONS["lib_ref"]["default"][1:].split("."))
+    older = (
+        f"v{floor[0]}.{floor[1]}.{floor[2] - 1}"
+        if floor[2]
+        else f"v{floor[0]}.{floor[1] - 1}.0"
+    )
+    assert _validator_message("lib_ref", lib_ref=older), (
+        f"lib_ref accepted {older!r}, which is older than the pinned default"
+    )
+    assert not _validator_message("lib_ref", lib_ref=f"v{floor[0]}.{floor[1] + 1}.0")
 
 
 _TAG_LITERAL = re.compile(r"\bv\d+\.\d+\.\d+\b")

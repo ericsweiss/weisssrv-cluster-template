@@ -185,10 +185,12 @@ so a transient first try never uploads alongside a passing retry.
 
 Each line of the file is a case-sensitive substring matched against the junit
 testcase name, and declares one testcase. A line ending in ` ::<n>` declares
-that it may match n of them. Blank lines and `#` comments are ignored.
+that it matches exactly n of them. Blank lines and `#` comments are ignored.
 
-Keep every pattern narrow. Under `--strict` the gate fails when a declaration
-matches more testcases than it declares, so a broad pattern cannot green-wash a
+Keep every pattern narrow. CI passes `--strict`, so a declaration that matches
+no testcase, or a number of them other than its ` ::<n>` count, fails the job
+instead of warning. A renamed or deleted guard is then a finding, a pattern that
+stops firing cannot sit there unnoticed, and a broad pattern cannot green-wash a
 real failure elsewhere in the scenario.
 
 Write the case so that a failure anywhere else still reds. Set the sentinel fact

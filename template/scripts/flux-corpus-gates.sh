@@ -106,6 +106,12 @@ echo "=== Checking ClusterSecretStore scoping ==="
 python3 scripts/check-secretstore-scope.py < "$CORPUS" || record $? check-secretstore-scope.py
 echo "=== Checking PVC storageClassName ==="
 python3 scripts/check-pvc-storageclass.py < "$CORPUS" || record $? check-pvc-storageclass.py
+# --allow-empty: a cluster with no NFS storage ships no such PV. The cert domain
+# only names the certificate in the IP-server message.
+echo "=== Checking NFS PersistentVolume TLS ==="
+NFS_CERT_DOMAIN=$(scripts/cluster-config-value.sh cluster_internal_domain || true)
+python3 scripts/check-nfs-tls.py --allow-empty --cert-domain "$NFS_CERT_DOMAIN" \
+  < "$CORPUS" || record $? check-nfs-tls.py
 # Source files, not the corpus: the app list is Ansible site data.
 echo "=== Checking backup-artifact apps against their alert arms ==="
 python3 scripts/check-backup-artifact-apps.py \

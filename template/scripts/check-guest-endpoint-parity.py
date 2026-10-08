@@ -15,11 +15,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
+    import gate_common  # noqa: E402
     import inventory_tree  # noqa: E402
 except ImportError as exc:  # pragma: no cover - environment guard
     print(
-        f"ERROR: {exc.name or 'inventory_tree'}.py must sit next to this script "
-        "- re-vendor it from weisssrv-lib.",
+        f"ERROR: {exc.name or 'the companion module'}.py must sit next to this "
+        "script - re-vendor it from weisssrv-lib.",
         file=sys.stderr,
     )
     raise SystemExit(2) from None
@@ -37,7 +38,7 @@ MANIFEST_TREE = "kubernetes"
 # left out takes its endpoints with it, uncompared and unreported.
 MANIFEST_GLOBS = ("*.yaml", "*.yml")
 HOSTS_YML = "ansible/inventories/prod/hosts.yml"
-CLUSTER_CONFIG = "kubernetes/infrastructure/sources/cluster-config.yaml"
+CLUSTER_CONFIG = gate_common.CLUSTER_CONFIG
 GROUP_VARS = "ansible/inventories/prod/group_vars"
 NAS_GROUP = "nas"
 DEFAULT_LAN_CIDR_KEY = "cluster_lan_cidr"
@@ -75,19 +76,6 @@ def inventory(root: Path) -> tuple[dict[str, str], dict[str, set[str]]]:
     if not found:
         raise Vacuous(f"{HOSTS_YML} declares no ansible_host values")
     return found, groups
-
-
-def cluster_config(root: Path) -> dict[str, str]:
-    """cluster-config's data map, the substitution source Flux uses."""
-    try:
-        # The handle, not the text: PyYAML names the file in its error mark.
-        with (root / CLUSTER_CONFIG).open(encoding="utf-8") as handle:
-            doc = yaml.safe_load(handle) or {}
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-        raise Vacuous(f"{CLUSTER_CONFIG} unreadable: {exc}") from exc
-    if not isinstance(doc, dict):
-        raise Vacuous(f"{CLUSTER_CONFIG} is not a mapping")
-    return {str(k): str(v) for k, v in (doc.get("data") or {}).items()}
 
 
 def substitute(address: str, config: dict[str, str]) -> str:
@@ -287,7 +275,10 @@ def check_detailed(
 ) -> tuple[list[str], int]:
     """(problems, addresses actually compared against the inventory)."""
     known, groups = inventory(root)
-    config = cluster_config(root)
+    try:
+        config = gate_common.load_cluster_config(root)
+    except gate_common.OperatorError as exc:
+        raise Vacuous(str(exc)) from exc
     keys = list(lan_cidr_keys or [DEFAULT_LAN_CIDR_KEY])
     lans = lan_networks(config, keys, list(extra_lan_cidrs or []))
     # A cluster that declares no gateway key simply gets no gateway allowance.

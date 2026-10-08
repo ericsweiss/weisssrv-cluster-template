@@ -10,10 +10,11 @@ import re
 from pathlib import Path
 
 import pytest
-import yaml
+from conftest import load_script
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "scripts"
+gate_common = load_script("gate_common.py")
 CLUSTER_CONFIG = REPO / "kubernetes" / "infrastructure" / "sources" / "cluster-config.yaml"
 DOMAIN_KEYS = ("cluster_internal_domain", "cluster_external_domain")
 
@@ -33,7 +34,7 @@ needs_cluster_config = pytest.mark.skipif(
 
 
 def site_domains() -> list[str]:
-    data = (yaml.safe_load(CLUSTER_CONFIG.read_text()) or {}).get("data") or {}
+    data = gate_common.load_cluster_config(REPO)
     return sorted({str(data[key]) for key in DOMAIN_KEYS if data.get(key)})
 
 

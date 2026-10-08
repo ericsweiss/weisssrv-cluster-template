@@ -8,8 +8,13 @@ vendored:
   # No directory walk reaches this one: the walks cover scripts/ trees only.
   - lib: lint/gitattributes
     consumer: .gitattributes
+  - scripts/check-comment-length.py
   - scripts/check-doc-links.py
   - scripts/check-lib-pins.py
+  # check-lib-pins.py imports ci_yaml from its own directory; the fetcher runs
+  # before any library checkout exists, which is the download block it replaces.
+  - scripts/ci_yaml.py
+  - scripts/ci-fetch-tools.py
   - scripts/semantic-release.py
   # The check-lib-pins suite is canonical in the library. This repository
   # vendors it because its own pipeline is where the rewriter runs; a generated
@@ -28,28 +33,55 @@ vendored:
     consumer: template/ansible/molecule/tasks/prepare-base.yml
   - lib: scripts/check-backup-artifact-apps.py
     consumer: template/scripts/check-backup-artifact-apps.py
+  - lib: scripts/check-cluster-invariants.py
+    consumer: template/scripts/check-cluster-invariants.py
+  - lib: scripts/check-comment-length.py
+    consumer: template/scripts/check-comment-length.py
+  - lib: scripts/check-dashboards.py
+    consumer: template/scripts/check-dashboards.py
   - lib: scripts/check-default-deny-coverage.py
     consumer: template/scripts/check-default-deny-coverage.py
   - lib: scripts/check-deploy-coverage.sh
     consumer: template/scripts/check-deploy-coverage.sh
   - lib: scripts/check-doc-links.py
     consumer: template/scripts/check-doc-links.py
+  - lib: scripts/check-helm-repo-parity.py
+    consumer: template/scripts/check-helm-repo-parity.py
   - lib: scripts/check-hpa-vpa-invariant.py
     consumer: template/scripts/check-hpa-vpa-invariant.py
   - lib: scripts/check-lib-pins.py
     consumer: template/scripts/check-lib-pins.py
   - lib: scripts/check-netpol-except-parity.py
     consumer: template/scripts/check-netpol-except-parity.py
+  - lib: scripts/check-nfs-tls.py
+    consumer: template/scripts/check-nfs-tls.py
   - lib: scripts/check-pvc-storageclass.py
     consumer: template/scripts/check-pvc-storageclass.py
+  - lib: scripts/check-role-inputs.py
+    consumer: template/scripts/check-role-inputs.py
   - lib: scripts/check-scrape-netpol.py
     consumer: template/scripts/check-scrape-netpol.py
   - lib: scripts/check-secretstore-scope.py
     consumer: template/scripts/check-secretstore-scope.py
   - lib: scripts/check-taskfile.sh
     consumer: template/scripts/check-taskfile.sh
+  - lib: scripts/check-version-checksums.py
+    consumer: template/scripts/check-version-checksums.py
   - lib: scripts/check-versions.py
     consumer: template/scripts/check-versions.py
+  - lib: scripts/ci-fetch-tools.py
+    consumer: template/scripts/ci-fetch-tools.py
+  # Companion modules: each is imported from the importing gate's own directory.
+  - lib: scripts/ci_playbook_invocations.py
+    consumer: template/scripts/ci_playbook_invocations.py
+  - lib: scripts/ci_yaml.py
+    consumer: template/scripts/ci_yaml.py
+  - lib: scripts/cluster-config-value.sh
+    consumer: template/scripts/cluster-config-value.sh
+  - lib: scripts/collect-state-lib.sh
+    consumer: template/scripts/collect-state-lib.sh
+  - lib: scripts/deploy-verify-lib.sh
+    consumer: template/scripts/deploy-verify-lib.sh
   - lib: scripts/extract-prometheus-config.py
     consumer: template/scripts/extract-prometheus-config.py
   - lib: scripts/flux-env.sh
@@ -58,14 +90,20 @@ vendored:
     consumer: template/scripts/find-reachable-host.sh
   - lib: scripts/flux-render.sh
     consumer: template/scripts/flux-render.sh
+  - lib: scripts/gate_common.py
+    consumer: template/scripts/gate_common.py
   - lib: scripts/generate-hosts-env.py
     consumer: template/scripts/generate-hosts-env.py
   - lib: scripts/generate-versions-configmap.py
     consumer: template/scripts/generate-versions-configmap.py
+  - lib: scripts/inventory_tree.py
+    consumer: template/scripts/inventory_tree.py
   - lib: scripts/kubeconform-skipped.py
     consumer: template/scripts/kubeconform-skipped.py
   - lib: scripts/lint-prometheus-config.sh
     consumer: template/scripts/lint-prometheus-config.sh
+  - lib: scripts/maintenance-run-with-verify.sh
+    consumer: template/scripts/maintenance-run-with-verify.sh
   - lib: scripts/molecule-retry.sh
     consumer: template/scripts/molecule-retry.sh
   - lib: scripts/resolve-tool.sh
@@ -76,9 +114,10 @@ vendored:
     consumer: template/scripts/semantic-release.py
   - lib: scripts/shell-lib.sh
     consumer: template/scripts/shell-lib.sh
-  # Absent from the pinned ref, so registering one now reds the gate; each joins
-  # this list at the next pin bump: check-comment-length.py,
-  # cluster-config-value.sh, flux-child-kustomizations.py.
+  - lib: scripts/supervised-apply-guard.sh
+    consumer: template/scripts/supervised-apply-guard.sh
+  # flux-child-kustomizations.py is still a template-local program; adopting the
+  # library's needs its tab output read at every call site.
   - lib: scripts/validate-helm-values.py
     consumer: template/scripts/validate-helm-values.py
   - lib: scripts/version-bump-mr.py
@@ -87,6 +126,10 @@ vendored:
   # pipeline loads is byte-identical to the library's.
   - lib: lint/secret-detection-ruleset.toml
     consumer: .gitlab/secret-detection-ruleset.toml
+  # Every generated cluster lints on this copy, held byte-identical so a
+  # tightened library rule cannot be left behind.
+  - lib: lint/yamllint-relaxed.yml
+    consumer: template/lint/yamllint-relaxed.yml
 
 forked:
   - lib: lint/ruff.toml
@@ -94,29 +137,52 @@ forked:
     reason: >-
       Repo-scoped header only; target-version and rule selection are the
       library's.
-    reconciled_sha256: ccf4e857a9d7e20039ef8f68be7080210e6703d1400c23586ec6f5679e2fbfb2
+    comment_only: true
+    reconciled_sha256: 17ffa1185a44dbc93e14f20bca60af1610702b1b03681691b6f602bd21ce9098
   - lib: lint/gitleaks.toml
     consumer: .gitleaks.toml
     reason: Allowlist paths and fixture anchors are per-repo.
-    reconciled_sha256: bffbe70c94436f4442aaeecc1f1f5715315fc5908b1486b2198796b9e097ff0d
+    reconciled_sha256: a70051101f8045b94172594a0a89c5cf7e17aa6ad56c184843ffc5eac29891ec
   - lib: lint/yamllint-relaxed.yml
     consumer: lint/yamllint-relaxed.yml
     reason: >-
       Repo-scoped header, plus a document-start note for the Jinja sources under
       template/. The rules are the library's. Kept at lint/, not the repo-root
       `.yamllint` the library documents, to match the generated cluster.
-    reconciled_sha256: 7fcb8f02aadf68b97cd334a69a889c8cd87ac4796927c086bf77702a247ae2d5
+    reconciled_sha256: 27bcd61c2e64c949a4e3da41633beecc8c8ee3933d4c6c0ab175c2f0828585d7
   - lib: lint/editorconfig
     consumer: .editorconfig
     reason: Per-repo file-type sections on a shared base.
-    reconciled_sha256: 911171d9f26ba0bb47300c97a9e46b078d48eb852dfe9a050fbc3c8e41cc2944
+    reconciled_sha256: 9873966d0ce8a80d7ed84ecce449107b2a20387a146692ffb9aec28dd505fe02
   - lib: lint/pre-commit-config.yaml
     consumer: .pre-commit-config.yaml
     reason: >-
       Template-repo hook set on a shared base: the template/ tree is excluded
       from the YAML hooks, and the library's local check-taskfile hook is
       dropped because this repository ships no Taskfile.
-    reconciled_sha256: 39e7c3a5fbc7d2185ad73c436cbba736cae1e2b2b88f7f50387f041cbd87323c
+    reconciled_sha256: f7e2dff0acee6c4787e1d89311fa72e5d089b13681ed9cd94e8b92bdcada519c
+  # Template-owned gates the library now offers under the same names. Each
+  # keeps its own CLI and its own test suite, so it is held to the library by
+  # reconciled_sha256 rather than by byte-identity.
+  - lib: scripts/check-flux-version-pin.py
+    consumer: template/scripts/check-flux-version-pin.py
+    reason: >-
+      Takes --root and --components where the library's takes --repo-root,
+      --ci-file, --versions-configmap, --gotk-glob and --runbook.
+    reconciled_sha256: 5353b33732feddc81d617138783f5fc65f09b13efc35a2f0dc0b878932e9d51c
+  - lib: scripts/check-secret-rotation-coverage.py
+    consumer: template/scripts/check-secret-rotation-coverage.py
+    reason: >-
+      Hard-codes the rotation document and the manual-rotation map, where the
+      library's requires --doc and accepts --declared-manual.
+    reconciled_sha256: 12e1a976a246b8067aea3da8441dec1c2c0be18604fb9b585a72030bb24931c7
+  - lib: scripts/flux-child-kustomizations.py
+    consumer: template/scripts/flux-child-kustomizations.py
+    reason: >-
+      Prints a bare spec.path for --paths, globs *.yaml only, and exposes
+      child_kustomizations() rather than the library's name<TAB>path output,
+      --exclude/--allow-missing-paths flags and child_kustomization_paths().
+    reconciled_sha256: 965d08702267f3f03d3213fdb623038178d874f89ef0486fe8b03fe2a37ded4b
   # The tenant-side lint profiles; the root copies above are what this
   # repository lints itself with. Both halves are listed so a library change
   # cannot reconcile one and leave generated clusters on the old profile.
@@ -125,27 +191,21 @@ forked:
     reason: >-
       Same rule selection, tenant-scoped header — it documents that the
       generated cluster relies on ruff's own config discovery.
-    reconciled_sha256: ccf4e857a9d7e20039ef8f68be7080210e6703d1400c23586ec6f5679e2fbfb2
+    comment_only: true
+    reconciled_sha256: 17ffa1185a44dbc93e14f20bca60af1610702b1b03681691b6f602bd21ce9098
   - lib: lint/pre-commit-config.yaml
     consumer: template/.pre-commit-config.yaml
     reason: >-
       Reworded header, `--unsafe` note, a yamllint hook pointed at
       lint/yamllint-relaxed.yml, and the whitespace hooks excluded from
       scripts/; the hook set and the pinned revs are the library's.
-    reconciled_sha256: 39e7c3a5fbc7d2185ad73c436cbba736cae1e2b2b88f7f50387f041cbd87323c
+    reconciled_sha256: f7e2dff0acee6c4787e1d89311fa72e5d089b13681ed9cd94e8b92bdcada519c
   - lib: lint/editorconfig
     consumer: template/.editorconfig
     reason: >-
       Tenant file-type sections on a shared base — `[Dockerfile*]` rather than
       `[Dockerfile]`, to cover the per-app Dockerfile suffixes.
-    reconciled_sha256: 911171d9f26ba0bb47300c97a9e46b078d48eb852dfe9a050fbc3c8e41cc2944
-  - lib: lint/yamllint-relaxed.yml
-    consumer: template/lint/yamllint-relaxed.yml
-    reason: >-
-      Cluster-scoped header; the rules are the library's. This is the copy every
-      generated cluster lints on, kept out of ansible-lint's discovery path: a
-      repo-root `.yamllint` replaces its yaml rule and disables fix mode.
-    reconciled_sha256: 7fcb8f02aadf68b97cd334a69a889c8cd87ac4796927c086bf77702a247ae2d5
+    reconciled_sha256: 9873966d0ce8a80d7ed84ecce449107b2a20387a146692ffb9aec28dd505fe02
   - lib: lint/gitattributes
     consumer: template/.gitattributes
     reason: >-

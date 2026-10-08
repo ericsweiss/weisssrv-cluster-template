@@ -54,7 +54,12 @@
       # Required: a digest-bearing image name must still answer at the `docker`
       # host DOCKER_HOST points at.
       alias: docker
-      command: ["--insecure-registry={{ registry_cache }}"]
+      # --mtu: the daemon's bridge inside a pod must not exceed the pod interface
+      # MTU (1420 on flannel over WireGuard or VXLAN); 1500 black-holes large TLS
+      # frames and surfaces as connection resets on fetches from the containers.
+      command:
+        - "--insecure-registry={{ registry_cache }}"
+        - "--mtu=1420"
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
@@ -110,11 +115,12 @@
     # start-storm-prone. No scenario opts — each test has one molecule.yml.
     - bash "$CI_PROJECT_DIR/scripts/molecule-retry.sh"
     # Downgrade the scenario's DECLARED negative-path failures so a green job
-    # uploads a green report; an absent expectations file is a no-op. Only on
-    # success, so a failed job keeps its raw report.
+    # uploads a green report; last in script, so a failed job keeps its raw one.
+    # --strict fails a declaration matching other than the count it declares.
     - python3 "$CI_PROJECT_DIR/scripts/sanitize-junit-expected-failures.py"
       --junit-dir "$CI_PROJECT_DIR/junit"
       --expectations "$CI_PROJECT_DIR/ansible/integration-tests/$TEST/molecule/default/expected-junit-failures.txt"
+      --strict
 
 integration-tests:
   extends: .integration-test-job

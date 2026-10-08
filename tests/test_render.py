@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -248,7 +249,27 @@ _JINJA_SCAN_EXEMPT: set[tuple[str, str]] = {
     ),
     ("scripts/check-comment-length.py", 'JINJA_STATEMENT = re.compile(r"\\{%.*?%\\}", re.S)'),
     ("scripts/check-comment-length.py", '`{% if x %}ci.yml{% endif %}.jinja` -> `ci.yml`."""'),
+    (
+        "scripts/check-comment-length.py",
+        "# A `{% raw %}` body is literal text: jinja reads no tags inside it, and an",
+    ),
+    (
+        "scripts/check-comment-length.py",
+        'r"(?P<open>\\{%-?\\s*raw\\s*-?%\\})(?P<body>.*?)(?P<close>\\{%-?\\s*endraw\\s*-?%\\})",',
+    ),
+    (
+        "scripts/check-comment-length.py",
+        "# (`{% %}`, the secrets seam a *.sh.jinja opens with) precede it.",
+    ),
+    (
+        "scripts/check-comment-length.py",
+        "A `{% raw %}` body is kept verbatim, only its tags dropped: jinja reads no",
+    ),
     ("tests/test_validate_helm_values.py", "limits: {%s}"),
+    (
+        "scripts/check-role-inputs.py",
+        '"{% if " + condition + " %}yes{% else %}no{% endif %}"',
+    ),
 }
 
 # Rendered lines that legitimately spell `{{ <answer name> }}`: Ansible-level
@@ -2315,6 +2336,14 @@ def test_the_crd_catalog_ref_is_pinned_to_the_library_default(cluster):
     assert all(location == "{{.CRD_CATALOG}}" for location in locations), (
         f"a kubeconform call site spells its own catalog URL: {sorted(set(locations))}"
     )
+    inputs = _flux_lint_include(cluster.path)["inputs"]
+    assert str(inputs.get("crd_catalog_ref")) == CRD_CATALOG_REF, (
+        f"the flux-lint include passes crd_catalog_ref {inputs.get('crd_catalog_ref')!r}, "
+        f"so the pipeline resolves a different catalog than taskfiles/flux.yml's {CRD_CATALOG_REF!r}"
+    )
+    baseline = inputs.get("expected_skipped_file")
+    assert baseline, "flux-lint passes no expected_skipped_file, so a skipped kind only prints"
+    assert (cluster.path / baseline).is_file(), f"flux-lint names a missing baseline: {baseline}"
 
 
 def test_the_crd_catalog_ref_matches_the_librarys_input_default():
@@ -3251,6 +3280,18 @@ def test_the_ci_matrix_runs_exactly_the_rendered_scenarios(cluster):
     assert check.returncode == 0, check.stdout + check.stderr
 
 
+def test_the_junit_sanitizer_runs_strict(cluster):
+    """Without --strict a declaration that matches nothing only warns, so a
+    renamed guard leaves the integration job green on a test it no longer runs."""
+    script = _load_ci(cluster.path / ".gitlab" / "ci" / "integration-jobs.yml")
+    commands = (script[".integration-test-job"] or {}).get("script") or []
+    calls = [c for c in commands if "sanitize-junit-expected-failures.py" in str(c)]
+    assert len(calls) == 1, "expected one sanitize-junit-expected-failures.py call"
+    assert "--strict" in str(calls[0]), (
+        "the sanitize call does not pass --strict, so a stale expectation only warns"
+    )
+
+
 def test_the_taskfile_runs_exactly_the_rendered_scenarios(cluster):
     """`task ansible:test-integration` is the third copy of the scenario list and
     the only one no shipped gate holds: a scenario it omits is skipped locally
@@ -3281,17 +3322,35 @@ def test_the_taskfile_runs_exactly_the_rendered_scenarios(cluster):
     )
 
 
-# Tool pins both pipelines download: render-validate lints the shipped alert
-# rules with the root pipeline's promtool, a generated cluster with its own.
-SHARED_TOOL_PINS = (
-    "PROMTOOL_VERSION",
-    "PROMTOOL_SHA256",
-    "AMTOOL_VERSION",
-    "AMTOOL_SHA256",
-    "KUSTOMIZE_VERSION",
-    "KUSTOMIZE_SHA256",
-    "PYYAML_VERSION",
+# Pins both pipelines still spell out. The binary pins moved into the vendored
+# scripts/ci-fetch-tools.py, byte-identical in both trees.
+SHARED_TOOL_PINS = ("PYYAML_VERSION",)
+FETCHER_RELPATH = "scripts/ci-fetch-tools.py"
+# Release-asset markers for the tools the fetcher owns. A pipeline naming one
+# is downloading it by hand against its own pin.
+FETCHED_TOOL_MARKERS = (
+    "releases/download/kustomize",
+    "yannh/kubeconform/releases",
+    "prometheus/prometheus/releases",
+    "prometheus/alertmanager/releases",
+    "releases.hashicorp.com/terraform",
+    "koalaman/shellcheck/releases",
+    "jqlang/jq/releases",
 )
+
+
+def test_both_pipelines_fetch_binaries_from_the_vendored_fetcher(cluster):
+    """One pin set for both. A pipeline downloading a tool by hand can pin a
+    version this repository's own gate never ran."""
+    for root in (REPO_ROOT, cluster.path):
+        assert (root / FETCHER_RELPATH).is_file(), f"{root} ships no {FETCHER_RELPATH}"
+        ci = (root / ".gitlab-ci.yml").read_text(encoding="utf-8")
+        assert FETCHER_RELPATH in ci, f"{root}/.gitlab-ci.yml never calls {FETCHER_RELPATH}"
+        hand_rolled = sorted(n for n in FETCHED_TOOL_MARKERS if n in ci)
+        assert not hand_rolled, (
+            f"{root}/.gitlab-ci.yml still downloads {hand_rolled} by hand — those "
+            f"pins belong in {FETCHER_RELPATH}"
+        )
 
 
 def test_the_two_pipelines_pin_the_same_tools(cluster):
@@ -3328,6 +3387,8 @@ def _assert_only_role(root: Path, when: str) -> tuple[Path, Path]:
         f"  when: {when}\n"
     )
     render = root / "render"
+    (render / "scripts").mkdir(parents=True)
+    shutil.copy(REPO_ROOT / "template" / "scripts" / "check-role-inputs.py", render / "scripts")
     (render / "ansible/inventories/prod/group_vars").mkdir(parents=True)
     (render / "ansible/inventories/prod/group_vars/all.yml").write_text("demo_target: demo-host\n")
     (render / "ansible/playbooks").mkdir(parents=True)

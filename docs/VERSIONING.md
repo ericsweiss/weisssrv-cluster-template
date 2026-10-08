@@ -80,7 +80,7 @@ after a `lib_ref` bump, or generate with `--vcs-ref HEAD` to take `main`.
 | `v0.6.0` | weisssrv-lib `v0.9.5` |
 | `v0.7.0` | weisssrv-lib `v0.9.8` |
 | `v0.8.0` | weisssrv-lib `v0.13.0` |
-| `main` (unreleased) | weisssrv-lib `v0.17.1` |
+| `main` (unreleased) | weisssrv-lib `v0.18.0` |
 
 Rules that keep the table meaningful:
 
@@ -236,84 +236,41 @@ it imports and exits 2 naming the missing file.
 
 Each entry is deleted by the pin bump that satisfies it.
 
-- Six gates under `template/scripts/` import `gate_common` from their own
-  directory in the library's current tree: `check-default-deny-coverage.py`,
-  `check-hpa-vpa-invariant.py`, `check-netpol-except-parity.py`,
-  `check-pvc-storageclass.py`, `check-scrape-netpol.py` and
-  `check-secretstore-scope.py`. The bump that brings them must also copy
-  `template/scripts/gate_common.py` and register it in **both**
-  `scripts/vendored-manifest.yml` (as `lib: scripts/gate_common.py`,
-  `consumer: template/scripts/gate_common.py`) and
-  `template/scripts/vendored-manifest.yml` (as `scripts/gate_common.py`).
-  Without it, `render-validate` fails on the render's corpus gates and every
-  generated cluster's `task lint` fails the same way.
-- The `flux-lint` include in `template/.gitlab-ci.yml.jinja` gains
-  `crd_catalog_ref`, passed the sha `template/taskfiles/flux.yml.jinja` pins as
-  `CRD_CATALOG_REF`, so the pipeline and `task flux:lint` resolve one catalog.
-  Pass `expected_skipped_file` in the same change, with the baseline file it
-  names, so the rendered repo's skip tracker is a gate rather than a report.
 - `template/scripts/check-scrape-wiring.py`: the library's port-granularity
   companion to `check-scrape-netpol.py`. It reads one namespace's directory, so
   a generated cluster needs the corpus-shaped arm first; vendor it once the
   library ships that, alongside `tests/test_check_scrape_wiring.py`.
-- Seven library scripts the render already carries are unregistered in
-  `template/scripts/vendored-manifest.yml`: `ci_yaml.py`,
-  `ci_playbook_invocations.py`, `inventory_tree.py`,
-  `supervised-apply-guard.sh`, `maintenance-run-with-verify.sh`,
-  `collect-state-lib.sh` and `deploy-verify-lib.sh`. Each is a straight
-  re-vendor plus a `vendored:` entry. `deploy-verify-lib.sh` diverges from the
-  library file only in its header and its per-function comments, so re-vendoring
-  it changes no behaviour and no call site. The `rendered-vendored` check reads
-  the library's offer list at the pin, so it names every one of them the moment
-  `lib_ref` moves.
-
-  Each registration also moves the script's row in
-  `template/scripts/README.md.jinja` from § Local helpers to § Vendored from
-  weisssrv-lib. `tests/test_scripts_readme_origin.py` compares that table
-  against the manifest in both directions, and a registered script missing from
-  it fails with a message about the manifest. Two rows are split rather than
-  moved whole: `collect-state-lib.sh` shares its row with `collect-state.sh`
-  and `deploy-verify-lib.sh` shares its with `deploy-verify.sh`, and both driver
-  halves stay local.
-- Two more the render carries diverge from the library file, so each needs a
-  decision rather than a registration. `check-flux-version-pin.py` takes
-  `--root` and `--components`, where the library's takes `--repo-root`,
-  `--ci-file`, `--versions-configmap`, `--gotk-glob`, `--components` and
-  `--runbook`. `check-secret-rotation-coverage.py` hard-codes `DOC` and
-  `DECLARED_MANUAL`, where the library's requires `--doc` and accepts
-  `--declared-manual`. Either re-vendor and adapt the call sites, or declare a
-  `forked:` entry with a reason. Adapting means passing `--doc
-  docs/RUNBOOKS.md` from `template/tests/test_check_secret_rotation_coverage.py`,
-  and the library's flags from `template/.pre-commit-config.yaml`,
-  `template/.gitlab-ci.yml.jinja` and `template/taskfiles/lint.yml.jinja`.
-  A re-vendor also moves that script's README row, the same way.
-- `template/scripts/flux-child-kustomizations.py` is a local program, not a copy.
-  The library's file excludes `flux-system`, globs `*.yml` too, tolerates an
-  unreadable file, prints `name<TAB>spec.path` for `--paths`, exits 1 on a
-  path-less Kustomization unless `--allow-missing-paths`, and exposes
-  `child_kustomization_paths()` / `_order()`. Vendoring it means, in the same
-  commit: register it in both manifests; read the tab form in
-  `template/scripts/deploy-verify.sh` (`while IFS=$'\t' read -r _KSNAME
-  SRCPATH`); pipe `KS_PATHS` through `cut -f2` in
-  `template/taskfiles/flux.yml.jinja`; rewrite
-  `template/tests/test_flux_child_kustomizations.py` against
-  `child_kustomization_paths` / `_order` and the tab output; correct its
-  `template/scripts/README.md.jinja` row and move it to § Vendored from
-  weisssrv-lib; and add the copy to `template/scripts/comment-length.yaml`'s
-  `exclude:`. weisssrv has already ported its half of the tab form.
-- `template/scripts/cluster-config-value.sh` is a `sed` reimplementation, not a
-  copy. The library's resolver is a `python3` heredoc that imports `yaml` and
-  reads only the `data:` mapping, so re-vendoring adds a PyYAML requirement to
-  its three call sites: `collect-state.sh`, `deploy-verify.sh` and
-  `diagnose-network-issues.sh`. `deploy-verify.sh` already installs PyYAML when
-  it is missing, so the `cluster-verify` job needs no change; the README row
-  gains a note that the resolver needs PyYAML, which is what the two
-  workstation-run scripts depend on. Register it in both manifests and add it to
-  `template/scripts/comment-length.yaml`'s `exclude:` in the same commit.
-- Every copy any entry above registers also joins
-  `template/scripts/comment-length.yaml`'s `exclude:` list. Without that, the
-  rendered comment-length gate fails on library comment blocks a generated
-  cluster cannot fix locally.
+- Three gates under `template/scripts/` are registered as declared `forked:`
+  entries rather than copies, so `reconciled_sha256` forces a review when the
+  library side moves. Adopting the library file means, for each, rewriting its
+  call sites and its shipped test suite:
+  - `check-flux-version-pin.py` takes `--root` and `--components`, where the
+    library's takes `--repo-root`, `--ci-file`, `--versions-configmap`,
+    `--gotk-glob`, `--components` and `--runbook`. The flags are passed from
+    `template/.pre-commit-config.yaml`, `template/.gitlab-ci.yml.jinja` and
+    `template/taskfiles/lint.yml.jinja`.
+  - `check-secret-rotation-coverage.py` hard-codes `DOC` and
+    `DECLARED_MANUAL`, where the library's requires `--doc` and accepts
+    `--declared-manual`. Adapting means passing `--doc docs/RUNBOOKS.md` from
+    `template/tests/test_check_secret_rotation_coverage.py` and the same three
+    callers.
+  - `flux-child-kustomizations.py` prints a bare `spec.path` for `--paths`,
+    globs `*.yaml` only, and exposes `child_kustomizations()`. The library's
+    excludes `flux-system`, globs `*.yml` too, tolerates an unreadable file,
+    prints `name<TAB>spec.path`, exits 1 on a path-less Kustomization unless
+    `--allow-missing-paths`, and exposes `child_kustomization_paths()` /
+    `_order()`. Adopting it means reading the tab form in
+    `template/scripts/deploy-verify.sh` (`while IFS=$'\t' read -r _KSNAME
+    SRCPATH`), piping `KS_PATHS` through `cut -f2` in
+    `template/taskfiles/flux.yml.jinja`, and rewriting
+    `template/tests/test_flux_child_kustomizations.py` against
+    `child_kustomization_paths` / `_order` and the tab output.
+- `check-netpol-except-parity.py` leaves a `${cluster_*}` ipBlock CIDR
+  unevaluated, and this template spells 15 of them across 8 manifests, so the
+  fence arm examines no rule whose only peer is one. Closing it needs the
+  library gate to read a manifest corpus on stdin, the way the other corpus
+  gates do. `template/scripts/flux-corpus-gates.sh` then runs it over the
+  substituted corpus, where every placeholder has a value.
 
 ## Related
 

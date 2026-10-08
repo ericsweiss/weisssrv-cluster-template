@@ -1,0 +1,3 @@
+# apiVersion/Kind pairs kubeconform may validate against NO schema, one per
+# line. Empty: the pinned CRD catalog covers every kind this repository ships,
+# so a skip is a new CRD or a failed catalog fetch and fails flux-lint.

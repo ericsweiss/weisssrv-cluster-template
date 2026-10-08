@@ -33,36 +33,24 @@ variables:
   LIB_PROJECT: "eric/weisssrv-lib"
   # Single source for the library pin. `include:` cannot read it, so each entry
   # repeats the tag; scripts/check-lib-pins.py fails drift. `--fix` rewrites.
-  WEISSSRV_LIB_REF: "v0.17.1"
+  WEISSSRV_LIB_REF: "v0.18.0"
   # Library checkout the python-tests job clones into and tests/test_render.py
   # reads for the ruleset parity gate, which fails rather than skips in CI.
   WEISSSRV_LIB_PATH: "$CI_PROJECT_DIR/.tmp/weisssrv-lib"
   COPIER_VERSION: "9.17.0"
   PYYAML_VERSION: "6.0.2"
   YAMLLINT_VERSION: "1.38.0"
-  ANSIBLE_CORE_VERSION: "2.18.18"
-  KUBECONFORM_VERSION: "0.6.7"
-  KUBECONFORM_SHA256: "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73"
-  KUSTOMIZE_VERSION: "5.4.3"
-  KUSTOMIZE_SHA256: "3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7"
-  # Same 1.15 line as the library's terraform-validate image; render-validate
-  # needs the binary alongside python/ansible, so it is fetched, not imaged.
-  TERRAFORM_VERSION: "1.15.8"
-  TERRAFORM_SHA256: "d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d"
-  # promtool + amtool: the cluster-gates check lints the alert rules and the
-  # Alertmanager config, which live inside a HelmRelease's values where
-  # kubeconform cannot reach them.
-  PROMTOOL_VERSION: "3.6.0"
-  PROMTOOL_SHA256: "2002ef4a55a64161affccd2786c7081d4e3b3a8d08786a98b3bb110971414916"
-  AMTOOL_VERSION: "0.28.1"
-  AMTOOL_SHA256: "5ac7ab5e4b8ee5ce4d8fb0988f9cb275efcc3f181b4b408179fafee121693311"
+  # The core line template/requirements.txt's `ansible==` pin resolves to:
+  # the render's nested pytest drives ansible-playbook, so it must run the
+  # interpreter a generated cluster deploys with.
+  ANSIBLE_CORE_VERSION: "2.21.5"
 
 include:
   # Only genuine YAML: files under template/ that carry the .jinja suffix are
   # Jinja sources, not documents. The render-validate job below yamllints the
   # rendered tree, which is where template/ actually gets covered.
   - project: eric/weisssrv-lib
-    ref: v0.17.1
+    ref: v0.18.0
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: []
@@ -77,7 +65,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.17.1
+    ref: v0.18.0
     file: /ci/lint/python-lint.yml
     inputs:
       tags: []
@@ -97,7 +85,7 @@ include:
   # The one .sh.jinja source is covered by the render check in
   # tests/validate_render.py, which shellchecks the generated scripts.
   - project: eric/weisssrv-lib
-    ref: v0.17.1
+    ref: v0.18.0
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: []
@@ -107,10 +95,20 @@ include:
         - "template/scripts/**/*.sh"
         - ".gitlab-ci.yml"
 
+  # The comment-length house rule over this repository's own sources, the Jinja
+  # ones included: the gate reads a `.jinja` source as the file it renders into.
+  # No config file, so PyYAML is not installed.
+  - project: eric/weisssrv-lib
+    ref: v0.18.0
+    file: /ci/lint/comment-length.yml
+    inputs:
+      tags: []
+      pyyaml_version: ""
+
   # copier.yml schema checks + the full render invariants. Everything in the
   # repository feeds the render, hence the catch-all `changes`.
   - project: eric/weisssrv-lib
-    ref: v0.17.1
+    ref: v0.18.0
     file: /ci/test/python-tests.yml
     inputs:
       tags: []
@@ -122,18 +120,18 @@ include:
       test_dir: "tests"
       # ansible-core: the nested `pytest tests scripts` inside the render runs
       # test_deploy_preflight.py, which fails rather than skips without it.
-      pip_packages: "copier==9.17.0 ansible-core==2.18.18"
+      pip_packages: "copier==9.17.0 ansible-core==2.21.5"
       # The library checkout the ruleset parity gate compares against; the
       # python:3.13 image already ships git. The fetch brings this repo's own
       # tags, which the validated-pair gate needs and a CI clone omits.
-      setup_command: 'mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" "$WEISSSRV_LIB_PATH" && git fetch --tags --quiet'
+      setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" "$WEISSSRV_LIB_PATH" && git fetch --tags --quiet'
       changes:
         - "**/*"
 
   # Self-application: the template ships this gate into every generated cluster,
   # and its own docs carry the same relative cross-links.
   - project: eric/weisssrv-lib
-    ref: v0.17.1
+    ref: v0.18.0
     file: /ci/lint/docs-link-check.yml
     inputs:
       tags: []
@@ -146,7 +144,7 @@ include:
   # Pin drift in the SHIPPED defaults, checked inside a render of this template.
   # Soft-fail: rc 1 means updates are available.
   - project: eric/weisssrv-lib
-    ref: v0.17.1
+    ref: v0.18.0
     file: /ci/maintenance/version-check.yml
     inputs:
       tags: []
@@ -159,6 +157,9 @@ include:
         [ -s "$REPORT_PATH" ] ||
         { echo "check-versions wrote no report (rc=$RC)"; exit 2; };
         exit "$RC"
+      # Stated, not inherited: rc=1 is "updates available", rc=2 a checker
+      # error, and the weekly sweep must red on the second.
+      soft_fail_exit_codes: [1]
       changes:
         - "template/ansible/inventories/prod/group_vars/all.yml.jinja"
         - "template/scripts/version-registry.py.jinja"
@@ -166,7 +167,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.17.1
+    ref: v0.18.0
     file: /ci/security/secret-detection.yml
     inputs:
       tags: []
@@ -176,7 +177,7 @@ include:
       cpu_selector: "esweiss.com/cpu=modern"
 
   - project: eric/weisssrv-lib
-    ref: v0.17.1
+    ref: v0.18.0
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []
@@ -198,7 +199,7 @@ include:
   # generated cluster's `copier update` resolves to. `release` is declared last
   # above, so stage order gates it on every job here. Policy: docs/VERSIONING.md.
   - project: eric/weisssrv-lib
-    ref: v0.17.1
+    ref: v0.18.0
     file: /ci/release/semantic-release.yml
     inputs:
       tags: []
@@ -232,39 +233,11 @@ render-validate:
         "pyyaml==${PYYAML_VERSION}" \
         "yamllint==${YAMLLINT_VERSION}" \
         "ansible-core==${ANSIBLE_CORE_VERSION}"
-    - |
-      set -eo pipefail
-      # Non-root tool install: stdlib download, sha256 verify, extract into a
-      # workspace bin that before_script already put on PATH.
-      fetch_verified() {  # <file> <url> <sha256>
-        python -c "import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])" "$2" "/tmp/$1"
-        echo "$3  /tmp/$1" | sha256sum -c -
-      }
-      fetch_verified kubeconform.tar.gz \
-        "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
-        "$KUBECONFORM_SHA256"
-      tar xzf /tmp/kubeconform.tar.gz -C "$CI_PROJECT_DIR/.bin" kubeconform
-      fetch_verified kustomize.tar.gz \
-        "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
-        "$KUSTOMIZE_SHA256"
-      tar xzf /tmp/kustomize.tar.gz -C "$CI_PROJECT_DIR/.bin" kustomize
-      fetch_verified terraform.zip \
-        "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" \
-        "$TERRAFORM_SHA256"
-      python -c "import zipfile,sys; zipfile.ZipFile('/tmp/terraform.zip').extract('terraform', sys.argv[1])" "$CI_PROJECT_DIR/.bin"
-      chmod +x "$CI_PROJECT_DIR/.bin/terraform"
-      fetch_verified prometheus.tar.gz \
-        "https://github.com/prometheus/prometheus/releases/download/v${PROMTOOL_VERSION}/prometheus-${PROMTOOL_VERSION}.linux-amd64.tar.gz" \
-        "$PROMTOOL_SHA256"
-      tar xzf /tmp/prometheus.tar.gz -C "$CI_PROJECT_DIR/.bin" --strip-components=1 \
-        "prometheus-${PROMTOOL_VERSION}.linux-amd64/promtool"
-      fetch_verified alertmanager.tar.gz \
-        "https://github.com/prometheus/alertmanager/releases/download/v${AMTOOL_VERSION}/alertmanager-${AMTOOL_VERSION}.linux-amd64.tar.gz" \
-        "$AMTOOL_SHA256"
-      tar xzf /tmp/alertmanager.tar.gz -C "$CI_PROJECT_DIR/.bin" --strip-components=1 \
-        "alertmanager-${AMTOOL_VERSION}.linux-amd64/amtool"
-      kubeconform -v && kustomize version && terraform version
-      promtool --version && amtool --version
+    # The pins live in the vendored fetcher, so this gate and every generated
+    # cluster download the same verified binaries.
+    - python3 scripts/ci-fetch-tools.py kubeconform kustomize terraform promtool amtool shellcheck
+    - kubeconform -v && kustomize version && terraform version
+    - promtool --version && amtool --version && shellcheck --version
     - |
       set -eo pipefail
       # The ref under test is copier.yml's lib_ref default, so the gate, the

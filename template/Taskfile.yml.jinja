@@ -35,7 +35,6 @@ vars:
   INVENTORY: ./inventories/prod
   CLUSTER_NAME: {{ cluster_name }}
   ADMIN_USER: {{ admin_user }}
-  API_VIP: {{ k3s_api_vip }}
   # Quoted: a vault name may contain spaces, and this value is expanded into
   # shell argv below as well as read as YAML here.
   OP_VAULT: "{{ onepassword_vault }}"
@@ -239,8 +238,12 @@ tasks:
       - task: lint:repo-sync
       - task: lint:netpol-parity
       - task: lint:kustomization-coverage
+      - task: lint:dashboards
+      - task: lint:helm-repo-parity
       - task: lint:cluster-literals
+      - task: lint:cluster-invariants
       - task: lint:integration-matrix
+      - task: lint:role-inputs
 {% endraw %}{% if vpn_tailscale %}{% raw %}
       - task: lint:tailscale-policy
 {% endraw %}{% endif %}{% raw %}

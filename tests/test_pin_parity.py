@@ -95,3 +95,82 @@ def test_the_generated_pipeline_pins_the_same_tools() -> None:
 def test_a_drifted_literal_pin_is_reported(text, expected) -> None:
     """Mutation case: the detection fires on a stale literal, and only on one."""
     assert drifted(text, {"COPIER_VERSION": "9.17.0"}) == expected
+
+
+# The community package's major N ships ansible-core 2.(N + 7).
+_CORE_MINOR_OFFSET = 7
+TEMPLATE_REQUIREMENTS = REPO / "template" / "requirements.txt"
+
+
+def core_line_for(ansible_pin: str) -> str:
+    """The ansible-core `major.minor` the community `ansible` pin resolves to."""
+    major = int(ansible_pin.split(".")[0])
+    return f"2.{major + _CORE_MINOR_OFFSET}"
+
+
+def test_the_core_pin_tracks_the_renders_ansible_pin() -> None:
+    """ANSIBLE_CORE_VERSION installs the interpreter the render's nested pytest
+    drives, so it must be the core line a generated cluster deploys with."""
+    text = TEMPLATE_REQUIREMENTS.read_text(encoding="utf-8")
+    match = re.search(r"^ansible==([^\s#]+)", text, re.MULTILINE)
+    assert match, "template/requirements.txt no longer pins `ansible==`"
+    expected = core_line_for(match.group(1))
+    core = pipeline_variables(CI_FILE)["ANSIBLE_CORE_VERSION"]
+    assert core.startswith(f"{expected}."), (
+        f"template/requirements.txt pins ansible=={match.group(1)}, which needs "
+        f"ansible-core {expected}.x, but ANSIBLE_CORE_VERSION is {core}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("ansible_pin", "expected"),
+    [("14.4.0", "2.21"), ("11.6.0", "2.18")],
+    ids=["current", "older-line"],
+)
+def test_the_core_line_derivation_is_exercised(ansible_pin, expected) -> None:
+    """Mutation case: a stale core line is only caught if the mapping holds."""
+    assert core_line_for(ansible_pin) == expected
+
+
+# The template's kubectl pin and the k3s release it talks to.
+TEMPLATE_GROUP_VARS = REPO / "template" / "ansible" / "inventories" / "prod" / "group_vars" / "all.yml.jinja"
+_KUBECTL_INPUT = re.compile(r'^\s*kubectl_version:\s*"v?(\d+)\.(\d+)\.', re.MULTILINE)
+_K3S_PIN = re.compile(r'^k3s_version:\s*"v?(\d+)\.(\d+)\.', re.MULTILINE)
+
+
+def skew(ci_text: str, group_vars_text: str) -> list[str]:
+    """kubectl pins outside Kubernetes' supported +/-1 minor skew of k3s."""
+    pins = sorted({(int(m[1]), int(m[2])) for m in _KUBECTL_INPUT.finditer(ci_text)})
+    k3s = _K3S_PIN.search(group_vars_text)
+    assert pins, "the template's pipeline spells no kubectl_version: input"
+    assert k3s, "the template's group_vars/all.yml.jinja pins no k3s_version"
+    major, minor = int(k3s[1]), int(k3s[2])
+    return [
+        f"kubectl v{pin[0]}.{pin[1]} against k3s v{major}.{minor}"
+        for pin in pins
+        if pin[0] != major or abs(pin[1] - minor) > 1
+    ]
+
+
+def test_the_kubectl_pin_tracks_the_k3s_release() -> None:
+    """kubectl is pinned in the pipeline and k3s in group_vars, so only a reader
+    pairs them. Outside one minor, kubectl refuses to talk to the apiserver."""
+    stale = skew(
+        TEMPLATE_CI.read_text(encoding="utf-8"),
+        TEMPLATE_GROUP_VARS.read_text(encoding="utf-8"),
+    )
+    assert not stale, (
+        "the template's kubectl pin is outside the supported skew:\n  "
+        + "\n  ".join(stale)
+        + "\nBump kubectl_version and its sha256 in template/.gitlab-ci.yml.jinja."
+    )
+
+
+@pytest.mark.parametrize(
+    ("kubectl", "expected"),
+    [("v1.37.1", []), ("v1.36.2", []), ("v1.35.9", ["kubectl v1.35 against k3s v1.37"])],
+    ids=["equal", "one-minor-back", "two-minors-back"],
+)
+def test_a_kubectl_pin_outside_the_skew_is_reported(kubectl, expected) -> None:
+    """Mutation case: the skew check fires, and only outside one minor."""
+    assert skew(f'      kubectl_version: "{kubectl}"\n', 'k3s_version: "v1.37.1+k3s1"\n') == expected

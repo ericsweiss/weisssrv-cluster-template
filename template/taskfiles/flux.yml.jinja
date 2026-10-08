@@ -463,14 +463,14 @@ tasks:
           fi
         done
 
-        # Informational, as the CI job runs it: which kinds no schema validated.
-        # Never sets FAILED — a local gate stricter than CI inverts the mirror.
+        # Which kinds no schema validated, against the baseline the CI flux-lint
+        # job passes: a skip outside it is a new CRD or a failed catalog fetch.
         # -verbose: without it kubeconform emits no per-resource array to filter.
         kubeconform -verbose -ignore-missing-schemas -kubernetes-version "$K8S_VER" \
           -schema-location default \
           -schema-location '{{.CRD_CATALOG}}' \
           -output json < "$RENDER_ALL" \
-          | python3 scripts/kubeconform-skipped.py || true
+          | python3 scripts/kubeconform-skipped.py scripts/kubeconform-expected-skipped.txt || FAILED=1
 
         # The corpus gates, in one script the CI flux-lint job calls as its
         # extra_validation. It also builds each cluster root into the corpus,

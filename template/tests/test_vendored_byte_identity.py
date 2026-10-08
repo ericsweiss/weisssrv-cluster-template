@@ -257,6 +257,23 @@ def test_the_dind_service_matches_the_library_input_default() -> None:
         f"dind_service default at {_pinned_ref()} is {default!r} — they are one pin."
     )
 
+    # The daemon's bridge MTU, held to the same default: 1500 black-holes large
+    # TLS frames inside the job pod, which reads as a flaky registry or git fetch.
+    mtu = (inputs.get("dind_mtu") or {}).get("default")
+    assert mtu, f"{DOCKER_BUILD_RELPATH} no longer declares a dind_mtu default"
+    commands = [
+        str(argument)
+        for job in jobs.values()
+        if isinstance(job, dict)
+        for service in (job.get("services") or [])
+        if isinstance(service, dict) and "dind" in str(service.get("name"))
+        for argument in (service.get("command") or [])
+    ]
+    assert f"--mtu={mtu}" in commands, (
+        f"{INTEGRATION_JOBS.relative_to(REPO)} passes the dind daemon {commands}, "
+        f"missing --mtu={mtu} — the library's dind_mtu default at {_pinned_ref()}."
+    )
+
 
 # The collection tree the shared molecule scaffolding is offered from. No
 # directory walk reaches ansible/molecule/, so its copies need their own check.

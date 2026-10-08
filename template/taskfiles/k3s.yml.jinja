@@ -53,6 +53,9 @@ tasks:
 
   kubeconfig:
     desc: Fetch the cluster kubeconfig into ~/.kube/config-k3s (rewritten to the API VIP)
+    preconditions:
+      - sh: python3 -c "import yaml" 2>/dev/null
+        msg: "PyYAML not installed, so the VIP cannot be read from cluster-config.yaml (pip install pyyaml)"
     cmds:
       - |
         set -eo pipefail
@@ -81,7 +84,8 @@ tasks:
         # The server writes 127.0.0.1; clients go through the VIP so a failover
         # does not invalidate the file. umask and chmod keep the cluster-admin
         # credentials out of a world-readable window.
-        (umask 077; echo "$DATA" | sed 's/127.0.0.1/{{.API_VIP}}/g; s/0.0.0.0/{{.API_VIP}}/g' > ~/.kube/config-k3s)
+        API_VIP=$(scripts/cluster-config-value.sh cluster_k3s_api_vip)
+        (umask 077; echo "$DATA" | sed "s/127.0.0.1/$API_VIP/g; s/0.0.0.0/$API_VIP/g" > ~/.kube/config-k3s)
         chmod 600 ~/.kube/config-k3s
         echo "Wrote ~/.kube/config-k3s — export KUBECONFIG=~/.kube/config-k3s"
 

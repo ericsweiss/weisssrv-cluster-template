@@ -76,6 +76,10 @@ CONFIG = {
             # Upstream also tags rc/alpha builds and the +k3sN suffix moves
             # independently of the Kubernetes version.
             "tag_filter": r"^v\d+\.\d+\.\d+\+k3s\d+$",
+            # The install script is fetched at the pinned tag and verified
+            # against this hash, so the two move together.
+            "checksum_var": "k3s_install_script_checksum",
+            "checksum_url": "https://raw.githubusercontent.com/k3s-io/k3s/{version}/install.sh",
             "deploy_command": "task maintenance:update-k3s-nodes",
             "notes": "bump the install-script sha256 in the same change",
         },
@@ -140,6 +144,9 @@ CONFIG = {
             "kube_prometheus_stack",
             "https://prometheus-community.github.io/helm-charts",
             "kube-prometheus-stack",
+            # A pin a human must rewrite with this one takes
+            # coupled_vars=["prometheus_operator_crds"], which makes --update-all
+            # print PAIRED-EDIT-REQUIRED instead of relying on the note below.
             notes="bump prometheus_operator_crds in lockstep — the CRDs must match the operator",
         ),
         _chart(
@@ -191,6 +198,8 @@ CONFIG = {
             "var_name": "postgresql_version",
             "category": "dockerhub",
             "docker_image": "library/postgres",
+            # A tag family whose suffixed tags overflow one page takes
+            # "dockerhub_page_size": 100 here.
             "tag_regex": r"^(\d+(?:\.\d+)?)-trixie$",
             "pin_major_version": True,
             "deploy_command": _FLUX,

@@ -72,6 +72,12 @@ tasks:
 
   doc-links:
     desc: Resolve relative Markdown cross-links offline
+    # Same two variables the CI job inherits from .gitlab-ci.yml: PATHS also
+    # resolves a backticked path whose first segment is a repo directory, and
+    # IGNORE lists the cited paths that are not files here.
+    env:
+      CHECK_DOC_LINKS_PATHS: "1"
+      CHECK_DOC_LINKS_IGNORE: "docs/[A-Z]* terraform/state/* */tfplan */check-vendored-copies.py"
     preconditions:
       - *needs_python3
     cmds:
@@ -170,6 +176,35 @@ tasks:
     cmds:
       - python3 scripts/check-kustomization-coverage.py kubernetes/
 
+  dashboards:
+    desc: Assert every Grafana dashboard parses and points at a provisioned datasource
+    # A dashboard imported in grafana.com's share form keeps its ${DS_*}
+    # placeholders, reconciles clean and shows "Datasource not found" in every
+    # panel.
+    preconditions:
+      - *needs_pyyaml
+    cmds:
+      - python3 scripts/check-dashboards.py
+
+  helm-repo-parity:
+    desc: Assert the chart-repo URL is one value in the manifests, the release list and the registry
+    # The HelmRepository is what Flux pulls from; a second copy that drifts
+    # validates one index while the cluster reconciles another.
+    preconditions:
+      - *needs_pyyaml
+    cmds:
+      - python3 scripts/check-helm-repo-parity.py
+
+  version-checksums:
+    desc: Assert every checksum pin still matches the artefact its version pin names
+    # Needs network egress, so it is not in the offline `task lint` list; the CI
+    # version-checksums job is where it runs on every version change. The bump
+    # bot rewrites a version and leaves its paired checksum alone.
+    preconditions:
+      - *needs_pyyaml
+    cmds:
+      - python3 scripts/check-version-checksums.py --allow-empty
+
   integration-matrix:
     desc: Assert every integration-test directory has a CI matrix entry
     # A scenario with no matrix entry never runs: the directory is green because
@@ -178,6 +213,34 @@ tasks:
       - *needs_pyyaml
     cmds:
       - python3 scripts/check-integration-matrix-coverage.py
+
+  cluster-invariants:
+    desc: Assert the inventory's addresses and vmids are internally consistent
+    # A duplicate vmid adopts the wrong guest, and a host on a VIP is an ARP
+    # fight with kube-vip or MetalLB. The library gate reads hosts.yml and
+    # cluster-config.yaml at their default paths.
+    preconditions:
+      - *needs_pyyaml
+    cmds:
+      - python3 scripts/check-cluster-invariants.py
+
+  role-inputs:
+    desc: Assert every invoked collection role has its asserted inputs set (mirrors the CI role-inputs job)
+    # A role's opening assert fails on every host it touches, after the play has
+    # already started. --allow-empty: a cluster composing no opt-in role reports
+    # the empty arm. --allow-unknown: a chart version carrying a role's prefix.
+    preconditions:
+      - *needs_pyyaml
+      - sh: test -d .ansible-home/collections/ansible_collections/weisssrv/infra/roles
+        msg: "the collection is not installed. Run: task ansible:lint"
+    cmds:
+      - |
+        python3 scripts/check-role-inputs.py --allow-empty \
+          --allow-unknown "gitlab_runner_helm_version=a chart version the Flux substitution reads, not a role variable" \
+          --allow-unknown "tailscale_operator=a helm_chart_versions key the Flux substitution reads, not a role variable" \
+          --roles-dir .ansible-home/collections/ansible_collections/weisssrv/infra/roles \
+          --inventory ansible/inventories/prod \
+          --playbooks ansible/playbooks
 
   invariants:
     desc: Assert the inventory, the Flux wiring and the vendored copies hold together (tests/ and scripts/)
@@ -314,10 +377,13 @@ tasks:
       - sh: command -v amtool
         msg: "amtool not installed (ships in the Alertmanager release tarball)"
       - *needs_pyyaml
-    # The extractor's default paths already match this tree's observability
-    # layout; promtool also unit-tests the rules against tests/prometheus-rules/*.test.yaml.
+    # RULES_DIR names the per-app PrometheusRule CRs; REQUIRE_RELEASE_RULES
+    # holds the kube-prometheus-stack release to its inline rule groups. The
+    # unit tests live in tests/prometheus-rules/*.test.yaml.
     env:
       RULE_TESTS_DIR: tests/prometheus-rules
+      RULES_DIR: kubernetes/apps
+      REQUIRE_RELEASE_RULES: "1"
     cmds:
       - bash scripts/lint-prometheus-config.sh
 {%- endraw %}

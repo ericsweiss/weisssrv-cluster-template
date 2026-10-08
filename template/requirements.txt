@@ -4,12 +4,13 @@
 
 # ansible and ruff are mirrored in .gitlab-ci.yml (ANSIBLE_VERSION and the
 # python-lint include's ruff_version); tests/test_site_configs.py fails on drift.
-ansible==11.6.0
-ansible-lint==25.12.2
-# black is a transitive dep (ansible-lint's jinja rule imports it); the black
-# 26.5.x wheels ship a broken mypyc extension that makes ansible-lint fail to
-# load. Lift once 26.5.x is fixed.
-black<26.5.0
+ansible==14.4.0
+# ansible-lint is also the ansible-lint include's default; a drift here lints
+# locally with a different rule set than the job deciding merge.
+ansible-lint==26.8.0
+# A transitive dep of ansible-lint's jinja rule, held below 26.5.x, whose
+# wheels ship a broken mypyc extension that makes ansible-lint fail to load.
+black==26.3.1
 molecule==26.4.0
 molecule-plugins[docker]==25.8.12
 pytest==9.1.1

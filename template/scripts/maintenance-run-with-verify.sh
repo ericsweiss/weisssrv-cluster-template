@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
 # Run a maintenance command, then run the verify script whatever the outcome.
 # Exits with the command's rc if it failed, else the verify's.
-
-# Usage: bash scripts/maintenance-run-with-verify.sh <command> [args...]
-# Takes one program with args, not a pipeline: wrap one as
-# `bash -c 'set -o pipefail; a | b'`.
-
-# VERIFY_SCRIPT overrides the verify script, repo-relative or absolute. The
-# default is the consumer-owned scripts/post-maintenance-verify.sh.
+# Usage and VERIFY_SCRIPT: docs/SCRIPTS.md.
 
 # No `-e`: a failing command must still reach the verify below.
 set -uo pipefail

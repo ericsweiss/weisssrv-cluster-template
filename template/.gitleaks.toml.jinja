@@ -13,10 +13,10 @@ description = "{{ cluster_name }} false positives"
 regexes = [
 {%- if secrets_backend == 'onepassword' %}
   # 1Password reference URIs — not secrets, just pointers to vault items.
-  '''op://[A-Za-z0-9_ /-]+''',
+  '''^op://[A-Za-z0-9_ /-]+''',
 {%- endif %}
   # Documentation placeholders like [your-cloudflare-api-token].
-  '''\[your-[a-z0-9-]+\]''',
+  '''^\[your-[a-z0-9-]+\]''',
   # Documentation placeholders written as <angle-bracket> tokens — a literal
   # <…> is never real credential material.
   '''<[a-z][a-z0-9_-]*>''',

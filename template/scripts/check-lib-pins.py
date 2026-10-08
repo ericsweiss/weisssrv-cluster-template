@@ -1,39 +1,8 @@
 #!/usr/bin/env python3
-"""Assert every weisssrv-lib pin matches the repo's single source.
+"""Assert every weisssrv-lib pin matches variables.WEISSSRV_LIB_REF.
 
-Covers two literals GitLab and Ansible-Galaxy both refuse to interpolate from a
-variable: the `include: ref:` entries in .gitlab-ci.yml, and the weisssrv-lib
-collection `version:` in the sibling ansible/requirements.yml (absent, and so a
-no-op, in a repo that does not install the collection). Both are synced from
-variables.WEISSSRV_LIB_REF; the include logic is described next, the collection
-logic near main().
-
-GitLab resolves `include:` at pipeline-CREATION time, before the `variables:`
-block of the same file exists, so `ref: $WEISSSRV_LIB_REF` does not work — the
-pin has to be a literal on every include entry. (A project/group CI/CD variable
-IS readable there, but it moves the pin out of git: a library bump would stop
-appearing in a diff and could not be reviewed or reverted as an MR.)
-
-So the copies are unavoidable, and this is what keeps them honest. It reads the
-authoritative value from `variables.WEISSSRV_LIB_REF` and requires that:
-
-  * every weisssrv-lib include entry pins exactly that ref, and
-  * the ref is a release TAG (vX.Y.Z).
-
-Both failures are silent without a gate. A stale ref on one entry runs that one
-job from a different library version — the "a changed input default silently
-changes this pipeline" hazard, arriving with nothing red to show for it. A
-BRANCH ref is worse: the include contract forbids it because a branch deleted
-after merge takes the include with it, and until then the pipeline's behaviour
-can change with no commit in the consuming repo at all.
-
-Consumers VENDOR this script (the CI job runs it from the consumer tree, like
-every other library script). `--project` / `--ref-var` exist so a consumer that
-pins a fork, or names its variable differently, can use the copy unmodified.
-
-Usage:
-  scripts/check-lib-pins.py            # verify (exit 1 on drift)
-  scripts/check-lib-pins.py --fix      # rewrite the pins to the single source
+Checks each weisssrv-lib `include:` ref and the sibling ansible/requirements.yml
+collection `version:`; `--fix` rewrites them. Contract: docs/INCLUDE-CONTRACT.md.
 """
 
 from __future__ import annotations
@@ -43,28 +12,33 @@ import re
 import sys
 from pathlib import Path
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
+    raise SystemExit(2) from None
+
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+try:
+    import ci_yaml  # noqa: E402  (resolved from this script's own directory)
+except ImportError:
+    print(
+        "ERROR: ci_yaml.py must sit next to this script — vendor both "
+        "(see weisssrv-lib scripts/vendorable-paths.yml).",
+        file=sys.stderr,
+    )
+    raise SystemExit(2) from None
 
 LIB_PROJECT = "eric/weisssrv-lib"
 REF_VAR = "WEISSSRV_LIB_REF"
 TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 
-
-class _RefTolerantLoader(yaml.SafeLoader):
-    """SafeLoader that survives GitLab's `!reference` tag.
-
-    `safe_load` raises on `!reference`, which .gitlab-ci.yml uses freely. This
-    subclasses SafeLoader — so it inherits exactly SafeLoader's constructors and
-    can NOT instantiate arbitrary Python — and adds one constructor that maps
-    `!reference` to None. Nothing here reads those values; the pins are plain
-    strings. `yaml.load` with this Loader is therefore as safe as `safe_load`,
-    unlike `yaml.load` with the default (arbitrary-object) Loader.
-    """
-
-
-_RefTolerantLoader.add_multi_constructor(
-    "!reference", lambda loader, suffix, node: None
-)
+# Shared with the other CI-reading gates: every `!`-tagged node becomes None, so
+# a pipeline file carrying any custom tag parses instead of crashing this gate.
+_LOADER = ci_yaml.NullTagCILoader
 
 
 def load_ci(path: Path) -> dict:
@@ -76,14 +50,18 @@ def parse_ci(text: str) -> dict:
     reads the file ONCE. Two reads could disagree if the file changed between
     them, and --fix rewrites lines located by one read into text from another.
     """
-    doc = yaml.load(text, Loader=_RefTolerantLoader)
-    if doc is None:
+    documents = [d for d in yaml.load_all(text, Loader=_LOADER) if d is not None]
+    if not documents:
         return {}
-    if not isinstance(doc, dict):
+    # GitLab's inputs syntax makes a pipeline file two documents, `spec:` then
+    # the jobs, so the last mapping is the one to read (as ci_yaml.parse_ci does).
+    mappings = [d for d in documents if isinstance(d, dict)]
+    if not mappings:
         # Valid YAML, wrong shape. Raised as a YAMLError so it lands on the
         # operator-error path (exit 2) rather than reaching `doc.get(...)` and
         # surfacing as an AttributeError traceback.
         raise yaml.YAMLError("the top-level CI document must be a mapping")
+    doc = mappings[-1]
     variables = doc.get("variables")
     if variables is not None and not isinstance(variables, dict):
         # A non-mapping `variables:` would reach .get(ref_var) on a scalar.
@@ -111,11 +89,10 @@ def declared_ref(doc: dict, ref_var: str = REF_VAR) -> str | None:
 
 
 def files_of(entry: dict) -> list[str]:
-    """`file:` is a string OR a list — a list shares one ref across templates.
+    """`file:` as a list of paths; a list shares one ref across templates.
 
-    An entry may carry no `file:` at all (a malformed include, or one using a
-    different selector). Naming it `<entry with no file:>` beats reporting the
-    drift against a bare `None`, which reads like a bug in this script.
+    An entry may carry no `file:` at all, so a placeholder string stands in
+    rather than a bare `None` in the drift report.
     """
     f = entry.get("file")
     if isinstance(f, list):
@@ -123,6 +100,24 @@ def files_of(entry: dict) -> list[str]:
         # loop to zero iterations, silently passing a drifted pin.
         return [str(x) for x in f] or ["<entry with an empty file: list>"]
     return [str(f)] if f else ["<entry with no file:>"]
+
+
+def _rewrite_scalar_line(line: str, key: str, want: str) -> str | None:
+    """`<indent>key: want<trailing comment>`, or None when nothing to rewrite.
+
+    A `#` opens a YAML comment only after whitespace, and a quoted scalar may
+    hold one, so the regex matches the scalar rather than splitting on `#`.
+    """
+    m = re.match(
+        rf"""^(\s*){re.escape(key)}:[^\S\n]*"""
+        r"""("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|.*?)"""
+        r"""([^\S\n]+#.*|[^\S\n]*)$""",
+        line.rstrip("\n"),
+    )
+    if not m or m.group(2) == want:
+        return None
+    newline = "\n" if line.endswith("\n") else ""
+    return f"{m.group(1)}{key}: {want}{m.group(3)}{newline}"
 
 
 def check(
@@ -161,19 +156,29 @@ def check(
     return problems
 
 
-def _ref_key_lines(text: str, project: str) -> set[int]:
-    """0-based line numbers of the `ref:` KEY in each library include entry.
+def _document_node(text: str, key: str, loader: type) -> yaml.MappingNode | None:
+    """The last mapping document carrying `key`, of a multi-document stream.
 
-    Derived from the parsed node tree rather than by scanning for `project:`
-    lines. Every indentation heuristic tried here leaked: a nested `inputs:`
-    block may legitimately carry `project` and `ref` keys of its own, and a
-    line scanner cannot tell those from an entry's own pin without effectively
-    reimplementing the parser. Composing the document gives the source line of
-    exactly the nodes `check()` reads, so --fix edits precisely what the gate
-    verifies and nothing else.
+    Matches what parse_ci reads, and compose_all marks are absolute in the
+    stream, so a caller's line offsets hold.
     """
-    root = yaml.compose(text, Loader=_RefTolerantLoader)
-    if not isinstance(root, yaml.MappingNode):
+    found = None
+    for root in yaml.compose_all(text, Loader=loader):
+        if isinstance(root, yaml.MappingNode) and any(
+            isinstance(k, yaml.ScalarNode) and k.value == key for k, _ in root.value
+        ):
+            found = root
+    return found
+
+
+def _ref_key_lines(text: str, project: str) -> set[int]:
+    """0-based line numbers of each library include entry's own `ref:` key.
+
+    Taken from the parsed node tree, so a nested `inputs:` `ref` is never
+    matched: --fix edits exactly the nodes check() reads.
+    """
+    root = _document_node(text, "include", _LOADER)
+    if root is None:
         return set()
 
     include_pairs = [
@@ -184,10 +189,9 @@ def _ref_key_lines(text: str, project: str) -> set[int]:
     if not include_pairs:
         return set()
     if len(include_pairs) > 1:
-        # PyYAML keeps the LAST duplicate key, so check() reads that one while
-        # taking the first here would rewrite a block GitLab and the gate both
-        # ignore — and the post-write verification would then pass against the
-        # other block. The two halves must agree on which block they mean.
+        # YAML keeps the LAST duplicate key, which is the one check() reads.
+        # Rewriting a different block would leave the verification passing
+        # against the wrong one, so refuse instead.
         raise SystemExit(
             "multiple top-level `include:` keys make the rewrite ambiguous "
             "(YAML keeps the last, so the others are silently ignored); "
@@ -195,17 +199,14 @@ def _ref_key_lines(text: str, project: str) -> set[int]:
         )
     include_key, include_node = include_pairs[0]
 
-    # Invariant: rewrite targets are bounded to the include node's own textual
-    # span. An alias resolves to its anchor, whose marks may sit anywhere in the
-    # file, so an unbounded rewrite could edit shared configuration.
+    # Rewrites are bounded to the include node's own span; an alias resolves to
+    # an anchor whose marks may sit anywhere in the file.
     include_start = include_key.start_mark.index
-    # The node's own end mark is the exact span; deriving it from the next
-    # top-level key can overshoot when that key is reached through an alias.
+    # The node end mark is the exact span; the next top-level key can overshoot.
     include_end = include_node.end_mark.index
     if include_end <= include_start:
-        # The include value is itself an alias, so its node carries the
-        # anchor's marks and the span reads as empty. Fall back to the
-        # conservative bound, which keeps the alias inside it and refused.
+        # An aliased include value carries the anchor's marks, so the span
+        # reads as empty. The conservative bound keeps the alias inside it.
         include_end = min(
             (
                 key.start_mark.index
@@ -215,15 +216,14 @@ def _ref_key_lines(text: str, project: str) -> set[int]:
             default=len(text),
         )
 
-    # Invariant: an alias inside the span refuses --fix. Composing resolves
-    # aliases away, so they are detected on the event stream instead. fix()
-    # then reports the drift unrepaired rather than editing a shared line.
-    for event in yaml.parse(text, Loader=_RefTolerantLoader):
+    # An anchor or alias inside the span refuses --fix: the pin may be shared
+    # with the rest of the file. Composing resolves aliases, so parse events
+    # detect them.
+    for event in yaml.parse(text, Loader=_LOADER):
         if not include_start <= event.start_mark.index < include_end:
             continue
         is_alias = isinstance(event, yaml.AliasEvent)
-        # An anchor DEFINED here can be referenced from outside the block, so
-        # rewriting this pin would change what that reference resolves to.
+        # An anchor defined here can be referenced from outside the block.
         defines_anchor = not is_alias and getattr(event, "anchor", None)
         if is_alias or defines_anchor:
             raise SystemExit(
@@ -280,41 +280,26 @@ def fix(path: Path, project: str = LIB_PROJECT, ref_var: str = REF_VAR) -> int:
     lines = text.splitlines(keepends=True)
     changed = 0
     for n in sorted(targets):
-        line = lines[n]
-        # A `#` only opens a YAML comment when whitespace precedes it, and a
-        # quoted scalar may contain one outright. Splitting on a bare `#` would
-        # cut a ref like `v1.0#rc1` in half and paste the remainder back as a
-        # comment.
-        m = re.match(
-            r"""^(\s*)ref:[^\S\n]*"""
-            r"""("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|.*?)"""
-            r"""([^\S\n]+#.*|[^\S\n]*)$""",
-            line.rstrip("\n"),
-        )
-        if m and m.group(2) != want:
-            newline = "\n" if line.endswith("\n") else ""
-            # `ref: ` rebuilt rather than reused: an EMPTY `ref:` has no
-            # trailing space to preserve, so reusing the matched prefix would
-            # emit `ref:v0.5.0`.
-            lines[n] = f"{m.group(1)}ref: {want}{m.group(3)}{newline}"
+        rewritten = _rewrite_scalar_line(lines[n], "ref", want)
+        if rewritten is not None:
+            lines[n] = rewritten
             changed += 1
     remaining = check(path, project, ref_var) if not changed else []
     if remaining:
-        # fix() reporting 0 is a claim that nothing needed doing. It cannot add
-        # a `ref:` that is absent, rewrite a flow-style entry, or reach a pin
-        # that lives outside `include:` — and returning 0 for any of those hands
-        # the caller a clean result over an unrepaired file.
+        # --fix cannot add an absent ref, rewrite flow style, or reach a pin
+        # outside `include:`; reporting 0 for any of those would hand the caller
+        # a clean result over an unrepaired file.
         raise SystemExit(
             f"{path}: --fix could not repair this file; fix it by hand:\n  "
             + "\n  ".join(remaining)
         )
     if changed:
         updated = "".join(lines)
-        # Invariant: re-parse and require every library pin to have landed as
-        # the exact string intended. Nothing is written until that passes, so a
-        # refusal is never a half-edited file.
+        # Re-parsed and required to have landed as the exact string intended.
+        # Nothing is written until that passes, so a refusal is never a
+        # half-edited file.
         try:
-            reparsed = yaml.load(updated, Loader=_RefTolerantLoader) or {}
+            reparsed = parse_ci(updated)
         except yaml.YAMLError as exc:
             raise SystemExit(
                 f"{path}: rewrite would produce invalid YAML ({exc}); "
@@ -330,12 +315,9 @@ def fix(path: Path, project: str = LIB_PROJECT, ref_var: str = REF_VAR) -> int:
     return changed
 
 
-# Ansible collection pin. A consumer's sibling ansible/requirements.yml installs
-# the SAME library at the SAME tag, but as a Galaxy collection rather than a CI
-# include. Galaxy cannot reference variables.WEISSSRV_LIB_REF any more than
-# `include: ref:` can, so its `version:` literal is synced from the same single
-# source. A repo that does not install the collection (a tenant app scaffold)
-# has no requirements.yml, and all of this is a no-op there.
+# Ansible collection pin: the sibling ansible/requirements.yml installs the same
+# library at the same tag as a Galaxy collection. A repo without that file (a
+# tenant app scaffold) makes this a no-op.
 
 _REQUIREMENTS_REL = Path("ansible") / "requirements.yml"
 
@@ -345,33 +327,61 @@ def requirements_path(ci_file: Path) -> Path:
     return ci_file.parent / _REQUIREMENTS_REL
 
 
-def _collection_version(text: str, project: str) -> tuple[int, str] | None:
-    """(0-based line of the `version:` KEY, its value) for the collection whose
-    `name` names `project`, read from the parsed node tree so a `version:` under
-    a DIFFERENT collection is never matched. None if the entry or its version is
-    absent. requirements.yml carries no GitLab `!reference`, so plain SafeLoader.
+def _repo_name(url: str) -> str:
+    """The repository name in a Galaxy source URL or an include project path."""
+    return url.split("#", 1)[0].rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+
+
+def _names_project(value: str, project: str) -> bool:
+    """Whether a collection `name:`/`source:` installs `project`.
+
+    The include path resolves instance-locally, so a mirror or a fork on
+    another host matches on repository name rather than as a substring.
     """
-    root = yaml.compose(text, Loader=yaml.SafeLoader)
-    if not isinstance(root, yaml.MappingNode):
-        return None
+    return project in value or _repo_name(value) == _repo_name(project)
+
+
+def _collection_entries(text: str) -> list[dict[str, tuple[int, str]]]:
+    """Each `collections:` entry as {key: (0-based key line, value)}.
+
+    Read from the node tree so a `version:` under a different collection never
+    matches. requirements.yml carries no `!reference`, so plain SafeLoader.
+    """
+    root = _document_node(text, "collections", yaml.SafeLoader)
+    if root is None:
+        return []
+    entries: list[dict[str, tuple[int, str]]] = []
     for top_key, top_val in root.value:
         if not (isinstance(top_key, yaml.ScalarNode) and top_key.value == "collections"):
             continue
         if not isinstance(top_val, yaml.SequenceNode):
-            return None
+            return []
         for entry in top_val.value:
             if not isinstance(entry, yaml.MappingNode):
                 continue
-            name = version = None
-            for key, value in entry.value:
-                if not (isinstance(key, yaml.ScalarNode) and isinstance(value, yaml.ScalarNode)):
-                    continue
-                if key.value == "name":
-                    name = value.value
-                elif key.value == "version":
-                    version = (key.start_mark.line, value.value)
-            if name and project in name and version is not None:
-                return version
+            entries.append(
+                {
+                    key.value: (key.start_mark.line, value.value)
+                    for key, value in entry.value
+                    if isinstance(key, yaml.ScalarNode)
+                    and isinstance(value, yaml.ScalarNode)
+                }
+            )
+    return entries
+
+
+def _is_git_collection(entry: dict[str, tuple[int, str]]) -> bool:
+    source = entry.get("source", entry.get("name", (0, "")))[1]
+    return entry.get("type", (0, ""))[1] == "git" or source.startswith("git+")
+
+
+def _collection_version(text: str, project: str) -> tuple[int, str] | None:
+    """(0-based line of the `version:` KEY, its value) for the collection that
+    installs `project`. None if the entry or its version is absent."""
+    for entry in _collection_entries(text):
+        named = [entry[k][1] for k in ("name", "source") if k in entry]
+        if any(_names_project(v, project) for v in named) and "version" in entry:
+            return entry["version"]
     return None
 
 
@@ -384,12 +394,24 @@ def check_requirements(
     req = requirements_path(ci_file)
     if not req.is_file():
         return []
-    found = _collection_version(req.read_text(encoding="utf-8"), project)
+    text = req.read_text(encoding="utf-8")
+    found = _collection_version(text, project)
     if found is None:
+        entries = _collection_entries(text)
+        named = [
+            v for e in entries for k in ("name", "source") if k in e for v in [e[k][1]]
+        ]
         # A requirements.yml that DOES install the library but carries no
-        # version: is a floating pin — the drift this exists to prevent.
-        if project in req.read_text(encoding="utf-8"):
+        # version: is a floating pin, the drift this exists to prevent.
+        if any(_names_project(v, project) for v in named):
             return [f"{req}: the {project} collection is installed without a version: pin"]
+        # Finding no subject is not the same as finding no drift: a git
+        # collection that matches nothing means the pin is going unchecked.
+        if any(_is_git_collection(e) for e in entries):
+            return [
+                f"{req}: no git collection matching {project!r} - the library "
+                "pin is not being checked (pass --project)"
+            ]
         return []
     _, current = found
     if current == want:
@@ -413,20 +435,13 @@ def fix_requirements(ci_file: Path, want: str, project: str = LIB_PROJECT) -> in
         return 0
     line_no, _ = found
     lines = text.splitlines(keepends=True)
-    line = lines[line_no]
-    m = re.match(
-        r"""^(\s*)version:[^\S\n]*"""
-        r"""("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|.*?)"""
-        r"""([^\S\n]+#.*|[^\S\n]*)$""",
-        line.rstrip("\n"),
-    )
-    if not m:
+    rewritten = _rewrite_scalar_line(lines[line_no], "version", want)
+    if rewritten is None:
         raise SystemExit(
             f"{req}: could not rewrite the {project} collection version: line; "
             "fix it by hand"
         )
-    newline = "\n" if line.endswith("\n") else ""
-    lines[line_no] = f"{m.group(1)}version: {want}{m.group(3)}{newline}"
+    lines[line_no] = rewritten
     updated = "".join(lines)
     landed = _collection_version(updated, project)
     if landed is None or landed[1] != want:
@@ -464,10 +479,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    # Unreadable or malformed input is an operator error, not a pin finding:
-    # exit 2 so CI can tell the two apart. Wrapping the real calls (not a
-    # preflight read) is what keeps the guard around every read. SystemExit
-    # from fix() passes through — those refusals are already worded.
+    # Unreadable or malformed input is operator error, not a pin finding: exit 2
+    # so CI can tell them apart. Wrapping the real calls, not a preflight read,
+    # keeps the guard around every read.
     try:
         return _run(args)
     except (OSError, UnicodeDecodeError) as exc:
@@ -493,10 +507,8 @@ def _run(args: argparse.Namespace) -> int:
         # fix() has validated `want` is a release tag (or raised); sync the
         # sibling collection pin from the same single source.
         changed += fix_requirements(args.ci_file, want, args.project)
-        # Verify the result rather than trusting the rewrite. --fix cannot
-        # repair a branch ref in the variable, an absent include block, or an
-        # entry whose `ref:` the line rewriter did not recognise — and exiting 0
-        # on any of those would report success for a file still in violation.
+        # Verified rather than trusted: --fix cannot repair a branch ref, an
+        # absent include block, or a `ref:` the line rewriter did not match.
         problems = check(args.ci_file, args.project, args.ref_var) + check_requirements(
             args.ci_file, want, args.project, args.ref_var
         )

@@ -1,26 +1,14 @@
 #!/usr/bin/env bash
-# Export the postBuild substitution variables from EVERY ConfigMap the Flux
-# Kustomizations substitute from. This cluster has two — cluster-versions
-# (pinned versions) and cluster-config (domains, VIPs, CIDRs) — while both the
-# local lint and the library's flux-lint CI template call a single
-# `<script> export-versions <configmap>` entry point. This wrapper is that entry
-# point; the per-file parsing stays in the vendored flux-render.sh.
-#
-#   VARS=$(scripts/flux-env.sh export-versions "$VERSIONS_CM") || exit 1
-#   eval "$VARS"        # exports every key plus the merged FLUX_ENVSUBST_VARS
-#
-# The argument may itself name several ConfigMaps separated by whitespace (the
-# CI template passes its `versions_configmap` input through as ONE quoted
-# argument), and $FLUX_EXTRA_CONFIGMAPS adds more — set it to the empty string
-# to add none. Later files win on a key collision; FLUX_ENVSUBST_VARS is the
-# union, and a file named twice is read once.
+# Multi-ConfigMap front end to flux-render.sh, which keeps the per-file parsing.
+# Usage: VARS=$(scripts/flux-env.sh export-versions "$CMS"); eval "$VARS"
+# Contract + env: weisssrv-lib docs/SCRIPTS.md - flux-env.sh.
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RENDER="$_SCRIPT_DIR/flux-render.sh"
 
 # `-` not `:-`: an explicitly empty value means "no extras", while an unset one
-# means "the usual sibling".
+# means the conventional sibling cluster-config.yaml.
 FLUX_EXTRA_CONFIGMAPS="${FLUX_EXTRA_CONFIGMAPS-kubernetes/infrastructure/sources/cluster-config.yaml}"
 
 die() {
@@ -31,7 +19,7 @@ die() {
 cmd_export_versions() {
     [ -n "${1:-}" ] || die "usage: $0 export-versions <configmap> [configmap ...]"
 
-    local names="" seen=" " out line key
+    local names="" seen=" " named=" " out line key
     # shellcheck disable=SC2048,SC2086  # both lists are deliberately word-split
     for cm in $* $FLUX_EXTRA_CONFIGMAPS; do
         case "$seen" in *" $cm "*) continue ;; esac
@@ -44,6 +32,10 @@ cmd_export_versions() {
             printf '%s\n' "$line"
             key=${line#export }
             key=${key%%=*}
+            # The allowlist is the union: a key defined in two ConfigMaps has
+            # two export lines (last wins) but one entry here.
+            case "$named" in *" $key "*) continue ;; esac
+            named="$named$key "
             names="${names}\${${key}} "
         done <<EOF
 $out
@@ -63,10 +55,9 @@ cmd_k8s_version() {
     "$RENDER" k8s-version "$1"
 }
 
-# Print ONE ConfigMap whose .data is the union of every input file's, for the
-# tools that accept a single --versions-configmap (validate-helm-values.py).
-# Same file list and precedence as export-versions, so the merged document and
-# the exported environment can never disagree.
+# Print ONE ConfigMap whose .data is the union of every input file's, for tools
+# that accept a single --versions-configmap (validate-helm-values.py). Same file
+# list and precedence as export-versions, so the two can never disagree.
 cmd_merged_configmap() {
     [ -n "${1:-}" ] || die "usage: $0 merged-configmap <configmap> [configmap ...]"
 

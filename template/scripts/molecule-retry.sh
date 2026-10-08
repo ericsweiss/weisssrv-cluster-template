@@ -1,46 +1,70 @@
 #!/usr/bin/env bash
-# Run `molecule test` with an in-job destroy + jitter retry, shared by the
-# molecule-tests and integration-tests CI jobs so the retry policy (max attempts
-# + jitter window) lives in ONE place instead of two hand-synced copies.
-#
-# Concurrent systemd-container starts race cgroup setup and die at prepare;
-# destroy + a jittered sleep de-conflicts the retry, where a job-level retry
-# would land every attempt in the same storm.
-#
-# The caller cd's into the role / integration-test directory first; molecule
-# runs in $PWD. Base opts (before the subcommand, e.g. `-c <base.yml>`) and
-# scenario opts (after it, e.g. `-s default`) are passed via env so both apply
-# to the `test` AND the `destroy` invocations:
-#   MOL_MAX  = max attempts            (default 4)
-#   MOL_BASE = args before subcommand  (default empty)
-#   MOL_SCEN = args after subcommand   (default empty)
-#
-# Usage:
-#   MOL_BASE="-c $CI_PROJECT_DIR/ansible/molecule/base.yml" MOL_SCEN="-s default" \
-#     bash "$CI_PROJECT_DIR/scripts/molecule-retry.sh"
-#   bash "$CI_PROJECT_DIR/scripts/molecule-retry.sh"   # integration-tests: no base/scen
+# Run `molecule test` with an in-job destroy + jittered retry. Only the setup
+# stages retry: a failure at or after converge is the scenario's verdict.
+# Contract + env: weisssrv-lib docs/SCRIPTS.md - molecule-retry.sh.
 set -uo pipefail
 
 MOL_MAX="${MOL_MAX:-4}"
 MOL_BASE="${MOL_BASE:-}"
 MOL_SCEN="${MOL_SCEN:-}"
 
+# Stage banners molecule prints when it enters a test stage. Reaching one means
+# the scenario ran, so a retry would let a flaky assertion pass green.
+TEST_STAGES='converge|idempotence|side_effect|verify'
+BANNER_RE="(Running .* > (${TEST_STAGES})\b)|(Action: '(${TEST_STAGES})')"
+# Stage-agnostic form: no banner of any shape means molecule's output format
+# changed, and BANNER_RE can no longer tell a setup failure from a verdict.
+ANY_BANNER_RE="(Running .* > [a-z_]+)|(Action: '[a-z_]+')"
+
+# Attempt count for the job's dotenv report; unset means no report.
+record_attempts() {
+    echo "molecule-retry: finished after $1 attempt(s)"
+    [ -n "${MOLECULE_RETRY_DOTENV:-}" ] || return 0
+    echo "MOLECULE_RETRY_ATTEMPTS=$1" >"$MOLECULE_RETRY_DOTENV"
+}
+
+# Move an attempt's junit out of the way so only the deciding attempt's XMLs
+# reach the pipeline test report, while the failed ones stay downloadable.
+stash_junit() {
+    [ -n "${JUNIT_OUTPUT_DIR:-}" ] && [ -d "$JUNIT_OUTPUT_DIR" ] || return 0
+    local failed_dir="$JUNIT_OUTPUT_DIR/failed-attempt-$1"
+    mkdir -p "$failed_dir"
+    find "$JUNIT_OUTPUT_DIR" -maxdepth 1 -name '*.xml' -exec mv {} "$failed_dir"/ \;
+}
+
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+
 attempt=1
-# shellcheck disable=SC2086  # intentional word-split of MOL_BASE/MOL_SCEN
-until molecule $MOL_BASE test $MOL_SCEN; do
-    rc=$?
-    attempt=$((attempt + 1))
-    if [ "$attempt" -gt "$MOL_MAX" ]; then
+while true; do
+    # shellcheck disable=SC2086  # intentional word-split of MOL_BASE/MOL_SCEN
+    molecule $MOL_BASE test $MOL_SCEN 2>&1 | tee "$log"
+    rc="${PIPESTATUS[0]}"
+    if [ "$rc" -eq 0 ]; then
+        record_attempts "$attempt"
+        exit 0
+    fi
+
+    if grep -Eq "$BANNER_RE" "$log"; then
+        echo "molecule-retry: failure at or after converge; not retrying (rc=$rc)"
+        record_attempts "$attempt"
         exit "$rc"
     fi
-    echo "molecule attempt $((attempt - 1)) failed (rc=$rc); destroying + retrying ($attempt/$MOL_MAX)"
-    # Clear the failed attempt's junit XMLs: the callback appends one file per
-    # playbook run, so without this a transient attempt-1 failure uploads its
-    # red testcases ALONGSIDE the passing retry's — the pipeline test report
-    # must reflect only the attempt that determined job status.
-    if [ -n "${JUNIT_OUTPUT_DIR:-}" ] && [ -d "$JUNIT_OUTPUT_DIR" ]; then
-        rm -f "$JUNIT_OUTPUT_DIR"/*.xml
+
+    if ! grep -Eq "$ANY_BANNER_RE" "$log"; then
+        echo "molecule-retry: no stage banner recognised - molecule output format changed; refusing to retry (rc=$rc)"
+        record_attempts "$attempt"
+        exit "$rc"
     fi
+
+    if [ "$attempt" -ge "$MOL_MAX" ]; then
+        record_attempts "$attempt"
+        exit "$rc"
+    fi
+
+    stash_junit "$attempt"
+    attempt=$((attempt + 1))
+    echo "molecule-retry: setup stage failed (rc=$rc); destroying + retrying ($attempt/$MOL_MAX)"
     # shellcheck disable=SC2086  # intentional word-split of MOL_BASE/MOL_SCEN
     molecule $MOL_BASE destroy $MOL_SCEN || true
     # 20-65s jitter so simultaneous retries across the fan-out do not re-collide.

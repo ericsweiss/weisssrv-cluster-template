@@ -2,11 +2,13 @@
 # Read one or more keys out of the cluster-config ConfigMap, the cluster's
 # identity source of truth for domains, CIDRs and VIPs.
 
+# Usage:
 #   cluster-config-value.sh cluster_k3s_api_vip
 #   CLUSTER_CONFIG=path/to/cluster-config.yaml cluster-config-value.sh a b
 
 # Prints one value per key, space-separated, and fails if any key is absent: an
-# empty value silently becomes a no-op sed or an empty probe list.
+# empty value silently becomes a no-op sed or an empty probe list. Only the
+# `data:` scalars are read.
 
 set -euo pipefail
 
@@ -22,16 +24,20 @@ if [ ! -f "$CLUSTER_CONFIG" ]; then
     exit 2
 fi
 
-out=""
-for key in "$@"; do
-    # Only the `data:` scalars are of this shape; quotes are optional in YAML, so
-    # both spellings are accepted and neither is emitted.
-    value=$(sed -n "s/^[[:space:]]*${key}:[[:space:]]*[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}[[:space:]]*$/\1/p" \
-        "$CLUSTER_CONFIG" | head -1)
-    if [ -z "$value" ]; then
-        echo "ERROR: $key is not set in $CLUSTER_CONFIG" >&2
-        exit 1
-    fi
-    out="${out:+$out }$value"
-done
-printf '%s\n' "$out"
+python3 - "$CLUSTER_CONFIG" "$@" <<'PYEOF'
+import sys
+
+import yaml
+
+path = sys.argv[1]
+with open(path) as f:
+    doc = yaml.safe_load(f)
+data = (doc or {}).get("data") or {}
+values = []
+for key in sys.argv[2:]:
+    value = data.get(key)
+    if value is None or str(value) == "":
+        sys.exit(f"ERROR: {key} is not set in {path}")
+    values.append(str(value))
+print(" ".join(values))
+PYEOF

@@ -108,9 +108,9 @@ adguard_home_user_rules: []
 # acme.sh + DNS-01 issues the wildcard on the primary only and pushes it over
 # SSH. The first issuance is manual - docs/RUNBOOKS.md Certificates.
 acme_certs_domain: {{ internal_domain }}
-# Written out so the pin is visible here: acme.sh 3.x otherwise falls back to
-# ZeroSSL. Any CA name acme.sh accepts, or a CA directory URL.
-acme_certs_ca_server: letsencrypt
+# The ACME CA, which the role already pins to Let's Encrypt. Any name acme.sh
+# accepts, or a CA directory URL.
+# acme_certs_ca_server: letsencrypt
 acme_certs_email: "{% raw %}{{ admin_email }}{% endraw %}"
 acme_certs_ssh_private_key: >-
   {% raw %}{{ lookup('ansible.builtin.env', 'ACME_SSH_PRIVATE_KEY')
