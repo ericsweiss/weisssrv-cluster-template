@@ -1,15 +1,10 @@
 ---
-# Shared RBAC for tenant Flux reconciliation.
-#
-# Tenant Kustomizations reconcile under a namespace-scoped ServiceAccount bound
-# to the built-in `admin` ClusterRole. `admin` does NOT aggregate three CRD
-# groups a normal tenant app uses — traefik.io (IngressRoute/Middleware),
-# monitoring.coreos.com (ServiceMonitor/PrometheusRule) and autoscaling.k8s.io
-# (VerticalPodAutoscaler; NOT the `autoscaling` group admin has, which is HPA).
-# Without them the tenant's first route/monitor/VPA fails Forbidden and the
-# whole tenant Kustomization goes NotReady. external-secrets.io and
-# cert-manager.io are usually covered by admin's aggregated edit roles, but are
-# granted explicitly so the tenant story survives an install without them.
+# Shared RBAC for tenant Flux reconciliation. The built-in `admin` ClusterRole
+# does not cover traefik.io, monitoring.coreos.com or autoscaling.k8s.io, so a
+# tenant's first route, monitor or VPA fails Forbidden without this.
+
+# external-secrets.io and cert-manager.io are granted explicitly rather than
+# relying on admin's aggregated edit roles.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -17,6 +12,8 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: flux
 rules:
+  # Must equal `kubectl api-resources --api-group=traefik.io --namespaced=true`;
+  # re-check after a Traefik chart bump.
   - apiGroups: ["traefik.io"]
     resources:
       - ingressroutes
@@ -26,7 +23,9 @@ rules:
       - middlewaretcps
       - traefikservices
       - serverstransports
+      - serverstransporttcps
       - tlsoptions
+      - tlsstores
     verbs: [get, list, watch, create, update, patch, delete, deletecollection]
   - apiGroups: ["monitoring.coreos.com"]
     resources:

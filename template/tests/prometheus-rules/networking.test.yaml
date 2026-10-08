@@ -1,0 +1,44 @@
+---
+# promtool unit tests for MetalLBSpeakerNotScheduled: the `absent()` arm is the
+# one a selector typo would silence, so it is asserted with no speaker series at
+# all, and a sibling DaemonSet must not satisfy the selector.
+rule_files:
+  - rules.yaml
+evaluation_interval: 5m
+tests:
+  # The DaemonSet is gone from kube-state-metrics entirely.
+  - interval: 5m
+    input_series:
+      - series: 'kube_daemonset_status_desired_number_scheduled{namespace="metallb-system", daemonset="metallb-controller", job="kube-state-metrics", instance="10.42.1.5:8080"}'
+        values: '1+0x24'
+    alert_rule_test:
+      # Inside the 10m hold.
+      - eval_time: 5m
+        alertname: MetalLBSpeakerNotScheduled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: MetalLBSpeakerNotScheduled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: metallb-system
+              daemonset: metallb-speaker
+
+  # The DaemonSet is reported, with no node left to schedule on.
+  - interval: 5m
+    input_series:
+      - series: 'kube_daemonset_status_desired_number_scheduled{namespace="metallb-system", daemonset="metallb-speaker", job="kube-state-metrics", instance="10.42.1.5:8080"}'
+        values: '9+0x12 0+0x12'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: MetalLBSpeakerNotScheduled
+        exp_alerts: []
+      - eval_time: 1h25m
+        alertname: MetalLBSpeakerNotScheduled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: metallb-system
+              daemonset: metallb-speaker
+              job: kube-state-metrics
+              instance: '10.42.1.5:8080'

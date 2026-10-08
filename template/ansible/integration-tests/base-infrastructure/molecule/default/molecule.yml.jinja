@@ -1,0 +1,58 @@
+---
+{%- from "partials/molecule.jinja" import systemd_platform, galaxy_dependency,
+    molecule_env, test_sequence with context %}
+# Base infrastructure integration test: base + qol{% if vpn_tailscale %} + tailscale{% endif %} together.
+
+driver:
+  name: docker
+
+platforms:
+  - name: base-test-01
+    # Shared systemd-container shape including group membership; only the
+    # name differs per platform.
+    <<: &systemd_platform
+{{- systemd_platform('base-infra-net',
+    groups=['base_managed', 'qol_enabled']) }}
+
+  - name: base-test-02
+    <<: *systemd_platform
+
+{{ galaxy_dependency() }}
+provisioner:
+  name: ansible
+{{- molecule_env() }}
+  playbooks:
+    prepare: ../../../_shared/prepare.yml
+  inventory:
+    group_vars:
+      base_managed:
+        # timezone and admin_user come from the production all.yml via the
+        # converge play's vars_files, which outranks this block.
+        # SSH hardening is covered by the base role's own molecule scenario.
+        base_skip_ssh_config: true
+        base_skip_dns_config: true  # DNS resolver needs real network
+{%- if vpn_tailscale %}
+        # No TAILSCALE_AUTH_KEY in the env, so the role installs and configures
+        # the daemon but never runs `tailscale up` — which is what makes this
+        # scenario runnable in a container.
+{%- endif %}
+
+      qol_enabled:
+        # Only OMZ-bundled plugins are supported: the role templates the
+        # plugins=() array, it never clones external ones. The neovim list
+        # drives Vundle.
+        qol_omz_plugins:
+          - git
+          - docker
+          - kubectl
+          - ansible
+          - systemd
+          - tmux
+        qol_nvim_plugins:
+          - tpope/vim-fugitive
+          - sheerun/vim-polyglot
+
+verifier:
+  name: ansible
+
+{{ test_sequence() }}

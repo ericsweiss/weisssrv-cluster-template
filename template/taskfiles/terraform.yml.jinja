@@ -1,0 +1,323 @@
+{#- SECRETS SEAM: partials/secrets.jinja is the one home. The vault here is
+    go-task's {{.OP_VAULT}} so `task secrets:show`, which reads the Taskfile tree
+    as text, matches the variable. -#}
+{%- import "partials/secrets.jinja" as secrets with context -%}
+{%- set secret_runner = secrets.secret_runner -%}
+{%- macro secret_ref(item, field) -%}{{ secrets.secret_ref(item, field, vault='{{.OP_VAULT}}') }}{%- endmacro -%}
+{#- One home for the GitLab HTTP backend: the state name is the only thing a
+    Terraform root varies, and the lock address must match its own state. -#}
+{%- macro tf_backend(state) -%}
+{% raw %}      TF_HTTP_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/{% endraw %}{{ state }}{% raw %}"
+      TF_HTTP_LOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/{% endraw %}{{ state }}{% raw %}/lock"
+      TF_HTTP_UNLOCK_ADDRESS: "{{.TF_API}}/projects/{{.TF_STATE_PROJECT}}/terraform/state/{% endraw %}{{ state }}{% raw %}/lock"
+      TF_HTTP_USERNAME: "terraform"
+      TF_HTTP_PASSWORD: {% endraw %}{{ secret_ref('Git Terraform State Token', 'credential') }}{% raw %}
+      TF_HTTP_LOCK_METHOD: "POST"
+      TF_HTTP_UNLOCK_METHOD: "DELETE"{% endraw %}
+{%- endmacro -%}
+# https://taskfile.dev
+# Terraform roots. Each keeps its own state name in GitLab-managed state; CI
+# authenticates with CI_JOB_TOKEN, local runs with the vault's project token.
+version: '3'
+
+{% raw -%}
+# Anchors aliased by the tasks below. YAML anchors do not cross files, so each
+# namespace file carries the precondition list it uses.
+x-preconditions:
+  terraform: &tf_preconditions
+    - sh: command -v terraform
+      msg: "terraform not installed: https://developer.hashicorp.com/terraform/downloads"
+    - sh: command -v op
+      msg: "1Password CLI not installed"
+    # `op account list`, not `op whoami`: with the desktop-app integration
+    # whoami reports "not signed in" in the non-interactive shell Task uses
+    # here.
+    - sh: op account list 2>/dev/null
+      msg: "1Password CLI not authenticated. Run: eval $(op signin)"
+
+tasks:
+  init:
+    desc: Initialize the DNS zone module
+    dir: "{{.TERRAFORM_DIR}}/cloudflare"
+    env: &tf_dns_env
+      TF_VAR_cloudflare_api_token: {% endraw %}{{ secret_ref('Cloudflare Terraform Token', 'credential') }}{% raw %}
+      TF_VAR_cloudflare_account_id: {% endraw %}{{ secret_ref('Cloudflare Terraform Token', 'username') }}{% raw %}
+{% endraw %}{{ tf_backend('cloudflare') }}{% raw %}
+    preconditions: *tf_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform init {{.CLI_ARGS}}
+
+  plan:
+    desc: Plan DNS zone changes
+    dir: "{{.TERRAFORM_DIR}}/cloudflare"
+    env: *tf_dns_env
+    preconditions: *tf_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
+
+  apply:
+    desc: Apply DNS zone changes
+    dir: "{{.TERRAFORM_DIR}}/cloudflare"
+    env: *tf_dns_env
+    preconditions: *tf_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
+
+  _require-state-args:
+    internal: true
+    cmds:
+      - |
+        if [ -z "{{.ARGS}}" ]; then
+          echo "Usage: task {{.TASK_NAME}} -- <subcommand> [args]"
+          echo "Example: task {{.TASK_NAME}} -- {{.EXAMPLE}}"
+          exit 1
+        fi
+
+  dns-state:
+    desc: "Run a `terraform state` subcommand against the DNS zone module's state — usage: task terraform:dns-state -- list"
+    dir: "{{.TERRAFORM_DIR}}/cloudflare"
+    env: *tf_dns_env
+    preconditions: *tf_preconditions
+    cmds:
+      # State-only; needs the backend credentials this env anchor carries.
+      # `rm` leaves the object live — terraform/cloudflare/README.md.
+      - task: _require-state-args
+        vars:
+          TASK_NAME: terraform:dns-state
+          EXAMPLE: "rm 'module.zone.cloudflare_record.this[\"www\"]'"
+          ARGS: "{{.CLI_ARGS}}"
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform state {{.CLI_ARGS}}
+{% endraw %}{% if vpn_tailscale %}{% raw %}
+  # --- Tailnet ACL (own state name; SUPERVISED apply) ---
+  tailscale-init:
+    desc: Initialize the tailnet ACL module
+    dir: "{{.TERRAFORM_DIR}}/tailscale"
+    env: &tf_tailscale_env
+      TF_VAR_tailscale_oauth_client_id: {% endraw %}{{ secret_ref('Tailscale OAuth', 'client id') }}{% raw %}
+      TF_VAR_tailscale_oauth_client_secret: {% endraw %}{{ secret_ref('Tailscale OAuth', 'credential') }}{% raw %}
+{% endraw %}{{ tf_backend('tailscale') }}{% raw %}
+    preconditions: *tf_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform init {{.CLI_ARGS}}
+
+  tailscale-plan:
+    desc: Plan tailnet ACL changes (diff against the live policy)
+    dir: "{{.TERRAFORM_DIR}}/tailscale"
+    env: *tf_tailscale_env
+    preconditions: *tf_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
+
+  tailscale-state:
+    desc: "Run a `terraform state` subcommand against the tailnet module's state — usage: task terraform:tailscale-state -- rm 'module.tailnet.tailscale_acl.this'"
+    dir: "{{.TERRAFORM_DIR}}/tailscale"
+    env: *tf_tailscale_env
+    preconditions: *tf_preconditions
+    cmds:
+      # State-only; needs the backend credentials this env anchor carries.
+      # `rm` leaves the object live — terraform/tailscale/README.md.
+      - task: _require-state-args
+        vars:
+          TASK_NAME: terraform:tailscale-state
+          EXAMPLE: "rm 'module.tailnet.tailscale_acl.this'"
+          ARGS: "{{.CLI_ARGS}}"
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform state {{.CLI_ARGS}}
+
+  tailscale-apply:
+    desc: "SUPERVISED: apply the tailnet ACL — it overwrites the live policy; read terraform/tailscale/README.md first"
+    dir: "{{.TERRAFORM_DIR}}/tailscale"
+    env: *tf_tailscale_env
+    preconditions: *tf_preconditions
+    cmds:
+      # A bad ACL can sever tailnet and SSH access to every node.
+      - '{{.ROOT_DIR}}/scripts/supervised-apply-guard.sh terraform:tailscale-apply "the live tailnet ACL" {{.CLI_ARGS}}'
+      - python3 {{.ROOT_DIR}}/scripts/check-tailscale-policy.py
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
+{% endraw %}{% endif %}{% raw %}
+  # --- SSO objects (own state name; SUPERVISED apply) ---
+  authentik-init:
+    desc: Initialize the SSO module
+    dir: "{{.TERRAFORM_DIR}}/authentik"
+    # The anchor is shared by authentik-plan and authentik-apply, so all three
+    # tasks see the same credentials.
+    env: &tf_authentik_env
+      TF_VAR_authentik_token: {% endraw %}{{ secret_ref('Authentik Terraform Token', 'credential') }}{% raw %}
+      # Grafana's OIDC client secret is supplied to Authentik, not minted by it:
+      # the same vault field the Grafana ExternalSecret reads. Without it the
+      # provider mints one that lives only in state, and the two sides diverge.
+      TF_VAR_oauth2_client_secret_grafana: {% endraw %}{{ secret_ref('Grafana SSO', 'oidc-client-secret') }}{% raw %}
+{% endraw %}{{ tf_backend('authentik') }}{% raw %}
+    preconditions: *tf_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform init {{.CLI_ARGS}}
+
+  authentik-plan:
+    desc: Plan SSO changes (read-only diff against the live objects)
+    dir: "{{.TERRAFORM_DIR}}/authentik"
+    env: *tf_authentik_env
+    preconditions: *tf_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
+
+  authentik-import:
+    desc: "Adopt UI-created SSO objects into state (idempotent; read-only against authentik)"
+    dir: "{{.TERRAFORM_DIR}}/authentik"
+    env: *tf_authentik_env
+    preconditions: *tf_preconditions
+    cmds:
+      # Only writes Terraform state. Required after a state loss: an apply with
+      # empty state duplicates every group instead of adopting it.
+      - {% endraw %}{{ secret_runner() }}{% raw %} ./import.sh
+
+  authentik-state:
+    desc: "Run a `terraform state` subcommand against the SSO module's state — usage: task terraform:authentik-state -- rm 'module.sso.authentik_application.this[\"app\"]'"
+    dir: "{{.TERRAFORM_DIR}}/authentik"
+    env: *tf_authentik_env
+    preconditions: *tf_preconditions
+    cmds:
+      # State-only; needs the backend credentials this env anchor carries.
+      # `rm` leaves the object live — terraform/authentik/README.md.
+      - task: _require-state-args
+        vars:
+          TASK_NAME: terraform:authentik-state
+          EXAMPLE: "rm 'module.sso.authentik_application.this[\"retired-app\"]'"
+          ARGS: "{{.CLI_ARGS}}"
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform state {{.CLI_ARGS}}
+
+  authentik-apply:
+    desc: "SUPERVISED: apply SSO changes — a misconfiguration locks every user out of every app"
+    dir: "{{.TERRAFORM_DIR}}/authentik"
+    env: *tf_authentik_env
+    preconditions: *tf_preconditions
+    cmds:
+      - '{{.ROOT_DIR}}/scripts/supervised-apply-guard.sh terraform:authentik-apply "every SSO application, provider and group" {{.CLI_ARGS}}'
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
+{% endraw %}{% if use_unifi %}{% raw %}
+  # --- Gateway networks and VLANs (own state name; SUPERVISED apply) ---
+  unifi-init:
+    desc: Initialize the gateway network module
+    dir: "{{.TERRAFORM_DIR}}/unifi"
+    # The anchor is shared by unifi-plan and unifi-apply, so all three tasks see
+    # the same credentials. One line per WLAN passphrase the root declares — a
+    # variable with no value fails the plan, which is the intent.
+    env: &tf_unifi_env
+      TF_VAR_unifi_api_url: {% endraw %}{{ secret_ref('UniFi Controller', 'url') }}{% raw %}
+      TF_VAR_unifi_api_key: {% endraw %}{{ secret_ref('UniFi Controller', 'api-key') }}{% raw %}
+      TF_VAR_wlan_passphrase_iot: {% endraw %}{{ secret_ref('WiFi IoT', 'password') }}{% raw %}
+      TF_VAR_wlan_passphrase_guest: {% endraw %}{{ secret_ref('WiFi Guest', 'password') }}{% raw %}
+{% endraw %}{{ tf_backend('unifi') }}{% raw %}
+    preconditions: *tf_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform init {{.CLI_ARGS}}
+
+  unifi-plan:
+    desc: Plan gateway network changes (read-only diff against the live console)
+    dir: "{{.TERRAFORM_DIR}}/unifi"
+    env: *tf_unifi_env
+    preconditions: *tf_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform plan {{.CLI_ARGS}}
+
+  unifi-import:
+    desc: "Adopt one pre-existing console object into state (read-only against the console; writes only Terraform state) — usage: task terraform:unifi-import -- <address> <id>"
+    dir: "{{.TERRAFORM_DIR}}/unifi"
+    env: *tf_unifi_env
+    preconditions: *tf_preconditions
+    cmds:
+      # UniFi ids are read off the live console one object at a time, so the
+      # address and id arrive as CLI_ARGS. Required before the first apply and
+      # after a state loss: terraform/unifi/README.md § Before the first apply.
+      - |
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Usage: task terraform:unifi-import -- <address> <id>"
+          echo "Example: task terraform:unifi-import -- 'module.network.unifi_network.this[\"default\"]' name=Default"
+          exit 1
+        fi
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform import {{.CLI_ARGS}}
+
+  unifi-state:
+    desc: "Run a `terraform state` subcommand against the gateway module's state — usage: task terraform:unifi-state -- rm 'module.network.unifi_network.this[\"iot\"]'"
+    dir: "{{.TERRAFORM_DIR}}/unifi"
+    env: *tf_unifi_env
+    preconditions: *tf_preconditions
+    cmds:
+      # State-only; needs the backend credentials this env anchor carries.
+      # `rm` leaves the object live — terraform/unifi/README.md § Renaming and removing.
+      - task: _require-state-args
+        vars:
+          TASK_NAME: terraform:unifi-state
+          EXAMPLE: "rm 'module.network.unifi_network.this[\"iot\"]'"
+          ARGS: "{{.CLI_ARGS}}"
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform state {{.CLI_ARGS}}
+
+  unifi-untaint:
+    desc: "Untaint one UniFi resource (clears the destroy-and-recreate mark a failed create leaves) — usage: task terraform:unifi-untaint -- '<address>'"
+    dir: "{{.TERRAFORM_DIR}}/unifi"
+    env: *tf_unifi_env
+    preconditions: *tf_preconditions
+    cmds:
+      # `untaint` only clears a taint mark; it never reaches the controller. The
+      # verb is HARDCODED so these backend credentials never reach a generic
+      # terraform passthrough. CLI_ARGS is spliced bare — Task already quotes it.
+      - |
+        {{if not .CLI_ARGS}}
+        echo "Usage: task terraform:unifi-untaint -- '<resource address>'"
+        echo "Example: task terraform:unifi-untaint -- 'module.network.unifi_wlan.this[\"iot\"]'"
+        exit 1
+        {{end}}
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform untaint {{.CLI_ARGS}}
+
+  unifi-apply:
+    desc: "SUPERVISED: apply gateway network changes — a bad apply is a LAN you cannot reach the console from"
+    dir: "{{.TERRAFORM_DIR}}/unifi"
+    env: *tf_unifi_env
+    preconditions: *tf_preconditions
+    cmds:
+      # Back the controller up (.unf export) first: a bad apply can sever routing
+      # to the console itself and recovery is then physical.
+      # terraform/unifi/README.md has the procedure.
+      - '{{.ROOT_DIR}}/scripts/supervised-apply-guard.sh terraform:unifi-apply "live VLANs, firewall zones/policies and WLANs" {{.CLI_ARGS}}'
+      - {% endraw %}{{ secret_runner() }}{% raw %} terraform apply {{.CLI_ARGS}}
+{% endraw %}{% endif %}{% raw %}
+  fmt:
+    desc: Format every Terraform module
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - terraform fmt -recursive
+
+  fmt-check:
+    desc: Check Terraform formatting (mirrors CI)
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - terraform fmt -check -recursive
+
+  tflint:
+    desc: Lint every Terraform root with tflint (no backend auth required)
+    dir: "{{.TERRAFORM_DIR}}"
+    preconditions:
+      - sh: command -v tflint
+        msg: "tflint not installed (brew install tflint)"
+    cmds:
+      # --recursive walks every root under terraform/. `--init` fetches the
+      # plugins .tflint.hcl names, if the repo grows one.
+      - tflint --init
+      - tflint --recursive --minimum-failure-severity=error
+
+  validate:
+    desc: Validate every Terraform module (no backend credentials needed)
+    dir: "{{.TERRAFORM_DIR}}"
+    cmds:
+      - |
+        set -euo pipefail
+        # Separate data dir per module so a backend-free init cannot disturb the
+        # real state, kept under the module's gitignored .terraform/ so the
+        # library modules are fetched once rather than on every lint run.
+        for mod in */; do
+          [ -f "${mod}versions.tf" ] || continue
+          echo "=== terraform validate ${mod} ==="
+          ( cd "$mod" \
+            && export TF_DATA_DIR=".terraform/validate" \
+            && terraform init -backend=false -input=false >/dev/null \
+            && terraform validate )
+        done
+{%- endraw %}

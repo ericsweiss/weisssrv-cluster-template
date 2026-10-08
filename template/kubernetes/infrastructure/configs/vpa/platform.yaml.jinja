@@ -1,14 +1,7 @@
 ---
-# Right-sizing policies for the platform controllers.
-#
-# updateMode Auto where a restart is cheap. Initial (apply on the next natural
-# restart, never by eviction) for anything on a synchronous request or admission
-# path: the ingress, single-replica webhooks, and the MetalLB speaker (evicting
-# the pod announcing a VIP forces a stale-ARP failover). Off = recommend-only,
-# used where an HPA already owns the workload or where eviction is unacceptable.
-#
-# An HPA and a VPA must never control the same resource — where a chart-native
-# HPA scales on CPU, the VPA here is memory-only.
+# Right-sizing policies for the platform controllers, updateMode by restart cost.
+# The HPA/VPA split and the per-controller reasons are kubernetes/README.md
+# § Scheduling priority; every maxAllowed.memory tracks the container's limit.
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
@@ -38,13 +31,28 @@ spec:
     apiVersion: apps/v1
     kind: DaemonSet
     name: metallb-speaker
+  # Initial: evicting the pod announcing a VIP forces a stale-ARP failover.
   updatePolicy:
     updateMode: Initial
   resourcePolicy:
     containerPolicies:
+      # The reloader and frr-metrics sidecars are bounded by the release's
+      # postRenderer; cap == each one's limit under RequestsOnly, so the "*"
+      # entry below never raises them past that bound.
+      - containerName: reloader
+        minAllowed: {cpu: 10m, memory: 16Mi}
+        maxAllowed: {cpu: 100m, memory: 64Mi}
+        controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
+      - containerName: frr-metrics
+        minAllowed: {cpu: 10m, memory: 32Mi}
+        maxAllowed: {cpu: 100m, memory: 128Mi}
+        controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
+      # speaker and frr, each under a 256Mi limit.
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 300m, memory: 256Mi}
+        maxAllowed: {cpu: 300m, memory: 204Mi}
         controlledResources: [cpu, memory]
 ---
 apiVersion: autoscaling.k8s.io/v1
@@ -81,10 +89,13 @@ spec:
     updateMode: Auto
   resourcePolicy:
     containerPolicies:
+      # RequestsOnly; cap == the 128Mi limit in controllers/cert-manager/
+      # release.yaml. Re-measure and move both together.
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 256Mi}
+        maxAllowed: {cpu: 200m, memory: 128Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -100,10 +111,12 @@ spec:
     updateMode: Auto
   resourcePolicy:
     containerPolicies:
+      # RequestsOnly; cap == the 128Mi cainjector limit in release.yaml.
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 384Mi}
+        maxAllowed: {cpu: 200m, memory: 128Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -115,14 +128,18 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: cert-manager-webhook
+  # Auto: 2 replicas behind controllers/cert-manager/pdb.yaml absorb an
+  # eviction without failing a CR write.
   updatePolicy:
-    updateMode: Initial
+    updateMode: Auto
   resourcePolicy:
     containerPolicies:
+      # RequestsOnly; cap == the 128Mi webhook limit in release.yaml.
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 256Mi}
+        maxAllowed: {cpu: 200m, memory: 128Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -141,7 +158,7 @@ spec:
     containerPolicies:
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 256Mi}
+        maxAllowed: {cpu: 200m, memory: 128Mi}
         controlledResources: [cpu, memory]
 ---
 apiVersion: autoscaling.k8s.io/v1
@@ -160,7 +177,7 @@ spec:
     containerPolicies:
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 512Mi}
+        maxAllowed: {cpu: 200m, memory: 256Mi}
         controlledResources: [cpu, memory]
 ---
 apiVersion: autoscaling.k8s.io/v1
@@ -179,7 +196,7 @@ spec:
     containerPolicies:
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 256Mi}
+        maxAllowed: {cpu: 200m, memory: 128Mi}
         controlledResources: [cpu, memory]
 ---
 apiVersion: autoscaling.k8s.io/v1
@@ -198,7 +215,7 @@ spec:
     containerPolicies:
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 256Mi}
+        maxAllowed: {cpu: 200m, memory: 128Mi}
         controlledResources: [cpu, memory]
 {%- if secrets_backend == 'onepassword' %}
 ---
@@ -219,7 +236,7 @@ spec:
     containerPolicies:
       - containerName: "*"
         minAllowed: {memory: 32Mi}
-        maxAllowed: {memory: 512Mi}
+        maxAllowed: {memory: 256Mi}
         controlledResources: [memory]
 {%- endif %}
 ---
@@ -239,7 +256,7 @@ spec:
     containerPolicies:
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 256Mi}
+        maxAllowed: {cpu: 200m, memory: 128Mi}
         controlledResources: [cpu, memory]
 {%- if vpn_tailscale %}
 ---
@@ -260,7 +277,36 @@ spec:
     containerPolicies:
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 384Mi}
+        maxAllowed: {cpu: 200m, memory: 256Mi}
+        controlledResources: [cpu, memory]
+{%- endif %}
+{%- if gpu == 'nvidia' %}
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: nvidia-device-plugin
+  namespace: nvidia-device-plugin
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: DaemonSet
+    name: nvidia-device-plugin
+  # Off: an eviction briefly withdraws nvidia.com/gpu from the node. It exists so
+  # the workload carries a right-sizing signal rather than none.
+  updatePolicy:
+    updateMode: "Off"
+  resourcePolicy:
+    containerPolicies:
+      # Cap == the config-manager sidecar's own 32Mi limit (release.yaml).
+      - containerName: nvidia-device-plugin-sidecar
+        minAllowed: {cpu: 10m, memory: 16Mi}
+        maxAllowed: {cpu: 50m, memory: 32Mi}
+        controlledResources: [cpu, memory]
+      # nvidia-device-plugin-ctr, cap == its 64Mi limit.
+      - containerName: "*"
+        minAllowed: {cpu: 10m, memory: 32Mi}
+        maxAllowed: {cpu: 200m, memory: 64Mi}
         controlledResources: [cpu, memory]
 {%- endif %}
 ---
@@ -289,20 +335,22 @@ spec:
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
-  name: local-path-provisioner
+  name: kured
   namespace: kube-system
 spec:
   targetRef:
     apiVersion: apps/v1
-    kind: Deployment
-    name: local-path-provisioner
+    kind: DaemonSet
+    name: kured
+  # Off: recommend-only. kured's requests are hand-set and it holds the
+  # cluster-wide reboot lock, so nothing here resizes it automatically.
   updatePolicy:
     updateMode: "Off"
   resourcePolicy:
     containerPolicies:
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 16Mi}
-        maxAllowed: {cpu: 100m, memory: 128Mi}
+        maxAllowed: {cpu: 100m, memory: 96Mi}
         controlledResources: [cpu, memory]
 ---
 apiVersion: autoscaling.k8s.io/v1
@@ -322,4 +370,25 @@ spec:
       - containerName: "*"
         minAllowed: {cpu: 25m, memory: 32Mi}
         maxAllowed: {cpu: 500m, memory: 256Mi}
+        controlledResources: [cpu, memory]
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: kube-vip
+  namespace: kube-system
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: DaemonSet
+    name: kube-vip
+  # Off: the Ansible k3s layer renders this DaemonSet, not Flux, and it owns the
+  # API VIP, so an eviction moves the control-plane endpoint.
+  updatePolicy:
+    updateMode: "Off"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        minAllowed: {cpu: 10m, memory: 32Mi}
+        maxAllowed: {cpu: 200m, memory: 192Mi}
         controlledResources: [cpu, memory]

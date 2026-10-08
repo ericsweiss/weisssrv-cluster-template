@@ -1,14 +1,6 @@
-# Pod-network controls for the observability namespace.
-#
-# Loki runs auth_enabled=false, so without these its ClusterIP :3100 is writable
-# by any pod cluster-wide (the basic-auth middleware only guards the ingress).
-# Prometheus, Alertmanager (holds the notification credentials) and Grafana are
-# likewise unguarded at the pod layer by default.
-#
-# default-deny-ingress comes from components/netpol-baseline. Egress is
-# deliberately left open: the exporters here reach many LAN hosts, Alertmanager
-# reaches the SMTP relay and the webhook receivers, and Prometheus remote-scrapes
-# host node-exporters — enumerating that surface is out of scope.
+# Pod-layer controls for the observability namespace. Loki runs
+# auth_enabled=false and Prometheus, Alertmanager and Grafana are unguarded at
+# the pod layer, so their ClusterIPs are open to any pod without these.
 
 ---
 # Intra-namespace ingress: Prometheus scrapes every component here, Grafana
@@ -76,11 +68,9 @@ spec:
           port: 3000
 
 ---
-# prometheus-operator admission webhooks (:10250). The apiserver calls the
-# operator pod directly and runs on the host network, so its source IP is not
-# selectable — allow the port from anywhere (it serves only the webhook). Without
-# this the default-deny blocks the call and, with failurePolicy=Ignore, invalid
-# PrometheusRules are admitted unvalidated.
+# prometheus-operator admission webhook (:10250, TLS), called by the apiserver.
+# It arrives as the node's pod-network gateway address, so the peer is the pod
+# CIDR; the LAN CIDR covers a call that leaves the node unmasqueraded.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -93,6 +83,11 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    - ports:
+    - from:
+        - ipBlock:
+            cidr: ${cluster_pod_cidr}
+        - ipBlock:
+            cidr: ${cluster_lan_cidr}
+      ports:
         - protocol: TCP
           port: 10250

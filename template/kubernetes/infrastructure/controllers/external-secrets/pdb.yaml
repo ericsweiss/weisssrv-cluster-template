@@ -1,8 +1,7 @@
 ---
-# The controller runs 2 replicas with leader election — one reconciler plus a
-# warm standby (ESO does not shard ExternalSecrets, so the second replica buys
-# HA, not throughput; that is also why there is no HPA). Keep one up across
-# drains so the secret-sync path is never fully offline.
+# Two replicas with leader election: one reconciler plus a warm standby. ESO
+# does not shard ExternalSecrets, so the spare buys HA, not throughput. Keep
+# one up across drains so the secret-sync path is never fully offline.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

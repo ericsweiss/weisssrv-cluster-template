@@ -1,0 +1,6 @@
+# Cursor rules
+
+This is the **weisssrv-cluster-template** copier template — it generates cluster
+repositories, it does not deploy anything. Read [AGENTS.md](AGENTS.md) before
+making any change; it is the canonical agent doc (also enforced by
+`.cursor/rules/template-development.mdc`, `alwaysApply: true`).

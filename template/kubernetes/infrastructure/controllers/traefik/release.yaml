@@ -1,8 +1,7 @@
 ---
-# Ingress controller for both zones. One deployment, two LoadBalancer Services:
-# the chart's (public VIP, below) and traefik-internal (internal VIP). Routes
-# are separated by hostname and by the lan-tailscale-only middleware, not by
-# separate controllers.
+# Ingress controller for both zones: one deployment, fronted by the LoadBalancer
+# Services in this directory (the chart's public VIP below, plus the siblings).
+# Routes are separated by hostname and the lan-tailscale-only middleware.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -11,6 +10,11 @@ metadata:
 spec:
   interval: 30m
   releaseName: traefik
+  # Repo rule: platform HelmReleases revert out-of-band edits. Off where a chart
+  # injects a webhook caBundle (cert-manager, external-secrets, metallb, vpa,
+  # kube-prometheus-stack) — a reconcile would wipe it.
+  driftDetection:
+    mode: enabled
   chart:
     spec:
       chart: traefik
@@ -39,10 +43,9 @@ spec:
       enabled: true
       minAvailable: 1
 
-    # Chart-native autoscaling rather than a standalone HPA: with
-    # autoscaling.enabled the chart omits .spec.replicas entirely, so a helm
-    # upgrade cannot re-assert replicas:1 and drop below the HA floor. The
-    # Traefik VPA is memory-only so it never contends with this on CPU.
+    # Chart-native autoscaling omits .spec.replicas, so a helm upgrade cannot
+    # re-assert replicas:1 and drop below the HA floor. The Traefik VPA is
+    # memory-only and never contends with this on CPU.
     autoscaling:
       enabled: true
       minReplicas: 2
@@ -71,14 +74,9 @@ spec:
               value: 1
               periodSeconds: 120
 
-    deployment: {}
-
-    # Public VIP. externalTrafficPolicy: Local preserves the client source IP,
-    # which the ipAllowList middlewares depend on; MetalLB L2 is endpoint-aware,
-    # so it only announces from a node with a Ready Traefik pod.
-    # allocateLoadBalancerNodePorts: false — L2 announces the VIP directly and
-    # never uses NodePorts. healthCheckNodePort stays; externalTrafficPolicy:
-    # Local requires it.
+    # Public VIP. externalTrafficPolicy: Local preserves the client source IP the
+    # ipAllowList middlewares depend on. allocateLoadBalancerNodePorts: false drops
+    # the data-plane NodePorts; MetalLB L2 announces the VIP, so nothing uses them.
     service:
       type: LoadBalancer
       annotations:
@@ -87,6 +85,9 @@ spec:
         externalTrafficPolicy: Local
         allocateLoadBalancerNodePorts: false
 
+    # api@internal (dashboard + /api/rawdata) is unauthenticated: it lists every
+    # router, service backend, middleware and TLS config. The strict allowlist is
+    # what keeps the pod CIDR — i.e. every workload in the cluster — out of it.
     ingressRoute:
       dashboard:
         enabled: true
@@ -94,7 +95,7 @@ spec:
         entryPoints:
           - websecure
         middlewares:
-          - name: lan-tailscale-only
+          - name: lan-tailscale-strict
             namespace: traefik
           - name: hsts-header
             namespace: traefik
@@ -111,19 +112,17 @@ spec:
         entryPoint: metrics
         serviceMonitor:
           enabled: true
-          # Keep Traefik's own per-backend `service` label instead of letting
-          # Prometheus rewrite it to exported_service (the scraped Service is
-          # also called "traefik"), which would collapse every backend into one
-          # series in the dashboards.
+          # Keeps Traefik's per-backend `service` label; without it Prometheus
+          # renames it to exported_service and the dashboards collapse every
+          # backend into one series.
           honorLabels: true
 
     providers:
       kubernetesCRD:
         enabled: true
-        # Required by this repo's design: app IngressRoutes reference the shared
-        # middlewares in the traefik namespace. The cost is that ANY IngressRoute
-        # can reference another namespace's middleware or Service — review this
-        # before letting untrusted authors write routes (see tenants/README.md).
+        # App IngressRoutes reference the shared middlewares in this namespace.
+        # Any IngressRoute may then reference another namespace's middleware or
+        # Service, so review routes from untrusted authors (tenants/README.md).
         allowCrossNamespace: true
       kubernetesIngress:
         enabled: true
@@ -135,10 +134,9 @@ spec:
         port: 80
       websecure:
         port: 443
-        # Traefik v3 defaults readTimeout to 60s, which kills any request whose
-        # BODY takes longer than that — large container-image pushes and file
-        # uploads through the ingress. 30m keeps a slowloris bound while fitting
-        # multi-GB uploads on slow links.
+        # The 60s chart default kills any request whose body takes longer,
+        # such as large image pushes. 30m fits multi-GB uploads on slow links
+        # while keeping a slowloris bound.
         transport:
           respondingTimeouts:
             readTimeout: 30m
@@ -148,17 +146,15 @@ spec:
       - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
       - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
 
-    # Prefer (not require) nodes labelled as ingress carriers, so the cluster
-    # still schedules Traefik before the k3s layer has labelled anything.
+    # A VIP is only announced from a node the MetalLB speaker runs on, and the
+    # speaker selects this label; externalTrafficPolicy: Local then needs a
+    # Traefik pod there too.
+    nodeSelector:
+      ${cluster_node_label_domain}/ingress: "true"
+
+    # Preferred, not required: a hard rule leaves pods Pending whenever fewer
+    # ingress nodes than replicas are available.
     affinity:
-      nodeAffinity:
-        preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            preference:
-              matchExpressions:
-                - key: ${cluster_node_label_domain}/ingress
-                  operator: In
-                  values: ["true"]
       podAntiAffinity:
         preferredDuringSchedulingIgnoredDuringExecution:
           - weight: 100

@@ -1,0 +1,117 @@
+# UniFi network
+
+The gateway layer below the cluster: VLANs, the zone-based firewall, WLANs, WAN
+port forwards and the site-wide switches. It is managed as code in
+`terraform/unifi`, applied under supervision — never edited in the console for
+anything Terraform owns, because the next plan reverts it.
+
+`terraform/unifi/README.md` is the file to read before you change anything: it
+owns the inventory of what ships, the adoption procedure for a console that is
+already configured, and the removal dance. This page is the site record — what
+is live, and why.
+
+## Where the boundaries are
+
+| Layer | Owner |
+|---|---|
+| VLANs, zones, policies, WLANs, reservations, port forwards, site settings | `terraform/unifi/networks.tf` |
+| Firmware, adoption, RF tuning, the console's own accounts | the console |
+| Everything inside the cluster | Flux |
+
+A plan that wants to destroy a network is a plan that wants to drop every client
+on it. Read `terraform/unifi/README.md` § Renaming and removing before
+answering `apply`.
+
+## Why a VLAN is not a UI-safe addition
+
+**A network created in the console lands in the built-in `Internal` zone**,
+which is Allow-All to `Gateway`, `Vpn`, `Hotspot` and `Dmz`. The deny-by-default
+this design relies on comes from Terraform putting each VLAN in its own custom
+zone, not from the controller. Add VLANs through `terraform/unifi/`, never
+through the console — a console-created network is segmented by nothing.
+
+The built-in `Vpn` zone has a default worth recording before anyone enables a
+gateway-side VPN on the console. Its clients arrive in `Vpn`, which by default
+reaches the management VLAN and the console but none of the custom VLAN zones —
+the opposite of what a remote-access VPN usually wants. It presents as a broken
+VPN rather than as a firewall default. A VPN running in-cluster behind a MetalLB
+VIP and a port forward is unaffected: it never touches the gateway's own VPN
+server.
+
+## Site settings
+
+The site-wide switches, pinned explicitly so a console default change cannot
+move them. `ips_mode` is the exception, below. Each row is the value in
+`site_settings`; `scripts/check-unifi-doc-parity.py` fails when the two
+disagree.
+
+| Setting | Value | Why |
+|---|---|---|
+| `auto_upgrade` | `false` | Firmware upgrades happen in a window you chose, not overnight |
+| `network_optimization` | `false` | It rewrites settings this repository declares |
+| `upnp` | `false` | Port forwards are declared in `networks.tf`; UPnP lets any host open its own |
+| `igmp_snooping_networks` | `iot` | Multicast discovery stays on the IoT VLAN instead of flooding every port |
+| `ips_mode` | `ids` | Detection only until the site has a traffic baseline. Inline blocking drops traffic no one has looked at yet |
+
+`ips_mode` is create-time intent only. The module ignores changes to the whole
+`ips` block, so on an imported site it is never written and editing the row
+plans nothing. Set day-2 IPS mode in the console. Do that after a period of
+detection with the categories tuned, and watch the first day of blocked events.
+
+## WAN exposure
+
+Only the port forwards in `networks.tf` reach the LAN from the internet. Every
+one of them is a deliberate entry with a comment; anything else a service needs
+belongs behind the ingress VIP instead, where Traefik terminates TLS and the
+cluster's own policies apply.
+
+## Cross-VLAN discovery
+
+UniFi reflects mDNS but has no SSDP reflector, so anything discovered over SSDP
+must be configured by address across VLANs. A media server's tuner, a hub's IoT
+integrations and two appliances that find each other on the same VLAN all need a
+static address or a manual host entry once they sit on different ones.
+
+That has a consequence one layer down. A guest-side hypervisor firewall rule
+only ever sees traffic a UniFi zone policy already admitted, so a rule for a
+flow the gateway drops is dead code that reads like a granted permission. Check
+the zone policy before adding or trusting a guest rule for a cross-VLAN flow.
+
+## Validation
+
+A re-runnable segmentation matrix. Run it after any change to the zone policies,
+the port map or the VLAN layout, and after a gateway or switch replacement.
+"Expected" is what a correct segmentation produces, and several rows are
+failures by design.
+
+| # | Check | How | Expected |
+|---|---|---|---|
+| 1 | Per-VLAN DHCP | Join each SSID, and plug into each access port | An address from that VLAN's pool, with the resolvers and search domain `networks.tf` declares for it |
+| 2 | Resolver reach from every VLAN | `dig @<resolver> <an internal name>` from each VLAN | An answer from every VLAN |
+| 3 | Guest containment | From a guest client, reach an internal service, then another guest client | Both **fail**. DNS resolves; everything else and peer-to-peer are denied |
+| 4 | IoT containment | From an IoT device, reach anything on the LAN | **Fails**, down to the per-service exceptions `local.policies` declares |
+| 5 | Gateway console fenced | From an untrusted VLAN: `curl -m5 -k https://<that VLAN's .1>` and `ssh <that VLAN's .1>` | Both **fail**, while `ping <that VLAN's .1>` still answers — ICMP is deliberately left up |
+| 6 | External DNS fenced | From each VLAN: `dig @1.1.1.1 example.com`, then the same with `+tls` | Both **fail or time out**; the internal resolver still answers |
+| 7 | Gateway resolver fenced | From each VLAN: `dig @<that VLAN's .1> example.com` | **Fails or times out**. A UniFi OS gateway answers DNS on every VLAN's own `.1` by default, which is why the block rows exist |
+| 8 | Drift plan | The next scheduled pipeline after an apply | `unifi-drift-plan` **green**. A yellow is real drift or a broken credential |
+
+## When something on the network breaks
+
+```bash
+task terraform:unifi-plan      # what drifted, read-only
+task terraform:unifi-state -- list
+```
+
+A plan that is clean while a client cannot reach something means the problem is
+below Terraform: a switch port profile, RF, or a device that never got a lease.
+The console is the place to look for those, and nothing there conflicts with
+this layer.
+
+**A green drift plan is not "the controller matches the repository."** Terraform
+neither writes nor watches most of the console; what it does cover is the table
+above.
+
+Nothing here checks the rest of `rest/setting`. That endpoint returns the
+device-SSH password, its hash and the site API token in cleartext to any
+API-key holder, so a checker would copy that material into CI logs and
+artefacts. Never dump that endpoint into a log, a report or a job artifact.

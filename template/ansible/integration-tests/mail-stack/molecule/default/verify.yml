@@ -1,0 +1,244 @@
+---
+# Mail Stack Integration Test - Verify
+# Validates smtp_relay + postfix_null_client integration
+
+- name: Verify - Mail Stack Integration
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    # molecule.yml platforms[].groups drive every `group_names` guard below; an
+    # empty group would skip every assertion and still report a pass.
+    - name: Assert the molecule roster resolved
+      ansible.builtin.assert:
+        that:
+          - groups['relay_servers'] | default([]) | length == 1
+          - groups['mail_clients'] | default([]) | length == 2
+        fail_msg: >-
+          molecule.yml no longer produces relay_servers and mail_clients, so
+          every assertion in this scenario skips.
+      run_once: true
+
+    # SMTP Relay Server Verification
+    - name: Check Postfix service on relay
+      ansible.builtin.systemd:
+        name: postfix
+        state: started
+      check_mode: true
+      register: relay_postfix
+      when: "'relay_servers' in group_names"
+      failed_when: false
+
+    - name: Assert relay Postfix is active
+      ansible.builtin.assert:
+        that:
+          - relay_postfix.status.ActiveState == "active"
+        fail_msg: "Relay Postfix is not active"
+        success_msg: "Relay Postfix is running"
+      when: "'relay_servers' in group_names"
+
+    - name: Check SMTP relay is listening on port 25
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 25
+        timeout: 5
+        msg: "SMTP relay not listening on port 25"
+      when: "'relay_servers' in group_names"
+
+    - name: Check relay main.cf configuration
+      ansible.builtin.command: postconf -h relayhost
+      register: relay_relayhost
+      changed_when: false
+      when: "'relay_servers' in group_names"
+
+    - name: Assert relay has correct relayhost
+      ansible.builtin.assert:
+        that:
+          - "'smtp.gmail.com' in relay_relayhost.stdout"
+        fail_msg: "Relay relayhost not configured correctly"
+        success_msg: "Relay relayhost is correct"
+      when: "'relay_servers' in group_names"
+
+    - name: Check relay SASL password file exists
+      ansible.builtin.stat:
+        path: /etc/postfix/sasl_passwd
+      register: relay_sasl
+      when: "'relay_servers' in group_names"
+
+    - name: Assert relay SASL password file exists
+      ansible.builtin.assert:
+        that:
+          - relay_sasl.stat.exists
+          - relay_sasl.stat.mode == '0600'
+        fail_msg: "Relay SASL password file missing or wrong permissions"
+        success_msg: "Relay SASL password file configured"
+      when: "'relay_servers' in group_names"
+
+
+    # Mail Client Verification
+    - name: Check Postfix service on clients
+      ansible.builtin.systemd:
+        name: postfix
+        state: started
+      check_mode: true
+      register: client_postfix
+      when: "'mail_clients' in group_names"
+      failed_when: false
+
+    - name: Assert client Postfix is active
+      ansible.builtin.assert:
+        that:
+          - client_postfix.status.ActiveState == "active"
+        fail_msg: "Client Postfix is not active"
+        success_msg: "Client Postfix is running"
+      when: "'mail_clients' in group_names"
+
+    - name: Check client relayhost configuration
+      ansible.builtin.command: postconf -h relayhost
+      register: client_relayhost
+      changed_when: false
+      when: "'mail_clients' in group_names"
+
+    - name: Assert client has correct relayhost
+      ansible.builtin.assert:
+        that:
+          - "'smtp-relay' in client_relayhost.stdout"
+        fail_msg: "Client relayhost not pointing to smtp-relay"
+        success_msg: "Client relayhost is correct"
+      when: "'mail_clients' in group_names"
+
+    - name: Check client SASL password file exists
+      ansible.builtin.stat:
+        path: /etc/postfix/sasl_passwd
+      register: client_sasl
+      when: "'mail_clients' in group_names"
+
+    - name: Assert client SASL password file exists
+      ansible.builtin.assert:
+        that:
+          - client_sasl.stat.exists
+          - client_sasl.stat.mode == '0600'
+        fail_msg: "Client SASL password file missing or wrong permissions"
+        success_msg: "Client SASL password file configured"
+      when: "'mail_clients' in group_names"
+
+    - name: Check client virtual alias file
+      ansible.builtin.stat:
+        path: /etc/postfix/virtual
+      register: client_virtual
+      when: "'mail_clients' in group_names"
+
+    - name: Assert client virtual alias file exists
+      ansible.builtin.assert:
+        that:
+          - client_virtual.stat.exists
+        fail_msg: "Client virtual alias file missing"
+        success_msg: "Client virtual alias file configured"
+      when: "'mail_clients' in group_names"
+
+    # Client -> relay end to end: banner, then a real message. The Gmail upstream
+    # is not exercised — mock credentials leave the message DEFERRED at the
+    # relay, which is what the assertion keys on.
+    - name: Test SMTP connectivity from client to relay
+      ansible.builtin.shell: |
+        set -o pipefail
+        (sleep 0.5; echo "QUIT") | nc smtp-relay 25 2>&1 | head -1
+      args:
+        executable: /bin/bash
+      register: smtp_test
+      changed_when: false
+      when: "'mail_clients' in group_names"
+      retries: 3
+      delay: 2
+      until: smtp_test.rc == 0 and '220' in smtp_test.stdout
+
+    - name: Assert SMTP banner received
+      ansible.builtin.assert:
+        that:
+          - smtp_test.rc == 0
+          - "'220' in smtp_test.stdout"
+        fail_msg: "Client cannot connect to SMTP relay (banner: {{ smtp_test.stdout }})"
+        success_msg: "Client can connect to SMTP relay (transport-level connectivity verified)"
+      when: "'mail_clients' in group_names"
+
+    - name: Log SMTP connectivity test
+      ansible.builtin.debug:
+        msg: "SMTP banner received: {{ smtp_test.stdout }}"
+      when: "'mail_clients' in group_names"
+
+    # root -> admin@example.com rewriting happens on the client, so seeing
+    # admin@example.com on the relay queue proves rewriting plus acceptance.
+    - name: Send test mail on client (root -> aliased recipient)
+      ansible.builtin.shell: |
+        set -o pipefail
+        echo "molecule relay test from {{ inventory_hostname }}" | /usr/sbin/sendmail root
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: "'mail_clients' in group_names"
+
+    - name: Flush client mail queue
+      ansible.builtin.command: postqueue -f
+      changed_when: false
+      when: "'mail_clients' in group_names"
+
+    - name: Wait for client queue to drain (message handed to relay)
+      ansible.builtin.command: postqueue -p
+      register: client_queue_drain
+      changed_when: false
+      retries: 15
+      delay: 4
+      until: "'Mail queue is empty' in client_queue_drain.stdout"
+      when: "'mail_clients' in group_names"
+
+    - name: Wait for relayed message on the relay (queued/deferred for Gmail upstream)
+      ansible.builtin.command: postqueue -p
+      register: relay_queue
+      changed_when: false
+      retries: 15
+      delay: 4
+      until: "'admin@example.com' in relay_queue.stdout"
+      when: "'relay_servers' in group_names"
+
+    - name: Assert relay accepted and queued the rewritten message
+      ansible.builtin.assert:
+        that:
+          - "'admin@example.com' in relay_queue.stdout"
+        fail_msg: "Relay never queued the client message for admin@example.com (relay queue: {{ relay_queue.stdout | default('') }})"
+        success_msg: "Client mail relayed end-to-end: accepted by relay, rewritten to admin@example.com, queued for the Gmail upstream"
+      when: "'relay_servers' in group_names"
+
+    # Configuration Verification
+    - name: Verify Postfix is in null client mode
+      ansible.builtin.command: postconf -h inet_interfaces
+      register: client_interfaces
+      changed_when: false
+      when: "'mail_clients' in group_names"
+
+    - name: Assert client is in null client mode
+      ansible.builtin.assert:
+        that:
+          - "'loopback-only' in client_interfaces.stdout"
+        fail_msg: "Client not in null client mode (inet_interfaces)"
+        success_msg: "Client is in null client mode"
+      when: "'mail_clients' in group_names"
+
+    - name: Check relay mynetworks (expected loopback-only)
+      ansible.builtin.command: postconf -h mynetworks
+      register: relay_mynetworks
+      changed_when: false
+      when: "'relay_servers' in group_names"
+
+    # Load-bearing: if mynetworks ever widened, the relay assertions above would
+    # prove a network exemption instead of a real SASL handshake.
+    - name: Assert relay mynetworks grants no network exemption
+      ansible.builtin.assert:
+        that:
+          - relay_mynetworks.stdout | trim == '127.0.0.0/8'
+        fail_msg: >-
+          Relay mynetworks is not loopback-only
+          ({{ relay_mynetworks.stdout }}) — the 587 relay assertions no longer
+          prove SASL authentication.
+        success_msg: "Relay mynetworks is loopback-only: {{ relay_mynetworks.stdout }}"
+      when: "'relay_servers' in group_names"

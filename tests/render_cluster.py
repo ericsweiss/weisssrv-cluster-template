@@ -1,12 +1,7 @@
 """Render this template into a throwaway directory.
 
-Shared by the pytest suite and tests/validate_render.py so both exercise the
-same invocation.
-
-The template source is COPIED to a scratch directory first, with .git left
-behind: copier treats a git checkout as a VCS source and renders its committed
-HEAD, which would silently test the last commit instead of the working tree
-every reviewer and CI job is actually looking at.
+Shared by the pytest suite and tests/validate_render.py. The source is copied to
+a scratch directory with .git left behind, so copier renders the working tree.
 """
 
 from __future__ import annotations
@@ -41,10 +36,18 @@ CILoader.add_multi_constructor(
 
 
 def load_ci(path: Path) -> dict:
-    return yaml.load(path.read_text(), Loader=CILoader)
+    """The jobs document of a pipeline file.
 
+    GitLab's inputs syntax makes a pipeline two documents, `spec:` then the jobs,
+    so the last mapping document is the one a caller wants.
+    """
+    docs = [d for d in yaml.load_all(path.read_text(), Loader=CILoader) if isinstance(d, dict)]
+    return docs[-1] if docs else {}
+
+# `.tmp` carries this pipeline's two weisssrv-lib clones, so copying it would
+# duplicate hundreds of megabytes into every render.
 _IGNORED = shutil.ignore_patterns(
-    ".git", "__pycache__", "*.pyc", ".pytest_cache", ".ruff_cache", ".render", ".bin"
+    ".git", "__pycache__", "*.pyc", ".pytest_cache", ".ruff_cache", ".render", ".tmp", ".bin"
 )
 
 

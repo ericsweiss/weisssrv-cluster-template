@@ -1,0 +1,33 @@
+{#- The starter roster, derived once from the answers. The inventory,
+    cluster-config, group_vars/nas.yml and the pipeline's coverage list all read
+    it, so the naming and addressing scheme has one home. -#}
+{%- set n_compute = compute_node_count | int -%}
+{%- set nas_name = nas_host.split('.')[0] -%}
+{%- set smtp_name = smtp_host.split('.')[0] -%}
+{%- set resolvers = upstream_dns_servers.split() -%}
+{%- set pve_hosts = [nas_name] -%}
+{%- for i in range(1, n_compute + 1) -%}
+{%- set _ = pve_hosts.append('pve-node-%02d' | format(i)) -%}
+{%- endfor -%}
+{%- set n_hosts = pve_hosts | length -%}
+{%- set n_srv = 3 if n_hosts >= 3 else 1 -%}
+{%- set gpu_host = pve_hosts[-1] if gpu == 'nvidia' else '' -%}
+
+{#- Guests follow the host count: one resolver per upstream, n_srv k3s servers
+    on .31 upward, one k3s agent per Proxmox host on .41 upward. -#}
+{%- set dns_names = [] -%}
+{%- for i in range(1, resolvers | length + 1) -%}
+{%- set _ = dns_names.append('dns-%02d' | format(i)) -%}
+{%- endfor -%}
+{%- set k3s_server_names = [] -%}
+{%- set k3s_server_ips = [] -%}
+{%- for j in range(1, n_srv + 1) -%}
+{%- set _ = k3s_server_names.append('k3s-srv-%02d' | format(j)) -%}
+{%- set _ = k3s_server_ips.append('%s.%d' | format(lan_prefix, 30 + j)) -%}
+{%- endfor -%}
+{%- set k3s_agent_names = [] -%}
+{%- set k3s_agent_ips = [] -%}
+{%- for k in range(1, n_hosts + 1) -%}
+{%- set _ = k3s_agent_names.append('k3s-agt-%02d' | format(k)) -%}
+{%- set _ = k3s_agent_ips.append('%s.%d' | format(lan_prefix, 40 + k)) -%}
+{%- endfor -%}

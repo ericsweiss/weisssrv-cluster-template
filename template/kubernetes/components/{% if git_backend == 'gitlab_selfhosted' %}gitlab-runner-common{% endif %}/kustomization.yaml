@@ -1,11 +1,11 @@
 ---
-# HelmRelease fields that are byte-identical in BOTH runner releases, defined
-# once so a fix here cannot be forgotten in one of them. The two runners are the
-# shared-vs-privileged trust boundary.
-#
-# Each runner's release.yaml keeps only its genuine deltas: name/namespace,
-# releaseName, secret, tags, runUntagged/protected, concurrent, the executor TOML,
-# image/privileged, serviceAccount and per-runner job resources.
+# HelmRelease fields shared by both runner releases, defined once so a fix here
+# reaches both. Each runner's release.yaml keeps only its own deltas: identity,
+# secret, tags, concurrency, executor TOML, image and job resources.
+
+# Keep ExternalSecrets out of this component: a namespace-less copy keys
+# rotation coverage once instead of once per including namespace. Each runner
+# declares its own.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 patches:
@@ -14,6 +14,7 @@ patches:
   # rename the selected HelmRelease.
   - target:
       kind: HelmRelease
+      name: gitlab-runner.*
     patch: |
       apiVersion: helm.toolkit.fluxcd.io/v2
       kind: HelmRelease
@@ -21,6 +22,8 @@ patches:
         name: gitlab-runner-common
       spec:
         interval: 30m
+        driftDetection:
+          mode: enabled
         # The liveness probe plus the GitLab connection handshake can take 6-8
         # minutes on a cold start; the 5m default times out prematurely.
         timeout: 15m
@@ -43,17 +46,13 @@ patches:
             retries: 3
             remediateLastFailure: true
         values:
-          # Use the name that resolves to the INTERNAL ingress path if your DNS is
-          # split-horizon, so runner<->GitLab traffic stays on the LAN instead of
-          # hairpinning through the public record. clone_url (in the executor TOML)
-          # must match: GitLab's external_url governs clone URLs, which do not
-          # follow gitlabUrl on their own.
+          # With split-horizon DNS, use the name resolving to the internal
+          # ingress so runner<->GitLab traffic stays on the LAN. clone_url in the
+          # executor TOML must match; clone URLs follow external_url, not this.
           gitlabUrl: https://${cluster_git_host}
 
-          # One manager pod; job parallelism is `concurrent` per runner. Pinned at
-          # 1 so an out-of-band `kubectl scale --replicas=0` (used to drain CI
-          # during cluster maintenance) is reconciled back instead of leaving the
-          # deployment silently at 0.
+          # One manager pod; job parallelism is `concurrent` per runner.
+          # driftDetection reverts an out-of-band scale.
           replicas: 1
 
           checkInterval: 30
@@ -78,10 +77,9 @@ patches:
               cpu: 150m
               memory: 128Mi
             limits:
-              # No CPU limit: the manager is a trusted control loop that bursts
-              # when spawning and reaping job pods, and CFS throttling here is a
-              # dominant CPUThrottlingHigh source. The request still grants a
-              # scheduling share; the memory limit stays.
+              # No CPU limit: the manager bursts when spawning and reaping job
+              # pods, and CFS throttling here drives CPUThrottlingHigh. The
+              # request still grants a scheduling share.
               memory: 512Mi
 
           affinity:
@@ -93,6 +91,8 @@ patches:
                       - key: ${cluster_node_label_domain}/nas
                         operator: DoesNotExist
 
+          # Tolerated for clusters that taint ingress/compute nodes; the starter
+          # roster taints only the NAS node, so these are inert until you do.
           tolerations:
             - key: ${cluster_node_label_domain}/ingress
               operator: Equal

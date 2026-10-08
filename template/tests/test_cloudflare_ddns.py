@@ -1,27 +1,13 @@
-"""Unit tests for the cloudflare-ddns CronJob program.
-
-The module lives beside its manifests
-(kubernetes/infrastructure/configs/cloudflare-ddns/cloudflare-ddns.py) because
-kustomize only accepts configMapGenerator sources inside the kustomization root,
-so it is loaded by path here rather than imported.
-
-What these cover is `update()`'s decision table, because every branch of it
-writes — or refuses to write — a public DNS record, and the CronJob's only other
-signal is its exit code. The Cloudflare calls are replaced with a fake `api`, so
-nothing here touches the network.
-
-The whole module is skipped when the cluster was generated with a different
-`dns_backend`: there is then no DDNS module to test.
-"""
+"""`update()`'s decision table in the cloudflare-ddns CronJob program: which
+branches write a public DNS record and which refuse. The program is loaded by
+path from kubernetes/infrastructure/configs/cloudflare-ddns/, with a fake api."""
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-
 import pytest
+from conftest import REPO as REPO_ROOT
+from conftest import load_script
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE_PATH = (
     REPO_ROOT / "kubernetes/infrastructure/configs/cloudflare-ddns/cloudflare-ddns.py"
 )
@@ -34,10 +20,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def ddns():
-    spec = importlib.util.spec_from_file_location("cloudflare_ddns", MODULE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_script(MODULE_PATH)
 
 
 def _fake_api(replies, seen):
@@ -45,6 +28,8 @@ def _fake_api(replies, seen):
 
     def api(url, method="GET", data=None):
         seen.append((method, url, data))
+        if not replies:
+            raise AssertionError("unexpected extra API call: %s %s" % (method, url))
         reply = replies.pop(0)
         return reply(url, method, data) if callable(reply) else reply
 
@@ -112,10 +97,7 @@ def test_update_refuses_to_write_when_the_query_failed(ddns, monkeypatch, capsys
 
 
 def test_update_reports_a_failed_write(ddns, monkeypatch, capsys):
-    """A rejected PUT must not read as success: main()'s exit code is the only
-    thing that turns a silently-stale record into a failed CronJob. The FAILED
-    line goes to stderr, where the other failures are, so it is findable without
-    parsing the per-record report."""
+    """A rejected PUT exits non-zero and reports FAILED on stderr."""
     seen = []
     replies = [
         {"success": True, "result": [{"id": "r1", "content": "198.51.100.1"}]},
@@ -147,6 +129,7 @@ def test_records_are_parsed_as_name_colon_proxied(ddns, monkeypatch):
     assert ddns.main() == 0
     assert calls == [("zone.invalid", True), ("direct.zone.invalid", False)]
 
+
 def test_multiple_records_refuse_partial_update(ddns, monkeypatch, capsys):
     """Two A records for one name = ambiguous ownership; a partial update
     leaves the sibling answering stale intermittently."""
@@ -159,6 +142,37 @@ def test_multiple_records_refuse_partial_update(ddns, monkeypatch, capsys):
     assert ddns.update("z1", "vpn.zone.invalid", "203.0.113.9", False) is False
     assert "multiple A records" in capsys.readouterr().err
     assert [method for method, _, _ in seen] == ["GET"]
+
+
+def test_update_percent_encodes_the_record_name_in_the_query(ddns, monkeypatch):
+    """A raw `&` or `#` in the name would truncate `?type=A&name=`, so the GET
+    matches a different record set and the write lands on that record."""
+    seen = []
+    replies = [{"success": True, "result": [{"id": "r1", "content": "198.51.100.7"}]}]
+    monkeypatch.setattr(ddns, "api", _fake_api(replies, seen))
+    assert ddns.update("z1", "a&b.zone.invalid", "198.51.100.7", False) is True
+    url = seen[0][1]
+    assert "name=a%26b.zone.invalid" in url
+    assert "&" not in url.split("name=", 1)[1]
+
+
+def test_main_percent_encodes_the_zone_in_the_lookup(ddns, monkeypatch):
+    """Same truncation on the zone lookup: a raw `&` ends the `?name=` value and
+    whatever zone comes back is adopted as this zone's id."""
+    seen = []
+    monkeypatch.setattr(ddns, "TOKEN", "tok")
+    monkeypatch.setattr(ddns, "ZONE", "a&b.invalid")
+    monkeypatch.setattr(ddns, "RECORDS", "host.a&b.invalid")
+    monkeypatch.setattr(ddns, "public_ip", lambda: "198.51.100.7")
+    monkeypatch.setattr(
+        ddns, "api", _fake_api([{"success": True, "result": [{"id": "z1"}]}], seen)
+    )
+    monkeypatch.setattr(ddns, "update", lambda *a, **k: True)
+    assert ddns.main() == 0
+    url = seen[0][1]
+    assert "/zones?name=a%26b.invalid" in url
+    assert "&" not in url.split("name=", 1)[1]
+
 
 def test_empty_or_blank_records_fail_closed(ddns, monkeypatch):
     """An empty list exits 0 managing nothing; a nameless entry queries wide."""
@@ -189,10 +203,8 @@ def _records_exit(ddns, monkeypatch, records):
 
 
 def test_records_reject_malformed_entry_shapes(ddns, monkeypatch):
-    """A second colon is swallowed into the flag by `partition`, so
-    `a:false:oops` would read as a well-named record whose flag is not "false" —
-    published THROUGH the proxy, the opposite of what was written. Shape is
-    validated before content."""
+    """Record entries are shape-validated before content, so `a:false:oops` is
+    rejected rather than read as a proxied record."""
     for bad in ("a.zone.invalid:false:oops", "a.zone.invalid:true:", "::"):
         assert "not a name[:proxied] pair" in _records_exit(ddns, monkeypatch, bad)
     # A well-formed sibling does not excuse a malformed one.
@@ -234,3 +246,100 @@ def test_records_accept_the_documented_spellings(ddns, monkeypatch):
         ("up.zone.invalid", False),
     ]
 
+
+
+# --------------------------------------------------------------------------
+# public_ip(): the guard that keeps an unreachable A record off the zone
+# --------------------------------------------------------------------------
+
+
+# A genuinely GLOBAL address: Python's is_global is false for every
+# documentation range, so 198.51.100.x would be rejected by the guard itself.
+GLOBAL_IP = "93.184.216.34"
+
+
+class _Resp:
+    def __init__(self, body):
+        self._body = body.encode()
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _urlopen_returning(answers, seen):
+    """Stand in for urllib.request.urlopen, one answer per provider URL."""
+
+    def urlopen(url, timeout=None):
+        seen.append(url)
+        answer = answers[url]
+        if isinstance(answer, Exception):
+            raise answer
+        return _Resp(answer)
+
+    return urlopen
+
+
+def test_a_private_or_ipv6_answer_is_skipped(ddns, monkeypatch):
+    """A captive portal answers with RFC1918 and a dual-stack provider with
+    AAAA; publishing either as an A record points the name at nothing."""
+    seen = []
+    providers = ("https://one.invalid", "https://two.invalid", "https://three.invalid")
+    answers = {
+        providers[0]: "10.0.0.1",
+        providers[1]: "2001:db8::1",
+        providers[2]: GLOBAL_IP,
+    }
+    monkeypatch.setattr(
+        ddns.urllib.request, "urlopen", _urlopen_returning(answers, seen)
+    )
+    assert ddns.public_ip(providers=providers, sleep=lambda _s: None) == GLOBAL_IP
+    assert seen == list(providers)
+
+
+def test_the_first_global_answer_wins(ddns, monkeypatch):
+    """Each extra provider is a network round-trip on a 5-minutely job."""
+    seen = []
+    providers = ("https://one.invalid", "https://two.invalid")
+    monkeypatch.setattr(
+        ddns.urllib.request,
+        "urlopen",
+        _urlopen_returning({providers[0]: GLOBAL_IP}, seen),
+    )
+    assert ddns.public_ip(providers=providers, sleep=lambda _s: None) == GLOBAL_IP
+    assert seen == [providers[0]]
+
+
+def test_every_provider_failing_returns_none_after_the_retries(ddns, monkeypatch):
+    seen = []
+    slept = []
+    providers = ("https://one.invalid",)
+    monkeypatch.setattr(
+        ddns.urllib.request,
+        "urlopen",
+        _urlopen_returning({providers[0]: OSError("unreachable")}, seen),
+    )
+    assert ddns.public_ip(providers=providers, attempts=3, sleep=slept.append) is None
+    assert len(seen) == 3
+    assert slept == [5, 5], "a failed round must back off, but not after the last one"
+
+
+def test_main_reports_failure_when_one_record_fails(ddns, monkeypatch):
+    """The CronJob's only signal is its exit code, so one failed record must
+    not be reported as a clean run."""
+    monkeypatch.setattr(ddns, "TOKEN", "t")
+    monkeypatch.setattr(ddns, "ZONE", "zone.invalid")
+    monkeypatch.setattr(ddns, "RECORDS", "a.zone.invalid,b.zone.invalid")
+    monkeypatch.setattr(ddns, "public_ip", lambda *a, **k: GLOBAL_IP)
+    monkeypatch.setattr(
+        ddns, "api", lambda *a, **k: {"success": True, "result": [{"id": "z1"}]}
+    )
+    monkeypatch.setattr(
+        ddns, "update", lambda zone_id, name, current, proxied: name == "a.zone.invalid"
+    )
+    assert ddns.main() == 1

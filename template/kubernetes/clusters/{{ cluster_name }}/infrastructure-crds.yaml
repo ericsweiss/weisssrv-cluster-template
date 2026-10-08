@@ -1,9 +1,7 @@
 ---
-# Stage 2/5 — CRD bootstrap. Installs the monitoring.coreos.com CRDs before
-# the controllers stage, which renders ServiceMonitors: on a fresh cluster the
-# Traefik chart hard-fails its template render when that API is absent
-# ("you have to deploy monitoring.coreos.com/v1 first"). wait:true holds the
-# controllers stage until the CRDs are Established.
+# Stage 2/5 — CRD bootstrap. Installs the monitoring.coreos.com CRDs before the
+# controllers stage, whose charts fail to render ServiceMonitors without them.
+# wait:true holds the controllers stage until the CRDs are Established.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
@@ -12,7 +10,8 @@ metadata:
 spec:
   interval: 10m
   retryInterval: 1m
-  timeout: 10m
+  # Headroom over the slowest release this stage waits on (the CRD chart, 10m).
+  timeout: 15m
   dependsOn:
     - name: infrastructure-sources
   sourceRef:
@@ -21,8 +20,6 @@ spec:
   path: ./kubernetes/infrastructure/crds
   prune: true
   wait: true
-  # optional:false — see infrastructure-sources.yaml for why only that stage
-  # tolerates a miss.
   postBuild:
     substituteFrom:
       - kind: ConfigMap

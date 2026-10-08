@@ -13,7 +13,7 @@
     - weisssrv.infra.restic_offsite
     - weisssrv.infra.proxmox_backup
     - weisssrv.infra.zfs_exporter
-    # Also deployed by site.yml; repeated so a standalone storage deploy keeps
-    # host metrics and log shipping in sync.
+    # Shared with site.yml; tests/test_shared_role_playbook_sync.py keeps the two
+    # in step, so a standalone storage deploy leaves the NAS unmetered.
     - weisssrv.infra.node_exporter_host
     - weisssrv.infra.alloy_host

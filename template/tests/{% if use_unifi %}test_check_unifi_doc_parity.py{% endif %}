@@ -1,0 +1,122 @@
+"""Coverage for check-unifi-doc-parity.py.
+
+The live pair is in step, so it proves nothing about failure. Each arm runs
+against a fixture pair, and every mutation case must FAIL.
+"""
+from __future__ import annotations
+
+import textwrap
+from pathlib import Path
+
+import pytest
+from conftest import REPO, load_script
+
+gate = load_script("check-unifi-doc-parity.py")
+
+
+MAIN_TF = textwrap.dedent(
+    """\
+    module "unifi" {
+      site_settings = {
+        # A comment naming auto_upgrade must not be parsed.
+        auto_upgrade           = true
+        ips_mode               = "ips"
+        igmp_snooping_networks = ["home", "iot"]
+      }
+    }
+    """
+)
+
+DOC = textwrap.dedent(
+    """\
+    ### Site settings
+
+    | Setting | Value | Why |
+    |---|---|---|
+    | `mgmt.auto_upgrade` | `true` | nightly firmware |
+    | `ips.ips_mode` | `"ips"` | inline blocking |
+    | `igmp_snooping_networks` | `["home", "iot"]` | the casting path |
+
+    ## Next section
+    """
+)
+
+
+def write(root: Path, rel: str, body: str) -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    write(tmp_path, gate.MAIN_TF, MAIN_TF)
+    write(tmp_path, gate.DOC, DOC)
+    return tmp_path
+
+
+def test_a_matching_pair_passes(repo: Path) -> None:
+    assert gate.check(repo)[0] == []
+    assert gate.main(["--repo-root", str(repo)]) == 0
+
+
+def test_a_flipped_documented_value_fails(repo: Path) -> None:
+    write(repo, gate.DOC, DOC.replace('`"ips"`', '`"ids"`'))
+    problems, _inspected = gate.check(repo)
+    assert any("ips_mode" in p for p in problems)
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_flipped_terraform_value_fails(repo: Path) -> None:
+    write(repo, gate.MAIN_TF, MAIN_TF.replace("auto_upgrade           = true", "auto_upgrade           = false"))
+    assert any("auto_upgrade" in p for p in gate.check(repo)[0])
+
+
+def test_a_reordered_list_is_still_a_difference(repo: Path) -> None:
+    write(repo, gate.DOC, DOC.replace('`["home", "iot"]`', '`["iot", "home"]`'))
+    assert any("igmp_snooping_networks" in p for p in gate.check(repo)[0])
+
+
+def test_an_undocumented_setting_fails(repo: Path) -> None:
+    write(repo, gate.DOC, DOC.replace("| `ips.ips_mode` | `\"ips\"` | inline blocking |\n", ""))
+    assert any("no docs" in p or "row names" in p for p in gate.check(repo)[0])
+
+
+def test_two_matching_rows_are_ambiguous(repo: Path) -> None:
+    write(repo, gate.DOC, DOC.replace(
+        "| `igmp_snooping_networks` | `[\"home\", \"iot\"]` | the casting path |",
+        "| `igmp_snooping_networks` | `[\"home\", \"iot\"]` | the casting path |\n"
+        "| `site.igmp_snooping_networks` | `[\"home\"]` | a stale duplicate |",
+    ))
+    assert any("ambiguous" in p for p in gate.check(repo)[0])
+
+
+def test_a_missing_section_is_vacuous(repo: Path) -> None:
+    write(repo, gate.DOC, "# Some other page\n")
+    with pytest.raises(gate.Vacuous):
+        gate.check(repo)
+    assert gate.main(["--repo-root", str(repo)]) == 2
+
+
+def test_a_nested_map_opening_line_is_not_a_setting(repo: Path) -> None:
+    """A nested map assigns no documentable value, so no docs row can match it."""
+    write(repo, gate.MAIN_TF, MAIN_TF.replace(
+        '    ips_mode               = "ips"\n',
+        '    ips_mode               = "ips"\n'
+        "    radius_profile = {\n"
+        '      name = "default"\n'
+        "    }\n",
+    ))
+    settings = gate.terraform_settings((repo / gate.MAIN_TF).read_text())
+    assert "radius_profile" not in settings
+    assert gate.check(repo)[0] == []
+
+
+def test_a_missing_site_settings_map_is_vacuous(repo: Path) -> None:
+    write(repo, gate.MAIN_TF, 'module "unifi" {\n}\n')
+    with pytest.raises(gate.Vacuous):
+        gate.check(repo)
+
+
+def test_the_live_pair_is_in_step() -> None:
+    assert gate.check(REPO)[0] == []

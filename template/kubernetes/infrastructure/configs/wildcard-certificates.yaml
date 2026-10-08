@@ -1,13 +1,7 @@
 ---
-# Wildcard certificates for IngressRoutes in the `default` namespace.
-#
-# cert-manager writes the Secret into the Certificate's OWN namespace and Traefik
-# only reads Secrets from the IngressRoute's namespace, so every namespace that
-# terminates one of these hostnames needs its own copy of the Certificate. Each
-# copy fires its own ACME order, so STAGGER renewBefore across them (this is the
-# anchor at 720h; the copy in external-secrets uses 600h) — otherwise they all
-# renew in the same window and burn the Let's Encrypt duplicate-certificate
-# limit at once.
+# Anchor copies of both wildcards; no IngressRoute lives in `default`. Traefik reads
+# Secrets only from the IngressRoute's namespace, so a namespace whose route needs a
+# wildcard keeps its own copy, at a renewBefore staggered off this 720h anchor.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -18,7 +12,8 @@ spec:
   issuerRef:
     name: ${cluster_issuer}
     kind: ClusterIssuer
-  commonName: "*.${cluster_external_domain}"
+  # `dnsNames` alone: Let's Encrypt issues no Common Name, and a CN built from a
+  # long domain would breach the 64-byte X.509 limit.
   dnsNames:
     - "*.${cluster_external_domain}"
     - ${cluster_external_domain}
@@ -34,7 +29,6 @@ spec:
   issuerRef:
     name: ${cluster_issuer}
     kind: ClusterIssuer
-  commonName: "*.${cluster_internal_domain}"
   dnsNames:
     - "*.${cluster_internal_domain}"
     - ${cluster_internal_domain}

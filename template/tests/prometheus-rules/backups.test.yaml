@@ -1,0 +1,130 @@
+---
+# promtool unit tests for the backup alerts whose arms are a window or a join:
+# a stale timestamp and a zero-byte artifact must be told apart from a backup
+# that is still landing, and from one that never landed.
+rule_files:
+  - rules.yaml
+evaluation_interval: 5m
+tests:
+  # PveClusterBackupStale: the dump timestamp stops advancing, 36h window.
+  - interval: 5m
+    input_series:
+      - series: 'pve_cluster_backup_last_success_timestamp_seconds{instance="pve-01:9101", job="node-exporter-host"}'
+        values: '0+0x460'
+      # Still landing: the timestamp advances with the clock.
+      - series: 'pve_cluster_backup_last_success_timestamp_seconds{instance="pve-02:9101", job="node-exporter-host"}'
+        values: '0+300x460'
+    alert_rule_test:
+      # Past the 36h window, inside the 1h hold.
+      - eval_time: 36h30m
+        alertname: PveClusterBackupStale
+        exp_alerts: []
+      - eval_time: 37h30m
+        alertname: PveClusterBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'pve-01:9101'
+              job: node-exporter-host
+
+  # BackupArtifactNeverLanded: mtime 0 across the whole window. The offset arm
+  # keeps a young series out, and a dump that lands late clears the window arm.
+  - interval: 5m
+    input_series:
+      - series: 'backup_artifact_last_mtime_seconds{app="authentik", instance="nas:9101", job="node-exporter-host"}'
+        values: '0+0x324'
+      - series: 'backup_artifact_last_mtime_seconds{app="immich", instance="nas:9101", job="node-exporter-host"}'
+        values: '0+0x24 1700000000+0x300'
+    alert_rule_test:
+      # 25h of history, inside the 1h hold.
+      - eval_time: 25h
+        alertname: BackupArtifactNeverLanded
+        exp_alerts: []
+      - eval_time: 26h30m
+        alertname: BackupArtifactNeverLanded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              app: authentik
+              instance: 'nas:9101'
+              job: node-exporter-host
+
+  # BackupArtifactZeroBytes: zero bytes with an mtime is a truncated dump; zero
+  # bytes with no mtime never landed and belongs to BackupArtifactNeverLanded.
+  - interval: 5m
+    input_series:
+      - series: 'backup_artifact_last_size_bytes{app="authentik", instance="nas:9101", job="node-exporter-host"}'
+        values: '0+0x40'
+      - series: 'backup_artifact_last_mtime_seconds{app="authentik", instance="nas:9101", job="node-exporter-host"}'
+        values: '1+0x40'
+      - series: 'backup_artifact_last_size_bytes{app="immich", instance="nas:9101", job="node-exporter-host"}'
+        values: '0+0x40'
+      - series: 'backup_artifact_last_mtime_seconds{app="immich", instance="nas:9101", job="node-exporter-host"}'
+        values: '0+0x40'
+      # Landed with bytes in it.
+      - series: 'backup_artifact_last_size_bytes{app="gitlab", instance="nas:9101", job="node-exporter-host"}'
+        values: '1024+0x40'
+      - series: 'backup_artifact_last_mtime_seconds{app="gitlab", instance="nas:9101", job="node-exporter-host"}'
+        values: '1+0x40'
+    alert_rule_test:
+      # Inside the 1h hold.
+      - eval_time: 30m
+        alertname: BackupArtifactZeroBytes
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: BackupArtifactZeroBytes
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              app: authentik
+              instance: 'nas:9101'
+              job: node-exporter-host
+
+  # VzdumpBackupNoGuests: a successful run that selected nothing. pve-01 owned
+  # guests earlier in the window, so it enters the alert; pve-02 never has, so
+  # the 30d arm keeps a k3s-only host out of it forever.
+  - interval: 5m
+    input_series:
+      - series: 'vzdump_backup_guests{instance="pve-01:9101", job="node-exporter-host"}'
+        values: '2+0x12 0+0x60'
+      - series: 'vzdump_backup_last_run_success{instance="pve-01:9101", job="node-exporter-host"}'
+        values: '1+0x72'
+      - series: 'vzdump_backup_guests{instance="pve-02:9101", job="node-exporter-host"}'
+        values: '0+0x72'
+      - series: 'vzdump_backup_last_run_success{instance="pve-02:9101", job="node-exporter-host"}'
+        values: '1+0x72'
+    alert_rule_test:
+      # Inside the 1h hold.
+      - eval_time: 1h30m
+        alertname: VzdumpBackupNoGuests
+        exp_alerts: []
+      - eval_time: 2h30m
+        alertname: VzdumpBackupNoGuests
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'pve-01:9101'
+              job: node-exporter-host
+
+  # OffsiteBackupIncomplete: the sticky rc=3 gauge at its 1h hold. The
+  # prolonged twin reads the same gauge at 36h, which needs its own
+  # long-horizon file.
+  - interval: 5m
+    input_series:
+      - series: 'restic_offsite_last_run_incomplete{instance="nas:9101", job="node-exporter-host"}'
+        values: '1+0x24'
+      # Cleared by an rc=0 run, so the arm must stay quiet for this host.
+      - series: 'restic_offsite_last_run_incomplete{instance="pve-01:9101", job="node-exporter-host"}'
+        values: '0+0x24'
+    alert_rule_test:
+      # Inside the 1h hold.
+      - eval_time: 55m
+        alertname: OffsiteBackupIncomplete
+        exp_alerts: []
+      - eval_time: 1h5m
+        alertname: OffsiteBackupIncomplete
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'nas:9101'
+              job: node-exporter-host

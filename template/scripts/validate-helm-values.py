@@ -1,41 +1,8 @@
 #!/usr/bin/env python3
 """Schema-validate the value-heavy Flux HelmReleases via `helm template`.
 
-`kustomize build | kubeconform` (task flux:lint) emits a HelmRelease verbatim as
-a Flux CR and never renders its chart, so the chart-specific keys inside
-`.spec.values` are NOT validated — the HelmRelease CRD treats `.spec.values` as a
-free-form object. A typo in a values key (e.g. `prometheuss:` for `prometheus:`)
-therefore slips past lint and silently no-ops in-cluster.
-
-This closes that gap for the releases named in --releases by extracting each
-release's `.spec.values`, substituting the `${...}` postBuild placeholders from
-the cluster-versions ConfigMap, and running `helm template` against the pinned
-chart version. That:
-  - hard-fails on a typo'd key for charts that ship a values.schema.json
-    (traefik does; helm validates values against it),
-  - hard-fails on any values that produce an unrenderable template (all charts),
-  - and (optionally) pipes the rendered output to kubeconform for structural
-    validation of the produced resources.
-
-It requires network access (it does `helm repo add`/`update` against the public
-chart repos). Which releases to render is consumer data, read from a YAML/JSON
-list (`--releases`, default `helm-values-releases.yaml` under the repo root):
-
-    - name: traefik
-      manifest: kubernetes/infrastructure/controllers/traefik/release.yaml
-      chart: traefik
-      repo_name: traefik
-      repo_url: https://traefik.github.io/charts
-
-The chart version comes from the manifest's `.spec.chart.spec.version` (a literal
-or a "${configmap_key}" placeholder), so there is no version to keep in sync here.
-
-Usage:
-  validate-helm-values.py [--kubeconform] [--repo-root DIR] [--releases FILE]
-                          [--versions-configmap PATH] [--policy-config PATH]
-
-Exit code is non-zero if any release fails to template (or fails kubeconform
-when --kubeconform is given).
+Renders each release's pinned chart with its substituted values and applies the
+shared pod policies to the result. Contract: docs/SCRIPTS.md.
 """
 
 from __future__ import annotations
@@ -48,31 +15,37 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
+    raise SystemExit(2) from None
 
-# Single source of truth for the no-CPU-limits policy: load the allowlist AND
-# the violation scanner from check-hpa-vpa-invariant.py so the kustomize-side
-# check (run by `task flux:lint`) and this helm-rendered-side check can never
-# diverge. The sibling has a hyphenated filename (not importable normally) and a
-# `__main__` guard, so loading it here does not run its main().
-_HPA_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "check-hpa-vpa-invariant.py")
-_hpa_spec = importlib.util.spec_from_file_location("check_hpa_vpa_invariant", _HPA_SRC)
+# Load the allowlist and the violation scanner from check-hpa-vpa-invariant.py
+# so the kustomize-side and helm-rendered-side checks cannot diverge. The
+# hyphenated filename is not importable normally, hence the spec loader.
+_HPA_SRC = Path(__file__).resolve().parent / "check-hpa-vpa-invariant.py"
+if not _HPA_SRC.is_file():
+    print(
+        "ERROR: check-hpa-vpa-invariant.py must sit next to this script — "
+        "vendor both (see weisssrv-lib scripts/vendorable-paths.yml).",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+_hpa_spec = importlib.util.spec_from_file_location("check_hpa_vpa_invariant", str(_HPA_SRC))
 _hpa = importlib.util.module_from_spec(_hpa_spec)
 _hpa_spec.loader.exec_module(_hpa)
 
-# Charts gate on .Capabilities.APIVersions, commonly in the kind-qualified form
-# (".../v1/ServiceMonitor"), so declare both the group/version and the
-# kind-qualified CRDs the cluster has — otherwise offline `helm template` of a
-# serviceMonitor-enabled release fails.
 # Kubernetes version for capability-gated rendering, shared by `helm template`
-# (--kube-version) and kubeconform (-kubernetes-version) so version-gated chart
-# templates render the way both tools see them. Derived at runtime from
-# k3s_version in the cluster-versions ConfigMap (see derive_kube_version) so it
-# tracks the live cluster; this fallback only applies if that key is missing.
+# (--kube-version) and kubeconform. Derived from k3s_version by
+# derive_kube_version(); this fallback applies only when that key is missing.
 KUBE_VERSION_FALLBACK = "1.36.0"
 
+# Charts gate on .Capabilities.APIVersions, commonly in the kind-qualified form
+# (".../v1/ServiceMonitor"), so declare both forms - otherwise an offline
+# `helm template` of a serviceMonitor-enabled release fails.
 HELM_API_VERSIONS = [
     "monitoring.coreos.com/v1",
     "monitoring.coreos.com/v1/ServiceMonitor",
@@ -82,8 +55,20 @@ HELM_API_VERSIONS = [
 
 DEFAULT_VERSIONS_CONFIGMAP = "kubernetes/infrastructure/sources/versions-configmap.yaml"
 DEFAULT_RELEASES_FILE = "helm-values-releases.yaml"
-REQUIRED_RELEASE_KEYS = ("name", "manifest", "chart", "repo_name", "repo_url")
+DEFAULT_SOURCES_DIR = "kubernetes/infrastructure/sources"
+# repo_name/repo_url are optional per-release OVERRIDES: the chart repo is
+# normally resolved from the manifest's own sourceRef, the way the version is.
+REQUIRED_RELEASE_KEYS = ("name", "manifest", "chart")
+# Branch of datreeio/CRDs-catalog kubeconform reads schemas from.
+DEFAULT_CRD_CATALOG_REF = os.environ.get("CRD_CATALOG_REF", "main")
 PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# Flux also accepts ${var:=default}, ${var:position} and ${var/a/b}. This gate
+# resolves none of them, so it refuses rather than render what Flux would not.
+UNSUPPORTED_PLACEHOLDER_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*[:/][^}]*\}")
+# Network-bound steps: a stalled chart repo must fail with a message, not hang
+# the job until the CI timeout.
+REPO_TIMEOUT_SECONDS = 120
+RENDER_TIMEOUT_SECONDS = 300
 
 
 def load_versions(repo_root: str, configmap: str = DEFAULT_VERSIONS_CONFIGMAP) -> dict:
@@ -118,6 +103,62 @@ def load_releases(path: str) -> list[dict]:
     return doc
 
 
+def helm_repositories(sources_dir: str, unreadable: list | None = None) -> dict:
+    """metadata.name -> spec.url for every HelmRepository under `sources_dir`.
+
+    A file that will not parse is appended to `unreadable` rather than skipped:
+    Flux would reject it, and a swallowed one misattributes the later failure.
+    """
+    repos: dict = {}
+    if not os.path.isdir(sources_dir):
+        return repos
+    for root, _dirs, files in os.walk(sources_dir):
+        for name in sorted(files):
+            if not name.endswith((".yaml", ".yml")):
+                continue
+            path = os.path.join(root, name)
+            try:
+                with open(path) as f:
+                    docs = list(yaml.safe_load_all(f))
+            except (OSError, yaml.YAMLError) as exc:
+                if unreadable is not None:
+                    unreadable.append((path, exc))
+                continue
+            for doc in docs:
+                if not isinstance(doc, dict) or doc.get("kind") != "HelmRepository":
+                    continue
+                key = (doc.get("metadata") or {}).get("name")
+                url = (doc.get("spec") or {}).get("url")
+                if key and url:
+                    # Trailing slash normalised, so a URL compares equal here
+                    # and in check-helm-repo-parity.py.
+                    repos[str(key)] = str(url).rstrip("/")
+    return repos
+
+
+def resolve_chart_repo(rel: dict, manifest_text: str, repos: dict):
+    """(repo_name, repo_url) for one release, or a str naming why it failed.
+
+    A per-release repo_name/repo_url pair wins; otherwise the manifest's
+    `.spec.chart.spec.sourceRef.name` is matched against the sources dir.
+    """
+    if rel.get("repo_name") and rel.get("repo_url"):
+        return rel["repo_name"], rel["repo_url"]
+    try:
+        hr = extract_helmrelease_from_text(manifest_text, rel["manifest"])
+    except SystemExit as exc:
+        return str(exc)
+    source = (
+        ((hr.get("spec") or {}).get("chart") or {}).get("spec") or {}
+    ).get("sourceRef") or {}
+    name = source.get("name")
+    if not name:
+        return "no .spec.chart.spec.sourceRef.name, and no repo_name/repo_url override"
+    if name not in repos:
+        return f"sourceRef {name!r} names no HelmRepository in the sources dir"
+    return str(name), repos[str(name)]
+
+
 def derive_kube_version(versions: dict) -> str:
     """Cluster Kubernetes version (X.Y.Z) for helm/kubeconform, from k3s_version.
 
@@ -126,6 +167,21 @@ def derive_kube_version(versions: dict) -> str:
     """
     m = re.match(r"v?(\d+\.\d+\.\d+)", str(versions.get("k3s_version", "")))
     return m.group(1) if m else KUBE_VERSION_FALLBACK
+
+
+def unsupported_substitution(text: str) -> str | None:
+    """The first postBuild substitution form this gate cannot evaluate, or None."""
+    match = UNSUPPORTED_PLACEHOLDER_RE.search(text)
+    return match.group(0) if match else None
+
+
+def _run_tool(cmd: list[str], timeout: int, label: str, **kwargs):
+    """Run a subprocess under a timeout. None (with a message) when it times out."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kwargs)
+    except subprocess.TimeoutExpired:
+        print(f"ERROR [{label}]: {' '.join(cmd[:2])} timed out after {timeout}s")
+        return None
 
 
 def substitute(text: str, versions: dict) -> tuple[str, list[str]]:
@@ -143,35 +199,89 @@ def substitute(text: str, versions: dict) -> tuple[str, list[str]]:
 
 
 def extract_helmrelease_from_text(text: str, source: str) -> dict:
-    """Return the (first) HelmRelease document from manifest text."""
-    docs = [d for d in yaml.safe_load_all(text)
-            if isinstance(d, dict) and d.get("kind") == "HelmRelease"]
+    """Return the (first) HelmRelease document from manifest text.
+
+    The text is already substituted, so PyYAML's mark names no file: the
+    source path goes into the message or the failure identifies nothing.
+    """
+    try:
+        docs = [d for d in yaml.safe_load_all(text)
+                if isinstance(d, dict) and d.get("kind") == "HelmRelease"]
+    except yaml.YAMLError as exc:
+        raise SystemExit(f"ERROR: {source} is not parseable YAML: {exc}") from exc
     if not docs:
         raise SystemExit(f"ERROR: no HelmRelease found in {source}")
     return docs[0]
 
 
-def extract_helmrelease(manifest_path: str) -> dict:
-    """Return the (first) HelmRelease document from a manifest file."""
-    with open(manifest_path) as f:
-        return extract_helmrelease_from_text(f.read(), manifest_path)
+def release_vpas(manifest_path: str, namespace: str, versions: dict) -> list[dict]:
+    """VerticalPodAutoscalers declared beside a release manifest.
+
+    The kustomize-side gate skips a VPA whose target is chart-rendered; here the
+    rendered pod spec is in hand, so the memory-cap rule can run on it.
+    """
+    out: list[dict] = []
+    directory = os.path.dirname(os.path.abspath(manifest_path))
+    if not os.path.isdir(directory):
+        return out
+    for entry in sorted(os.listdir(directory)):
+        if not entry.endswith((".yaml", ".yml")):
+            continue
+        try:
+            with open(os.path.join(directory, entry)) as f:
+                text, _missing = substitute(f.read(), versions)
+            docs = list(yaml.safe_load_all(text))
+        except (OSError, yaml.YAMLError):
+            continue
+        for doc in docs:
+            if not isinstance(doc, dict) or doc.get("kind") != "VerticalPodAutoscaler":
+                continue
+            _stamp_namespace(doc, namespace)
+            out.append(doc)
+    return out
+
+
+def _stamp_namespace(doc: dict, namespace: str) -> None:
+    """Apply the namespace the object is installed into, as the apiserver does."""
+    meta = doc.get("metadata")
+    if not isinstance(meta, dict):
+        meta = {}
+        doc["metadata"] = meta
+    meta.setdefault("namespace", namespace)
 
 
 def validate_release(rel: dict, versions: dict, repo_root: str, run_kubeconform: bool,
-                     kube_version: str, cpu_limit_allowlist: set | None = None) -> bool:
+                     kube_version: str, cpu_limit_allowlist: set | None = None,
+                     vpa_cap_allowlist: set | None = None,
+                     crd_catalog_ref: str = DEFAULT_CRD_CATALOG_REF) -> bool:
     """Template one release; return True on success."""
     manifest = os.path.join(repo_root, rel["manifest"])
-    # Substitute ${placeholders} in the RAW manifest text first — exactly like
-    # Flux's postBuild.substituteFrom — so a quoted placeholder keeps its YAML
-    # type after substitution (e.g. "${redis_version}" stays a string, not a
-    # number parsed from the bare value), matching the object Flux applies.
+    # Substitute ${placeholders} in the raw manifest text first, as Flux's
+    # postBuild.substituteFrom does, so a quoted placeholder keeps its YAML
+    # type after substitution.
     with open(manifest) as f:
-        rendered_manifest, missing = substitute(f.read(), versions)
+        manifest_text = f.read()
+    unsupported = unsupported_substitution(manifest_text)
+    if unsupported:
+        print(
+            f"ERROR [{rel['name']}]: manifest uses a postBuild substitution form this "
+            f"gate cannot evaluate ({unsupported}) — only ${{VAR}} is handled, so the "
+            f"rendered object would differ from what Flux installs"
+        )
+        return False
+    rendered_manifest, missing = substitute(manifest_text, versions)
     if missing:
         print(f"ERROR [{rel['name']}]: manifest references unknown configmap key(s): {missing}")
         return False
     hr = extract_helmrelease_from_text(rendered_manifest, manifest)
     spec = hr.get("spec", {})
+
+    if spec.get("valuesFrom"):
+        print(
+            f"ERROR [{rel['name']}]: .spec.valuesFrom is not rendered by this gate — "
+            f"the templated values would differ from what Flux installs"
+        )
+        return False
 
     version = str(spec.get("chart", {}).get("spec", {}).get("version", ""))
     if not version:
@@ -206,7 +316,9 @@ def validate_release(rel: dict, versions: dict, repo_root: str, run_kubeconform:
         for api in HELM_API_VERSIONS:
             cmd += ["--api-versions", api]
         print(f"=== helm template {rel['name']} ({rel['chart']}@{version}) ===")
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = _run_tool(cmd, RENDER_TIMEOUT_SECONDS, rel["name"])
+        if proc is None:
+            return False
         if proc.returncode != 0:
             print(f"ERROR [{rel['name']}]: helm template failed:")
             # helm can emit useful render diagnostics on stdout too, not just stderr.
@@ -215,11 +327,12 @@ def validate_release(rel: dict, versions: dict, repo_root: str, run_kubeconform:
             print("stderr:", proc.stderr.strip())
             return False
 
-        # No-CPU-limits policy on the CHART-RENDERED pods: check-hpa-vpa-
-        # invariant.py scans only the HelmRelease `.spec.values`, so a chart
-        # default would slip past it. Same scanner and allowlist, so the two
-        # checks cannot disagree.
+        # No-CPU-limits policy on the chart-rendered pods. The sibling gate
+        # scans only the HelmRelease `.spec.values`, so a chart default would
+        # slip past it. Same scanner and allowlist.
         rendered_docs = [d for d in yaml.safe_load_all(proc.stdout) if isinstance(d, dict)]
+        for doc in rendered_docs:
+            _stamp_namespace(doc, namespace)
         cpu_viol = _hpa.cpu_limit_violations(rendered_docs, cpu_limit_allowlist)
         if cpu_viol:
             print(
@@ -232,19 +345,37 @@ def validate_release(rel: dict, versions: dict, repo_root: str, run_kubeconform:
             print("\n".join(cpu_viol))
             return False
 
+        # VPA memory caps against the CHART-RENDERED limits: the kustomize-side
+        # gate has no limit to compare against for a chart-rendered workload.
+        cap_viol = _hpa.vpa_cap_violations(
+            rendered_docs + release_vpas(manifest, namespace, versions), vpa_cap_allowlist
+        )
+        if cap_viol:
+            print(
+                f"ERROR [{rel['name']}]: a VPA caps memory at or above the "
+                "chart-rendered container limit. To carry one while it is re-derived, "
+                "add its 'namespace/VerticalPodAutoscaler/name' key to "
+                "vpa_cap_allowlist in the --policy-config. Offenders:"
+            )
+            print("\n".join(cap_viol))
+            return False
+
         if run_kubeconform:
-            kc = subprocess.run(
+            kc = _run_tool(
                 [
                     "kubeconform", "-strict", "-ignore-missing-schemas",
                     "-kubernetes-version", kube_version,
                     "-schema-location", "default",
                     "-schema-location",
-                    "https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/"
+                    "https://raw.githubusercontent.com/datreeio/CRDs-catalog/"
+                    f"{crd_catalog_ref}/"
                     "{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json",
                     "-summary",
                 ],
-                input=proc.stdout, capture_output=True, text=True,
+                RENDER_TIMEOUT_SECONDS, rel["name"], input=proc.stdout,
             )
+            if kc is None:
+                return False
             print(kc.stdout.strip())
             if kc.returncode != 0:
                 print(f"ERROR [{rel['name']}]: kubeconform failed:")
@@ -255,7 +386,7 @@ def validate_release(rel: dict, versions: dict, repo_root: str, run_kubeconform:
         os.unlink(values_file)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -279,7 +410,15 @@ def main() -> int:
         "--policy-config", default=None,
         help="autoscaling policy file supplying the shared cpu_limit_allowlist",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--sources-dir", default=DEFAULT_SOURCES_DIR,
+        help="HelmRepository dir the chart repo is resolved from, relative to --repo-root",
+    )
+    parser.add_argument(
+        "--crd-catalog-ref", default=DEFAULT_CRD_CATALOG_REF,
+        help="datreeio/CRDs-catalog ref kubeconform reads schemas from",
+    )
+    args = parser.parse_args(argv)
 
     if shutil.which("helm") is None:
         print("ERROR: helm not found on PATH")
@@ -295,20 +434,50 @@ def main() -> int:
     versions = load_versions(args.repo_root, args.versions_configmap)
     kube_version = derive_kube_version(versions)
 
+    unreadable: list = []
+    repos = helm_repositories(
+        os.path.join(args.repo_root, args.sources_dir), unreadable
+    )
+    if unreadable:
+        for path, exc in unreadable:
+            print(f"ERROR: {path} could not be read as YAML: {exc}")
+        return 1
+    for rel in releases:
+        manifest = os.path.join(args.repo_root, rel["manifest"])
+        try:
+            with open(manifest) as f:
+                text, _missing = substitute(f.read(), versions)
+        except OSError as exc:
+            print(f"ERROR [{rel['name']}]: cannot read {manifest}: {exc}")
+            return 1
+        resolved = resolve_chart_repo(rel, text, repos)
+        if isinstance(resolved, str):
+            print(
+                f"ERROR [{rel['name']}]: cannot resolve the chart repo: {resolved}. "
+                f"Add the HelmRepository under {args.sources_dir}, or set "
+                f"repo_name/repo_url on the release entry."
+            )
+            return 1
+        rel["repo_name"], rel["repo_url"] = resolved
+
     # Add/refresh the chart repos once (network).
     for rel in releases:
-        add = subprocess.run(
+        add = _run_tool(
             # --force-update keeps repeated local runs idempotent (a plain
             # `repo add` errors when the repo already exists) and refreshes a
             # changed URL.
             ["helm", "repo", "add", rel["repo_name"], rel["repo_url"], "--force-update"],
-            capture_output=True, text=True,
+            REPO_TIMEOUT_SECONDS, rel["name"],
         )
+        if add is None:
+            return 1
         if add.returncode != 0:
             print(f"ERROR: failed to add/update Helm repo {rel['repo_name']}:")
             print(add.stderr.strip())
             return 1
-    upd = subprocess.run(["helm", "repo", "update"], capture_output=True, text=True)
+    upd = _run_tool(["helm", "repo", "update"], REPO_TIMEOUT_SECONDS, "helm repo update")
+    if upd is None:
+        return 1
     if upd.returncode != 0:
         print("ERROR: helm repo update failed:")
         print(upd.stderr.strip())
@@ -317,7 +486,8 @@ def main() -> int:
     failed = 0
     for rel in releases:
         if not validate_release(rel, versions, args.repo_root, args.kubeconform, kube_version,
-                                policy.cpu_limit_allowlist):
+                                policy.cpu_limit_allowlist, policy.vpa_cap_allowlist,
+                                args.crd_catalog_ref):
             failed += 1
     if failed:
         print(f"\n{failed} release(s) failed helm-values validation")

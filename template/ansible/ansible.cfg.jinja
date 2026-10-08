@@ -2,6 +2,12 @@
 inventory = inventories/prod/hosts.yml
 remote_user = {{ admin_user }}
 retry_files_enabled = False
+# Sized to the CI runner build container's memory cap. `serial:` on a play
+# still overrides this.
+forks = 15
+# No fact_caching backend on purpose: a cache that outlives the run goes stale
+# exactly when it hurts - mid-incident, or right after a host is rebuilt.
+gathering = smart
 stdout_callback = default
 callback_result_format = yaml
 callbacks_enabled = timer, profile_tasks
@@ -12,10 +18,9 @@ become_method = sudo
 become_user = root
 become_ask_pass = False
 
-# host_key_checking stays on; accept-new is TOFU (record on first contact, refuse
-# loudly if a host's key ever changes). After a legitimate host rebuild:
-#   ssh-keygen -R <host-or-ip> && ssh-keyscan -t ed25519 <host-or-ip> >> ~/.ssh/known_hosts
-# Never "fix" a key-change failure by disabling the check.
+# accept-new is TOFU: recorded on first contact, refused loudly if a key ever
+# changes. NEVER set host_key_checking=False to get past that failure - re-key
+# the host (ssh-keygen -R, then ssh-keyscan into known_hosts) instead.
 [ssh_connection]
 pipelining = True
 ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=~/.ssh/known_hosts

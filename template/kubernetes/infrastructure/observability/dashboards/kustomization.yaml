@@ -1,84 +1,48 @@
 ---
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# Pinned explicitly (the parent sets it too): the generated ConfigMaps must land
-# in observability for the Grafana sidecar to discover them, and this keeps the
-# directory rendering correctly when built standalone.
+# Pinned so the directory still renders into observability when built standalone;
+# the parent kustomization sets the same namespace.
 namespace: observability
 # Names must stay STABLE (no content-hash suffix) or the sidecar loses track of a
 # dashboard on every edit and orphan ConfigMaps accumulate.
 generatorOptions:
   disableNameSuffixHash: true
+  labels:
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: "Infrastructure"
 configMapGenerator:
-  - name: grafana-dashboard-cluster-overview
-    files:
-      - cluster-overview.json
-    options:
-      labels:
-        grafana_dashboard: "1"
-      annotations:
-        grafana_folder: "Infrastructure"
-  - name: grafana-dashboard-flux
-    files:
-      - flux-cluster.json
-    options:
-      labels:
-        grafana_dashboard: "1"
-      annotations:
-        grafana_folder: "Infrastructure"
-  - name: grafana-dashboard-alerts-overview
-    files:
-      - alerts-overview.json
-    options:
-      labels:
-        grafana_dashboard: "1"
-      annotations:
-        grafana_folder: "Infrastructure"
-  - name: grafana-dashboard-node-exporter-full
-    files:
-      - node-exporter-full.json
-    options:
-      labels:
-        grafana_dashboard: "1"
-      annotations:
-        grafana_folder: "Infrastructure"
-  - name: grafana-dashboard-prometheus-self
-    files:
-      - prometheus-self.json
-    options:
-      labels:
-        grafana_dashboard: "1"
-      annotations:
-        grafana_folder: "Infrastructure"
   - name: grafana-dashboard-alertmanager-self
     files:
       - alertmanager-self.json
-    options:
-      labels:
-        grafana_dashboard: "1"
-      annotations:
-        grafana_folder: "Infrastructure"
-  - name: grafana-dashboard-cert-manager
+  - name: grafana-dashboard-alerts-overview
     files:
-      - cert-manager.json
-    options:
-      labels:
-        grafana_dashboard: "1"
-      annotations:
-        grafana_folder: "Infrastructure"
+      - alerts-overview.json
   - name: grafana-dashboard-blackbox
     files:
       - blackbox.json
-    options:
-      labels:
-        grafana_dashboard: "1"
-      annotations:
-        grafana_folder: "Infrastructure"
+  - name: grafana-dashboard-cert-manager
+    files:
+      - cert-manager.json
+  - name: grafana-dashboard-cluster-overview
+    files:
+      - cluster-overview.json
+  - name: grafana-dashboard-flux
+    files:
+      - flux-cluster.json
+  - name: grafana-dashboard-loki-self
+    files:
+      - loki-self.json
+  - name: grafana-dashboard-node-exporter-full
+    files:
+      - node-exporter-full.json
+  - name: grafana-dashboard-prometheus-self
+    files:
+      - prometheus-self.json
   - name: grafana-dashboard-traefik-official
     files:
       - traefik-official.json
     options:
-      labels:
-        grafana_dashboard: "1"
       annotations:
         grafana_folder: "Networking"

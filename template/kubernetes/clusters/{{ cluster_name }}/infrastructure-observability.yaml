@@ -10,7 +10,9 @@ metadata:
 spec:
   interval: 10m
   retryInterval: 1m
-  timeout: 15m
+  # Headroom over the slowest release this stage waits on
+  # (kube-prometheus-stack, 15m).
+  timeout: 25m
   dependsOn:
     - name: infrastructure-configs
   sourceRef:
@@ -19,8 +21,6 @@ spec:
   path: ./kubernetes/infrastructure/observability
   prune: true
   wait: true
-  # optional:false — see infrastructure-sources.yaml for why only that stage
-  # tolerates a miss.
   postBuild:
     substituteFrom:
       - kind: ConfigMap

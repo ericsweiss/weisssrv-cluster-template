@@ -1,7 +1,7 @@
 ---
-# Grafana Alloy — container-log collector DaemonSet. Streams pod logs from every
-# node (including tainted ones) into Loki. Host journald is shipped separately by
-# the alloy_host Ansible role, not by this DaemonSet.
+# Grafana Alloy — container-log collector DaemonSet. Tails each node's
+# /var/log/pods into Loki, tolerating every taint. Host journald is a separate
+# path, the alloy_host Ansible role.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -10,6 +10,9 @@ metadata:
 spec:
   interval: 30m
   releaseName: alloy
+  # Revert out-of-band edits; the repo rule lives in traefik/release.yaml.
+  driftDetection:
+    mode: enabled
   timeout: 10m
   chart:
     spec:
@@ -28,8 +31,40 @@ spec:
       retries: 3
       remediateLastFailure: true
   values:
+    # Narrower than the chart default: discovery.kubernetes role=pod reads pods
+    # and nothing else, and the tail is from disk rather than pods/log.
+    # clusterRules must stay non-empty or templates/rbac.yaml breaks.
+    rbac:
+      rules:
+        - apiGroups: [""]
+          resources: ["pods"]
+          verbs: ["get", "list", "watch"]
+      clusterRules:
+        - nonResourceURLs: ["/metrics"]
+          verbs: ["get"]
+    configReloader:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 128Mi
+
     alloy:
       enableReporting: false
+      # The kubelet's /var/log/pods tree is root-owned, so the file tailer runs
+      # as root.
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      # Read offsets live under the storage path; the hostPath below keeps them
+      # across a restart, so a tail resumes instead of gapping or duplicating.
+      storagePath: /var/lib/alloy/data
+      mounts:
+        varlog: true
+        extra:
+          - name: alloy-storage
+            mountPath: /var/lib/alloy
       resources:
         requests:
           cpu: 25m
@@ -70,15 +105,34 @@ spec:
               separator     = "/"
               target_label  = "job"
             }
+            // On-disk log path for the file tailer: the kubelet writes
+            // /var/log/pods/<namespace>_<pod>_<uid>/<container>/<n>.log, so the
+            // uid and container name are enough to glob it.
+            rule {
+              source_labels = ["__meta_kubernetes_pod_uid", "__meta_kubernetes_pod_container_name"]
+              separator     = "/"
+              action        = "replace"
+              replacement   = "/var/log/pods/*$1/*.log"
+              target_label  = "__path__"
+            }
           }
 
-          // loki.source.kubernetes tails logs through the kube-apiserver and
-          // tracks read offsets in memory only, so an Alloy restart can gap or
-          // duplicate a small window and adds apiserver load. Accepted for the
-          // simpler setup; local.file_match + loki.source.file with a hostPath
-          // positions file survives restarts if this becomes a problem.
-          loki.source.kubernetes "pods" {
-            targets    = discovery.relabel.pods.output
+          // Re-evaluated as pods come and go.
+          local.file_match "pods" {
+            path_targets = discovery.relabel.pods.output
+          }
+
+          // From disk, not through the kube-apiserver: offsets persist under the
+          // storage path, so a restart resumes and the apiserver carries no log
+          // traffic.
+          loki.source.file "pods" {
+            targets    = local.file_match.pods.targets
+            forward_to = [loki.process.cri.receiver]
+          }
+
+          // Files are raw CRI wire format ("<ts> stdout F <message>").
+          loki.process "cri" {
+            stage.cri {}
             forward_to = [loki.write.default.receiver]
           }
 
@@ -95,6 +149,12 @@ spec:
       type: daemonset
       tolerations:
         - operator: Exists
+      volumes:
+        extra:
+          - name: alloy-storage
+            hostPath:
+              path: /var/lib/alloy
+              type: DirectoryOrCreate
 
     serviceMonitor:
       enabled: true

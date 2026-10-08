@@ -1,0 +1,99 @@
+---
+{%- from "partials/molecule.jinja" import systemd_platform, galaxy_dependency,
+    molecule_env, test_sequence with context %}
+# Mail Stack Integration Test
+# Tests: smtp_relay (relay server) + postfix_null_client (client) communication
+
+driver:
+  name: docker
+
+platforms:
+  - name: smtp-relay
+    # Shared systemd-container shape; only name/groups differ per platform.
+    <<: &systemd_platform
+{{- systemd_platform('mail-stack-net') }}
+    groups:
+      - mail
+      - relay_servers
+
+  - name: mail-client-01
+    <<: *systemd_platform
+    groups:
+      - mail
+      - mail_clients
+
+  - name: mail-client-02
+    <<: *systemd_platform
+    groups:
+      - mail
+      - mail_clients
+
+{{ galaxy_dependency() }}
+provisioner:
+  name: ansible
+{{- molecule_env() }}
+    SMTP_RELAY_USER: relay_user
+    SMTP_RELAY_PASSWORD: test_relay_password
+    # all.yml's admin_email hard-requires this env var (undef() guard).
+    ROOT_EMAIL_ALIAS: admin@example.com
+  playbooks:
+    prepare: ../../../_shared/prepare.yml
+  inventory:
+    group_vars:
+      relay_servers:
+        # SMTP Relay configuration (smtp_relay role). all.yml defines none of
+        # these prefixed names, so a mock here is what the role reads.
+        smtp_relay_internal_domain: test.local
+        smtp_relay_upstream: "[smtp.gmail.com]:587"
+        smtp_relay_upstream_user: test@example.com
+        smtp_relay_upstream_password: test_gmail_app_password
+        smtp_relay_tls_cert_dir: /etc/letsencrypt/live/smtp-relay
+        # Deltas over the role's shipped hardening only: inbound SASL stays on
+        # 587 (25 is chrooted and cannot read /etc/sasldb2) and mynetworks stays
+        # loopback-only, so a relayed message proves a real SASL handshake.
+        smtp_relay_config:
+          # Encrypt to the mock Gmail smarthost without verifying its cert; the
+          # mock credentials leave the message deferred at the relay, which is
+          # what the verify play's relay-queue assertion keys on.
+          smtp_tls_security_level: "encrypt"
+
+{% raw %}
+      mail_clients:
+        # Relay over submission (587), like production — that is the port whose
+        # smtpd is NOT chrooted, so the relay's auxprop sasldb SASL check
+        # resolves. Port 25 is used only for the banner probe in verify.
+        postfix_null_client_relay_port: 587
+        postfix_null_client_config:
+          myhostname: "{{ inventory_hostname }}.test.local"
+          myorigin: "/etc/mailname"
+          mydestination: "{{ inventory_hostname }}.test.local, test.local, localhost.localdomain, localhost"
+          relayhost: "[smtp-relay]:587"
+          mynetworks: "127.0.0.0/8"
+          inet_interfaces: "loopback-only"
+          # Submission mandates STARTTLS. The relay's cert is self-signed
+          # (minted in converge), so verification is off.
+          smtp_tls_security_level: "encrypt"
+          smtp_tls_CAfile: "/etc/ssl/certs/ca-certificates.crt"
+          smtp_sasl_auth_enable: "yes"
+          smtp_sasl_security_options: "noanonymous"
+          smtp_sasl_password_maps: "hash:/etc/postfix/sasl_passwd"
+        # The role gates templates/virtual.j2 and main.cf virtual_alias_maps on
+        # this var being defined, and removes /etc/postfix/virtual{,.db} when it
+        # is not.
+        postfix_null_client_virtual_aliases:
+          - from: "admin@test.local"
+            to: "admin@example.com"
+          - from: "root@test.local"
+            to: "admin@example.com"
+        postfix_null_client_aliases:
+          postmaster: root
+          nobody: root
+          hostmaster: root
+          webmaster: root
+          root: "admin@example.com"
+
+{% endraw %}
+verifier:
+  name: ansible
+
+{{ test_sequence() }}

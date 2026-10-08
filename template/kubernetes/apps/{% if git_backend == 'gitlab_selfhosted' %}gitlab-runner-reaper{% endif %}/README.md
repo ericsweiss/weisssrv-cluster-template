@@ -57,13 +57,23 @@ server-side type filter keeps that to the ephemeral per-job registry credentials
 the residual exposure is inherent and is mitigated by the digest-pinned image,
 the fixed no-input script, and this dedicated single-purpose ServiceAccount.
 
+## Where the code lives
+
+`gitlab-runner-reaper.py` sits beside the manifests because kustomize only
+accepts `configMapGenerator` sources inside the kustomization root. The CronJob
+mounts it read-only at `/opt/reaper`, and a script edit rolls a new hashed
+ConfigMap. Its unit tests are `tests/test_gitlab_runner_reaper.py`, which also
+holds the manifest and the code defaults to each other.
+
 ## Operational shape
 
 - Runs every 15 minutes, `concurrencyPolicy: Forbid`.
 - Lists are **paged** so a large backlog cannot OOM the 64Mi container.
-- A soft `BUDGET_SECONDS` stops cleanly under `activeDeadlineSeconds`: partial
-  progress this run, the rest next run — rather than a hard deadline-kill that
-  marks the Job failed.
+- A soft `BUDGET_SECONDS` (90s) stops cleanly under `activeDeadlineSeconds`
+  (360s for the whole Job, retries included): partial progress this run, the
+  rest next run — rather than a hard deadline-kill that marks the Job failed.
+- Namespaces rotate one slot per run, so a standing backlog in the first one
+  cannot starve the second.
 - Any non-race list/delete error exits non-zero, so a persistent failure (broken
   RBAC) surfaces as a failed Job instead of a silent no-op.
 - `ttlSecondsAfterFinished` on its own Jobs, so the reaper does not itself leak.

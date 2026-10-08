@@ -2,11 +2,56 @@
 # Base configuration only (SSH hardening, packages, timezone, fail2ban, NIC
 # tuning). Use it for a first contact with a new host; site.yml supersedes it.
 
+# See _reachability-probe.yml: the probe/gate pair is what stops a host this
+# playbook configured NOTHING on from exiting 0.
+- name: Probe reachability before deploying
+  ansible.builtin.import_playbook: _reachability-probe.yml
+
 - name: Deploy base configuration
-  hosts: base_managed
+  # !deploy_skipped drops probe misses; ignore_unreachable covers a host that
+  # dies between probe and play. See _reachability-probe.yml.
+  hosts: base_managed:!deploy_skipped
   become: true
+  ignore_unreachable: true
   roles:
     - role: weisssrv.infra.base
       tags: [base]
     - role: weisssrv.infra.nic_tuning
       tags: [nic_tuning, network]
+
+# weisssrv.infra.base above rewrites each guest's authorized_keys, dropping the
+# pinned cert-distribution key, so the next push from the cert primary would fail
+# until acme_certs runs again. Re-seed it from the primary here.
+- name: Re-seed the cert-distribution key on every cert target
+  hosts: dns_primary
+  become: true
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    - name: Re-seed the cert-distribution targets
+      when: acme_certs_ssh_public_key | default('') | length > 0
+      block:
+        - name: Reset the cert-distribution reachability results
+          ansible.builtin.set_fact:
+            acme_certs_unreachable_targets: []
+
+        - name: Seed each reachable target
+          ansible.builtin.include_role:
+            name: weisssrv.infra.acme_certs
+            tasks_from: seed-target
+          loop: "{{ acme_certs_distribution_targets | default([]) }}"
+          loop_control:
+            loop_var: acme_certs_target
+            label: "{{ acme_certs_target.host }}"
+          when: not (acme_certs_target.ssh_no_sudo | default(false))
+
+    - name: Report a skipped re-seed
+      ansible.builtin.debug:
+        msg: >-
+          ACME_SSH_PUBLIC_KEY is unset, so the cert-distribution key was not
+          re-seeded. Re-run through the task wrapper, or run playbooks/dns.yml,
+          before the next certificate renewal.
+      when: acme_certs_ssh_public_key | default('') | length == 0
+
+- name: Gate on the reachability ledger
+  ansible.builtin.import_playbook: _reachability-gate.yml

@@ -1,8 +1,7 @@
 ---
-# The SMTP relay on its own. site.yml deploys the same roles as part of a full
-# base run; this exists so a mail-only change (an upstream smarthost, a SASL
-# credential, a Postfix parameter) can be deployed — by hand or by its own CI
-# job — without re-running every other host's base configuration.
+# The SMTP relay on its own, so a mail-only change ships without re-running
+# every other host's base configuration. site.yml deploys the same roles as
+# part of a full base run.
 
 - name: Provision SMTP relay container
   hosts: mail
@@ -16,8 +15,8 @@
   roles:
     - weisssrv.infra.base
     - weisssrv.infra.smtp_relay
-    # Also deployed by site.yml; repeated so a standalone mail deploy keeps the
-    # relay's host metrics and log shipping in sync.
+    # Shared with site.yml; tests/test_shared_role_playbook_sync.py keeps the two
+    # in step, so a standalone mail deploy leaves the relay unmetered.
     - weisssrv.infra.node_exporter_host
     - weisssrv.infra.alloy_host
 
@@ -25,3 +24,39 @@
   hosts: mail
   roles:
     - weisssrv.infra.proxmox_firewall
+
+# weisssrv.infra.base above rewrites each guest's authorized_keys, dropping the
+# pinned cert-distribution key, so the next push from the cert primary would fail
+# until acme_certs runs again. Re-seed it from the primary here.
+- name: Re-seed the cert-distribution key on the relay
+  hosts: dns_primary
+  become: true
+  gather_facts: false
+  ignore_unreachable: true
+  tasks:
+    - name: Re-seed the relay as a cert-distribution target
+      when: acme_certs_ssh_public_key | default('') | length > 0
+      block:
+        - name: Reset the cert-distribution reachability results
+          ansible.builtin.set_fact:
+            acme_certs_unreachable_targets: []
+
+        - name: Seed each reachable target
+          ansible.builtin.include_role:
+            name: weisssrv.infra.acme_certs
+            tasks_from: seed-target
+          loop: >-
+            {{ acme_certs_distribution_targets | default([])
+               | selectattr('host', 'in', groups['mail'] | default([])) | list }}
+          loop_control:
+            loop_var: acme_certs_target
+            label: "{{ acme_certs_target.host }}"
+          when: not (acme_certs_target.ssh_no_sudo | default(false))
+
+    - name: Report a skipped re-seed
+      ansible.builtin.debug:
+        msg: >-
+          ACME_SSH_PUBLIC_KEY is unset, so the cert-distribution key was not
+          re-seeded. Re-run through the task wrapper, or run playbooks/dns.yml,
+          before the next certificate renewal.
+      when: acme_certs_ssh_public_key | default('') | length == 0

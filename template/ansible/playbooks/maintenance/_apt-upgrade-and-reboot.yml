@@ -1,0 +1,19 @@
+---
+# Shared OS-patch phase for the maintenance entry points: apt upgrade, the
+# reboot decision, then the nfsd stop-hang recovery. The k3s play includes the
+# apt half on its own. Optional variable: apt_upgrade_phase_label.
+
+- name: Upgrade packages
+  ansible.builtin.include_tasks: _apt-upgrade.yml
+
+- name: Check and reboot if needed
+  ansible.builtin.include_tasks: _reboot-if-needed.yml
+
+- name: Verify SSH after the reboot
+  ansible.builtin.service:
+    name: ssh
+    state: started
+  when: reboot_required | bool
+
+- name: Ensure the NFS server is healthy after the upgrade
+  ansible.builtin.include_tasks: _ensure-nfs-server-healthy.yml

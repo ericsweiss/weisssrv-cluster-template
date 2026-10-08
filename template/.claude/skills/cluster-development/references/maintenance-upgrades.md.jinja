@@ -1,0 +1,51 @@
+# Versions, upgrades and the library pin
+
+`docs/RUNBOOKS.md` § Upgrades is canonical. This page is the two flows an agent
+runs most.
+
+## Bumping a version pin
+
+Every chart, image and binary version is single-sourced in
+`ansible/inventories/prod/group_vars/all.yml`. Manifests spell them as
+`${<name>_version}` and Flux substitutes at reconcile time.
+
+1. `task maintenance:check-versions` lists what is behind.
+2. Edit the pin in `all.yml`. Never hand-edit the generated ConfigMap.
+3. `task flux:sync-versions`, then commit both files in one commit. The drift
+   gate inside `task lint` fails if they disagree.
+4. `task flux:lint` if the chart's values changed.
+5. Read the release notes for a CRD change. A chart that manages its own CRDs can
+   DELETE them on an upgrade or a downgrade, taking every object of that kind
+   with it.
+
+Fold every available bump into a revision you are already making rather than
+opening a revision just for bumps, and read the pipeline's version-check output
+rather than a local run, whose cache can be stale.
+
+## Bumping the library pin
+
+The roles, CI job templates, Terraform modules and vendored gates all come from
+weisssrv-lib at `{{ lib_ref }}`. A behaviour change is a library merge request and
+a release tag, then a pin bump here.
+
+1. The change lands in the library and a release tag is cut.
+2. Here: bump the collection version in `ansible/requirements.yml` and the single
+   ref variable in `.gitlab-ci.yml`, then run `scripts/check-lib-pins.py --fix`.
+   The Terraform module `?ref=` pins are bumped by hand; a missed one is caught
+   by the pin-parity test, not by the fixer.
+3. `task lib:sync` to refresh the local checkout, re-vendor the byte-identical
+   copies, and re-run the gates. A vendored copy edited here is reverted by the
+   next re-vendor and reds the byte-identity gate meanwhile.
+4. `task ansible:install-collections` — the installer will not refresh an
+   already-installed collection without being forced.
+5. Land the inventory changes a renamed or emptied variable needs in the SAME
+   merge request. Role variables are `| default(...)`-guarded, so a missed rename
+   does not fail: it silently takes the role default.
+6. Prove pipeline parity before merging. The library serves several consumers, so
+   a changed input default changes this pipeline too.
+
+## OS patching and reboots
+
+The maintenance playbooks drain, patch, reboot and uncordon one node at a time,
+and the manual CI jobs run them. Do not run two against the same target at once,
+and never start a manual deploy while that target's CI deploy job is in flight.

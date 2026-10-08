@@ -1,0 +1,125 @@
+{%- import "partials/secrets.jinja" as secrets with context -%}
+# Add a Kubernetes application
+
+Canonical procedure: `docs/RUNBOOKS.md` § Adding an application. This page is the
+condensed checklist and the traps. Copy the closest existing directory under
+`kubernetes/apps/` rather than inventing a shape.
+
+## Checklist
+
+1. **Directory** `kubernetes/apps/<app>/`, registered in
+   `kubernetes/apps/kustomization.yaml`. Kustomize does not auto-discover.
+2. **Namespace** with Pod Security Admission labels. `enforce: baseline` unless a
+   capability forces `privileged`, and then justify it in an inline comment and
+   keep `warn` and `audit` at `restricted`.
+3. **NetworkPolicy**: take the `kubernetes/components/netpol-baseline` component
+   for the ingress default-deny, then an explicit egress deny with scoped allows
+   — cluster DNS, the apiserver, SMTP if the app mails, public HTTPS with the
+   reserved-CIDR `except:` list. Add the scrape allow from the observability
+   namespace. An allow that really is namespace-wide takes one of
+   `kubernetes/components/netpol-egress-dns`,
+   `kubernetes/components/netpol-egress-apiserver` or
+   `kubernetes/components/netpol-egress-public`; each selects every pod, so none
+   of them is right for a per-app rule. Addresses stay LITERAL here: the parity
+   gate reads NetworkPolicies from disk, before substitution. A peer pod in the
+   SAME namespace takes two rules, because the baseline denies ingress to that
+   pod too: the egress entry on the app's policy, and a separate policy
+   selecting the peer with `policyTypes: [Ingress]` allowing the app on its
+   port. The egress half alone passes every gate here and the connection still
+   fails.
+4. **Autoscaling policy** (required): an entry in `scripts/autoscaling-policy.yaml`
+   plus the `vpa.yaml` it describes. `Initial` for stateless, `Off` for anything
+   with a database, memory-only when an HPA owns CPU.
+5. **Certificate** per hostname, mirroring a neighbour's `certificate.yaml`.
+6. **IngressRoute**: copy a neighbour's and reference the platform middlewares
+   from the Traefik namespace. Every domain and address is a `${cluster_...}`
+   placeholder — a literal reds `task lint:cluster-literals`.
+7. **Secrets**: an `ExternalSecret`. With this cluster's backend the reference is
+   `{{ secrets.secret_ref('<item>', '<field>') }}`, so `remoteRef.key` is the
+   item TITLE and `remoteRef.property` the field. That split is the part people
+   get wrong. Record a new item in `docs/RUNBOOKS.md` § Rotating a secret.
+8. **Version pin**: add `${<app>_version}` to
+   `ansible/inventories/prod/group_vars/all.yml`, run `task flux:sync-versions`,
+   and commit both files. A new Helm chart also needs a `HelmRepository` under
+   `kubernetes/infrastructure/sources/`.
+9. **Observability** (mandatory): logs, metrics, a down-or-stale alert, and a
+   probe if users reach the app directly. § Alert rules below.
+10. **DNS**: the internal rewrite in `ansible/inventories/prod/group_vars/dns.yml`
+    and the external record from the external-dns annotation, unless the name
+    needs a nested subdomain or a DNS-only record — then one entry in
+    `terraform/cloudflare/dns.tf`.
+11. **Docs**: a `kubernetes/apps/<app>/README.md` covering what lives in that
+    folder, plus a row in the repository `README.md` § Applications.
+
+## A receiver reached from outside the cluster
+
+An app that terminates a protocol from the LAN on its own address, rather than
+sitting behind Traefik, needs four more things than an IngressRoute:
+
+- Its own single-address pool in
+  `kubernetes/infrastructure/configs/metallb-ip-pools.yaml` with
+  `autoAssign: false`, claimed by a `metallb.io/loadBalancerIPs` annotation on
+  the Service and announced by the `L2Advertisement`.
+- A `cluster_*` key for that address in
+  `kubernetes/infrastructure/sources/cluster-config.yaml`, registered in
+  `scripts/check-cluster-literals.py` and mirrored in the Ansible inventory, so
+  the manifests spell it as a `${cluster_...}` placeholder.
+- `externalTrafficPolicy: Local` on the Service where the source IP matters.
+  Cluster-wide policy SNATs it to the node that received the frame.
+- A **guest** firewall allow on the nodes that may announce the address, not a
+  datacenter rule: a frame destined for the VIP is forwarded to the announcing
+  node's guest, so the guest firewall filters it and a datacenter rule is inert.
+  `add-vm-app.md` § Firewall is the same trap from the guest side.
+
+## Alert rules
+
+Platform-wide rules live in `additionalPrometheusRulesMap` inside
+`kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml`. An
+application's own rules are a `PrometheusRule` in the application's directory
+instead, so the app's manifests and its alerts move together.
+
+Either way:
+
+- `annotations.runbook_url` is required and points at the `docs/RUNBOOKS.md`
+  heading that says what to do.
+- A promtool unit test ships in `tests/prometheus-rules/`, proven with
+  `task lint:prometheus-config`.
+
+## Storage
+
+- NFS volumes mount **by hostname**, never by address: the wildcard certificate
+  carries no address in its SAN list, so an address mount fails the handshake.
+- A zvol-backed PV uses `storageClassName: ""` for a static bind with no
+  provisioner. The zvol itself is declared host-side in the guest's
+  `vm_additional_disks` block in `ansible/inventories/prod/hosts.yml`.
+
+## Scheduling
+
+Node labels live under the `${cluster_node_label_domain}` namespace, substituted
+from the cluster-config ConfigMap.
+
+- Stateless work prefers a node without the storage label and selects the
+  general-purpose one.
+- Work that needs storage-local I/O pins to the storage node by hostname and
+  tolerates its taint.
+- GPU work selects the GPU label and requests an `nvidia.com/gpu`. The device
+  plugin is time-sliced, so a request of 1 is a slice, not exclusivity.
+- Leave `priorityClassName` unset for an ordinary application: priority 0 already
+  outranks CI job pods. The classes this repository defines are in
+  `kubernetes/infrastructure/sources/priorityclasses.yaml`.
+
+## SSO
+
+- The OIDC issuer host is always the EXTERNAL one, even for an internal-only
+  application.
+- **Two gate shapes.** An application that speaks OIDC gates itself and takes no
+  Traefik middleware. One that does not is gated by the forward-auth middleware,
+  and that needs a proxy provider AND an entry in the embedded outpost's list — a
+  provider missing from the outpost plans clean and then 404s.
+- A partly-public application is split by ROUTE, not by hostname: a
+  higher-priority route with an explicit path allowlist and no auth middleware,
+  plus a lower-priority catch-all that carries it.
+- SSO objects are codified in `terraform/authentik/` as `locals` maps fed to the
+  library module, so adding an application is a map entry. Edit the `.tf` files,
+  read the plan line by line, then apply under supervision. Never the admin UI:
+  an object created there drifts out of state.

@@ -1,10 +1,7 @@
 ---
 # One ClusterExternalSecret fans the DNS provider token out to every namespace
-# labelled <label-domain>/dns-api-token=true (cert-manager for DNS-01,
-# external-dns, the DDNS job). A new consumer just adds the label.
-#
-# remoteRef.key is the item TITLE in the secret backend and .property is the
-# FIELD name. The token needs Zone:Read + DNS:Edit on the external zone only.
+# labelled <label-domain>/dns-api-token=true, so a new consumer just adds the
+# label. remoteRef.key is the backend item title and .property is the field.
 apiVersion: external-secrets.io/v1
 kind: ClusterExternalSecret
 metadata:

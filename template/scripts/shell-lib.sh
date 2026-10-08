@@ -1,17 +1,11 @@
 #!/usr/bin/env bash
-# Shared shell helpers sourced by repo scripts. Function-only: NO top-level
-# side effects, so sourcing is safe even under a caller's `set -e`.
-#
-# Source via the _SCRIPT_DIR pattern:
-#   _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-#   # shellcheck source=scripts/shell-lib.sh
-#   . "$_SCRIPT_DIR/shell-lib.sh"
+# Shell helpers other scripts source. Function-only: no top-level side effects,
+# so sourcing is safe under a caller's `set -e`.
+# Contract: weisssrv-lib docs/SCRIPTS.md - CI invariants.
 
-# Run "$@" under a hard wall-clock bound (first arg = seconds). Prefers GNU
-# coreutils `timeout`, then `gtimeout` (macOS: brew install coreutils), and
-# finally — if neither exists — runs the command unbounded so callers still
-# work (their own ssh ConnectTimeout/ServerAlive* options are the only guard
-# on that fallback path).
+# Run "$@" under a hard wall-clock bound (first arg = seconds). Prefers
+# `timeout`, then `gtimeout`; with neither present the command runs unbounded,
+# guarded only by the caller's own ssh timeouts.
 timeout_cmd() {
     local seconds="$1"
     shift
@@ -31,12 +25,55 @@ timeout_cmd() {
     fi
 }
 
-# SSH reachability probe: short-timeout, keepalive-bounded ssh under a
-# wall-clock backstop. ConnectTimeout=2 bounds the TCP connect; ServerAlive*
-# trips a dead post-connect channel; timeout_cmd is the backstop for a host that
-# connects then stalls (PAM/sssd, disk-stuck remote shell). Pass the target and
-# remote command as args, e.g. `ssh_probe "$host" "true"`.
+# SSH reachability probe under a wall-clock backstop. ConnectTimeout bounds the
+# TCP connect, ServerAlive* trips a dead channel, timeout_cmd catches a host
+# that connects then stalls. Usage: ssh_probe "$host" "true".
 ssh_probe() {
     timeout_cmd 6 ssh -o ConnectTimeout=2 -o BatchMode=yes \
         -o ServerAliveInterval=2 -o ServerAliveCountMax=2 "$@"
+}
+
+# CRITICAL: `kubectl get … 2>/dev/null || true` collapses an absent object, no
+# cluster, no RBAC and an API timeout into the same empty string, so the caller
+# prints a remedy for the wrong problem. This reads one object as JSON and
+# separates them: 0 with the JSON on stdout, 3 on NotFound, 1 with kubectl's
+# stderr otherwise. Usage: json="$(kubectl_read secret x -n ns)" || rc=$?
+kubectl_read() {
+    local out
+    if out="$(kubectl get "$@" -o json 2>&1)"; then
+        printf '%s' "$out"
+        return 0
+    fi
+    case "$out" in
+        *NotFound*|*"not found"*) return 3 ;;
+    esac
+    printf '%s\n' "$out" >&2
+    return 1
+}
+
+# CRITICAL: `cmd | grep -q` under pipefail inverts a match into a failure —
+# grep exits on the first hit, the producer takes SIGPIPE, and pipefail returns
+# its status. Capture first, then test the value. Usage:
+#   out=$(ssh "$h" "systemctl is-active x") || return 1
+#   captured_match "$out" "^active"
+captured_match() {
+    printf '%s' "$1" | grep -q -- "$2"
+}
+
+# url_contains <url> <pattern>: fetch a URL and test its body against a BRE.
+# Non-zero when the fetch failed, so an unreachable endpoint is a FAIL rather
+# than an empty body. SHELL_LIB_CURL_MAX_TIME bounds the fetch.
+url_contains() {
+    local out
+    out=$(curl -s --max-time "${SHELL_LIB_CURL_MAX_TIME:-10}" "$1" 2>/dev/null) || return 1
+    captured_match "$out" "$2"
+}
+
+# ssh_contains <user@host> <command> <pattern>: run a command over ssh and test
+# its output against a BRE. Non-zero when the command or the connection failed,
+# so an unreachable host does not read as a clean non-match.
+ssh_contains() {
+    local out
+    out=$(ssh_probe "$1" "$2" 2>/dev/null) || return 1
+    captured_match "$out" "$3"
 }

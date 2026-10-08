@@ -1,0 +1,62 @@
+{% raw %}#!/usr/bin/env bash
+# Pure-logic helpers shared by the maintenance scripts, unit-tested by
+# scripts/test_maintenance_lib.py. Functions only, no side effects: each reads
+# stdin or arguments and writes a verdict. None call kubectl, curl or ansible.
+
+# not_ready_node_names: `kubectl get nodes --no-headers` on stdin -> the NAME of
+# each node whose STATUS does not begin with "Ready", so "Ready,SchedulingDisabled"
+# (cordoned but healthy) counts as ready and is NOT listed.
+not_ready_node_names() {
+  awk '$2 !~ /^Ready/ {print $1}'
+}
+
+# kured_rebooting_filter: `node<TAB>annotation<TAB>unschedulable` rows on stdin ->
+# the nodes kured is actively rebooting. Annotated AND cordoned is required:
+# annotated-but-schedulable means kured is blocked, not mid-reboot.
+kured_rebooting_filter() {
+  awk -F'\t' '$2 != "" && $3 == "true" {print $1}'
+}
+
+# classify_not_ready_nodes <kured_names>: not-ready node names on stdin -> one
+# verdict line per node, "excused <name>" on an exact match in the
+# newline-separated <kured_names>, "error <name>" otherwise.
+classify_not_ready_nodes() {
+  local kured_names="$1" n
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    if printf '%s\n' "$kured_names" | grep -qxF "$n"; then
+      echo "excused $n"
+    else
+      echo "error $n"
+    fi
+  done
+}
+
+# list_unhealthy_pods: `kubectl get pods -A --no-headers` on stdin -> the rows
+# for unhealthy pods (STATUS not "Running", or READY "a/b" with a != b). Terminal
+# Job outcomes go to the verify's failed-Job check, which scopes them per node.
+list_unhealthy_pods() {
+  awk '
+    $4 == "Completed" || $4 == "Succeeded" || $4 == "Error" || $4 == "Failed" { next }{% endraw %}
+{%- if git_backend == 'gitlab_selfhosted' %}
+{% raw %}    # Runner JOB pods (runner-* in the gitlab-runner* namespaces) are pipeline
+    # state, not cluster health: Pending while queued, Terminating while DinD
+    # tears down. The runner MANAGERS (gitlab-runner-*) stay covered.
+    ($1 == "gitlab-runner" || $1 == "gitlab-runner-privileged") && $2 ~ /^runner-/ { next }{% endraw %}
+{%- endif %}
+{% raw %}    { split($3, a, "/"); if ($4 != "Running" || a[1] != a[2]) print }'
+}
+
+# deployment_replicas_ok <available> <desired>: exit 0 if available >= desired,
+# defaulting blanks to 0 and 1; non-numeric input returns non-zero.
+deployment_replicas_ok() {
+  local avail="${1:-0}" desired="${2:-1}"
+  [ "${avail:-0}" -ge "${desired:-1}" ] 2>/dev/null
+}
+
+# deployment_pod_nodes <deployment-name>: `name<TAB>nodeName` rows on stdin ->
+# each of <deployment>'s pods' nodeName, or "<unscheduled>". The SafeEncode
+# pod-template-hash match keeps a name-prefix sibling out.
+deployment_pod_nodes() {
+  awk -F'\t' -v d="$1" '$1 ~ "^"d"-[b-df-hj-np-tv-z2-9]+-" {print ($2 == "" ? "<unscheduled>" : $2)}'
+}{% endraw %}

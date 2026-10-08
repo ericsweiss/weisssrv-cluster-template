@@ -1,0 +1,44 @@
+---
+# promtool unit tests for the ZfsEncryptedMountStuck pair: the unit sits in
+# `activating` forever by design, so the two holds (30m warning, 2h critical)
+# are the only thing separating a slow unlock from a dead key source.
+rule_files:
+  - rules.yaml
+evaluation_interval: 15m
+tests:
+  - interval: 15m
+    input_series:
+      # Stuck activating for the whole horizon.
+      - series: 'node_systemd_unit_state{name="zfs-mount-encrypted.service", state="activating", instance="nas:9101"}'
+        values: '1+0x16'
+      # The same unit reporting active: the healthy arm.
+      - series: 'node_systemd_unit_state{name="zfs-mount-encrypted.service", state="active", instance="nas:9101"}'
+        values: '1+0x16'
+      # Another unit activating must not trip either arm.
+      - series: 'node_systemd_unit_state{name="zfs-load-key@tank.service", state="activating", instance="nas:9101"}'
+        values: '1+0x16'
+    alert_rule_test:
+      # Inside the 30m hold.
+      - eval_time: 15m
+        alertname: ZfsEncryptedMountStuck
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: ZfsEncryptedMountStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              name: zfs-mount-encrypted.service
+              state: activating
+              instance: 'nas:9101'
+      # Inside the 2h hold: the warning is up, the critical is not.
+      - eval_time: 1h45m
+        alertname: ZfsEncryptedMountStuckCritical
+        exp_alerts: []
+      - eval_time: 2h15m
+        alertname: ZfsEncryptedMountStuckCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              name: zfs-mount-encrypted.service
+              state: activating
+              instance: 'nas:9101'

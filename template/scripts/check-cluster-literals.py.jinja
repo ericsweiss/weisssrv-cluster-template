@@ -1,0 +1,389 @@
+#!/usr/bin/env python3
+"""Assert the substituted trees spell cluster identity as cluster-config
+placeholders, and that cluster-config agrees with the Ansible inventory.
+Exit 0 clean, 1 violations, 2 the gate could not inspect its subject.
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover - environment guard
+    print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
+    raise SystemExit(2) from None
+
+# Trees a Flux Kustomization renders WITH substituteFrom, derived from the cluster
+# dir so a new or renamed stage cannot leave a tree unscanned. sources/ and
+# clusters/ fall out on their own: neither carries substituteFrom.
+CLUSTER_DIR = "kubernetes/clusters/{{ cluster_name }}"
+# Rendered INTO those trees as a kustomize component, so it has no Kustomization
+# of its own and cannot be derived.
+EXTRA_TREES = ("kubernetes/components",)
+
+# Non-YAML generator sources kustomize renders into a substituted manifest.
+GENERATOR_SUFFIXES = (".json", ".py", ".toml", ".tpl")
+# Both YAML spellings: Flux reconciles a .yml manifest exactly like a .yaml one.
+MANIFEST_SUFFIXES = (".yaml", ".yml")
+
+CLUSTER_CONFIG = "kubernetes/infrastructure/sources/cluster-config.yaml"
+ANSIBLE_ALL = "ansible/inventories/prod/group_vars/all.yml"
+ANSIBLE_K3S = "ansible/inventories/prod/group_vars/k3s.yml"
+
+RULES_TREE = "kubernetes/infrastructure/observability/rules"
+
+# cluster-config key -> the literal it replaces. Domains match as a suffix (any
+# hostname under them counts); everything else matches whole.
+DOMAIN_KEYS = ("cluster_internal_domain", "cluster_external_domain")
+# Addresses/CIDRs are exempt inside a NetworkPolicy and the rules tree, where a
+# tool parses the manifest before Flux substitutes.
+ADDRESS_KEYS = (
+    "cluster_lan_cidr",
+    "cluster_pod_cidr",
+    "cluster_service_cidr",
+{%- if vpn_tailscale %}
+    "cluster_tailnet_cidr",
+{%- endif %}
+    "cluster_metallb_public_vip",
+    "cluster_metallb_internal_vip",
+    "cluster_api_vip",
+)
+
+# Non-address identity values with no netpol/rules exemption: nothing parses a
+# timezone before Flux substitutes.
+VALUE_KEYS = ("cluster_timezone",)
+
+
+def vip_keys(config: dict) -> tuple[str, ...]:
+    """Every `cluster_*_vip` key the config declares, ADDRESS_KEYS floor included.
+
+    A VIP added to cluster-config alone would otherwise be scanned by no arm
+    while the gate still reports OK.
+    """
+    declared = {k for k in config if k.startswith("cluster_") and k.endswith("_vip")}
+    floor = {k for k in ADDRESS_KEYS if k.endswith("_vip")}
+    return tuple(sorted(declared | floor))
+
+
+# cluster-config key -> where the same value lives in the Ansible inventory.
+INVENTORY_MIRRORS = {
+    "cluster_internal_domain": (ANSIBLE_ALL, "internal_domain"),
+    "cluster_external_domain": (ANSIBLE_ALL, "external_domain"),
+    "cluster_node_label_domain": (ANSIBLE_ALL, "internal_domain"),
+    "cluster_pod_cidr": (ANSIBLE_K3S, "k3s_cluster_cidr"),
+    "cluster_service_cidr": (ANSIBLE_K3S, "k3s_service_cidr"),
+    "cluster_api_vip": (ANSIBLE_ALL, "k3s_api_vip"),
+    "cluster_k3s_api_vip": (ANSIBLE_ALL, "k3s_api_vip"),
+    "cluster_metallb_public_vip": (ANSIBLE_ALL, "metallb_public_vip"),
+    "cluster_metallb_internal_vip": (ANSIBLE_ALL, "metallb_internal_vip"),
+    "cluster_timezone": (ANSIBLE_ALL, "timezone"),
+}
+
+# A second inventory variable carrying the same value, for a key the inventory
+# writes out twice. Each entry is checked exactly like an INVENTORY_MIRRORS one.
+SECONDARY_MIRRORS: dict[str, tuple[str, str]] = {}
+
+{% if vpn_tailscale %}# The resolver list, spelled space-separated on the Flux side and as a YAML list
+# in the inventory.
+DNS_SERVERS_KEY = "cluster_upstream_dns_servers"{% else %}# No tailnet resolver zone, so no cluster-config key mirrors `dns_servers`.
+DNS_SERVERS_KEY = None{% endif %}
+
+# Every key an arm of this gate consumes. Each arm is guarded by `if key not in
+# config`, so the whole set is asserted up front: a disappeared key is Vacuous
+# (exit 2), never a quiet pass over a smaller subject.
+REQUIRED_KEYS = (
+    set(DOMAIN_KEYS)
+    | set(ADDRESS_KEYS)
+    | set(VALUE_KEYS)
+    | set(INVENTORY_MIRRORS)
+    | set(SECONDARY_MIRRORS)
+    | ({DNS_SERVERS_KEY} if DNS_SERVERS_KEY else set())
+)
+
+
+def manifests(base: Path, *, recurse: bool = True) -> list[Path]:
+    """The YAML manifests in a directory, under either suffix."""
+    walk = base.rglob("*") if recurse else base.iterdir()
+    return sorted(p for p in walk if p.is_file() and p.suffix in MANIFEST_SUFFIXES)
+
+
+class Vacuous(Exception):
+    """The gate could not inspect its subject — exit 2, never a silent pass."""
+
+
+def _read_yaml(path: Path, rel: str, *, multi: bool = False):
+    """Parse one of the gate's OWN inputs, or exit 2 through Vacuous.
+
+    An unreadable input means the gate could not inspect its subject, which is a
+    different outcome from a finding and must not surface as a traceback.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+        return list(yaml.safe_load_all(text)) if multi else (yaml.safe_load(text) or {})
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise Vacuous(f"{rel} could not be read ({exc.__class__.__name__}: {exc})") from exc
+
+
+def substituted_trees(root: Path) -> tuple[str, ...]:
+    """Every tree a Flux Kustomization renders with a cluster-config substitution.
+
+    Derived from spec.path. A path nested in another derived path is dropped, and
+    a derived path missing from disk is a hard error, not a smaller scan.
+    """
+    cluster = root / CLUSTER_DIR
+    if not cluster.is_dir():
+        raise Vacuous(f"{CLUSTER_DIR} not found — cannot derive the substituted trees")
+    derived: set[str] = set()
+    for path in manifests(cluster, recurse=False):
+        for doc in _read_yaml(path, path.relative_to(root).as_posix(), multi=True):
+            if not isinstance(doc, dict) or doc.get("kind") != "Kustomization":
+                continue
+            if not str(doc.get("apiVersion", "")).startswith("kustomize.toolkit"):
+                continue
+            spec = doc.get("spec") or {}
+            froms = (spec.get("postBuild") or {}).get("substituteFrom") or []
+            if not any(f.get("name") == "cluster-config" for f in froms):
+                continue
+            tree = str(spec.get("path") or "").lstrip("./")
+            if tree:
+                derived.add(tree)
+    if not derived:
+        raise Vacuous(
+            f"no Kustomization in {CLUSTER_DIR} substitutes from cluster-config — "
+            "nothing would be scanned"
+        )
+    derived |= set(EXTRA_TREES)
+    missing = sorted(t for t in derived if not (root / t).is_dir())
+    if missing:
+        raise Vacuous(f"substituted tree(s) declared but absent from disk: {', '.join(missing)}")
+    # Drop nested paths: a stage that ships its own Kustomization inside another
+    # stage's tree is already covered by the outer one.
+    return tuple(
+        sorted(
+            t
+            for t in derived
+            if not any(o != t and t.startswith(f"{o}/") for o in derived)
+        )
+    )
+
+
+def load_config(root: Path) -> dict:
+    doc = _read_yaml(root / CLUSTER_CONFIG, CLUSTER_CONFIG)
+    data = doc.get("data") or {}
+    if not data:
+        raise Vacuous(f"no data keys in {CLUSTER_CONFIG} — the gate has no key set to check")
+    return {k: str(v) for k, v in data.items()}
+
+
+def require_keys(config: dict) -> None:
+    """Every key the gate's arms consume must be present, or it degrades silently."""
+    missing = sorted(REQUIRED_KEYS - set(config))
+    if missing:
+        raise Vacuous(
+            f"{CLUSTER_CONFIG} is missing key(s) this gate checks: {', '.join(missing)}. "
+            "Each arm skips an absent key, so the gate would pass while enforcing less. "
+            "Re-add the key, or delete it from the gate's key lists deliberately."
+        )
+
+
+def mirror_check_count(config: dict) -> int:
+    """How many inventory-mirror assertions actually ran (never a constant)."""
+    return (
+        len([k for k in INVENTORY_MIRRORS if k in config])
+        + len([k for k in SECONDARY_MIRRORS if k in config])
+        + (1 if DNS_SERVERS_KEY and DNS_SERVERS_KEY in config else 0)
+    )
+
+
+COMMENT_LINE = re.compile(r"^\s*#")
+TRAILING_COMMENT = re.compile(r"\s+#.*$")
+
+
+def strip_comments(text: str, *, trailing: bool = True) -> str:
+    """Drop comment lines, and the trailing comment on a code line.
+
+    A block scalar can carry a whole embedded file whose comments PyYAML hands
+    over as content, and prose naming the real domain belongs in a comment.
+    """
+    kept = []
+    for line in text.split("\n"):
+        if COMMENT_LINE.match(line):
+            continue
+        kept.append(TRAILING_COMMENT.sub("", line) if trailing else line)
+    return "\n".join(kept)
+
+
+def scalars(node):
+    """Every scalar in a document, keys included."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield key
+            yield from scalars(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from scalars(item)
+    elif node is not None:
+        yield node
+
+
+def domain_hits(text: str, domain: str) -> bool:
+    """A literal use of `domain`; a backslash immediately before it is a regex
+    spelling."""
+    for match in re.finditer(re.escape(domain), text):
+        start = match.start()
+        if start and text[start - 1] == "\\":
+            continue
+        return True
+    return False
+
+
+def escaped_free(text: str, domain: str) -> str:
+    """Drop escaped spellings so a bare-domain search cannot see them."""
+    return text.replace(domain.replace(".", "\\\\."), "").replace(
+        domain.replace(".", "\\."), ""
+    )
+
+
+def scan_text(rel: str, text: str, domains: list[str], addresses: dict) -> list[str]:
+    """Domain/address literals in a raw scalar or a whole generator file."""
+    violations = []
+    # JSON has no comment syntax, so a `#` there is data, not a comment.
+    remaining = strip_comments(text, trailing=not rel.endswith(".json"))
+    # Longest literal first, dropping each hit from the text: a value spelled
+    # inside a longer one is otherwise reported against the wrong key.
+    for domain in sorted(domains, key=len, reverse=True):
+        if domain_hits(escaped_free(remaining, domain), domain):
+            violations.append(
+                f"{rel}: literal {domain!r} — use the cluster-config placeholder"
+            )
+            remaining = remaining.replace(domain, "")
+    for literal, key in sorted(addresses.items(), key=lambda kv: -len(kv[0])):
+        if re.search(rf"(?<![\d.]){re.escape(literal)}(?![\d.])", remaining):
+{% raw %}            violations.append(f"{rel}: literal {literal!r} — use ${{{key}}}"){% endraw %}
+            remaining = remaining.replace(literal, "")
+    return violations
+
+
+def check_literals(root: Path, config: dict, trees: tuple[str, ...]) -> list[str]:
+    violations = []
+    domains = [config[k] for k in DOMAIN_KEYS if k in config]
+    address_keys = tuple(sorted(set(ADDRESS_KEYS) | set(vip_keys(config))))
+    addresses = {config[k]: k for k in address_keys if k in config}
+    values = {config[k]: k for k in VALUE_KEYS if k in config}
+    for tree in trees:
+        base = root / tree
+        if not base.is_dir():
+            continue
+        for path in sorted(
+            p
+            for p in base.rglob("*")
+            if p.is_file() and p.suffix in GENERATOR_SUFFIXES
+        ):
+            rel = path.relative_to(root).as_posix()
+            if rel.startswith(RULES_TREE) or rel == CLUSTER_CONFIG:
+                continue
+            violations += scan_text(
+                rel, path.read_text(encoding="utf-8"), domains, {**addresses, **values}
+            )
+        for path in manifests(base):
+            rel = path.relative_to(root).as_posix()
+            # cluster-config is where the values are declared, so it is the one
+            # manifest that spells them literally.
+            if rel == CLUSTER_CONFIG:
+                continue
+            in_rules = rel.startswith(RULES_TREE)
+            # A manifest the gate cannot parse is a subject it did not inspect,
+            # not literal drift: _read_yaml raises Vacuous and main() exits 2.
+            docs = _read_yaml(path, rel, multi=True)
+            for doc in docs:
+                if not isinstance(doc, dict):
+                    continue
+                is_netpol = doc.get("kind") == "NetworkPolicy"
+                # Addresses stay literal where a tool parses them pre-Flux.
+                doc_addresses = {} if (is_netpol or in_rules) else addresses
+                doc_addresses = {**doc_addresses, **values}
+                for raw in scalars(doc):
+                    if not isinstance(raw, str):
+                        continue
+                    violations += scan_text(rel, raw, domains, doc_addresses)
+    return sorted(set(violations))
+
+
+def check_inventory(root: Path, config: dict) -> list[str]:
+    violations = []
+    cache: dict[str, dict] = {}
+    for key, (path, var) in list(INVENTORY_MIRRORS.items()) + list(SECONDARY_MIRRORS.items()):
+        if key not in config:
+            continue
+        if path not in cache:
+            cache[path] = _read_yaml(root / path, path)
+        expected = cache[path].get(var)
+        if expected is None:
+            violations.append(
+                f"{path}: {var} not found (cluster-config {key} has nothing to check)"
+            )
+        elif str(expected) != config[key]:
+            violations.append(
+                f"cluster-config {key}={config[key]!r} != {path} {var}={expected!r}"
+            )
+    # A VIP reaching cluster-config with no mirror arm is drift the other arms
+    # cannot see: name its inventory variable in INVENTORY_MIRRORS.
+    mirrored = set(INVENTORY_MIRRORS) | set(SECONDARY_MIRRORS)
+    for key in vip_keys(config):
+        if key in config and key not in mirrored:
+            violations.append(
+                f"cluster-config {key}={config[key]!r} is mirrored by no arm of this "
+                "gate — add it to INVENTORY_MIRRORS with its inventory variable"
+            )
+    if DNS_SERVERS_KEY and DNS_SERVERS_KEY in config:
+        all_vars = cache.get(ANSIBLE_ALL) or _read_yaml(root / ANSIBLE_ALL, ANSIBLE_ALL)
+        dns = all_vars.get("dns_servers")
+        # A missing mirror is a violation, not a skip: silently dropping the
+        # check because the inventory side vanished is the drift it exists for.
+        if dns is None:
+            violations.append(
+                f"{ANSIBLE_ALL}: dns_servers not found (cluster-config "
+                f"{DNS_SERVERS_KEY} has nothing to check)"
+            )
+        else:
+            expected = " ".join(str(x) for x in dns)
+            if expected != config[DNS_SERVERS_KEY]:
+                violations.append(
+                    f"cluster-config {DNS_SERVERS_KEY}="
+                    f"{config[DNS_SERVERS_KEY]!r} != {ANSIBLE_ALL} dns_servers={expected!r}"
+                )
+    return violations
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parent.parent))
+    args = parser.parse_args(argv)
+    root = Path(args.repo_root)
+
+    try:
+        config = load_config(root)
+        require_keys(config)
+        trees = substituted_trees(root)
+        violations = check_literals(root, config, trees) + check_inventory(root, config)
+    except Vacuous as exc:
+        print(f"check-cluster-literals inspected nothing: {exc}", file=sys.stderr)
+        return 2
+    if violations:
+        print("Cluster-identity literals / inventory drift:", file=sys.stderr)
+        for violation in violations:
+            print(f"  {violation}", file=sys.stderr)
+        return 1
+    print(
+        f"Cluster identity is placeholder-only across {len(trees)} substituted trees "
+        f"({', '.join(trees)}), and cluster-config agrees with the Ansible inventory "
+        f"({mirror_check_count(config)} mirrored values checked)."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,10 +1,6 @@
 ---
-# Ingress:
-#   :5000 from the CI runner namespace only. A pull of the ClusterIP is DNAT'd to
-#     this pod but the SOURCE is unchanged, so a namespaceSelector is the right
-#     grain. Change the namespace name if your CI runs elsewhere.
-#   :5001 from the Prometheus pod only — the debug listener also serves /debug
-#     endpoints, so admitting the whole observability namespace over-shares.
+# Ingress: :5000 from gitlab-runner-privileged only (the shared runner is not
+# admitted), :5001 from the Prometheus pod.
 # Kubelet health probes are node-local and not gated by NetworkPolicy.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -37,13 +33,9 @@ spec:
           port: 5001
 
 ---
-# Egress: the upstream fetch only. This assumes a SELF-HOSTED upstream fronted by
-# this cluster's ingress — kube-proxy DNATs the VIP to the Traefik pod, which a
-# namespaceSelector matches (an ipBlock on the VIP would not). For a public
-# upstream, swap this for the shared netpol-egress-public component.
-#
-# DNS comes from the netpol-egress-dns component (kustomization.yaml). No LAN
-# egress, no kube-apiserver (the SA token is not mounted).
+# Egress: the self-hosted upstream through this cluster's ingress pod, plus DNS
+# from the netpol-egress-dns component. For a public upstream, swap in the
+# netpol-egress-public component.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

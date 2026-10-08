@@ -1,0 +1,111 @@
+---
+# Release list for validate-helm-values.py (--releases, CI flux-lint): each
+# entry is rendered with `helm template`, so a `.spec.values` typo hard-fails.
+# Field reference: weisssrv-lib docs/SCRIPTS.md.
+releases:
+  - name: traefik
+    manifest: kubernetes/infrastructure/controllers/traefik/release.yaml
+    chart: traefik
+    repo_name: traefik
+    repo_url: https://traefik.github.io/charts
+  - name: kube-prometheus-stack
+    manifest: kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml
+    chart: kube-prometheus-stack
+    repo_name: prometheus-community
+    repo_url: https://prometheus-community.github.io/helm-charts
+  # OSS Loki ships from grafana-community; grafana/loki is the GEL chart.
+  # repo_name must match the manifest's sourceRef or the version will not resolve.
+  - name: loki
+    manifest: kubernetes/infrastructure/observability/loki/release.yaml
+    chart: loki
+    repo_name: grafana-community
+    repo_url: https://grafana-community.github.io/helm-charts
+  - name: alloy
+    manifest: kubernetes/infrastructure/observability/alloy/release.yaml
+    chart: alloy
+    repo_name: grafana
+    repo_url: https://grafana.github.io/helm-charts
+  - name: authentik
+    manifest: kubernetes/apps/authentik/release.yaml
+    chart: authentik
+    repo_name: authentik
+    repo_url: https://charts.goauthentik.io
+  - name: blackbox-exporter
+    manifest: kubernetes/infrastructure/observability/exporters/blackbox-exporter.yaml
+    chart: prometheus-blackbox-exporter
+    repo_name: prometheus-community
+    repo_url: https://prometheus-community.github.io/helm-charts
+  # Charts shipping a values.schema.json — helm hard-fails a mistyped key, so
+  # these buy real schema validation rather than render-only coverage.
+  - name: cert-manager
+    manifest: kubernetes/infrastructure/controllers/cert-manager/release.yaml
+    chart: cert-manager
+    repo_name: jetstack
+    repo_url: https://charts.jetstack.io
+  - name: external-secrets
+    manifest: kubernetes/infrastructure/controllers/external-secrets/release.yaml
+    chart: external-secrets
+    repo_name: external-secrets
+    repo_url: https://charts.external-secrets.io
+  - name: external-dns
+    manifest: kubernetes/infrastructure/controllers/external-dns/release.yaml
+    chart: external-dns
+    repo_name: external-dns
+    repo_url: https://kubernetes-sigs.github.io/external-dns
+  - name: metallb
+    manifest: kubernetes/infrastructure/controllers/metallb/release.yaml
+    chart: metallb
+    repo_name: metallb
+    repo_url: https://metallb.github.io/metallb
+  - name: kured
+    manifest: kubernetes/infrastructure/controllers/kured/release.yaml
+    chart: kured
+    repo_name: kured
+    repo_url: https://kubereboot.github.io/charts
+  - name: reloader
+    manifest: kubernetes/infrastructure/controllers/reloader/release.yaml
+    chart: reloader
+    repo_name: stakater
+    repo_url: https://stakater.github.io/stakater-charts
+  - name: vpa
+    manifest: kubernetes/infrastructure/controllers/vpa/release.yaml
+    chart: vpa
+    repo_name: fairwinds-stable
+    repo_url: https://charts.fairwinds.com/stable
+{%- if vpn_tailscale %}
+  - name: tailscale-operator
+    manifest: kubernetes/infrastructure/controllers/tailscale-operator/release.yaml
+    chart: tailscale-operator
+    repo_name: tailscale
+    repo_url: https://pkgs.tailscale.com/helmcharts
+{%- endif %}
+{%- if gpu == 'nvidia' %}
+  - name: nvidia-device-plugin
+    manifest: kubernetes/infrastructure/controllers/nvidia-device-plugin/release.yaml
+    chart: nvidia-device-plugin
+    repo_name: nvidia
+    repo_url: https://nvidia.github.io/k8s-device-plugin
+{%- endif %}
+{%- if secrets_backend == 'onepassword' %}
+  - name: onepassword-connect
+    manifest: kubernetes/infrastructure/controllers/onepassword-connect/release.yaml
+    chart: connect
+    repo_name: onepassword-connect
+    repo_url: https://1password.github.io/connect-helm-charts
+{%- endif %}
+
+# Shipped HelmReleases deliberately left out, keyed by manifest path. Every
+# HelmRelease is listed above or here, so a new one with an unvalidated values
+# block cannot arrive unnoticed.
+excluded:
+  kubernetes/infrastructure/crds/release.yaml: >-
+    prometheus-operator-crds renders a CRD enum holding a bare `=`, which PyYAML
+    safe_load refuses, so validate-helm-values.py cannot parse the output.
+{%- if git_backend == 'gitlab_selfhosted' %}
+  kubernetes/apps/gitlab-runner/release.yaml: >-
+    The chart comes from components/gitlab-runner-common, so the manifest carries
+    no spec.chart and there is no chart version to render with.
+  kubernetes/apps/gitlab-runner-privileged/release.yaml: >-
+    The chart comes from components/gitlab-runner-common, so the manifest carries
+    no spec.chart and there is no chart version to render with.
+{%- endif %}

@@ -10,3 +10,13 @@ exists so that an agent which opens `CLAUDE.md` first still lands there.
 
 Nothing from the skill is repeated here: a second copy of the rules is a second
 copy to keep current, and the skill is the one the tooling loads.
+
+## Template first
+
+This repository is one cluster, not the product. Site data — inventory values,
+addresses, the application estate, this cluster's documents — stays here.
+Anything generic goes upstream first: a role, a CI job template, a Terraform
+module or a shared gate to weisssrv-lib, and a repository-shape change to
+weisssrv-cluster-template. It then arrives here as a `lib_ref` bump or a
+`copier update`. The skill's § Where the generic half of a change goes is the
+table; `README.md` § Reference names every document this repository owns.

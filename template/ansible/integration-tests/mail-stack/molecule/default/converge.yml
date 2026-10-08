@@ -1,0 +1,82 @@
+---
+# Mail Stack Integration Test - Converge
+# Deploys smtp_relay on relay server and postfix_null_client on clients
+
+- name: Converge - Mail Stack
+  hosts: all
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../../../../inventories/prod/group_vars/all.yml
+  # Scenario mocks for keys all.yml does not define. vars_files OUTRANKS both
+  # play vars and inventory group_vars, so a key all.yml defines is steered only
+  # through molecule.yml's env (SMTP_RELAY_USER, ROOT_EMAIL_ALIAS).
+  vars:
+    smtp_relay_sasl_user: relay_user
+    smtp_relay_sasl_password: test_relay_password
+
+  pre_tasks:
+    # molecule.yml platforms[].groups drive every `group_names` guard below; an
+    # empty group would skip them all and still report a pass.
+    - name: Assert the molecule roster resolved
+      ansible.builtin.assert:
+        that:
+          - groups['relay_servers'] | default([]) | length == 1
+          - groups['mail_clients'] | default([]) | length == 2
+        fail_msg: >-
+          molecule.yml no longer produces relay_servers and mail_clients, so
+          every guarded task in this scenario skips.
+      run_once: true
+
+    - name: Container warm-up (apt locks, dpkg state, cache, systemd)
+      ansible.builtin.include_tasks: ../../../../molecule/tasks/container-warmup.yml
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - ca-certificates
+          - systemd
+          - mailutils  # For testing mail
+          - netcat-openbsd  # For port testing
+          - openssl  # Mint the relay's self-signed STARTTLS cert (submission/587)
+        state: present
+
+    # The null clients relay over submission (587), whose smtpd mandates STARTTLS
+    # before AUTH. STARTTLS therefore needs a loadable certificate, so mint a
+    # self-signed one; the clients do not verify it.
+    - name: Create TLS certificate directory
+      ansible.builtin.file:
+        path: /etc/letsencrypt/live/smtp-relay
+        state: directory
+        mode: '0755'
+      when: "'relay_servers' in group_names"
+
+    - name: Generate a self-signed TLS cert for the relay STARTTLS endpoint
+      ansible.builtin.command:
+        cmd: >-
+          openssl req -x509 -newkey rsa:2048 -nodes
+          -keyout /etc/letsencrypt/live/smtp-relay/privkey.pem
+          -out /etc/letsencrypt/live/smtp-relay/fullchain.pem
+          -days 3650 -subj "/CN=smtp-relay.test.local"
+          -addext "subjectAltName=DNS:smtp-relay,DNS:smtp-relay.test.local"
+        creates: /etc/letsencrypt/live/smtp-relay/fullchain.pem
+      when: "'relay_servers' in group_names"
+
+    - name: Restrict the relay TLS private key
+      ansible.builtin.file:
+        path: /etc/letsencrypt/live/smtp-relay/privkey.pem
+        mode: '0600'
+      when: "'relay_servers' in group_names"
+
+  tasks:
+    # Vars come from the molecule.yml inventory and the all.yml vars_files above.
+    - name: Apply smtp_relay role
+      ansible.builtin.include_role:
+        name: weisssrv.infra.smtp_relay
+      when: "'relay_servers' in group_names"
+
+    - name: Apply postfix_null_client role
+      ansible.builtin.include_role:
+        name: weisssrv.infra.postfix_null_client
+      when: "'mail_clients' in group_names"

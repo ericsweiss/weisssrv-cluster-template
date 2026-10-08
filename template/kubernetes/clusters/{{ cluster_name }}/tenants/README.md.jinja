@@ -7,15 +7,19 @@ reconciliation `ServiceAccount` + RoleBindings, and top-level `Kustomization`.
 
 Removal is the inverse: delete the file and its `kustomization.yaml` line. Flux
 prunes the Kustomization (and everything it created, including ESO-owned
-Secrets), the GitRepository, the secret store and the namespace.
+Secrets), the GitRepository, the secret store and the namespace — in that order.
+`creationPolicy: Owner` puts an ownerReference from each ExternalSecret onto its
+Secret, so the Secrets go with the ExternalSecrets; deleting a store on its own
+removes nothing and only pushes its ExternalSecrets into `SecretSyncError`.
 
 ## The tenant side of the contract
 
 A tenant repo needs a `kubernetes/flux/` directory that `kustomize build`
-resolves cleanly, and CI that lints it. **weisssrv-app-template** generates
-exactly that — manifests, lint + kubeconform + secret-scan pipeline, and the
-namespace/PSS conventions this cluster expects. Point new tenants at it rather
-than at a hand-rolled tree.
+resolves cleanly, and CI that lints it.
+**[weisssrv-app-template](https://github.com/ericsweiss/weisssrv-app-template)**
+generates exactly that — manifests, lint + kubeconform + secret-scan pipeline,
+and the namespace/PSS conventions this cluster expects. Point new tenants at it
+rather than at a hand-rolled tree.
 
 Two things the tenant must match, and one this repo owes them:
 
@@ -28,32 +32,58 @@ Two things the tenant must match, and one this repo owes them:
 - **Deploys happen cluster-side.** Tenant CI lints and builds; it does not
   `kubectl apply`. Flux pulls. A tenant that also deploys from CI will fight the
   reconciler.
+- **Substitution is strict.** Every `${...}` a tenant manifest carries must
+  resolve from `cluster-config` or `cluster-versions`, or the tenant's whole
+  reconcile fails. Escape a literal as `$${...}`.
 
 Nothing about tenant onboarding requires the app-template — a hand-authored
 `kubernetes/flux/` works identically. It just means writing the pipeline and the
-conventions again.
+conventions again, including the one the cluster mandates: a namespace-wide
+ingress default-deny NetworkPolicy plus a scrape-allow from `observability`. The
+platform's default-deny coverage gate reads only this repository, so a tenant
+namespace is invisible to it.
+
+### What the platform provides
+
+Four cluster-side behaviours a tenant manifest binds to, none of which fail
+loudly when they are missing:
+
+- **The `infrastructure-configs` Flux Kustomization exists under that name.**
+  Every tenant Kustomization names it in `dependsOn`, so a cluster that renames
+  or drops the stage leaves each tenant retrying "dependency not found" forever.
+  With `wait: true` nothing is applied and no tenant-side alert fires.
+- **Prometheus discovers rules and monitors in every namespace.** The
+  kube-prometheus-stack release sets `ruleSelectorNilUsesHelmValues: false`,
+  `serviceMonitorSelectorNilUsesHelmValues: false` and the matching
+  `*NamespaceSelector: {}`, so a tenant's `PrometheusRule` and `ServiceMonitor`
+  are selected without a release label. A cluster left on the chart defaults
+  ignores both without a word.
+- **The Traefik `websecure` entryPoint.** Every tenant IngressRoute names it.
+- **external-dns watches the Traefik source** with the
+  `external-dns.alpha.kubernetes.io` annotation prefix, pinned in
+  `infrastructure/controllers/external-dns/release.yaml`. Under a different
+  prefix the annotation is ignored and no record appears, while the pods stay
+  ready and nothing alerts.
 
 ### Tenant CI is the tenant's choice, and one option is none
 
-**The cluster side is indifferent to a tenant's CI, whatever it is** — the deploy
-is always this cluster pulling, never the tenant pushing. That is true today and
-is the part that matters here.
+**The cluster side is indifferent to a tenant's CI** — the deploy is always this
+cluster pulling, never the tenant pushing.
 
 The app-template asks for the shape up front — its `ci_shape` answer — so a
 tenant is generated with the pipeline it wants rather than editing one out
 afterwards:
 
-| `ci_shape` | What the tenant repo carries | What this cluster does |
-|---|---|---|
-| `gitlab_selfhosted` | a `.gitlab-ci.yml` that lints and kubeconforms `kubernetes/flux/` | pulls and reconciles |
-| `github` | the same gates as GitHub Actions workflows | pulls and reconciles |
-| `none` | no pipeline at all | pulls and reconciles |
+| `ci_shape` | What the tenant repo carries |
+|---|---|
+| `gitlab_selfhosted` | a `.gitlab-ci.yml` that lints and kubeconforms `kubernetes/flux/` |
+| `github` | the same gates as GitHub Actions workflows |
+| `none` | no pipeline at all |
 
-Shape `none` is a real option, not a degraded one: the `Kustomization` below is
-the only thing that applies anything, so a tenant with no CI is deployed exactly
-like a tenant with CI — it just has no pre-merge gate of its own. It does put the
-whole burden on Flux being able to clone the repository, so read the private-repo
-section below before choosing it for a private tenant.
+`none` is a supported shape, not a degraded one — the `Kustomization` below is
+the only thing that applies anything — but it leaves no pre-merge gate and rests
+entirely on Flux being able to clone the repository. Read "Private tenant
+repositories" below before choosing it for a private tenant.
 
 ### Tenant repositories are host-independent
 
@@ -136,12 +166,50 @@ metadata:
     # and it would give this tenant read access to every item in the platform
     # vault. The tenant gets its own store, below.
 ---
-# One-time bootstrap (NOT Flux-managed), scoped to this tenant so revocation is
-# independent:
+# Cap the namespace: `admin` places no ceiling on what a tenant may request.
+# `pods:` must exceed the tenant's replica count, which surges by one on
+# rollout, and `limits.memory` must cover that many per-pod memory limits.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: example-app-quota
+  namespace: example-app
+spec:
+  hard:
+    pods: "10"
+    requests.cpu: "2"
+    requests.memory: 4Gi
+    limits.memory: 8Gi
+---
+# Defaults and per-container ceilings, so a pod with no resources block cannot
+# land unbounded inside the quota. A `max:` key with no matching `default:` key
+# becomes the default limit, so CPU is left to the quota's requests.cpu.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: example-app-limits
+  namespace: example-app
+spec:
+  limits:
+    - type: Container
+      default:
+        memory: 512Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 128Mi
+      max:
+        memory: 2Gi
+---
+# Bootstrap (NOT Flux-managed), scoped to this tenant so revocation is
+# independent. The apply form is also the rotation procedure:
 #   op connect token create {{ cluster_name }}-example-app-eso \
 #     --server <EXISTING_SERVER_ID> --vaults <vault>
 #   kubectl -n example-app create secret generic onepassword-connect-token \
-#     --from-literal=token=<CONNECT_TOKEN>
+#     --from-literal=token=<CONNECT_TOKEN> --dry-run=client -o yaml \
+#     | kubectl apply -f -
+# The Secret has no controller owner, so an unmanaged-secrets gate must
+# allowlist example-app/onepassword-connect-token in the same change as this
+# file, and lose the entry when the tenant goes.
 apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
@@ -155,6 +223,7 @@ spec:
         - example-app
   provider:
     onepassword:
+      # The cluster's 1Password Connect Service; change it if yours differs.
       connectHost: http://onepassword-connect.external-secrets.svc.cluster.local:8080
       vaults:
         <vault>: 1
@@ -164,6 +233,9 @@ spec:
             name: onepassword-connect-token
             namespace: example-app
             key: token
+# This is the 1Password shape. A tenant generated by weisssrv-app-template picks
+# its own `secrets_backend`, and its docs/ONBOARDING.md step O1 is the
+# authoritative wiring for whichever it chose - follow that file, not this block.
 ---
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
@@ -234,6 +306,7 @@ spec:
   timeout: 10m
   # Mirror the platform's apps.yaml: wait for the CRD chain so a fresh
   # bootstrap does not apply tenant CRs before ESO/cert-manager/Traefik exist.
+  # The name must be this cluster's platform stage; a mismatch retries forever.
   dependsOn:
     - name: infrastructure-configs
   serviceAccountName: example-app-flux
@@ -244,6 +317,14 @@ spec:
   prune: true
   targetNamespace: example-app
   wait: true
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: cluster-versions
+        optional: false
+      - kind: ConfigMap
+        name: cluster-config
+        optional: false
 ```
 
 ## Before onboarding the first tenant
@@ -264,12 +345,57 @@ spec:
   single-operator homelab; give tenants their own vault (or their own Connect
   server) otherwise. Their store also needs its own `spec.conditions` — scope it
   to the tenant namespace, or the next tenant can name it too.
+  `scripts/check-tenant-wiring.py` is the gate for a tenant store: the corpus
+  gates read only the platform stage paths and never reach this tree. All of
+  this applies to every backend, not only 1Password.
+- **Merge the wiring only once the tenant repo carries a real image tag.** A
+  placeholder tag no registry has leaves the Deployment at zero available
+  replicas, and the tenant's own replica-availability alert fires critical in
+  this cluster's Alertmanager minutes later.
+- **Tenant storage is yours to back up.** A volume provisioned for a tenant
+  namespace sits outside whatever backup set this cluster runs until you add
+  the `{{ storage_backend }}`-backed volume behind the PV to it. Its snapshot
+  schedule is the operator's, not the tenant's; `docs/RUNBOOKS.md` holds the
+  backup and restore procedures.
+{%- if secrets_backend == 'onepassword' %}
+- **The Connect Service the example names.** `onepassword-connect` in namespace
+  `external-secrets`, on port 8080, is what a tenant store's `connectHost`
+  resolves to. It ships with this cluster; a tenant pointed at its own Connect
+  server writes that host instead.
+{%- endif %}
+- **Quota the namespace.** `admin` places no ceiling on requests, so an uncapped
+  tenant namespace can starve the cluster. The wiring file above ships a
+  `ResourceQuota` and a `LimitRange`; size both per tenant rather than copying
+  the starting numbers. `pods:` has to exceed the tenant's replica count, which
+  surges by one during a rollout, and `limits.memory` has to cover that many
+  per-pod memory limits, or the surge pod is rejected and the rollout stalls.
+- **Metrics must not ride the public port.** A tenant route matches on hostname,
+  not path, so a `/metrics` endpoint served on the port the tenant's own
+  IngressRoute publishes is reachable from the internet. Require a separate
+  metrics `containerPort` and Service port, or a path rule on the route, at
+  onboarding review.
+- **A tenant PrometheusRule must scope its own expressions.** Prometheus runs
+  without `enforcedNamespaceLabel`, deliberately, because the platform's own
+  rules span namespaces. A tenant `expr` selecting only on `deployment="x"`
+  therefore evaluates cluster-wide: it mis-fires on any like-named workload,
+  and it silently disables an `absent()` arm as soon as another namespace has a
+  match. Require `namespace="<slug>"` in the selector, not only in the alert
+  labels.
+- **Add the tenant's hostnames to the blackbox targets.** A tenant's own
+  `PrometheusRule` covers replica availability and certificate readiness. A
+  broken IngressRoute or DNS record while the replicas stay ready is caught only
+  by an end-to-end probe, so add each hostname to the `targets:` list in
+  `infrastructure/observability/exporters/blackbox-exporter.yaml` — `http_sso`
+  for an SSO-gated route, `http_2xx` otherwise, and the internal hostname too
+  where the tenant carries a second route.
 - **Traefik cross-namespace refs.** The platform runs the Traefik CRD provider
   with `allowCrossNamespace: true` so app IngressRoutes can use the shared
   middlewares in the `traefik` namespace. A tenant-authored IngressRoute can
   therefore also reference another namespace's Service. Scope the provider per
   tenant, add a validating policy, or set it back to `false` before opening the
-  cluster to untrusted authors.
+  cluster to untrusted authors. Turning it off fails closed: Traefik refuses the
+  whole router, so a route that referenced a shared middleware 404s rather than
+  serving without it. Move those middlewares into each namespace first.
 - **Namespace ownership** is cooperative: nothing stops a tenant manifest from
   targeting a platform namespace today. An admission policy engine
   (Kyverno/OPA) is the durable fix.

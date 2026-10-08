@@ -1,18 +1,7 @@
-# LogQL rules evaluated by the Loki ruler.
-#
-# Host-side journald shipping (the alloy_host role) labels its stream
-# {job="journal", host="<inventory_hostname>"}; job="journal" distinguishes it
-# from the in-cluster Alloy DaemonSet, which ships container logs.
-#
-# This is the CLUSTER-WIDE arm: no journald line from ANY host in 45m means the
-# whole host-log path is broken. Per-host coverage needs one rule per host —
-# LogQL cannot group by label and alert on absence — which is site data;
-# docs/RUNBOOKS.md "Per-host log-shipping alerts" has the rule shape.
-#
-# for:15m on top of the [45m] window is ~1h of silence before paging —
-# deliberately conservative, because the host-side collector's WAL backfills
-# brief Loki outages, so a real stop is sustained. A fully-down host also raises
-# KubeNodeNotReady; this warning is corroborating, not the primary page.
+---
+# PLACEHOLDER — the cluster-wide arm only. Run `task flux:sync-host-log-staleness`
+# to add one alert per `alloy_host` host; `task lint` and the CI repo-sync job fail
+# here until you do. The task rewrites this header.
 groups:
   - name: host-log-staleness
     interval: 1m
@@ -23,3 +12,8 @@ groups:
         labels: { severity: warning, component: logging }
         annotations:
           summary: "No journald logs from ANY host in 45m (host log shipping stopped cluster-wide)"
+          description: >-
+            No journald line has reached Loki from any host in 45 minutes. Check
+            the host-side collector unit on one host, then the Loki push
+            IngressRoute and the Loki pod.
+          runbook_url: "${cluster_runbook_base_url}/RUNBOOKS.md#per-host-log-shipping-alerts"

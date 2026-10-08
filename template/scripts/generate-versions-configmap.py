@@ -1,32 +1,8 @@
 #!/usr/bin/env python3
 """Generate a Flux `cluster-versions` ConfigMap from an Ansible vars file.
 
-Reads version-related keys from a vars file (conventionally
-`ansible/inventories/prod/group_vars/all.yml`) and emits a ConfigMap consumed by
-Flux Kustomizations via postBuild.substituteFrom.
-
-Keys are flattened:
-  - Top-level keys ending in `_version` pass through (e.g. authentik_version)
-  - Nested keys under each --nested-key become <parent>_<child>
-    (e.g. helm_chart_versions.traefik -> helm_chart_versions_traefik)
-
-Every *_version key is included, host-only pins among them. That is intentional:
-the ConfigMap is a harmless superset — a key no manifest references is simply
-never substituted. Filtering by which manifests use a key would risk dropping a
-needed substitution (a silent broken deploy), so the simpler superset wins.
-
-Produced keys MUST match the Flux postBuild identifier grammar
-  [A-Za-z_][A-Za-z0-9_]*
-or kustomize-controller skips the substitution (older releases failed silently;
-current releases log the rejected variable).
-
-Idempotent — pair it with a CI job that regenerates and diffs the committed
-output.
-
-  generate-versions-configmap.py --vars-file <in.yml> --output <out.yaml>
-                                 [--name cluster-versions] [--namespace flux-system]
-                                 [--nested-key helm_chart_versions ...]
-                                 [--regen-command "<how to regenerate>"]
+Flattens every `*_version` key (and each --nested-key mapping) into the
+postBuild substitution grammar. Idempotent. Contract: docs/SCRIPTS.md.
 """
 from __future__ import annotations
 
@@ -38,7 +14,8 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:
-    sys.exit("PyYAML required: pip install pyyaml (or brew install python && pip3 install pyyaml)")
+    print("ERROR: PyYAML required: pip install pyyaml (or brew install python && pip3 install pyyaml)", file=sys.stderr)
+    raise SystemExit(2) from None
 
 VERSION_SUFFIX = "_version"
 DEFAULT_NESTED_KEYS = ("helm_chart_versions",)
@@ -51,12 +28,8 @@ FLUX_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 def _scalar_str(key: str, value: object) -> str:
     """Coerce a YAML scalar to the str form that Flux will substitute.
 
-    Rejects bool because `isinstance(True, int)` is True and str(True) == "True",
-    which silently ships as an image tag or chart version — obviously wrong
-    but hard to debug. Rejects float for the same reason: an unquoted version
-    like `1.20` parses to the float 1.2 and would ship as "1.2", silently losing
-    the trailing zero. Also rejects anything non-scalar (lists, dicts) that
-    could sneak through a refactor of the vars file.
+    Rejects bool and float, whose str() forms ship silently as a wrong image
+    tag or chart version, and rejects anything non-scalar.
     """
     if isinstance(value, bool):
         raise ValueError(
@@ -77,6 +50,11 @@ def _scalar_str(key: str, value: object) -> str:
 
 
 def flatten(data: dict, nested_keys: tuple[str, ...] = DEFAULT_NESTED_KEYS) -> dict[str, str]:
+    """Flatten the version keys of a vars file into ConfigMap data.
+
+    An empty value is a vars-file sentinel meaning "take the distro build", so
+    the key is dropped and `${...}` stays visible instead of an empty tag.
+    """
     out: dict[str, str] = {}
     for k, v in data.items():
         if k.endswith(VERSION_SUFFIX):
@@ -84,10 +62,12 @@ def flatten(data: dict, nested_keys: tuple[str, ...] = DEFAULT_NESTED_KEYS) -> d
                 raise ValueError(
                     f"top-level key {k!r} is not a valid Flux postBuild variable name"
                 )
-            # Fail closed, exactly like the nested branch: a dropped key is not
-            # a warning, it is an unresolved ${...} at reconcile time. The
-            # "every key dropped" guard below only catches the total case.
-            out[k] = _scalar_str(k, v)
+            # Coercion errors raise rather than skip: a silently dropped key is
+            # an unresolved ${...} at reconcile time, and the "every key
+            # dropped" guard below only catches the total case.
+            value = _scalar_str(k, v)
+            if value:
+                out[k] = value
         elif k in nested_keys and isinstance(v, dict):
             for sub_k, sub_v in v.items():
                 flat_key = f"{k}_{sub_k}"
@@ -97,7 +77,9 @@ def flatten(data: dict, nested_keys: tuple[str, ...] = DEFAULT_NESTED_KEYS) -> d
                         "postBuild variable name (needs [A-Za-z_][A-Za-z0-9_]*). "
                         f"Offending input: {k}.{sub_k}"
                     )
-                out[flat_key] = _scalar_str(flat_key, sub_v)
+                value = _scalar_str(flat_key, sub_v)
+                if value:
+                    out[flat_key] = value
     return out
 
 

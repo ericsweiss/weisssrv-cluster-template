@@ -1,0 +1,96 @@
+"""Fixed-IP reservations in terraform/unifi must spell their MAC in lowercase.
+
+`mac` is ForceNew and matched case-sensitively against the controller's
+lowercase spelling, so an uppercase entry replans forever and never adopts.
+"""
+
+from __future__ import annotations
+
+import re
+
+import pytest
+from conftest import REPO
+
+NETWORKS_TF = REPO / "terraform" / "unifi" / "networks.tf"
+MAC_RE = re.compile(r'mac\s*=\s*"([0-9A-Fa-f:]{17})"')
+
+# Reservations the provider created with an uppercase spelling already in state:
+# re-casing one replaces a live object for no gain. The set only ever shrinks, by
+# re-importing an entry.
+GRANDFATHERED_UPPERCASE_MACS: frozenset = frozenset()
+
+needs_unifi = pytest.mark.skipif(
+    not NETWORKS_TF.is_file(), reason="no terraform/unifi/networks.tf"
+)
+
+
+def clients_block(text: str) -> str:
+    """The body of `clients = { ... }`, found by brace depth.
+
+    A regex over the whole file would also pick up a MAC in a comment or in
+    another map, and this gate's whole claim is about that one map.
+    """
+    match = re.search(r"^\s*clients\s*=\s*\{", text, re.M)
+    assert match, "networks.tf declares no clients map — this gate is examining nothing"
+    depth = 1
+    body: list[str] = []
+    for line in text[match.end() :].split("\n"):
+        depth += line.count("{") - line.count("}")
+        if depth <= 0:
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
+def uppercase_offenders(block: str) -> list[str]:
+    return sorted(
+        mac
+        for mac in MAC_RE.findall(block)
+        if mac != mac.lower() and mac not in GRANDFATHERED_UPPERCASE_MACS
+    )
+
+
+@needs_unifi
+def test_client_macs_are_lowercase_unless_grandfathered():
+    offenders = uppercase_offenders(clients_block(NETWORKS_TF.read_text(encoding="utf-8")))
+    assert not offenders, (
+        f"these unifi client reservations spell the MAC in uppercase: {offenders}. "
+        "README.md § MAC case matters explains why: an uppercase entry plans a "
+        "replacement on every apply and never adopts."
+    )
+
+
+@needs_unifi
+def test_every_grandfathered_mac_is_still_declared():
+    """A stale exemption covers nothing and hides the next uppercase entry."""
+    declared = set(MAC_RE.findall(clients_block(NETWORKS_TF.read_text(encoding="utf-8"))))
+    stale = sorted(GRANDFATHERED_UPPERCASE_MACS - declared)
+    assert not stale, (
+        f"these MACs are exempt here but no longer in networks.tf: {stale} — "
+        "drop them from GRANDFATHERED_UPPERCASE_MACS"
+    )
+
+
+def test_the_rule_rejects_an_uppercase_entry():
+    """Mutation case: the template ships an empty clients map, so the reader is
+    proven against a fixture."""
+    block = clients_block(
+        'locals {\n'
+        '  clients = {\n'
+        '    good = { mac = "aa:bb:cc:dd:ee:ff", name = "ok" }\n'
+        '    bad  = { mac = "AA:BB:CC:DD:EE:00", name = "shouted" }\n'
+        '  }\n'
+        '}\n'
+    )
+    assert uppercase_offenders(block) == ["AA:BB:CC:DD:EE:00"]
+
+
+def test_the_block_reader_stops_at_the_closing_brace():
+    """A MAC in the next map must not be read as a reservation."""
+    block = clients_block(
+        '  clients = {}\n'
+        '  other = {\n'
+        '    x = { mac = "AA:BB:CC:DD:EE:00" }\n'
+        '  }\n'
+    )
+    assert uppercase_offenders(block) == []

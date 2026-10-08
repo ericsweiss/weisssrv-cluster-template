@@ -10,16 +10,11 @@ files exist. That is expected.
 
 Full procedure — including the pre-created deploy token and the
 1Password Connect bootstrap Secrets — is in the template's
-[PRE-SETUP.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/PRE-SETUP.md) and the Flux
-operations runbook. The short form:
-
-```bash
-flux bootstrap git \
-  --url=https://{{ git_host }}/{{ git_namespace }}/<this-repo>.git \
-  --branch=main \
-  --path=./kubernetes/clusters/{{ cluster_name }} \
-  --token-auth
-```
+[PRE-SETUP.md](https://github.com/ericsweiss/weisssrv-cluster-template/blob/main/docs/PRE-SETUP.md) and the Flux
+operations runbook. Run it with `task flux:bootstrap`: it checks the bootstrap
+Secrets exist, reads the git token from the vault and calls `flux bootstrap`
+with this repository, branch and path already filled in. Do not assemble the
+invocation by hand — the Taskfile is the one place it is maintained.
 
 `--path` must stay `./kubernetes/clusters/{{ cluster_name }}` — it is the
 directory this file lives in, and the cluster root `kustomization.yaml` there

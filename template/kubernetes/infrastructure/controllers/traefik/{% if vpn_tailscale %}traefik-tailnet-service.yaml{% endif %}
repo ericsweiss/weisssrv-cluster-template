@@ -1,9 +1,7 @@
 ---
-# Third Service selecting the same Traefik pods, exposed as a real tailnet
-# device by the Tailscale operator (a single Service cannot be both MetalLB and
-# tailscale). Plain TCP passthrough, so SNI/Host survive and Traefik terminates
-# the internal wildcard cert exactly as for a LAN client — remote clients reach
-# internal apps over the mesh instead of via subnet routing to a VIP.
+# Third Service selecting the same Traefik pods, exposed as a tailnet device by
+# the Tailscale operator: one Service cannot be both MetalLB and tailscale. Plain
+# TCP passthrough, so SNI and Host survive and Traefik terminates the cert.
 apiVersion: v1
 kind: Service
 metadata:

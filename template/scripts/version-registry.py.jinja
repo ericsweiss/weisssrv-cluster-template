@@ -1,32 +1,7 @@
-"""Tracked-version registry — site data for weisssrv-lib's check-versions.py.
+"""Tracked-version registry: one entry per pin in ansible/inventories/prod/group_vars/all.yml.
 
-`task maintenance:check-versions` reads this file (the checker's default lookup
-path) and compares each entry's upstream against the pin in `vars_file`;
-`task maintenance:update-version SERVICE=<name>` rewrites the pin and
-regenerates the cluster-versions ConfigMap.
-
-What ships here is the PLATFORM set — an entry for EVERY pin in `vars_file`,
-including the ones the optional modules add. Add an entry per application you
-adopt (its `var_name` is the key in the vars file, so a typo shows up as "pin
-not found"), and delete the entry for anything you remove.
-
-Coverage is enforced, not trusted: `task lint:version-coverage` (and the CI job
-of the same name) runs `check-versions.py --check-coverage`, which fails when a
-pin in `vars_file` has no entry here. Without that gate the weekly
-version-bump-bot stays green while silently never reporting the untracked pins —
-the failure mode is invisible precisely because the pin does not exist in the
-checker's world. A pin with genuinely no upstream to track goes in
-`untracked_allowlist` WITH a rationale, never in neither place.
-
-This file is rendered from the template, so its entries follow the same
-`{% raw %}{% if %}{% endraw %}` conditions as the pins in
-ansible/inventories/prod/group_vars/all.yml — an entry whose pin was never
-generated would report "unknown" forever.
-
-Field reference: weisssrv-lib docs/SCRIPTS.md. Categories are
-github | dockerhub | ghcr | lsio | helm | apt_repo | manual, each with its own
-fetch fields. `held: True` reports an upstream but never writes it — say why in
-`notes`, which is the most valuable column in this file.
+Read by `task maintenance:check-versions`; coverage enforced by `task lint:version-coverage`.
+Field reference and categories: weisssrv-lib docs/SCRIPTS.md.
 """
 
 # Charts reconciled by Flux: nothing to deploy, the push is the deploy.
@@ -84,10 +59,8 @@ CONFIG = {
             "name": "Grafana Alloy (host)",
             "var_name": "alloy_host_version",
             # The apt package on every host, distinct from
-            # helm_chart_versions.alloy (the in-cluster chart). Tracking only
-            # the chart would leave the fleet-wide journald shipper unchecked.
-            # The repo line is arch-agnostic `stable main`, so binary-amd64 is
-            # the right index for an amd64 fleet.
+            # helm_chart_versions.alloy (the in-cluster chart). The repo line is
+            # arch-agnostic `stable main`, so binary-amd64 suits an amd64 fleet.
             "category": "apt_repo",
             "apt_index_url": "https://apt.grafana.com/dists/stable/main/binary-amd64/Packages.gz",
             "apt_package": "alloy",
@@ -103,8 +76,45 @@ CONFIG = {
             # Upstream also tags rc/alpha builds and the +k3sN suffix moves
             # independently of the Kubernetes version.
             "tag_filter": r"^v\d+\.\d+\.\d+\+k3s\d+$",
+            # The install script is fetched at the pinned tag and verified
+            # against this hash, so the two move together.
+            "checksum_var": "k3s_install_script_checksum",
+            "checksum_url": "https://raw.githubusercontent.com/k3s-io/k3s/{version}/install.sh",
             "deploy_command": "task maintenance:update-k3s-nodes",
             "notes": "bump the install-script sha256 in the same change",
+        },
+        {
+            "name": "Flux CLI (CI verify + bootstrap)",
+            "var_name": "flux_version",
+            "category": "github",
+            "github_repo": "fluxcd/flux2",
+            "version_prefix": "v",
+            "strip_prefix": True,
+            "held": True,
+            "deploy_command": (
+                "edit FLUX_VERSION in .gitlab-ci.yml cluster-verify (version and sha256 "
+                "are one pin), bump all.yml, task flux:sync-versions, then regenerate "
+                "gotk-components.yaml with the matching CLI"
+            ),
+            "notes": (
+                "Held: this pin is the GitOps control plane, not a plain version bump. "
+                "It must stay in lockstep with clusters/*/flux-system/gotk-components.yaml, "
+                "which only a bootstrap truly validates."
+            ),
+        },
+        {
+            # `latest/` and its SHA512SUMS move together, so all.yml pins a
+            # dated directory. No release feed: read the dated index, and note
+            # Debian prunes old directories, so an unwatched pin eventually 404s.
+            "name": "Debian cloud image",
+            "var_name": "proxmox_vm_cloud_image_url",
+            "category": "manual",
+            "source_url": "https://cloud.debian.org/images/cloud/trixie/",
+            "deploy_command": "applies on the next proxmox_vm create; no rollout needed",
+            "notes": (
+                "Bump proxmox_vm_cloud_image_url, _name and _checksum in all.yml "
+                "together — the sha512 comes from that directory's SHA512SUMS."
+            ),
         },
         # --- Platform charts ------------------------------------------------
         _chart("cert-manager", "cert_manager", "https://charts.jetstack.io", "cert-manager"),
@@ -124,9 +134,8 @@ CONFIG = {
             "MetalLB", "metallb", "https://metallb.github.io/metallb", "metallb",
             held=True,
             notes=(
-                "0.16.x intentionally held back: open apiserver-flooding "
-                "regression (metallb#3063); re-evaluate when the fix ships in "
-                "a release."
+                "held at 0.15.x: 0.16.x floods the apiserver on this topology. "
+                "Confirm upstream has shipped a fix before unholding."
             ),
         ),
         _chart("Traefik", "traefik", "https://traefik.github.io/charts", "traefik"),
@@ -135,6 +144,9 @@ CONFIG = {
             "kube_prometheus_stack",
             "https://prometheus-community.github.io/helm-charts",
             "kube-prometheus-stack",
+            # A pin a human must rewrite with this one takes
+            # coupled_vars=["prometheus_operator_crds"], which makes --update-all
+            # print PAIRED-EDIT-REQUIRED instead of relying on the note below.
             notes="bump prometheus_operator_crds in lockstep — the CRDs must match the operator",
         ),
         _chart(
@@ -143,9 +155,6 @@ CONFIG = {
             "https://prometheus-community.github.io/helm-charts",
             "prometheus-operator-crds",
         ),
-        # The OSS Loki chart lives in grafana-community, not grafana — the two
-        # diverged at 6.55.0 and the repo here must match the HelmRelease's
-        # sourceRef or the checker resolves a chart line the cluster never pulls.
         _chart(
             "Loki",
             "loki",
@@ -172,11 +181,9 @@ CONFIG = {
         _chart("Reloader", "reloader", "https://stakater.github.io/stakater-charts", "reloader"),
         # --- Applications ---------------------------------------------------
         {
-            # Deployed from the goauthentik chart, so the pin is read as a CHART
-            # version: the chart publishes a few days after the matching GitHub
-            # release, and pinning a tag Flux cannot resolve fails reconciliation
-            # with "no 'authentik' chart with version ... found". Query the chart
-            # repo, not the release feed.
+            # Deployed from the goauthentik chart, so the pin is a CHART version.
+            # The chart publishes days after the matching GitHub release, and a
+            # tag Flux cannot resolve fails reconciliation. Query the chart repo.
             "name": "Authentik",
             "var_name": "authentik_version",
             "category": "helm",
@@ -191,6 +198,8 @@ CONFIG = {
             "var_name": "postgresql_version",
             "category": "dockerhub",
             "docker_image": "library/postgres",
+            # A tag family whose suffixed tags overflow one page takes
+            # "dockerhub_page_size": 100 here.
             "tag_regex": r"^(\d+(?:\.\d+)?)-trixie$",
             "pin_major_version": True,
             "deploy_command": _FLUX,
@@ -211,6 +220,15 @@ CONFIG = {
             "source_url": "https://hub.docker.com/_/registry/tags",
             "deploy_command": _FLUX,
         },
+        {
+            "name": "BusyBox",
+            "var_name": "busybox_version",
+            "category": "dockerhub",
+            "docker_image": "library/busybox",
+            "tag_regex": r"^(\d+\.\d+)$",
+            "source_url": "https://hub.docker.com/_/busybox/tags",
+            "deploy_command": "edit scripts/post-maintenance-verify.sh to match",
+        },
 {%- if git_backend == 'gitlab_selfhosted' %}
         {
             "name": "GitLab Runner",
@@ -228,11 +246,9 @@ CONFIG = {
         {
             "name": "Tailscale (host)",
             "var_name": "tailscale_version",
-            # The apt repo, not GitHub releases: the hosts install via
-            # `apt install tailscale=<pin>` and the apt publish lags the GitHub
-            # tag by days, so tracking GitHub advertises versions apt cannot
-            # satisfy yet. The index is trixie/amd64 — extend it to a list if the
-            # fleet ever carries another suite or architecture.
+            # The apt repo, not GitHub releases: the apt publish lags the tag by
+            # days, so tracking GitHub advertises versions apt cannot satisfy.
+            # The index is trixie/amd64; extend it for another suite or arch.
             "category": "apt_repo",
             "apt_index_url": "https://pkgs.tailscale.com/stable/debian/dists/trixie/main/binary-amd64/Packages.gz",
             "apt_package": "tailscale",
@@ -271,10 +287,8 @@ CONFIG = {
         ),
         {
             # nvidia-open from NVIDIA's CUDA apt repo. `manual`: the repo
-            # publishes a directory index rather than a package feed this
-            # checker can diff, and the apt version (X.Y.Z-N) carries a Debian
-            # revision no release tag has. Manual still REPORTS the pin with its
-            # source, which is the whole point — an unlisted pin reports nothing.
+            # publishes a directory index no checker can diff, and the apt
+            # version carries a Debian revision no release tag has.
             "name": "NVIDIA driver (nvidia-open, CUDA repo)",
             "var_name": "nvidia_driver_version",
             "category": "manual",

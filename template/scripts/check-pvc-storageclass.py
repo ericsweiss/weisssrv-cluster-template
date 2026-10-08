@@ -1,36 +1,33 @@
 #!/usr/bin/env python3
 """Assert every claim pins a storageClassName.
 
-Omitting the field is not neutral: the DefaultStorageClass admission plugin
-rewrites an unset `storageClassName` to whatever class is marked default, at
-create time, with no diff in git — so a cluster on pre-provisioned PVs
-(`storageClassName: ""`) silently binds a dynamically provisioned volume no
-backup path covers. StatefulSet `volumeClaimTemplates` are immutable, so the PVC
-then has to be deleted and recreated.
-
-Input: the rendered manifest corpus on stdin (what `task flux:lint` accumulates
-from `kustomize build | envsubst`). Exit 0 clean, 1 on a finding, 2 on an
-operator error including an empty corpus or one declaring no claim.
-
-Usage:
-  cat rendered-corpus.yaml | python3 scripts/check-pvc-storageclass.py
+An unset field is rewritten by the DefaultStorageClass admission plugin at
+create time; a pinned static bind is not growable. Both: docs/SCRIPTS.md.
 """
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 try:
-    import yaml
+    from gate_common import (  # noqa: E402  (resolved from this script's own directory)
+        doc_key,
+        load_corpus,
+    )
 except ImportError:
-    sys.exit("PyYAML required: pip install pyyaml")
+    print(
+        "ERROR: gate_common.py must be vendored beside this gate "
+        "(see scripts/vendorable-paths.yml)", file=sys.stderr,
+    )
+    raise SystemExit(2) from None
 
-# Chart values shapes that create a PVC the corpus never renders (the chart
-# does, server-side). A persistence block that declares a size is provisioning
-# storage, so it must also say WHICH class — `storageClass: ""` for a static
-# bind, the chart-specific `"-"` sentinel where the template's `with` guard
-# would otherwise drop an empty string (loki), or an existingClaim. A class
-# key set to null, or an existing-volume key that is not a non-empty string,
-# pins nothing: chart templates treat both as unset.
+# Chart values keys that pin a PVC the corpus never renders: a class name
+# ("" for a static bind, "-" where a chart's `with` guard drops an empty
+# string) or an existing claim. Null or non-string pins nothing.
 _CLASS_PIN_KEYS = ("storageClass", "storageClassName")
 _VOLUME_PIN_KEYS = ("existingClaim", "existingVolume")
 
@@ -41,8 +38,7 @@ def _claim_violations(docs: list[dict]) -> tuple[list[str], int]:
     seen = 0
     for d in docs:
         kind = d.get("kind")
-        meta = d.get("metadata") or {}
-        where = f"{meta.get('namespace', '')}/{kind}/{meta.get('name', '?')}"
+        where = doc_key(d)
         claims: list[tuple[str, dict]] = []
         if kind == "PersistentVolumeClaim":
             claims.append((where, d.get("spec") or {}))
@@ -107,8 +103,7 @@ def violations(docs: list[dict]) -> tuple[list[str], int]:
     for d in docs:
         if d.get("kind") != "HelmRelease":
             continue
-        meta = d.get("metadata") or {}
-        label = f"{meta.get('namespace', '')}/HelmRelease/{meta.get('name', '?')}"
+        label = doc_key(d)
         child, child_seen = _values_violations((d.get("spec") or {}).get("values") or {}, label)
         out.extend(child)
         seen += child_seen
@@ -116,27 +111,7 @@ def violations(docs: list[dict]) -> tuple[list[str], int]:
 
 
 def main() -> int:
-    docs: list[dict] = []
-    try:
-        for raw in yaml.safe_load_all(sys.stdin):
-            if isinstance(raw, dict):
-                if raw.get("kind") == "List" and isinstance(raw.get("items"), list):
-                    docs.extend(i for i in raw["items"] if isinstance(i, dict))
-                else:
-                    docs.append(raw)
-            elif isinstance(raw, list):
-                docs.extend(i for i in raw if isinstance(i, dict))
-    except yaml.YAMLError as exc:
-        print(f"ERROR: failed to parse YAML input: {exc}", file=sys.stderr)
-        return 2
-
-    if not docs:
-        print(
-            "ERROR: empty corpus — no manifests on stdin. A gate that passes on nothing "
-            "is not a gate; check the pipe and the `kustomize build` paths feeding it.",
-            file=sys.stderr,
-        )
-        return 2
+    docs = load_corpus()
 
     found, seen = violations(docs)
     if found:
@@ -150,10 +125,6 @@ def main() -> int:
         return 1
 
     if not seen:
-        # A non-empty corpus declaring no claim is the wiring failure an empty
-        # one cannot be: the render loop produced documents but never reached
-        # the stages that declare storage. Same arm as check-secretstore-scope.py's
-        # store-less corpus.
         print(
             f"ERROR: inspected 0 claims in {len(docs)} document(s) — a gate that "
             "checks nothing is not a gate. Check that the `kustomize build` paths "

@@ -1,18 +1,7 @@
 ---
 # Advertises the node's GPU to the kubelet as the nvidia.com/gpu extended
-# resource.
-#
-# NO GPU TELEMETRY SHIPS WITH THIS MODULE. The device plugin exports nothing
-# about utilisation, VRAM, temperature, power or per-pod GPU usage — it only
-# tells the scheduler the resource exists. A GPU node is therefore DARK in
-# Grafana until you add an exporter, and the time-slicing configured at the
-# bottom of this file (several pods sharing one card's memory) is exactly the
-# arrangement where that blindness bites: the first symptom of VRAM exhaustion
-# is a workload OOMing inside CUDA with nothing on a dashboard to explain it.
-#
-# NVIDIA's DCGM exporter is the answer, and adding it is a small, bounded change
-# — see "GPU telemetry" in infrastructure/observability/README.md for the exact
-# HelmRepository/HelmRelease/ServiceMonitor and the two version pins it needs.
+# resource. Exports NO metrics — a GPU node is dark in Grafana until you add an
+# exporter; see "GPU telemetry" in ../../observability/README.md.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -21,6 +10,9 @@ metadata:
 spec:
   interval: 30m
   releaseName: nvidia-device-plugin
+  # Revert out-of-band edits; the repo rule lives in traefik/release.yaml.
+  driftDetection:
+    mode: enabled
   chart:
     spec:
       chart: nvidia-device-plugin
@@ -45,10 +37,9 @@ spec:
       - key: nvidia.com/gpu
         operator: Exists
         effect: NoSchedule
-    # NULL, not {}: the chart REQUIRES one of the Node Feature Discovery labels
-    # by default, and Helm deep-merges maps — an empty map leaves that
-    # requirement in place and the DaemonSet sits at DESIRED=0. Null removes the
-    # key so the nodeSelector above governs. Delete this only if you run NFD/GFD.
+    # Null, not {}: Helm deep-merges maps, so an empty map keeps the chart's
+    # Node Feature Discovery requirement and the DaemonSet sits at DESIRED=0.
+    # Null removes the key, leaving the nodeSelector above in charge.
     affinity:
       nodeAffinity: null
     resources:
@@ -57,10 +48,9 @@ spec:
         memory: 32Mi
       limits:
         memory: 64Mi
-    # Time-slicing: advertise the single physical GPU as 4 shareable units so
-    # several pods can co-schedule on it. This shares COMPUTE, not VRAM — the
-    # co-scheduled workloads must fit in the card's memory together.
-    # `default: any` selects map.any on nodes without a per-node config label.
+    # Time-slicing advertises one physical GPU as 4 shareable units. It shares
+    # compute, not VRAM, so co-scheduled workloads must fit in the card's
+    # memory together. `default: any` applies map.any to unlabelled nodes.
     config:
       default: any
       map:
@@ -73,3 +63,31 @@ spec:
               resources:
                 - name: nvidia.com/gpu
                   replicas: 4
+  # `config.map` makes the chart inject a config-manager sidecar for which it
+  # exposes no values key, so it renders with no requests and no memory limit.
+  postRenderers:
+    - kustomize:
+        patches:
+          # target.name is a FULL-match regex, so this hits only the plugin
+          # DaemonSet, not the mps-control-daemon one rendered beside it.
+          - target:
+              group: apps
+              version: v1
+              kind: DaemonSet
+              name: nvidia-device-plugin
+            patch: |
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: nvidia-device-plugin
+              spec:
+                template:
+                  spec:
+                    containers:
+                      - name: nvidia-device-plugin-sidecar
+                        resources:
+                          requests:
+                            cpu: 10m
+                            memory: 16Mi
+                          limits:
+                            memory: 32Mi

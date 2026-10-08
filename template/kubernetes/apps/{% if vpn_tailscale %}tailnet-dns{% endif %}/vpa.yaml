@@ -15,7 +15,10 @@ spec:
     updateMode: Initial
   resourcePolicy:
     containerPolicies:
+      # RequestsOnly; cap == the 128Mi limit in deployment.yaml, comfortably
+      # over the observed working set.
       - containerName: coredns
         minAllowed: {cpu: 25m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 102Mi}
+        maxAllowed: {cpu: 200m, memory: 128Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly

@@ -1,0 +1,94 @@
+---
+# Both plays below select hosts by group, and an unmatched group pattern is a
+# warning, not an error, so a renamed group would skip the whole scenario green.
+- name: Converge - Molecule roster guard
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Assert the molecule roster resolved
+      ansible.builtin.assert:
+        that:
+          - groups['nas_servers'] | default([]) | length == 1
+          - groups['smb_clients'] | default([]) | length == 1
+        fail_msg: >-
+          molecule.yml no longer produces nas_servers and smb_clients, so the
+          plays in this scenario match no hosts.
+      run_once: true
+
+- name: Converge - Storage Stack (NAS Server)
+  hosts: nas_servers
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../../../../inventories/prod/group_vars/all.yml
+
+  pre_tasks:
+    - name: Container warm-up (apt locks, dpkg state, cache, systemd)
+      ansible.builtin.include_tasks: ../../../../molecule/tasks/container-warmup.yml
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - systemd
+          - nfs-kernel-server
+          - samba
+          - smbclient  # For local verification of shares
+          - smartmontools
+        state: present
+
+    # Mock ZFS mount points; ZFS does not work in containers. Mode matches the
+    # nas_storage_exports entries for these paths — the role asserts that mode,
+    # so any other value flip-flops between converge and the role.
+    - name: Create mock ZFS mount points
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '1777'
+        owner: root
+        group: root
+      loop: "{{ mock_zfs_mounts }}"
+
+    - name: Create test files in mock mounts
+      ansible.builtin.copy:
+        content: "Test file in {{ item }}"
+        dest: "{{ item }}/test.txt"
+        mode: '0644'
+      loop: "{{ mock_zfs_mounts }}"
+
+  tasks:
+    # Apply nas_storage role with container-appropriate skip flags
+    # Skip flags are set in molecule.yml group_vars
+    - name: Apply nas_storage role
+      ansible.builtin.include_role:
+        name: weisssrv.infra.nas_storage
+
+- name: Converge - Storage Stack (Samba Clients)
+  hosts: smb_clients
+  become: true
+  gather_facts: true
+  vars_files:
+    - ../../../../inventories/prod/group_vars/all.yml
+
+  pre_tasks:
+    - name: Container warm-up (apt locks, dpkg state, cache, systemd)
+      ansible.builtin.include_tasks: ../../../../molecule/tasks/container-warmup.yml
+
+    - name: Install Samba client packages
+      ansible.builtin.apt:
+        name:
+          - smbclient
+        state: present
+        # Note: cifs-utils not needed - we test with smbclient only
+        # Mounting CIFS shares doesn't work reliably in Docker containers
+
+    - name: Wait for Samba server to be ready
+      ansible.builtin.wait_for:
+        host: nas-server
+        port: 445
+        timeout: 60
+        delay: 5
+      register: samba_wait
+      retries: 3
+      delay: 10
+      until: samba_wait is succeeded

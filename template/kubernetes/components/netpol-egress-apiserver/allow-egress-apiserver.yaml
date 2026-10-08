@@ -1,6 +1,7 @@
 ---
 # kube-proxy DNATs the in-cluster API VIP to a real server node IP before
 # NetworkPolicy evaluation, so this allows the node range, not the VIP.
+# The key holds ONE CIDR; narrow to per-server /32s by adding an ipBlock each.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

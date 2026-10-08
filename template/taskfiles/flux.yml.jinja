@@ -1,0 +1,480 @@
+{#- SECRETS SEAM: partials/secrets.jinja is the one home. The vault here is
+    go-task's {{.OP_VAULT}} so `task secrets:show`, which reads the Taskfile tree
+    as text, matches the variable. -#}
+{%- import "partials/secrets.jinja" as secrets with context -%}
+{%- set secret_runner = secrets.secret_runner -%}
+{%- macro secret_ref(item, field) -%}{{ secrets.secret_ref(item, field, vault='{{.OP_VAULT}}') }}{%- endmacro -%}
+# https://taskfile.dev
+# Flux GitOps: bootstrap, control and manifest validation. Deployment itself
+# is `git push` — Flux reconciles kubernetes/.
+version: '3'
+
+{% raw -%}
+# The datreeio CRD-catalog revision kubeconform reads CR schemas from. Pinned to
+# a sha, the library flux-lint job's crd_catalog_ref default, so a catalog
+# rewrite cannot change what this gate accepts and CI resolves the same set.
+vars:
+  CRD_CATALOG_REF: ad3b08c5045129d7bb1eeffd8e61719b2c8dd1e2
+  CRD_CATALOG: 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/{{.CRD_CATALOG_REF}}/{{`{{.Group}}`}}/{{`{{.ResourceKind}}`}}_{{`{{.ResourceAPIVersion}}`}}.json'
+
+# Anchors aliased by the tasks below. YAML anchors do not cross files, so each
+# namespace file carries the precondition list it uses.
+x-preconditions:
+  flux_cli: &flux_cli_precondition
+    sh: command -v flux
+    msg: "flux CLI not installed. Run: task flux:install-cli"
+  kubectl: &kubectl_precondition
+    sh: command -v kubectl
+    msg: "kubectl not found"
+  pyyaml_item: &pyyaml_item
+    sh: python3 -c "import yaml" 2>/dev/null
+    msg: "PyYAML not installed (pip install pyyaml)"
+  flux: &flux_preconditions
+    - *flux_cli_precondition
+    - *kubectl_precondition
+  pyyaml: &pyyaml_precondition
+    - *pyyaml_item
+
+tasks:
+  install-cli:
+    desc: Install the pinned flux CLI (flux_version in the versions ConfigMap)
+    preconditions:
+      - sh: command -v curl
+        msg: "curl not installed"
+    cmds:
+      - |
+        set -eo pipefail
+        PIN=$(grep -m1 -E '^[[:space:]]*flux_version:' {{.VERSIONS_CM}} 2>/dev/null | tr -d ' "' | cut -d: -f2 || true)
+        [ -n "$PIN" ] || { echo "ERROR: no flux_version key in {{.VERSIONS_CM}}"; exit 1; }
+        if flux --version 2>/dev/null | grep -qxF "flux version $PIN"; then
+          flux --version
+          exit 0
+        fi
+        # The pinned release, not brew's latest: `flux bootstrap` stamps its own
+        # version into gotk-components.yaml and the flux-version-pin gate holds
+        # that equal to flux_version.
+        case "$(uname -m)" in
+          x86_64|amd64) ARCH=amd64 ;;
+          arm64|aarch64) ARCH=arm64 ;;
+          *) echo "ERROR: no flux release for $(uname -m). Install $PIN by hand: https://fluxcd.io/flux/installation/"; exit 1 ;;
+        esac
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        DEST=${FLUX_INSTALL_DIR:-/usr/local/bin}
+        [ -w "$DEST" ] || { echo "ERROR: $DEST is not writable. Set FLUX_INSTALL_DIR to a directory on your PATH"; exit 1; }
+        TMP=$(mktemp -d)
+        trap 'rm -rf "$TMP"' EXIT
+        curl -fsSL "https://github.com/fluxcd/flux2/releases/download/v${PIN}/flux_${PIN}_${OS}_${ARCH}.tar.gz" -o "$TMP/flux.tar.gz"
+        tar xzf "$TMP/flux.tar.gz" -C "$DEST" flux
+        hash -r 2>/dev/null || true
+        flux --version
+        flux --version | grep -qxF "flux version $PIN" || {
+          echo "ERROR: the flux on PATH ($(command -v flux)) is not $PIN. Remove the other install or put $DEST first"
+          exit 1
+        }
+
+  bootstrap-secrets:
+    desc: Create the two bootstrap Secrets External Secrets needs (one-time, needs ./1password-credentials.json)
+    preconditions:
+      - sh: command -v op
+        msg: "1Password CLI not installed"
+      # `op account list`, not `op whoami`: with the desktop-app integration
+      # whoami reports "not signed in" in the non-interactive shell Task uses
+      # here.
+      - sh: op account list 2>/dev/null
+        msg: "1Password CLI not authenticated. Run: eval $(op signin)"
+      - sh: kubectl cluster-info 2>/dev/null
+        msg: "Cannot reach the cluster. Point KUBECONFIG at it first"
+      - sh: test -f ./1password-credentials.json
+        msg: "./1password-credentials.json missing. Run: op connect server create {{.CLUSTER_NAME}}-connect --vaults '{{.OP_VAULT}}'"
+    cmds:
+      - |
+        set -eo pipefail
+        # These two Secrets are the only hand-created ones; every other Secret
+        # comes from External Secrets using this token. The Connect token is
+        # minted here, not stored as a vault item.
+        TOKEN="$(op connect token create {{.CLUSTER_NAME}}-eso --server {{.CLUSTER_NAME}}-connect --vaults "{{.OP_VAULT}}")"
+        [ -n "$TOKEN" ] || { echo "ERROR: op connect token create returned nothing"; exit 1; }
+        TOKEN_FILE=$(mktemp)
+        trap 'rm -f "$TOKEN_FILE"' EXIT
+        printf '%s' "$TOKEN" > "$TOKEN_FILE"
+        kubectl create namespace external-secrets --dry-run=client -o yaml | kubectl apply -f -
+        kubectl -n external-secrets create secret generic op-credentials \
+          --from-file=1password-credentials.json=./1password-credentials.json \
+          --dry-run=client -o yaml | kubectl apply -f -
+        kubectl -n external-secrets create secret generic onepassword-connect-token \
+          --from-file=token="$TOKEN_FILE" \
+          --dry-run=client -o yaml | kubectl apply -f -
+        echo "Bootstrap Secrets created. Next: task flux:bootstrap"
+
+  bootstrap:
+    desc: "One-time Flux bootstrap into this repository (BRANCH=main)"
+    vars:
+      BRANCH: '{{.BRANCH | default "main"}}'
+    preconditions:
+      - sh: command -v flux
+        msg: "flux CLI not installed. Run: task flux:install-cli"
+      # `flux bootstrap` stamps its own version into gotk-components.yaml, which
+      # the flux-version-pin gate holds equal to flux_version: a CLI off the pin
+      # reds the bootstrap commit's own pipeline.
+      - sh: |
+          PIN=$(grep -m1 -E '^[[:space:]]*flux_version:' {{.VERSIONS_CM}} | tr -d ' "' | cut -d: -f2)
+          flux --version 2>/dev/null | grep -qxF "flux version $PIN"
+        msg: "flux CLI disagrees with flux_version in {{.VERSIONS_CM}}. Run: task flux:install-cli, or bump the pin (docs/ci-pipeline.md, flux-version-pin)"
+      - sh: kubectl cluster-info 2>/dev/null
+        msg: "Cannot reach the cluster. Point KUBECONFIG at it first"
+      - sh: op account list 2>/dev/null
+        msg: "1Password CLI not authenticated. Run: eval $(op signin)"
+      - sh: kubectl -n external-secrets get secret op-credentials 2>/dev/null
+        msg: "Bootstrap Secret op-credentials missing. Run: task flux:bootstrap-secrets"
+      - sh: kubectl -n external-secrets get secret onepassword-connect-token 2>/dev/null
+        msg: "Bootstrap Secret onepassword-connect-token missing. Run: task flux:bootstrap-secrets"
+    cmds:
+      - |
+        set -eo pipefail
+        if [ ! -t 0 ]; then
+          echo "ERROR: flux:bootstrap needs an interactive TTY (it confirms before pushing)."
+          exit 1
+        fi
+        echo "Bootstrapping Flux into {{.GIT_HOST}}/{{.GIT_NAMESPACE}}/{{.CLUSTER_NAME}} (branch {{.BRANCH}})."
+        echo "This commits to the branch and pushes it."
+        read -r -p "Continue? [y/N] " confirm
+        [ "$confirm" = "y" ] || { echo "Aborted"; exit 1; }
+      - |
+        set -eo pipefail
+        # Explicit read + emptiness check: a silent op failure would otherwise
+        # run bootstrap with an empty token and fail with an opaque auth error.
+        GITLAB_TOKEN="$(op read '{% endraw %}{{ secret_ref('Git Access Token', 'credential') }}{% raw %}')"
+        [ -n "$GITLAB_TOKEN" ] || { echo "ERROR: empty token from 'Git Access Token'"; exit 1; }
+        export GITLAB_TOKEN
+        flux bootstrap gitlab \
+          --hostname={{.GIT_HOST}} \
+          --owner={{.GIT_NAMESPACE}} \
+          --repository={{.CLUSTER_NAME}} \
+          --branch={{.BRANCH}} \
+          --path={{.CLUSTER_DIR}} \
+          --deploy-token-auth \
+          --interval=1m
+
+  reconcile:
+    desc: Force a full reconcile (source → the infrastructure chain → apps)
+    preconditions:
+      - *flux_cli_precondition
+      - *kubectl_precondition
+      # The stage list is derived, not listed, so the parser is a hard dependency.
+      - *pyyaml_item
+    cmds:
+      - flux reconcile source git flux-system
+      # Root first: it applies the child Kustomization CRs themselves, so edits
+      # under the cluster dir take effect without waiting for its own interval.
+      - flux reconcile kustomization flux-system
+      # Children derived from the cluster dir in dependsOn order, so a stage
+      # this cluster adds or drops needs no edit here. Per-stage error capture,
+      # not `set -e`: an unready stage must not strand the ones after it.
+      - |
+        set -u
+        STAGES=$(python3 scripts/flux-child-kustomizations.py --dir "{{.CLUSTER_DIR}}") || {
+          echo "ERROR: could not derive the child Kustomization list from {{.CLUSTER_DIR}}/" >&2
+          exit 1
+        }
+        FAILED=""
+        for ks in $STAGES; do
+          [ -n "$ks" ] || continue
+          # --timeout caps a stage that cannot become Ready at 2m rather than
+          # the CLI's 5m default, so the remaining stages get their turn.
+          if flux reconcile kustomization "$ks" --timeout=2m; then
+            continue
+          fi
+          echo "WARN: $ks did not reach Ready — continuing with the remaining stages"
+          FAILED="$FAILED $ks"
+        done
+        if [ -n "$FAILED" ]; then
+          echo ""
+          echo "ERROR: stage(s) did not reconcile to Ready:$FAILED"
+          echo "  Every OTHER stage above was still reconciled."
+          exit 1
+        fi
+        echo "All Flux stages reconciled."
+
+  status:
+    desc: Concise health summary (kustomizations, releases, secrets)
+    preconditions: *flux_preconditions
+    cmds:
+      - flux get kustomizations -A
+      - flux get helmreleases -A
+      - kubectl get externalsecrets -A
+
+  verify:
+    desc: flux check plus every managed resource
+    preconditions: *flux_preconditions
+    cmds:
+      - flux check
+      - flux get all -A
+
+  suspend:
+    desc: "Suspend a Flux resource (task flux:suspend -- <ns>/<kind>/<name>)"
+    preconditions: *flux_preconditions
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Usage: task flux:suspend -- <ns>/<kind>/<name>"
+          exit 1
+        fi
+        IFS='/' read -r NS KIND NAME <<< "{{.CLI_ARGS}}"
+        flux suspend "$KIND" "$NAME" -n "$NS"
+
+  resume:
+    desc: "Resume a suspended Flux resource (task flux:resume -- <ns>/<kind>/<name>)"
+    preconditions: *flux_preconditions
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Usage: task flux:resume -- <ns>/<kind>/<name>"
+          exit 1
+        fi
+        IFS='/' read -r NS KIND NAME <<< "{{.CLI_ARGS}}"
+        flux resume "$KIND" "$NAME" -n "$NS"
+
+  refresh-secret:
+    desc: "Force an ExternalSecret to re-fetch (task flux:refresh-secret -- <ns>/<name>)"
+    cmds:
+      - |
+        set -eo pipefail
+        if ! [[ "{{.CLI_ARGS}}" =~ ^[a-z0-9-]+/[a-z0-9-]+$ ]]; then
+          echo "Usage: task flux:refresh-secret -- <namespace>/<name>"
+          exit 1
+        fi
+        IFS='/' read -r NS NAME <<< "{{.CLI_ARGS}}"
+        # Wait for status.refreshTime to CHANGE, not for condition=Ready: an
+        # already-Ready ExternalSecret stays Ready across the annotation, so
+        # Ready returns instantly and consumers restart against the OLD value.
+        BEFORE=$(kubectl get -n "$NS" externalsecret "$NAME" \
+          -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
+        kubectl annotate --overwrite -n "$NS" externalsecret "$NAME" force-sync="$(date +%s)"
+        for _ in $(seq 1 60); do
+          AFTER=$(kubectl get -n "$NS" externalsecret "$NAME" \
+            -o jsonpath='{.status.refreshTime}' 2>/dev/null || true)
+          [ -n "$AFTER" ] && [ "$AFTER" != "$BEFORE" ] && break
+          sleep 1
+        done
+        if [ "$AFTER" = "$BEFORE" ]; then
+          echo "ERROR: $NS/$NAME did not refresh within 60s (refreshTime unchanged: ${BEFORE:-none})" >&2
+          echo "Consumers were NOT restarted; the old secret value is still in place." >&2
+          exit 1
+        fi
+        kubectl wait -n "$NS" externalsecret "$NAME" --for=condition=Ready --timeout=60s
+
+  rotate-secret:
+    desc: "Re-fetch an ExternalSecret and restart its consumers (task flux:rotate-secret -- <ns>/<name>)"
+    cmds:
+      - |
+        # `set -e` matters: without it a failed refresh would still restart the
+        # pods, which come back with the OLD value and look like a success.
+        set -eo pipefail
+        if ! [[ "{{.CLI_ARGS}}" =~ ^[a-z0-9-]+/[a-z0-9-]+$ ]]; then
+          echo "Usage: task flux:rotate-secret -- <namespace>/<name>"
+          exit 1
+        fi
+        IFS='/' read -r NS NAME <<< "{{.CLI_ARGS}}"
+        # Resolved BEFORE the refresh: the whole namespace is the wrong blast
+        # radius, and a Secret nothing consumes is an operator mistake worth
+        # reporting rather than a rotation that restarts unrelated workloads.
+        CONSUMERS=$(kubectl get deployment,statefulset,daemonset -n "$NS" -o json \
+          | python3 scripts/flux-secret-consumers.py "$NAME")
+        if [ -z "$CONSUMERS" ]; then
+          echo "ERROR: nothing in $NS references secret $NAME — not refreshed, nothing restarted" >&2
+          echo "       Check the name: kubectl get externalsecrets -n $NS" >&2
+          exit 1
+        fi
+        task flux:refresh-secret -- "$NS/$NAME"
+        # Reloader watches ConfigMaps only (ignoreSecrets), so a Secret rotation
+        # is always a manual restart. Pod delete for what kustomize-controller
+        # applies: a restart annotation there is drift and gets reverted.
+        while IFS=$'\t' read -r OBJ MANAGER SELECTOR; do
+          [ -n "$OBJ" ] || continue
+          if [ "$MANAGER" = "kustomize" ]; then
+            kubectl delete pod -n "$NS" -l "$SELECTOR"
+          else
+            kubectl rollout restart "$OBJ" -n "$NS"
+          fi
+          # By workload, not `kubectl wait --all`: a completed or mid-window Job
+          # pod in the namespace would never reach Ready and stall the wait.
+          kubectl rollout status "$OBJ" -n "$NS" --timeout=300s
+        done <<< "$CONSUMERS"
+
+  sync-versions:
+    desc: Regenerate the cluster-versions ConfigMap from the Ansible vars file
+    preconditions: *pyyaml_precondition
+    cmds:
+      - >-
+        python3 scripts/generate-versions-configmap.py
+        --vars-file ansible/inventories/prod/group_vars/all.yml
+        --output {{.VERSIONS_CM}}
+        --nested-key helm_chart_versions
+        --regen-command "task flux:sync-versions"
+
+  sync-host-log-staleness:
+    desc: Regenerate the per-host log-shipping alerts from the alloy_host play
+    preconditions: *pyyaml_precondition
+    cmds:
+      - python3 scripts/generate-host-log-staleness.py
+  dev-apply:
+    desc: "Dev helper: render one path and apply it (Flux reverts it on the next reconcile)"
+    preconditions:
+      - sh: command -v kustomize
+        msg: "kustomize not installed"
+      - sh: command -v envsubst
+        msg: "envsubst not installed (brew install gettext)"
+      - sh: python3 -c "import yaml" 2>/dev/null
+        msg: "PyYAML not installed (pip install pyyaml)"
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -z "{{.CLI_ARGS}}" ]; then
+          echo "Usage: task flux:dev-apply -- <path-to-kustomization-dir>"
+          exit 1
+        fi
+        # Substitute exactly what Flux substitutes at reconcile time, or the
+        # applied manifests carry literal ${...} placeholders.
+        VARS=$(scripts/flux-env.sh export-versions "{{.VERSIONS_CM}}") || exit 1
+        eval "$VARS"
+        echo "WARNING: Flux reverts this unless the change is committed."
+        kustomize build "{{.CLI_ARGS}}" | envsubst "$FLUX_ENVSUBST_VARS" | kubectl apply -f -
+
+  lint:
+    desc: Build every Flux Kustomization, substitute, schema-validate, and run the corpus gates
+    preconditions:
+      - sh: command -v kustomize
+        msg: "kustomize not installed"
+      - sh: command -v kubeconform
+        msg: "kubeconform not installed (brew install kubeconform)"
+      - sh: command -v envsubst
+        msg: "envsubst not installed (brew install gettext)"
+      - sh: command -v helm
+        msg: "helm not installed (brew install helm — schema-validates the value-heavy HelmReleases)"
+      - sh: python3 -c "import yaml" 2>/dev/null
+        msg: "PyYAML not installed (pip install pyyaml)"
+    cmds:
+      - |
+        set -eo pipefail
+        FAILED=0
+        # Mirror the reconcile-time postBuild substitution: both ConfigMaps
+        # (versions + cluster config) are exported, so a placeholder typo is
+        # caught here instead of rendering as an empty string in-cluster.
+        VARS=$(scripts/flux-env.sh export-versions "{{.VERSIONS_CM}}") || exit 1
+        eval "$VARS"
+        K8S_VER=$(scripts/flux-env.sh k8s-version "{{.VERSIONS_CM}}")
+        echo "kubeconform target: $K8S_VER"
+
+        # The corpus the invariant gates below read. They compare across stages,
+        # so each build is appended here rather than checked in isolation. CI's
+        # flux-lint job passes the same file to the same scripts.
+        RENDER_ALL=$(mktemp)
+        trap 'rm -f "$RENDER_ALL"' EXIT
+
+        # Stage paths come from the script deploy-verify uses: one parser, in
+        # dependsOn order, multi-document cluster files included. It exits
+        # non-zero when no Kustomization declares a spec.path.
+        KS_PATHS=$(python3 scripts/flux-child-kustomizations.py --paths --dir "{{.CLUSTER_DIR}}") \
+          || { echo "ERROR: could not derive the stage source paths"; exit 1; }
+        # A stage with no spec.path reconciles the repository root, and nothing
+        # below builds, scans or gates it. Counted from a captured list: a pipe
+        # would discard the gate's own non-zero exit for a dependsOn cycle.
+        KS_NAMES=$(python3 scripts/flux-child-kustomizations.py --dir "{{.CLUSTER_DIR}}") \
+          || { echo "ERROR: could not enumerate the Kustomizations under {{.CLUSTER_DIR}}"; exit 1; }
+        KS_TOTAL=$(printf '%s\n' "$KS_NAMES" | wc -l | tr -d ' ')
+        KS_BUILT=$(printf '%s\n' "$KS_PATHS" | wc -l | tr -d ' ')
+        if [ "$KS_BUILT" -ne "$KS_TOTAL" ]; then
+          echo "ERROR: $((KS_TOTAL - KS_BUILT)) of $KS_TOTAL Kustomizations under {{.CLUSTER_DIR}} declare no spec.path - they were neither built nor linted"
+          echo "  Give each one a spec.path: grep -L 'path:' {{.CLUSTER_DIR}}/*.yaml"
+          FAILED=1
+        fi
+
+        for SRCPATH in $KS_PATHS; do
+          SRCPATH="${SRCPATH#./}"
+          echo "=== $SRCPATH ==="
+          if ! RAW=$(kustomize build "$SRCPATH" 2>&1); then
+            echo "ERROR: kustomize build failed for $SRCPATH:"
+            echo "$RAW"
+            FAILED=1
+            continue
+          fi
+          # kubeconform passes empty input, so the floor is its own gate: an
+          # emptied resources: list renders nothing and Flux prunes what it applied.
+          if ! printf '%s\n' "$RAW" | grep -qE '^kind:'; then
+            echo "ERROR: kustomize build produced no resources for $SRCPATH, so Flux prunes what it applied"
+            FAILED=1
+            continue
+          fi
+          # Both scans read the PRE-substitution text: envsubst renders an
+          # unknown var as an empty string, so only the raw text reveals a typo.
+          # `$${` is the escaped form and is masked out of both.
+          SCAN=$(printf '%s\n' "$RAW" | sed 's/\$\$[{]/__FLUX_ESCAPED__/g')
+          # Flux's Go envsubst silently EATS a bare ${1}; GNU envsubst leaves it,
+          # so nothing else in this pipeline sees the difference.
+          MALFORMED=$(printf '%s\n' "$SCAN" | grep -nE '\$\{[^A-Za-z_]' || true)
+          if [ -n "$MALFORMED" ]; then
+            echo "ERROR: $SRCPATH has placeholders Flux will eat — escape them as \$\${...}:"
+            echo "$MALFORMED" | sed 's/^/  /'
+            FAILED=1
+            continue
+          fi
+          MISSING=""
+          # A key present with an EMPTY value is its own failure: envsubst
+          # renders `image: foo:${x}` as `foo:` and yamllint/kubeconform both
+          # pass it, so the broken reference only shows up in-cluster.
+          EMPTY=""
+          for ref in $(echo "$SCAN" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' | sort -u); do
+            varname=${ref#\$\{}
+            varname=${varname%\}}
+            if [ -z "${!varname+x}" ]; then
+              MISSING="$MISSING $varname"
+            elif [ -z "${!varname}" ]; then
+              EMPTY="$EMPTY $varname"
+            fi
+          done
+          MISSING=$(echo "$MISSING" | tr ' ' '\n' | grep -v '^$' | sort -u || true)
+          if [ -n "$MISSING" ]; then
+            echo "ERROR: $SRCPATH references keys absent from both ConfigMaps:"
+            echo "$MISSING" | sed 's/^/  - /'
+            FAILED=1
+            continue
+          fi
+          EMPTY=$(echo "$EMPTY" | tr ' ' '\n' | grep -v '^$' | sort -u || true)
+          if [ -n "$EMPTY" ]; then
+            echo "ERROR: $SRCPATH references keys that are present but EMPTY in {{.VERSIONS_CM}} or the cluster-config ConfigMap:"
+            echo "$EMPTY" | sed 's/^/  - /'
+            echo "  Give each one a value, or drop the key and the reference together."
+            FAILED=1
+            continue
+          fi
+          # printf, never echo: rendered dashboards carry literal \n inside
+          # block scalars that echo would expand and corrupt.
+          RENDERED=$(printf '%s\n' "$RAW" | envsubst "$FLUX_ENVSUBST_VARS")
+          printf '%s\n---\n' "$RENDERED" >> "$RENDER_ALL"
+          if ! printf '%s\n' "$RENDERED" | kubeconform \
+              -strict -ignore-missing-schemas \
+              -kubernetes-version "$K8S_VER" \
+              -schema-location default \
+              -schema-location '{{.CRD_CATALOG}}' \
+              -summary; then
+            FAILED=1
+          fi
+        done
+
+        # Which kinds no schema validated, against the baseline the CI flux-lint
+        # job passes: a skip outside it is a new CRD or a failed catalog fetch.
+        # -verbose: without it kubeconform emits no per-resource array to filter.
+        kubeconform -verbose -ignore-missing-schemas -kubernetes-version "$K8S_VER" \
+          -schema-location default \
+          -schema-location '{{.CRD_CATALOG}}' \
+          -output json < "$RENDER_ALL" \
+          | python3 scripts/kubeconform-skipped.py scripts/kubeconform-expected-skipped.txt || FAILED=1
+
+        # The corpus gates, in one script the CI flux-lint job calls as its
+        # extra_validation. It also builds each cluster root into the corpus,
+        # skipping one whose flux-system/ `flux bootstrap` has not written yet.
+        bash scripts/flux-corpus-gates.sh "$RENDER_ALL" "{{.VERSIONS_CM}}" || FAILED=1
+        exit $FAILED
+{%- endraw %}

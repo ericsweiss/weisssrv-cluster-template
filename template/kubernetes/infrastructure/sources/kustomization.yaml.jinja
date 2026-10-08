@@ -1,28 +1,29 @@
 ---
-# Earliest-reconciling stage: HelmRepository sources plus the two ConfigMaps
-# every later stage substitutes from. They live here because they MUST exist
-# before controllers/ renders HelmReleases carrying ${...} placeholders.
-#
-# priorityclasses.yaml is here for the same ordering reason: the Priority
-# admission plugin rejects a pod naming a class that does not exist, and the
-# controllers stage schedules pods that name `platform`.
+# Earliest-reconciling stage: HelmRepository sources, the two substitution
+# ConfigMaps and the PriorityClasses, all of which must exist before
+# controllers/ renders. Ordering rationale: kubernetes/README.md.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+# HelmRepositories alphabetically, so a new source has an obvious insertion
+# point; the cluster-wide documents follow as a marked block.
 resources:
-  - external-secrets.yaml
-  - metallb.yaml
-  - jetstack.yaml
-  - traefik.yaml
-  - external-dns.yaml
   - authentik.yaml
-  - prometheus-community.yaml
-  - grafana.yaml
+  - external-dns.yaml
+  - external-secrets.yaml
+  - fairwinds-stable.yaml
   - grafana-community.yaml
-  - fairwinds.yaml
+  - grafana.yaml
+  - jetstack.yaml
   - kured.yaml
+  - metallb.yaml
+  - prometheus-community.yaml
   - stakater.yaml
+  - traefik.yaml
 {%- if git_backend == 'gitlab_selfhosted' %}
   - gitlab.yaml
+{%- endif %}
+{%- if gpu == 'nvidia' %}
+  - nvidia.yaml
 {%- endif %}
 {%- if secrets_backend == 'onepassword' %}
   - onepassword-connect.yaml
@@ -30,9 +31,7 @@ resources:
 {%- if vpn_tailscale %}
   - tailscale.yaml
 {%- endif %}
-{%- if gpu == 'nvidia' %}
-  - nvidia.yaml
-{%- endif %}
+  # Not HelmRepositories: cluster identity, versions and the priority classes.
+  - cluster-config.yaml
   - priorityclasses.yaml
   - versions-configmap.yaml
-  - cluster-config.yaml

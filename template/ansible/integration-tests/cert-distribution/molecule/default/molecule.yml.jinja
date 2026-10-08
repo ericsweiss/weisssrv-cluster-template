@@ -1,0 +1,81 @@
+---
+{%- from "partials/molecule.jinja" import systemd_platform, galaxy_dependency,
+    molecule_env, test_sequence with context %}
+# Certificate distribution integration test: acme_certs plus the SSH push to
+# two receiver hosts.
+
+driver:
+  name: docker
+
+platforms:
+  - name: dns-01
+    # Shared systemd-container shape; only name/groups differ per platform.
+    <<: &systemd_platform
+{{- systemd_platform('cert-stack-net') }}
+    groups:
+      - cert_stack
+      - cert_servers
+
+  - name: cert-client-01
+    <<: *systemd_platform
+    groups:
+      - cert_stack
+      - cert_clients
+
+  - name: cert-client-02
+    <<: *systemd_platform
+    groups:
+      - cert_stack
+      - cert_clients
+
+{{ galaxy_dependency() }}
+provisioner:
+  name: ansible
+{{- molecule_env() }}
+  playbooks:
+    prepare: ../../../_shared/prepare.yml
+  inventory:
+    group_vars:
+{% raw %}
+      cert_servers:
+        acme_certs_enabled: true
+        acme_certs_domain: "{{ internal_domain }}"
+        acme_certs_email: test@example.com
+        # Test-local list driving the mock cert fixtures in converge/verify —
+        # NOT a role knob (acme_certs issues acme_certs_domain plus its wildcard
+        # and reads no domain-list variable).
+        mock_cert_domains:
+          - domain: "*.{{ internal_domain }}"
+          - domain: "{{ internal_domain }}"
+
+        # SSH keys (acme_certs_ssh_private_key/_public_key) are generated in
+        # converge.yml and injected onto dns-01's hostvars via add_host. The
+        # role's assert surfaces a clear error if that injection fails.
+
+        # Certificate distribution targets. converge.yml slurps host_key from
+        # each cert_clients container and re-injects the whole list via
+        # add_host; the static fields stay here so verify.yml reads the shape.
+        acme_certs_distribution_targets:
+          - host: cert-client-01
+            ip: cert-client-01
+            cert_dir: /etc/ssl/certs/wildcard
+            owner: root
+            group: root
+            cert_mode: "0644"
+            key_mode: "0600"
+            restart_service: ssh
+          - host: cert-client-02
+            ip: cert-client-02
+            cert_dir: /etc/ssl/certs/wildcard
+            owner: root
+            group: root
+            cert_mode: "0644"
+            key_mode: "0600"
+            restart_service: ssh
+{% endraw %}
+verifier:
+  name: ansible
+
+{{ test_sequence(idempotence=false, skip_comment=[
+    'Idempotence is skipped: a fresh throwaway keypair is generated per run, so',
+    'the deployed key files always change between converges.']) }}

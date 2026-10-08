@@ -1,8 +1,7 @@
 ---
-# Exposes the resolver to the tailnet as its own device with a stable MagicDNS
-# name (ts-dns.<suffix>). Its tailnet address is what you set as the Split-DNS
-# nameserver for the internal domain. UDP+TCP 53 on one LoadBalancer Service
-# (MixedProtocolLBService, GA since k8s 1.26).
+# Exposes the resolver to the tailnet as its own device, ts-dns.<suffix>. Its
+# tailnet address is the Split-DNS nameserver for the internal domain. UDP and
+# TCP 53 share one LoadBalancer Service.
 apiVersion: v1
 kind: Service
 metadata:

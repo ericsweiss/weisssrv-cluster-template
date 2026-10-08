@@ -1,0 +1,12 @@
+---
+description: Always follow the cluster-template development rules.
+globs:
+alwaysApply: true
+---
+
+# Template development
+
+Before making any change in this repo, read and follow `AGENTS.md` — the
+authoritative rules for the copier template that generates weisssrv cluster
+repositories. `docs/ARCHITECTURE.md` is the map of how the template is put
+together.

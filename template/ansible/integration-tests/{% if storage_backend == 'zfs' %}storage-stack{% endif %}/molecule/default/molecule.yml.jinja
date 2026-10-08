@@ -1,0 +1,129 @@
+---
+{%- from "partials/molecule.jinja" import systemd_platform, galaxy_dependency,
+    molecule_env, test_sequence with context %}
+# nas_storage scenario: NFS export + Samba share rendering, Samba service and
+# client access. NFS/CIFS client mounts are not possible in Docker — server-side
+# render only. Scenario conventions: ansible/TESTING.md.
+
+driver:
+  name: docker
+
+platforms:
+  # NAS Server - runs nas_storage role
+  - name: nas-server
+    # Shared systemd-container shape; only name/groups/capabilities differ per
+    # platform (SYS_ADMIN is the NAS server's alone).
+    <<: &systemd_platform
+{{- systemd_platform('storage-stack-net') }}
+    capabilities:
+      - SYS_ADMIN
+    groups:
+      - storage
+      - nas_servers
+
+  # SMB Client - tests Samba connectivity (listing shares)
+  # NFS client removed: mounting NFS shares doesn't work in Docker containers
+  - name: smb-client-01
+    <<: *systemd_platform
+    groups:
+      - storage
+      - smb_clients
+
+{{ galaxy_dependency() }}
+provisioner:
+  name: ansible
+{{- molecule_env() }}
+    # Samba user password: the nas_storage role's nas_storage_samba_password
+    # default reads this env var and sets the `nas` smbpasswd (anonymous access
+    # is hardened off, so verify authenticates with it).
+    SAMBA_NAS_PASSWORD: molecule-test-samba-pw
+  config_options:
+    defaults:
+      callbacks_enabled: profile_tasks, timer
+      stdout_callback: ansible.builtin.default
+      result_format: yaml
+  playbooks:
+    prepare: ../../../_shared/prepare.yml
+    converge: converge.yml
+    verify: verify.yml
+  inventory:
+    group_vars:
+      nas_servers:
+        # Base role configuration (applied by converge). SSH hardening is
+        # exercised by the base role's own molecule scenario; skip it here to
+        # keep this integration test focused on the NFS/Samba storage path.
+        base_skip_ssh_config: true
+        base_skip_dns_config: true  # DNS resolver needs real network
+
+        # NAS storage configuration - skip operations that don't work in containers
+        nas_storage_skip_zfs_operations: true  # ZFS requires kernel modules (also bypasses the bind-source mountpoint guard)
+        nas_storage_skip_nfs_reload: true      # exportfs -ra fails without NFS kernel support
+        nas_storage_skip_smartd_service: true  # No block devices in container
+
+        # NFS exports configuration (templates will be generated)
+        nas_storage_exports:
+          # 1777: the SMB write test proves the share layer is writable; the
+          # fixture dirs stay sticky-world-writable so no unix user plumbing
+          # is needed in the container.
+          - path: /tank/media
+            mode: "1777"
+            clients:
+              - spec: "172.16.0.0/12"
+                options: "rw,sync,no_subtree_check,no_root_squash"
+          - path: /tank/share
+            mode: "1777"
+            clients:
+              - spec: "172.16.0.0/12"
+                options: "rw,sync,no_subtree_check,no_root_squash"
+          # Prod-shaped export: bind_source under the pool mount, export-level
+          # xprtsec=tls, fsid, all_squash mapping. verify.yml asserts the
+          # rendered /etc/exports line.
+          - path: /export/appdata
+            bind_source: /mnt/tank/appdata
+            owner: 1000
+            group: 2000
+            mode: "02775"
+            xprtsec: "tls"
+            clients:
+              - spec: "172.16.0.0/12"
+                options: "rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=2000,fsid=11"
+
+        # Samba shares configuration (Samba DOES work in containers)
+        nas_storage_samba_shares:
+          - name: media
+            path: /tank/media
+            comment: "Media Library"
+            read_only: false
+            browseable: true
+            guest_ok: true
+            create_mask: "0664"
+            directory_mask: "0775"
+          - name: share
+            path: /tank/share
+            comment: "Shared Files"
+            read_only: false
+            browseable: true
+            guest_ok: true
+            create_mask: "0664"
+            directory_mask: "0775"
+
+        # Mock ZFS mount points (created in converge)
+        mock_zfs_mounts:
+          - /tank/media
+          - /tank/share
+
+        # SMART monitoring (no real devices in container; the smartd_*_disks
+        # lists the role consumes default to empty)
+        nas_storage_smartd_enabled: true
+
+      smb_clients:
+        # Samba client configuration
+        smb_server: nas-server
+        smb_test_shares:
+          - media
+          - share
+
+verifier:
+  name: ansible
+
+{{ test_sequence() }}

@@ -1,0 +1,152 @@
+{#- The registry-cache app's Service and namespace (kubernetes/apps/registry-cache);
+    it has no answer gate, so it always renders and this address always resolves. -#}
+{%- set registry_cache = 'registry-cache.registry-cache.svc.cluster.local:5000' -%}
+---
+# The integration-test matrix, exercising role combinations against this repo's
+# prod group_vars. Its own file so its `changes:` trigger and the
+# matrix-coverage gate can name it instead of .gitlab-ci.yml.
+
+# Everything this matrix reads.
+.paths-integration:
+  changes:
+    - ansible/integration-tests/**/*
+    # Every integration converge include_tasks's
+    # ansible/molecule/tasks/container-warmup.yml, and _shared/prepare.yml
+    # re-imports ansible/molecule/prepare-common.yml.
+    - ansible/molecule/**/*
+    # The roles under test ship in weisssrv.infra: the pin is the suite's real
+    # input, alongside the prod all.yml the converges vars_files.
+    - ansible/requirements.yml
+    - ansible/inventories/prod/group_vars/all.yml
+    # The shared in-job wrappers the suite runs through.
+    - scripts/molecule-retry.sh
+    - scripts/sanitize-junit-expected-failures.py
+    # This file. NOT `.gitlab-ci.yml`: this is a long privileged-DinD fan-out on
+    # the critical path to validation-gate, and naming the whole pipeline file
+    # fires it on every CI-only edit.
+    - .gitlab/ci/integration-jobs.yml
+
+.integration-test-job:
+  stage: test
+  # Infra-class only. NOT script_failure (it would mask a failing test; start
+  # storms are scripts/molecule-retry.sh's job) and NOT stuck_or_timeout_failure
+  # (a hung test should fail fast).
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - scheduler_failure
+  needs:
+    # Gate this expensive fan-out behind the two fastest correctness lints, so a
+    # syntax error does not burn the suite on the scarce privileged runner.
+    - job: ansible-lint
+      optional: true
+    - job: yaml-lint
+      optional: true
+  # The library's pre-built CI image at the same tag as every library include.
+  # `image:` expands $VAR but not bash defaults, hence the variables block.
+  image: $MOLECULE_CI_IMAGE
+  services:
+    # Digest-pinned (multi-arch index), matching the library's molecule jobs.
+    # --insecure-registry: the in-cluster pull-through cache is plaintext HTTP
+    # and network-fenced, and every fresh DinD daemon needs the flag.
+    - name: docker:27.5.1-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce
+      # Required: a digest-bearing image name must still answer at the `docker`
+      # host DOCKER_HOST points at.
+      alias: docker
+      # The pod interface MTU is 1420 (flannel over WireGuard); a 1500 bridge
+      # black-holes large TLS frames. --mtu covers the default bridge, the
+      # default-network-opt covers the user-defined networks molecule creates.
+      command:
+        - "--insecure-registry={{ registry_cache }}"
+        - "--mtu=1420"
+        - "--default-network-opt=bridge=com.docker.network.driver.mtu=1420"
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    ANSIBLE_FORCE_COLOR: "1"
+    PY_COLORS: "1"
+    ANSIBLE_CALLBACKS_ENABLED: junit
+    JUNIT_OUTPUT_DIR: "$CI_PROJECT_DIR/junit"
+    # Published by {{ lib_project }}'s release pipeline under the release tag.
+    # This project must stay on its job-token allowlist; a mirrored library
+    # needs its own registry copies, or both set as project CI/CD variables.
+    MOLECULE_CI_IMAGE: "$CI_REGISTRY/{{ lib_project }}/molecule-ci:$WEISSSRV_LIB_REF"
+    # Read by the scenarios' `platforms[].image`, so this job's pull and the
+    # containers molecule starts are the same build.
+    MOLECULE_TEST_IMAGE: "$CI_REGISTRY/{{ lib_project }}/molecule-test:$WEISSSRV_LIB_REF"
+    # The registry-cache app's ClusterIP: the first job's fresh DinD cold-pulls
+    # the test image, the rest hit the in-cluster cache.
+    REGISTRY_CACHE: "{{ registry_cache }}"
+  before_script:
+    # Wait for the DinD sidecar — with a pre-built CI image the script starts
+    # before DinD is ready (no apt-get delay to absorb its startup).
+    - |
+      for i in $(seq 1 30); do
+        docker info >/dev/null 2>&1 && break
+        echo "Waiting for DinD... ($i)"
+        sleep 1
+      done
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    # Pre-pull the test image into this job's DinD so the scenarios
+    # (pre_build_image: true) start without pulling. Cache first, time-bounded,
+    # falling back to the registry: a cache outage only loses the warm hit.
+    - |
+      cref="${REGISTRY_CACHE}/${MOLECULE_TEST_IMAGE#"${CI_REGISTRY}"/}"
+      if timeout 25 docker pull "$cref" 2>/dev/null; then
+        docker tag "$cref" "$MOLECULE_TEST_IMAGE"
+      else
+        docker pull "$MOLECULE_TEST_IMAGE"
+      fi
+    # weisssrv.infra is installed by molecule's own `dependency` step (each
+    # scenario points it at ansible/requirements.yml), so the pin has one
+    # installer.
+    - mkdir -p "$CI_PROJECT_DIR/junit"
+  artifacts:
+    when: always
+    reports:
+      junit: junit/*.xml
+  # Above MOL_MAX x worst-case attempt, not at it: with no headroom a retry
+  # storm ends as stuck_or_timeout_failure with the trace truncated, which
+  # hides the molecule error that names the failing task.
+  timeout: 50m
+  script:
+    - cd "ansible/integration-tests/$TEST"
+    # Shared destroy+jitter retry: multi-container scenarios are the most
+    # start-storm-prone. No scenario opts — each test has one molecule.yml.
+    - bash "$CI_PROJECT_DIR/scripts/molecule-retry.sh"
+    # Downgrade the scenario's DECLARED negative-path failures so a green job
+    # uploads a green report; last in script, so a failed job keeps its raw one.
+    # --strict fails a declaration matching other than the count it declares.
+    - python3 "$CI_PROJECT_DIR/scripts/sanitize-junit-expected-failures.py"
+      --junit-dir "$CI_PROJECT_DIR/junit"
+      --expectations "$CI_PROJECT_DIR/ansible/integration-tests/$TEST/molecule/default/expected-junit-failures.txt"
+      --strict
+
+integration-tests:
+  extends: .integration-test-job
+  parallel:
+    matrix:
+      - TEST:
+          - base-infrastructure
+          - cert-distribution
+          - dns-stack
+          - mail-stack
+{%- if storage_backend == 'zfs' %}
+          - storage-stack
+{%- endif %}
+  rules:
+    # full-test schedule canary, which must precede the schedule when:never rule
+    # (first match wins): it catches external-dependency rot without waiting for
+    # an unrelated MR to turn red.
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $SCHEDULE_TYPE == "full-test"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      # `!reference`, not a YAML anchor: anchors do not resolve across includes.
+      changes: !reference [.paths-integration, changes]
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: !reference [.paths-integration, changes]
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: manual
+      allow_failure: true

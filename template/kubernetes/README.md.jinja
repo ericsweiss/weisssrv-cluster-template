@@ -28,6 +28,14 @@ kubernetes/
 └── apps/               # workloads, one directory per app
 ```
 
+A `ServiceMonitor` or `PodMonitor` for a workload this repository deploys lives
+in that workload's own directory, beside the NetworkPolicy that admits the
+scrape. The CRDs land in stage 2, so any later stage already has them, and
+removing an app removes its scrape config with it. Monitors for targets no
+manifest here creates — a host exporter, Flux's own controllers — stay in
+`infrastructure/observability/service-monitors/`, because there is no app
+directory to put them in.
+
 ## Reconciliation order
 
 `sources → crds → controllers → configs`, then `observability` and `apps` in
@@ -42,17 +50,21 @@ parallel. Two choices in that graph are deliberate and worth keeping:
 
 ## No site literals — the `cluster-config` ConfigMap
 
-Nothing under `kubernetes/` contains a domain, an IP, a CIDR or a vault name.
-Those live in exactly one file — `infrastructure/sources/cluster-config.yaml` —
-and reach the manifests at reconcile time through
-`postBuild.substituteFrom`. Chart and image versions work the same way through
-the sibling `cluster-versions` ConfigMap. Every Flux Kustomization reads both.
+No site value — a domain, an address, a LAN CIDR or a vault name that came from
+your copier answers — appears under `kubernetes/`. Those live in exactly one
+file — `infrastructure/sources/cluster-config.yaml` — and reach the manifests at
+reconcile time through `postBuild.substituteFrom`. Standards constants (the
+RFC-reserved ranges, the CGNAT block, the pod and service CIDRs) are spelled out
+where a NetworkPolicy needs them; the gate does not treat those as literals.
+Chart and image versions work the same way through the sibling
+`cluster-versions` ConfigMap. Every Flux Kustomization reads both.
 
 Adding a literal to a manifest is a regression; add a key to `cluster-config`
 instead. `tests/test_cluster_invariants.py` enforces this, along with "every
-`${placeholder}` resolves to a key that exists" — important, because Flux and
-`envsubst` both render an unknown placeholder as an **empty string** rather than
-failing.
+`${placeholder}` resolves to a key that exists", which the gate catches
+pre-merge. In the cluster, kustomize-controller runs with
+`StrictPostBuildSubstitutions`, so an unresolved `${...}` fails the stage's
+reconcile. Escape a deliberate literal as `$${...}`.
 
 | Key | Meaning |
 |---|---|
@@ -62,7 +74,9 @@ failing.
 | `cluster_node_label_domain` | Prefix for node role labels/taints (`<prefix>/ingress`, `<prefix>/gpu`) |
 | `cluster_lan_cidr` | LAN range — ingress allowlists |
 | `cluster_pod_cidr` / `cluster_service_cidr` | k3s CIDRs |
+{%- if vpn_tailscale %}
 | `cluster_tailnet_cidr` | Tailscale CGNAT range |
+{%- endif %}
 | `cluster_api_vip` (reserved alias `cluster_k3s_api_vip`) | kube-apiserver VIP |
 | `cluster_apiserver_egress_cidr` | What pod egress policies allow on 6443 |
 | `cluster_etcd_endpoints` | etcd scrape targets for `kubeEtcd` — a **JSON flow sequence**, because Helm needs a real list where Flux substitutes text |
@@ -70,16 +84,23 @@ failing.
 | `cluster_zfs_exporter_addresses` | EndpointSlice roster for `zfs_exporter` (`:9134`) — flow sequence; ZFS storage backend only |
 | `cluster_unbound_exporter_addresses` | EndpointSlice roster for `unbound_exporter` (`:9167`), one entry per resolver — also a flow sequence |
 | `cluster_offsite_backup_probe_metric` | gates `OffsiteBackupStale`'s `absent()` arm; `up` until the offsite tier is enabled |
+| `cluster_archive_backup_probe_metric` | gates `ArchiveBackupStale`'s `absent()` arm; `up` until the archive tier is enabled |
+| `cluster_vzdump_probe_metric` | gates `VzdumpBackupStale`'s `absent()` arm; `up` until hypervisor guest backups are enabled |
+| `cluster_backup_artifact_probe_metric` | same gate for the per-app dump tier, which ships armed |
 | `cluster_metallb_public_vip` / `cluster_metallb_internal_vip` | Ingress VIPs |
 | `cluster_issuer` / `cluster_acme_email` | cert-manager ClusterIssuer name + ACME contact |
 | `cluster_secret_store` | ClusterSecretStore every ExternalSecret references |
+| `cluster_secrets_provider_namespace` / `cluster_secrets_provider_deployment` | the provider Deployment `SecretsProviderDown` watches |
 | `cluster_secrets_vault` | Vault the secret store reads |
 | `cluster_git_host` / `cluster_runbook_base_url` | Git host; runbook link prefix for alerts |
 | `cluster_nas_host` / `cluster_smtp_host` / `cluster_alert_email` | Host-side services the platform talks to |
-| `cluster_upstream_dns_servers` | LAN resolvers in-cluster forwarders point at |
-| `cluster_tailnet_dns_suffix` | MagicDNS suffix (`<tailnet>.ts.net`), tailnet module only |
+{%- if vpn_tailscale %}
+| `cluster_upstream_dns_servers` | LAN resolvers the tailnet override zone forwards to |
+| `cluster_tailnet_dns_suffix` | MagicDNS suffix (`<tailnet>.ts.net`) |
+{%- endif %}
 | `cluster_node_exporter_job_regex` | Prometheus job name for host node-exporters |
-| `cluster_ddns_records` | Records the DDNS CronJob maintains |
+| `cluster_timezone` | Site timezone; container `TZ` env values and CronJob `spec.timeZone` read it |
+| `cluster_ddns_records` | Records the DDNS CronJob maintains, as `<name>:<proxied-on-create>`; add a hostname that must bypass the Cloudflare proxy (large uploads, non-HTTP ports) as `:false` |
 
 Values whose defaults are guesses are the first thing to check if something
 resolves to the wrong place. Each of these is an answer, so correct it with
@@ -93,9 +114,12 @@ that substitute it.
 | `netpol-baseline` | `default-deny-ingress` |
 | `netpol-egress-dns` | egress to cluster DNS |
 | `netpol-egress-apiserver` | egress to the kube-apiserver on 6443 |
-| `netpol-egress-public` | egress to public unicast only, never RFC1918/CGNAT/metadata |
+| `netpol-egress-public` | egress to public unicast `:443` only, never RFC1918/CGNAT/metadata |
+{%- if git_backend == 'gitlab_selfhosted' %}
+| `gitlab-runner-common` | the HelmRelease fields both runner releases share; each `release.yaml` keeps only its own deltas |
+{%- endif %}
 
-Two things to know before using them:
+Three things to know before using them:
 
 1. Adding **any** egress policy makes egress default-deny for the pods it
    selects. A namespace that takes one egress component must take (or
@@ -103,9 +127,66 @@ Two things to know before using them:
 2. `netpol-egress-public` selects all pods in the namespace. Where only some
    pods should reach the internet, patch its `podSelector` in the including
    kustomization — `controllers/external-secrets/` does exactly that.
+3. It carries `:443` and nothing else. Public `:53` is appended by a patch in
+   `controllers/cert-manager/` alone, because the DNS-01 self-check needs it and
+   outbound DNS to the internet is an exfiltration channel everywhere else.
+
+The `lan-tailscale-only` and `lan-tailscale-strict` middlewares keep their names
+in every cluster, so routes copy between repos unchanged. With `vpn_tailscale`
+false they allow the LAN (and, for `-only`, the pod CIDR) and nothing else.
 
 The RFC-reserved `except:` list lives in that one component instead of being
 copied into every policy. It is a standards constant, not this site's LAN.
+
+Turning a recurring egress rule into a component is right only where the policy
+it came from already selected the whole namespace. A component ships a complete
+policy with `podSelector: {}`, so a rule lifted out of an app-scoped policy
+would hand the same egress to pods that policy deliberately denies — leave that
+one inline.
+
+A component that patches a container or a volume by index owns the `op: test`
+layout guard for that index. The guard lives in the component once, not copied
+into each including kustomization, or the next overlay ships unguarded and
+patches whichever object has drifted into that position.
+
+### A same-namespace peer needs both halves
+
+`netpol-baseline` denies ingress to every pod in the namespace, including the
+app's own database or cache. Adding a peer therefore takes two objects:
+
+1. An egress rule on the app's own policy selecting the peer pod and its port.
+2. A separate NetworkPolicy selecting the peer, `policyTypes: [Ingress]`,
+   admitting the app on that port.
+
+The egress half alone passes every gate here and the connection still fails.
+`apps/authentik/networkpolicy.yaml` is the worked pair: `allow-egress-authentik`
+lets the server out to `postgresql` on 5432, and `allow-postgres-from-authentik`
+lets the Postgres pod accept it.
+
+A policy that belongs to a seam lives in the seam's own conditional directory,
+even when it names another namespace. `allow-egress-onepassword-connect` sits in
+`controllers/onepassword-connect/` with an explicit `metadata.namespace:
+external-secrets`, so selecting a different `secrets_backend` takes both halves
+of the contract out together instead of leaving an egress rule pointing at a
+backend that is no longer rendered.
+
+### Admission-webhook ingress
+
+An admission webhook is called by the kube-apiserver, which runs on the host
+network, so no `namespaceSelector` or `podSelector` can name it. Two shapes are
+in use and both are deliberate:
+
+- Peer-less, port-scoped. The policy names the port and leaves `from` out, so
+  the webhook's own TLS and authz are the control. cert-manager,
+  external-secrets, metallb and vpa all use this.
+- `ipBlock` peers, where the call is known to arrive translated. The
+  prometheus-operator webhook sees the node's pod-network gateway address, so
+  `observability/networkpolicy.yaml` scopes it to `cluster_pod_cidr` plus
+  `cluster_lan_cidr`.
+
+Prefer the `ipBlock` form only when the arriving source address is known.
+Guessing it closes the webhook, and on a `failurePolicy: Ignore` webhook that
+admits invalid CRs silently rather than failing the write.
 
 ## Node label contract
 
@@ -116,12 +197,15 @@ The Ansible k3s layer labels and taints nodes with the
 |---|---|
 | `<prefix>/general: "true"` | Set on every agent; `apps/registry-cache` selects it (**required** — that pod stays Pending without it) |
 | `<prefix>/nas: "true"` (+ matching `PreferNoSchedule` taint) | Storage-node affinity for the Prometheus/Loki/database volumes; also the DoesNotExist term that steers disposable workloads and CI job pods off it |
-| `<prefix>/ingress: "true"` | Traefik node affinity (**preferred**, so an unlabelled cluster still schedules) |
+| `<prefix>/ingress: "true"` | Traefik's `nodeSelector` and the MetalLB speaker's (**required** — without it Traefik stays Pending and no VIP is announced, while the Services still show their EXTERNAL-IP) |
 | `<prefix>/gpu: nvidia` | NVIDIA device plugin node selector (**required** — that DaemonSet is for the GPU node only) |
 | `<prefix>/cpu: modern` | CI job pods pin themselves here via `ci_cpu_selector`, and the runners only permit an override matching `^<prefix>/cpu=(modern\|legacy)$` — **required**, or those jobs are unschedulable. Set `legacy` on a node without modern CPU flags |
 | `<prefix>/runner-class` | A **pod** label on CI job pods, with two fixed values: `infrastructure` and `shared`. kured refuses to reboot a node running an `infrastructure` job pod, and each runner's egress NetworkPolicy selects on it. It is the runner TIER, deliberately **not** the `ci_runner_tag` answer |
 | `<prefix>/dns-api-token: "true"` | Namespace opt-in for the DNS-provider token fan-out |
-| `<prefix>/cluster-secrets: "true"` | Namespace opt-in for the platform `ClusterSecretStore` — **required** on any namespace with an ExternalSecret (see below) |
+| `<prefix>/cluster-secrets: "true"` | Namespace opt-in for the platform `ClusterSecretStore` — **required** on a platform namespace whose ExternalSecrets read the platform store, and never on a tenant namespace, which gets its own store instead (see below) |
+
+At least two nodes should carry `<prefix>/ingress`, or an ingress node
+cannot be drained: Traefik's PodDisruptionBudget blocks the second eviction.
 
 Not every row is a node label: `runner-class` is set on CI job pods, and the
 last two are set on Namespaces. They live in this table because they share the
@@ -144,6 +228,22 @@ outranks a job pod without needing a class of its own, and `Never` means a burst
 queues rather than evicting anything. `platform` is deliberately **not** set on
 kured or metrics-server — both already carry a higher built-in class, so setting
 it would be a downgrade.
+
+## In-cluster DNS
+
+k3s ships CoreDNS as a bundled AddOn and owns that Deployment. It resets the
+object on every server restart or upgrade, so a `replicas` patch is a no-op.
+`infrastructure/configs/coredns/` holds the count with an HPA whose `minReplicas`
+and `maxReplicas` are equal. That makes the HPA a pin, not an autoscaler: its
+metrics block is there because the v2 schema requires one, and its threshold
+never fires. Raise `maxReplicas` to turn it into a real autoscaler.
+
+The same ownership limits the rest. Topology spread is soft only, so the
+scheduler may still put both replicas on one node, and the PodDisruptionBudget
+cannot prevent that. It only keeps a drain from taking both at once.
+
+The durable fix is to disable the bundled AddOn on the servers and ship your own
+CoreDNS manifest in this repo.
 
 ## Backend seams
 
@@ -206,7 +306,7 @@ the reasoning, the residual risk `protected: false` accepts, and the
 `flux bootstrap` is a one-time step and is documented in
 `clusters/{{ cluster_name }}/flux-system/README.md`; everything you must have in
 place before it (secret backend credentials, DNS zone + API token, Git deploy
-access) is in the template's [PRE-SETUP.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/PRE-SETUP.md).
+access) is in the template's [PRE-SETUP.md](https://github.com/ericsweiss/weisssrv-cluster-template/blob/main/docs/PRE-SETUP.md).
 
 Lint the whole tree before pushing — it builds every Kustomization, substitutes
 from BOTH ConfigMaps, and runs kubeconform:

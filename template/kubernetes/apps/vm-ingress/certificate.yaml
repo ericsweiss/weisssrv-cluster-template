@@ -1,16 +1,9 @@
-# TEMPLATE — enable together with your first route (add BOTH this file and your
-# route file to kustomization.yaml). Not reconciled as-is, because an unused
-# certificate is a pointless ACME order.
-#
-# cert-manager writes the Secret into the Certificate's OWN namespace, and
-# Traefik only reads Secrets from the IngressRoute's namespace — so this
-# namespace needs its own copy of the wildcard, even though infrastructure/configs
-# already issues one elsewhere.
-#
-# Each copy fires its own ACME order: STAGGER renewBefore against the other copies
-# (the anchor in infrastructure/configs/wildcard-certificates.yaml uses 720h) or
-# they all renew in the same window and burn the duplicate-certificate rate limit
-# together.
+# CRITICAL: template, not reconciled as-is. Enable it together with your first
+# route, adding both files to kustomization.yaml. This namespace needs its own
+# wildcard copy because Traefik reads Secrets only from the IngressRoute's
+# namespace. Each copy fires its own ACME order, so stagger renewBefore against
+# the other copies or a shared renewal window burns the duplicate-certificate
+# rate limit. README.md, Certificates in this namespace.
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -22,7 +15,8 @@ spec:
   issuerRef:
     name: ${cluster_issuer}
     kind: ClusterIssuer
-  commonName: "*.${cluster_internal_domain}"
+  # `dnsNames` alone: Let's Encrypt issues no Common Name, and a CN built from a
+  # long domain would breach the 64-byte X.509 limit.
   dnsNames:
     - "*.${cluster_internal_domain}"
     - ${cluster_internal_domain}

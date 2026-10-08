@@ -1,3 +1,4 @@
+{%- import "partials/links.jinja" as links with context -%}
 # Runbooks — {{ cluster_name }}
 
 Day-two operations for this cluster. This is the file every alert's
@@ -10,7 +11,7 @@ that is a bug, not a missing feature you need to install.
 
 The reasoning behind these shapes (Flux stages, substitution, storage tiers, the
 DNS split) lives in the template's
-[ARCHITECTURE.md](https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/ARCHITECTURE.md).
+[ARCHITECTURE.md](https://github.com/ericsweiss/weisssrv-cluster-template/blob/main/docs/ARCHITECTURE.md).
 
 ---
 
@@ -31,10 +32,80 @@ There is no state-snapshot task: the repository *is* the intended state, and
 `task flux:status` plus `task infra:verify` are how you compare the cluster
 against it.
 
+`task infra:verify` is read-only with one exception: it starts a single
+adguardhome-sync run on the DNS primary to prove the service sandbox can start,
+so the play reports one changed task and the primary's config is pushed to the
+replica. Add `-e postflight_exercise_sync=false` to skip that run.
+
 If `task` itself fails before running anything, the usual causes are a missing
 tool (`task lint` names each one in its precondition message), an unauthenticated
 1Password CLI (`task op:check`), or the collection not being installed
 (`task ansible:install-collections`).
+
+**Alert index**
+
+| Alert | Means | First move |
+|---|---|---|
+| `EndpointDown` | a blackbox probe target stopped answering | the service's dashboard, then its logs, then its NetworkPolicy |
+| `BlackboxExporterDown` | the prober itself is down, so every probe is blind | `kubectl -n observability get pods -l app.kubernetes.io/name=prometheus-blackbox-exporter` |
+| `KeyEndpointProbeMissing` | a probe target other rules select by name is gone, so those rules match nothing | the target list in `observability/exporters/blackbox-exporter.yaml` |
+| `AlertmanagerClusterFailedToSendAlerts` | alerts are firing but a receiver is not being reached | `kubectl -n observability logs sts/alertmanager-kube-prometheus-stack-alertmanager`, then that receiver's endpoint |
+| `ExternalDNSNoSourceEndpoints` | external-dns owns no Ingress or Service source, so every record it manages is unmanaged | `kubectl -n <ns> logs deploy/external-dns`, then its source and provider flags |
+| `ExternalDNSSyncStale` | no successful sync in over 30 minutes | the provider credential, then the controller log |
+| `ExternalDNSRecordsDropped` | the owned-record count fell by more than a fifth | a changed annotation prefix or owner id makes external-dns disown and delete records it created |
+| `LokiRulerRulesMissing` | the Loki ruler loaded no rules | the `loki-sc-rules` sidecar and the rule ConfigMap's folder annotation |
+| `LokiRulerEvaluationFailures` | LogQL rule evaluations are failing, so log-based alerts do not fire | the ruler's log, then the failing rule's query |
+| `LokiRulerNotificationFailures` | the ruler cannot reach Alertmanager, so a firing log alert reaches no receiver | the ruler's Alertmanager URL and the NetworkPolicy between them |
+| `ContainerMemoryNearLimit` | a container has held above 90% of its memory limit | raise the limit in git, and the paired VPA `maxAllowed` with it |
+| `PageCacheWorkloadRSSNearLimit` | an observability container's non-reclaimable memory is near its limit | same, but it is not page cache, so the limit really is too low |
+
+The three Loki ruler alerts matter more than their severity suggests: the ruler
+is the only alert path that does not run through Prometheus, so nothing else
+notices when it stops.
+
+### After an addressing change
+
+Old addresses survive in stored state that nothing reconciles. Sweep the vault
+items' URL fields, every kubeconfig, and any daemon still running with the old
+address in its config.
+
+A service whose config file is regenerated on upgrade brings the old address
+back after a hand-edit. Home Assistant's `.storage/http` is the usual one, so
+re-check it after the next update.
+
+---
+
+## Alerts that link here
+
+Most rules point at this file without an anchor. What each one means and where
+to read on:
+
+| Alert | Means | Section |
+|---|---|---|
+| `DiskUsageWarning` / `DiskUsageCritical` | a filesystem is filling | Storage |
+| `InodeUsageWarning` / `InodeUsageCritical` | inodes are exhausting before bytes do | Storage |
+| `PVCUsageWarning` / `PVCUsageCritical` | a claim is filling | Storage |
+| `LocalPathPVExists` | a PV landed on the local-path class instead of a static volume | Storage |
+| `KubeletImageGCIneffective` | a node root filesystem is above the kubelet image-gc watermark | Storage, "Kubelet image store" |
+| `ZFSPoolNotOnline` / `ZFSPoolDataErrors` | a pool is DEGRADED or has unrecoverable data | Storage, "A degraded pool" |
+| `ZFSPoolDeviceErrors` / `ZFSPoolScrubStale` | checksum errors on an ONLINE pool, or no scrub in 35 days | Storage, "A degraded pool" |
+| `ZfsEncryptedMountStuck` / `ZfsEncryptedMountStuckCritical` | encrypted datasets have not mounted, so their exports and gated guests stay down | Storage |
+| `SwapCleanFailed` / `SwapCleanSkipped` | the swap-clean job failed, or a conflicting unit has blocked every run for 3 days | Storage |
+| `EncryptedSwapPlaintextFallback` | a host swaps to the plaintext device because the dm-crypt mapper is not active | Storage, "Encrypted swap" |
+| `EncryptedSwapRestoreFailed` | the mapper failed and the plaintext fallback could not be restored, so the host has no swap | Storage, "Encrypted swap" |
+| `NodeMemoryPressure` | the kubelet is evicting for memory | Adding a node |
+| `NodeExporterHealthcheckRestartLoop` | the host node-exporter is being restarted repeatedly by its liveness gate | Adding a node |
+| `NodeOutageStormControl` | a node is NotReady and its workload alerts are inhibited | Adding a node |
+| `NodeStuckCordoned` | a node has been unschedulable for 30 minutes | Upgrades, Kubernetes nodes |
+| `KuredRebootStuck` | the cluster-wide reboot lock is held with nothing rebooting | Upgrades, Coordinated reboots |
+| `MaintenanceRebootDeferred` | a host has a pending reboot it keeps deferring | Upgrades, Coordinated reboots |
+| `FluxReconciliationFailure` | a Kustomization or source stopped reconciling | When Flux is unhappy |
+| `FluxResourceNotReady` | a reconciled object never became ready | When Flux is unhappy |
+| `MetalLBSpeakerNotScheduled` | no metallb-speaker pod is scheduled, so no LoadBalancer VIP is announced | When Flux is unhappy, "A MetalLB VIP receives nothing" |
+| `VPARecommendationCapped` | a VPA wants more than its policy ceiling allows | Adding an application |
+| `ExternalSecretSyncFailure` | a Secret is no longer being produced from the vault | Rotating a secret |
+| `SecretsProviderDown` | the secrets backend itself is unreachable | Rotating a secret |
+| `RegistryCacheDown` | the pull-through registry cache is down or unscrapable | Registry pull-through cache |
 
 ---
 
@@ -62,12 +133,13 @@ your machine:
 | You touched | Also run | Commit |
 |---|---|---|
 | a version pin in `group_vars/all.yml` | `task flux:sync-versions` | the ConfigMap alongside |
-| `hosts.yml` | `task hosts:sync` | `scripts/hosts.env` alongside |
+| `hosts.yml` | `task hosts:sync`, `task flux:sync-host-log-staleness` | `scripts/hosts.env` and the regenerated rule file alongside |
 | anything under `kubernetes/` | `task flux:lint` | — |
 | alert or recording rules | `task lint:prometheus-config` | — |
 
-`task lint:prometheus-config` is deliberately **not** part of `task lint`: it
-needs `promtool` and `amtool`, which are not workstation defaults.
+`task lint` runs `task lint:prometheus-config` as well. It needs `promtool` and
+`amtool`, which are not workstation defaults, so its preconditions name the
+missing tool instead of skipping the checks.
 
 ---
 
@@ -82,8 +154,9 @@ flux reconcile kustomization apps --with-source
 flux reconcile helmrelease <name> -n <namespace>
 ```
 
-Reconciliation is push-triggered, with a short poll as the fallback, so a merged
-change normally lands within a minute. Forcing is for when you are watching.
+Reconciliation is poll-driven: `task flux:bootstrap` creates the `flux-system`
+GitRepository with a one-minute interval, so a merged change normally lands
+within a minute. Forcing is for when you are watching.
 
 Fast local iteration, reverted on the next pass — use it to check a render, not
 to deploy:
@@ -91,6 +164,56 @@ to deploy:
 ```bash
 task flux:dev-apply -- kubernetes/apps/<app>
 ```
+
+### Restarting a Flux-managed workload
+
+Which command to use depends on who owns the object, not on what you want to
+happen:
+
+- **HelmRelease-backed workloads** take `kubectl rollout restart`. The
+  helm-controller owns the release rather than the individual Deployment, so the
+  restart annotation survives until the next Helm upgrade.
+- **Kustomize-managed workloads** take `kubectl delete pod`. A `rollout restart`
+  writes a `kubectl.kubernetes.io/restartedAt` annotation the kustomize-controller
+  treats as drift and reverts on the next reconcile, so the pods come back and
+  the restart silently un-happens.
+
+`kustomize.toolkit.fluxcd.io/name` is on everything kustomize-controller
+applies and on nothing a HelmRelease produces, so the label tells the two apart
+without a hand-kept list. `task observability:restart` is the worked example for
+a namespace that holds both.
+
+After a pod delete, wait on the new pod with
+`kubectl wait --for=condition=ready -l <selector>`. Run against the old pods it
+passes immediately, so give the delete a moment to take effect first.
+
+### A changed PV mountOption that nothing picked up
+
+The kubelet reads `mountOptions` at mount time only. Flux reconciles the PV and
+every running pod stays on the options it mounted with, so the change looks
+applied and is not in effect. Delete the pods that mount it, one workload at a
+time:
+
+```bash
+kubectl delete pod -n <namespace> -l <selector>
+```
+
+Pod delete, not `rollout restart` — see above. Confirm the new options with
+`nfsstat -m` on the node the pod landed on, or read the pod's resolved mount
+options.
+
+### A new NFS-backed PV stuck in ContainerCreating
+
+Flux reconciles `kubernetes/` within about a minute of a merge, while the export
+the PV names is created by a separate, later `task storage:deploy`. Merge the
+Ansible half first, deploy it, and only then merge the manifest. The other way
+round the pod sits in `ContainerCreating` with a `mount.nfs: ... No such file or
+directory` event.
+
+A Deployment with `strategy: Recreate` on an RWO volume terminates the running
+pod before the new one is scheduled, so this is a full outage of that app rather
+than a rolling one. Recovery order: create the export, `exportfs -ra`, then
+delete the stuck pod so the kubelet retries the mount.
 
 ---
 
@@ -131,6 +254,43 @@ run it under `op run --`.
 All roles are idempotent; re-running is the normal way to apply a change and the
 first thing to try when a host has drifted.
 
+### A green deploy that converged nothing
+
+The multi-host plays in `base.yml` and `site.yml` carry
+`ignore_unreachable: true`, so one down box cannot red the whole fleet run.
+ansible-core does not record such a host as dark: with `ignore_unreachable` set
+it increments `ok` and `ignored`, never adds the host to `_unreachable_hosts`,
+and the recap prints `unreachable=0` with `ansible-playbook` exiting 0. A deploy
+that configured **nothing** on a host would otherwise report success.
+
+A probe/gate pair around those plays is what turns that into a red run:
+
+- `_reachability-probe.yml` runs first and records the misses in the in-memory
+  `deploy_skipped` group. Every multi-host deploy play targets
+  `<group>:!deploy_skipped`, so a host known absent is not dialled again in each
+  later play and cannot hard-fail on the first task templating a fact it never
+  gathered.
+- `_reachability-gate.yml` runs last and carries the probe's host pattern rather
+  than `hosts: localhost`. `--limit` applies to every play's host list, implicit
+  localhost included, so a localhost gate matches zero hosts under exactly the
+  scoped CI deploy jobs it exists to protect. `tags: always` cannot rescue a play
+  with no hosts.
+- The ledger is a t0 snapshot, so the gate re-probes whatever is not already on
+  it. `deploy_skipped` converged nothing; `deploy_lost` converged part of the run
+  and is the more dangerous state to report green.
+- A host knowingly out for hardware work goes in
+  `deploy_expected_absent_hosts` (`group_vars/all.yml`), which downgrades it to a
+  warning. The concession is then recorded in git and expires with a commit.
+
+The plays outside the ledger — host metrics and log shipping, which also target
+application and k3s guests — report their own misses in a `post_tasks` step
+instead. Read that line before treating a green run as converged, and re-run
+against the host once it is back:
+
+```bash
+task infra:deploy -- --limit <host>
+```
+
 ---
 
 ## Upgrades
@@ -160,6 +320,11 @@ task maintenance:update-full              # both, rolling and interactive
 task infra:verify
 ```
 
+Upgrading `nfs-kernel-server` can hang nfsd's STOP, which leaves `:2049` dead
+with the unit neither stopped nor running. `_ensure-nfs-server-healthy.yml`
+recovers it with `reset-failed` then `start` — never `restart`, which waits on
+the same stop.
+
 Silence the alerts a planned restart will trip **before** starting, or the next
 real incident arrives in a channel everyone has learned to ignore. There is no
 task for this; go through Alertmanager directly:
@@ -170,14 +335,65 @@ kubectl -n observability port-forward svc/<alertmanager-svc> 9093:9093
 # then http://localhost:9093 → Silences → New Silence
 ```
 
+### Coordinated reboots
+
+kured reboots a node when its package manager asks for it, one node at a time,
+behind a cluster-wide lock. The lock does not expire: if a kured pod dies while
+holding it, reboots stop until it is cleared by hand.
+
+```bash
+kubectl -n kube-system annotate ds/kured weave.works/kured-node-lock-
+```
+
+#### Maintenance reboot routing
+
+`ansible/playbooks/maintenance/_reboot-if-needed.yml` routes a pending host
+reboot three ways, on three inputs:
+
+| Input | Meaning |
+|---|---|
+| `host_runs_etcd_server` | the hypervisor host carries a k3s **server** guest, so an etcd member |
+| `ci_detection_failed` | the play is running inside a CI executor pod but the node lookup never resolved |
+| `proxmox_self_reboot_safe` | per-host, default true; set it false for a host that must never auto-reboot |
+
+- **Defer** — the operator reboots by hand, and the host publishes
+  `maintenance_reboot_deferred` (alert `MaintenanceRebootDeferred`).
+- **Detached** — a `systemd-run` timer that survives the CI job, armed and
+  disarmed by the job's `after_script`.
+- **Synchronous** — reboot in place.
+
+Why each defer exists:
+
+- A **detached** reboot of an etcd-server host cannot coordinate with kured and
+  could take a second etcd member down. The synchronous path stays one member at
+  a time, because play 1 is `serial: 1` and waits for the etcd rejoin.
+- `ci_detection_failed` covers a pod name that does not match the executor
+  prefix, a lookup error, an empty `nodeName`, or a node with no `proxmox_host`
+  in inventory. None of those can prove the host is not the one running the job,
+  so it fails closed.
+- `proxmox_self_reboot_safe: false` never auto-reboots at all. Set it on a host
+  with encrypted pools or `onboot=0` guests that need a hand on the way back up.
+
+**Nested timeout budget on the etcd-rejoin wait.** Rebooting a control-plane
+host fails the API VIP over to another server, and during that window a
+`kubectl wait` against the VIP can block on a dead TCP session far past its own
+`--timeout`. Smallest first: `--timeout=180s` is how long the node has to go
+Ready, `--request-timeout=190s` bounds a hung API call and sits **above**
+`--timeout` so it never cuts the wait's watch short, and
+`timeout --kill-after=10s 200s` is the outer backstop for a socket-level hang.
+180 < 190 < 200, three attempts, about ten minutes worst case, then the run
+fails. Raise them together.
+
 ### Kubernetes nodes
 
 ```bash
 # bump k3s_version in group_vars/all.yml, then:
-task maintenance:update-k3s-nodes         # drains, upgrades and uncordons node by node
+task maintenance:update-k3s-nodes         # cordons, upgrades and uncordons node by node
 task k3s:status
 ```
 
+It cordons rather than drains: containerd keeps running pods alive across the
+kubelet restart, and draining would evict the CI executor pod running the job.
 Servers first, one at a time, watching the etcd quorum. Rolling back is a
 version bump in the other direction plus the same task.
 `task maintenance:update-cluster` chains the node upgrade and the pin sweep.
@@ -186,7 +402,7 @@ version bump in the other direction plus the same task.
 
 Bumping `lib_ref` upgrades the Ansible collection, the CI templates and the
 Terraform modules together — three pin surfaces, one answer. Read the library's
-release notes first ([weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib),
+release notes first ([weisssrv-lib]({{ links.lib_home() }}),
 and `ansible_collections/weisssrv/infra/MIGRATING.md` for role variable renames
 and newly asserted inputs), then change the ref in every place it is written:
 each `ref:` in `.gitlab-ci.yml`, the `version:` in `ansible/requirements.yml`,
@@ -207,10 +423,9 @@ vendored-copy gate in `tests/` compares every file
 `scripts/vendored-manifest.yml` lists against the refreshed `.weisssrv-lib`
 checkout. A script the bump changed fails it, and the fix is to copy the new
 version out of `.weisssrv-lib/` and review the diff — never to edit the copy.
-A profile listed as a **fork** (`ruff.toml`, `.editorconfig`, `.gitleaks.toml`,
-`.gitlab/secret-detection-ruleset.toml`) fails differently: absorb the library's
-change into the fork, then set that entry's `reconciled_sha256` to the sha the
-failure prints.
+A file the manifest's `forked:` list names fails differently: absorb the
+library's change into the fork, then set that entry's `reconciled_sha256` to the
+sha the failure prints.
 
 Each Terraform module caches its module source in its own `.terraform/`, so
 every one of them needs re-initialising after a ref bump —
@@ -226,15 +441,46 @@ See § Updating the template.
 
 ## Adding a node
 
+The address bands the starter roster occupies are listed once, in the header of
+`ansible/inventories/prod/hosts.yml`. Pick the new address from there rather
+than from any band written down elsewhere.
+
 ### A hypervisor host
 
 1. Install the OS, static address, join the cluster (`pvecm add <existing-node>`).
-2. Create the admin user with passwordless sudo and deploy your SSH key.
+2. Create the admin user with passwordless sudo and deploy your SSH key. Ansible
+   needs this to exist before it can do anything. From a workstation that can
+   still reach the host as root:
+
+   ```bash
+   scripts/bootstrap-proxmox-host.sh <address> "$(cat ~/.ssh/id_ed25519.pub)"
+   ```
+
+   It creates the user, sets a console password, validates each sudoers file
+   with `visudo -cf` before installing it, and appends the key instead of
+   replacing `authorized_keys`. By hand on the console the equivalent is:
+
+   ```bash
+   useradd -m -s /bin/bash {{ admin_user }}
+   install -m 0440 /dev/stdin /etc/sudoers.d/{{ admin_user }} <<<'{{ admin_user }} ALL=(ALL) NOPASSWD:ALL'
+   install -d -m 0700 -o {{ admin_user }} -g {{ admin_user }} /home/{{ admin_user }}/.ssh
+   install -m 0600 -o {{ admin_user }} -g {{ admin_user }} /dev/stdin \
+     /home/{{ admin_user }}/.ssh/authorized_keys <<<'<your public key>'
+   ```
+
+   That `install` truncates `authorized_keys`, so the by-hand form is safe only
+   on a brand-new host. The modes matter too: sshd refuses a key in a group- or
+   world-writable `.ssh`.
+
+   From here `base.yml` owns the account — shell, groups, further keys,
+   hardening. If sudo still prompts on the first connection, use
+   `task infra:base-first-run -- --limit <host>`, which passes `-K`.
 3. Add it to `hosts.yml` under the `compute` (or `nas`) group, with its
    `proxmox_role` and `firewall_ipsets`. Facts that apply to one host only
    (NIC names, VFIO ids, per-host disks) go inline on the host entry, or in an
    optional `host_vars/<host>.yml` you create — the generated tree ships none.
-4. `task hosts:sync` and commit `scripts/hosts.env` alongside.
+4. `task hosts:sync`, `task flux:sync-host-log-staleness`, and commit both
+   generated files alongside.
 5. `task infra:base -- --limit <host>`
 6. Redeploy the firewall so the new address enters the derived IP sets:
    `cd ansible && ansible-playbook -i inventories/prod/hosts.yml playbooks/site.yml --tags proxmox_firewall`
@@ -245,7 +491,7 @@ See § Updating the template.
 1. Add the VM to `hosts.yml` under `k3s_agents` with its address, `vmid` and
    the `proxmox_host` it lives on; give it the `k3s_labels` you want it
    scheduled by.
-2. `task hosts:sync`, commit.
+2. `task hosts:sync`, `task flux:sync-host-log-staleness`, commit both.
 3. `task k3s:provision-vms -- --limit <vm>`
 4. `task k3s:deploy -- --limit <vm>`
 5. `kubectl get nodes` — the new node is `Ready` and carries its labels.
@@ -253,8 +499,10 @@ See § Updating the template.
 Adding a **server** additionally changes the etcd quorum: go from three to five,
 never to four, and verify `kubectl get nodes -l node-role.kubernetes.io/etcd`
 before and after. Server addresses also feed
-`cluster_apiserver_egress_cidr` in `cluster-config` — that key is a hand-edited
-CIDR, not derived, so widen or re-narrow it in the same change.
+`cluster_apiserver_egress_cidr` in `cluster-config` — that key is a single
+hand-edited CIDR that must cover the servers, not derived, so widen or
+re-narrow it in the same change. Where the policies spell the servers as
+individual `/32`s, add the new one there too.
 
 ---
 
@@ -306,24 +554,91 @@ task proxmox:configure-autostart          # add -- --limit <host> to narrow it
 It reads each guest's live config through its `proxmox_host` and writes only on
 a difference, so it is safe to re-run and safe against a powered-off guest.
 Leave HA-managed guests out of the groups it walks: HA starts them, so `onboot`
-is meaningless for them and setting it invites two owners for one decision.
+is meaningless for them and setting it invites two owners for one decision. The
+`services` group is out of scope for the same reason. An appliance VM this
+cluster does provision belongs in `app_servers` with `ansible_connection: local`,
+a `vmid` and a `proxmox_host`, so the reconcile reaches it.
 
 ---
 
 ## Per-host log-shipping alerts
 
-`kubernetes/infrastructure/observability/loki/host-log-staleness.yaml` ships the
-cluster-wide arm only — no journald line from ANY host. LogQL cannot group by
-label and alert on absence, so per-host coverage is one rule per host, which is
-site data. Generate them from the inventory alongside `scripts/hosts.env`:
+**Alert index**
 
-```yaml
+| Alert | Means | First move |
+|---|---|---|
+| `HostLogShippingStaleAll` | no journald line from ANY host in 45 minutes | the host-side collector unit on one host, then the Loki push IngressRoute, then the Loki pod |
+| `HostLogShippingStale` | no journald line from the named host in 45 minutes | `systemctl status alloy` on that host, then the Loki push IngressRoute and the Loki pod |
+
+`kubernetes/infrastructure/observability/loki/host-log-staleness.yaml` is
+generated. LogQL cannot group by label and alert on absence, so per-host
+coverage is one rule per host, derived from the `alloy_host` play by
+`scripts/generate-host-log-staleness.py`. Run
+`task flux:sync-host-log-staleness` after any inventory change and commit the
+result: `task lint` (`lint:repo-sync`) and the CI `check-generated-files` job fail until you
+do, including on a freshly generated repository.
+
+What the generator emits per host:
+
+{% raw %}```yaml
 - alert: HostLogShippingStale
   expr: absent_over_time({job="journal", host="<name>"}[45m])
   for: 15m
-  labels: {severity: warning, component: logging, host: <name>, instance: <name>}
+  labels: { severity: warning, component: logging, host: <name>, instance: <name> }
   annotations:
-    summary: "No journald logs from <name> in 45m (host log shipping stopped)"
+    summary: "No journald logs from {{ $labels.host }} in 45m (alloy_host shipping stopped)"
+```{% endraw %}
+
+### Loki push emergency fallback
+
+If the Loki push IngressRoute is broken but Loki itself is healthy, host
+collectors can push straight at a node port. Two objects are needed, not one:
+the NodePort skips the basic-auth ingress, but `allow-loki-ingress` still admits
+port 3100 from the Traefik namespace only, so the push is dropped without a
+temporary `ipBlock` allow as well. Flux reconciles neither object, so nothing
+removes them for you.
+
+```bash
+kubectl apply -f kubernetes/infrastructure/observability/loki/nodeport.yaml
+
+kubectl apply -f - <<'EOF'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-loki-nodeport-breakglass
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: {{ lan_cidr }}
+      ports:
+        - protocol: TCP
+          port: 3100
+EOF
+```
+
+The CIDR is a literal on purpose: `kubectl` applies this object directly and
+Flux never substitutes `${cluster_lan_cidr}` for you.
+
+Then point the host collectors at the node port and redeploy them:
+
+```bash
+# alloy_host_loki_url in group_vars/all.yml (or a host_vars override):
+#   http://<node>:31100/loki/api/v1/push
+task infra:deploy -- --tags alloy_host
+```
+
+Teardown, once the ingress is fixed: revert the `alloy_host_loki_url` override,
+redeploy the collectors, then delete both objects.
+
+```bash
+kubectl -n observability delete networkpolicy allow-loki-nodeport-breakglass
+kubectl -n observability delete service loki-external
 ```
 
 ---
@@ -338,6 +653,11 @@ deliberately uniform. Reference site values as `${cluster_...}` substitutions,
 never as literals, and run `task flux:lint` before committing — it fails on any
 placeholder the ConfigMaps do not define.
 
+If the app gets an HPA, size its CPU request first. `averageUtilization` is a
+percentage of the container's `requests.cpu`, so an under-sized request puts the
+target at noise level and the HPA sits at `maxReplicas` even when the app is
+idle. The fix is to raise the request, not the threshold.
+
 **As a guest**: define the VM or container in `hosts.yml` with its resources and
 any `vm_additional_disks` zvols, add a playbook, and route to it through the
 ingress (`kubernetes/apps/vm-ingress/` is the worked example). Guests need the
@@ -349,6 +669,68 @@ down-or-stale alert, and a probe if users hit it directly.
 
 ---
 
+## Registry pull-through cache
+
+`RegistryCacheDown` means the `registry-cache` Deployment has no available
+replica, or its `:5001` metrics endpoint stopped answering, for 15 minutes.
+Image pulls still work: they cold-fetch from the upstream registry, so pipelines
+get slower rather than failing.
+
+```bash
+kubectl -n registry-cache get pods,deploy
+kubectl -n registry-cache logs deploy/registry-cache --tail=100
+```
+
+Two causes account for most of it. The pod was evicted for exceeding the
+`emptyDir` cap in `deployment.yaml`, in which case it reschedules and re-warms
+on its own and the cap wants raising. Or the upstream credentials in the
+**Registry Cache Upstream** item stopped working, which shows as authentication
+errors in the log while the pod stays Ready — rotate them and restart the
+Deployment.
+
+If the alert fires with the pod healthy, the scrape is what broke: check the
+`:5001` ingress rule in `networkpolicy.yaml` and the ServiceMonitor's port name.
+
+---
+{% if gpu == 'nvidia' %}
+## Adding DCGM GPU telemetry
+
+`nvidia-device-plugin` advertises the card to the scheduler but exports no
+metrics: no utilisation, VRAM, temperature, power or per-pod attribution. That
+matters most under the time-slicing the plugin enables by default, where several
+pods share one card's memory and the first symptom of exhaustion is a CUDA OOM
+with nothing on a dashboard to explain it.
+
+NVIDIA's DCGM exporter fills the gap. It is not shipped because it needs a
+version pin, and every pin is single-sourced. Four steps:
+
+1. **Pin the chart** — add to `group_vars/all.yml` under `helm_chart_versions`:
+
+   ```yaml
+   dcgm_exporter: "4.6.1"   # https://github.com/NVIDIA/dcgm-exporter/releases
+   ```
+
+   then `task flux:sync-versions`. CI fails if you skip it.
+2. **Add the chart repository** — `infrastructure/sources/nvidia-dcgm.yaml`, a
+   `HelmRepository` named `nvidia-dcgm` in `flux-system` pointing at
+   `https://nvidia.github.io/dcgm-exporter/helm-charts`, listed in
+   `sources/kustomization.yaml`.
+3. **Add the release** — a `dcgm-exporter/` directory in the observability
+   stage: a namespace (PSA privileged, because the DaemonSet mounts the host GPU
+   devices), the `netpol-baseline` component, and a `HelmRelease` whose values
+   carry the same `nodeSelector` and tolerations as the device plugin
+   (`${cluster_node_label_domain}/gpu: nvidia`, tolerating `nvidia.com/gpu`),
+   `runtimeClassName: nvidia`, and `serviceMonitor.enabled: true`. Prometheus
+   discovers ServiceMonitors in every namespace.
+4. **Add a dashboard** — NVIDIA publishes one; drop the JSON into `dashboards/`
+   with a `configMapGenerator` entry and `disableNameSuffixHash: true`.
+
+First alerts worth adding once the metrics exist: `DCGM_FI_DEV_GPU_TEMP` above
+the card's slowdown threshold, and `DCGM_FI_DEV_FB_FREE` near zero for more than
+a few minutes.
+
+---
+{% endif %}
 ## Rotating a secret
 
 **In-cluster** (anything an `ExternalSecret` produces):
@@ -367,6 +749,26 @@ Restarting matters more than it looks: the operator re-fetches on a long
 interval and the reloader deliberately ignores Secret changes, so a rotation
 without a restart is a silent no-op.
 
+### What each ExternalSecret holds
+
+One row per shipped `ExternalSecret`, with the vault items it reads.
+`scripts/check-secret-rotation-coverage.py` fails when a new one, or a new
+`remoteRef.key`, is missing from this table.
+
+| ExternalSecret | Vault items | After rotating |
+|---|---|---|
+| `observability/alertmanager-config` | `Alertmanager Webhook`, `SMTP Relay Auth`, `Healthchecks Watchdog` | `task flux:rotate-secret -- observability/alertmanager-config`, then send a test alert |
+| `observability/observability-secrets` | `Grafana SSO` | `task flux:rotate-secret -- observability/observability-secrets`; the admin password only takes effect on a fresh Grafana database |
+| `observability/loki-push-auth` | `Loki Push Auth` | `task flux:rotate-secret -- observability/loki-push-auth`, then redeploy the host log shippers — they hold the same credential |
+| `authentik/authentik-secrets` | `Authentik Secrets`, `SMTP Relay Auth` | `task flux:rotate-secret -- authentik/authentik-secrets`. The PostgreSQL passwords must change in the database first, or the pods crashloop |
+| `registry-cache/registry-cache-secrets` | `Registry Cache Upstream` | `task flux:rotate-secret -- registry-cache/registry-cache-secrets` |
+{% if dns_backend == 'cloudflare' %}| `dns-api-token` (ClusterExternalSecret, fanned out) | `Cloudflare DNS Token` | rotate the token in the DNS provider first, then run `task flux:rotate-secret -- <ns>/dns-api-token` once per labelled namespace. `kubectl get externalsecrets -A` lists the copies. cert-manager DNS-01, external-dns and the DDNS CronJob all read it |
+{% endif %}{% if vpn_tailscale %}| `tailscale/tailscale-operator-oauth` | `Tailscale Operator OAuth` | `task flux:rotate-secret -- tailscale/tailscale-operator-oauth`; existing proxies keep running on their issued node keys |
+{% endif %}{% if git_backend == 'gitlab_selfhosted' %}| `gitlab-runner/gitlab-runner-token` | `GitLab Runner` | register a new runner token in the forge first, then `task flux:rotate-secret -- gitlab-runner/gitlab-runner-token` |
+| `gitlab-runner-privileged/gitlab-runner-privileged-token` | `GitLab Runner Privileged` | same procedure, on the privileged runner |
+{% endif %}
+`SMTP Relay Auth` is read by two of them, so rotating it is two rotations.
+
 **Host-side** (anything injected with `op run`): update the item, then re-run the
 task that consumes it. `task secrets:show` prints every reference this
 repository uses, so you can see which item a given task needs before touching it.
@@ -377,7 +779,86 @@ both hand-made Kubernetes Secrets and mints a fresh Connect token.
 
 ---
 
+## Adding or changing a DNS record
+
+The split horizon means a name has two halves, and which half answers depends
+on who is asking. Change the one the client resolves, and keep the two from
+disagreeing.
+
+**Internal (`*.{{ internal_domain }}`)** is a rewrite entry answering the
+internal ingress VIP. Add it to `_dns_service_rewrites` in
+`ansible/inventories/prod/group_vars/dns.yml`, apply with `task dns:deploy`,
+then verify against each resolver:
+
+```bash
+dig @<resolver> <name>.{{ internal_domain }} +short
+```
+
+A rewrite added in the AdGuard UI is pruned on the next deploy: the role owns
+the whole list. Codify it in `dns.yml` for anything permanent.
+
+**External (`*.{{ external_domain }}`)** is normally an
+`external-dns.alpha.kubernetes.io/*` annotation on the Ingress or IngressRoute,
+so adding an app's public name needs no Terraform edit at all. {% if dns_backend == 'cloudflare' %}Only what
+external-dns cannot express goes in `terraform/cloudflare/dns.tf` as an entry in
+`local.dns_records`: the apex, CAA, SPF and DMARC, DDNS-tracked A records,
+nested subdomains and DNS-only records. Those ship behind a plan — `task
+terraform:plan`, then the apply job.{% else %}Only what external-dns cannot
+express is declared by hand in the DNS provider's own configuration: the apex,
+CAA, SPF and DMARC, nested subdomains and DNS-only records.{% endif %}
+
+Keep both halves pointing at the same service. A name that resolves to the
+internal VIP inside and to a stale public address outside is the failure mode
+that looks like an app fault from one network and works fine from the other.
+
+---
+
+## Mail relay
+
+All alert and cron email leaves through the single relay at `{{ smtp_host }}`.
+An alert on it is usually the smarthost credential or the smarthost's own TLS
+verification, not the local Postfix.
+
+```bash
+ssh {{ admin_user }}@{{ smtp_host }}
+sudo systemctl status postfix
+mailq                        # or: sudo postqueue -p
+sudo tail -50 /var/log/mail.log
+```
+
+Three states matter:
+
+| State | Reading | First move |
+|---|---|---|
+| Queue growing | mail is accepted and not delivered | the upstream hop, not Postfix |
+| Deferred climbing | repeated delivery failures | `mail.log` for the SASL or TLS error |
+| Relay unreachable | senders cannot hand mail over | the service, then the firewall between sender and relay |
+
+After fixing the upstream, flush the queue rather than waiting out the retry
+timer:
+
+```bash
+sudo postfix flush           # or: sudo postqueue -f
+```
+
+While the relay is down the email leg of every alert is blind. Any
+non-email receiver is the only delivery path until it recovers.
+
+---
+
 ## Certificates
+
+**Alert index**
+
+| Alert | Means | First move |
+|---|---|---|
+| `CertExpiringWarning` / `CertExpiringCritical` | an in-cluster certificate is near expiry | `kubectl describe certificaterequest -n <ns> <name>` |
+| `BlackboxCertExpiringSoon` | the certificate a probe SEES is near expiry, whatever cert-manager thinks | check what the endpoint is actually serving before the issuer |
+| `CertificateNotReady` | cert-manager has never issued this certificate | `kubectl describe certificate -n <ns> <name>` and check the issuer and DNS token |
+| `CertRenewalFailed` / `CertRenewalFailedProlonged` | the host-side renewal exited non-zero, for an hour or for three days | read the reload script's journal on the certificate authority; the prolonged arm is the same work at higher urgency |
+| `CertRenewalStale` | nothing has renewed for 75 days, so renewal stopped RUNNING rather than failing | check the renewal cron entry on that host: a dead cron never fails, so `CertRenewalFailed` stays silent |
+| `CertDistributionTargetFailed` | the host-side renewal worked but one named target host did not get the new certificate | check SSH reachability to that host, then the reload script's journal on the certificate authority |
+| `CertExpiringSoon` / `CertExpiringSoonCritical` | the host-distributed wildcard is within 14 / 3 days of its real notAfter, or its gauge is gone | renew and redistribute now; TLS-required NFS exports and log ingest break at expiry, not just web UIs |
 
 ```bash
 kubectl get certificates -A                          # in-cluster
@@ -403,6 +884,13 @@ holds an old certificate until you notice; `task infra:verify` is what names it.
 The NAS depends on this: `nfs_tls` refuses to publish a require-TLS export
 without the wildcard certificate and key in place, so a certificate failure
 surfaces as a storage failure on the next `task storage:deploy`.
+
+In-cluster, `infrastructure/configs/wildcard-certificates.yaml` holds the anchor
+copy of each wildcard in `default`. Traefik reads Secrets only from the
+IngressRoute's own namespace, so a namespace whose route needs a wildcard keeps
+its own `Certificate` with a `renewBefore` staggered off the anchor. Per-host
+certificates are a different identifier set and share no renewal window with
+the wildcards, so a renewal storm on one does not touch the other.
 
 **The FIRST certificate is issued by hand, once.** Ansible installs acme.sh, the
 renewal cron and the push channel, and it never runs `--issue` — so on a cluster
@@ -439,26 +927,27 @@ also changed git — which is the point.
 
 **Locked out of Grafana** (the identity provider is down, or a group mapping in
 it went wrong). Grafana keeps a built-in `admin` whose password is the vault's
-`Grafana SSO` → `admin-password`, but both doors to it are closed. Open one:
-set `auth.disable_login_form: false` and `auth.basic.enabled: true` in
+`Grafana SSO` → `admin-password`, but the login form and basic auth are both
+disabled. Open one door: set `auth.disable_login_form: false` and
+`auth.basic.enabled: true` in
 `kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml`,
 reconcile, sign in, fix the provider, then revert both. Do not leave that state
 committed.
 
-If that password is refused, it is almost certainly because the account's
-password is **whatever the vault held at Grafana's first start** and the field
-has been edited since. Grafana applies `admin_password` only while its user
-table is empty, and the database is on a persistent volume, so nothing after
-that first start re-applies it — not an ExternalSecret refresh, not a rollout
-restart. Reset it against the database instead, and put the same value back in
-the vault so the two agree:
+If that password is refused, the account holds whatever the vault held at
+Grafana's first start — the field has been edited since and nothing re-applies
+it (`kubernetes/infrastructure/observability/README.md` § The admin password is
+applied once, at the first start). Rotation is therefore two steps in one
+change: edit the vault field, then make the database agree.
 
 ```bash
+task flux:refresh-secret -- observability/observability-secrets
 kubectl -n observability exec deploy/kube-prometheus-stack-grafana -c grafana -- \
   grafana cli --homepath /usr/share/grafana admin reset-admin-password '<new>'
 ```
 
-That is also the rotation procedure: a vault edit alone changes nothing.
+`--homepath` is not optional: without it the CLI cannot find its config defaults
+and exits before touching the database.
 
 ---
 
@@ -504,7 +993,17 @@ re-run — `task zfs:encrypt` installs the boot-time key load.
 **3. Verify**: `task infra:verify`, `zpool status`, and the SMART checks on the
 new members.
 
+There is no scripted teardown, and none should be added: a copy-pasteable
+`zpool destroy` in a recovery document is one mistyped pool name from an
+unrecoverable loss.
+
 **A degraded pool**
+
+`ZFSPoolNotOnline` means a pool is DEGRADED or worse. `ZFSPoolDataErrors` means
+`zpool status -v` lists unrecoverable data, so the affected files or zvols need a
+restore. `ZFSPoolDeviceErrors` catches checksum errors on a pool that still reads
+ONLINE, which is the silent-corruption signature. `ZFSPoolScrubStale` means no
+scrub has completed in 35 days, or none ever has.
 
 ```bash
 zpool status -v <pool>          # which device, which errors
@@ -525,6 +1024,27 @@ back but the client holds a stale handle. Restart the consumers — for pods,
 delete them so they remount. If the server itself refuses to stop, reset the
 failed unit and start it again rather than forcing a reboot.
 
+**Cutting a node over from plaintext to TLS**
+
+A node cannot hold a plaintext mount and an `xprtsec=tls` mount to the same
+server at once. Long-running pods and orphaned kubelet mounts pin a node to
+plaintext, so the cutover is:
+
+1. Scale every Deployment on that node that mounts the server to 0. The
+   `Recreate` strategy keeps a new pod from racing the old one for an RWO mount.
+2. Force-unmount the orphans:
+
+   ```bash
+   mount -t nfs4 | grep -E '<server-host>|<server-ip>' | grep -v xprtsec=tls \
+     | awk '{print $3}' | xargs -rn1 sudo umount -f -l
+   ```
+
+3. Scale back up. The first mount establishes the TLS session and the rest reuse
+   it. Verify with `mount -t nfs4 | grep -c xprtsec=tls`.
+
+Sweep the fleet afterwards. A client that only ever mounts plaintext is fine:
+the rule is per-client internal consistency, not a fleet-wide state.
+
 **Something landed on the wrong storage class**
 
 Every PV in the cluster is static with `storageClassName: ""`. If an alert says
@@ -533,9 +1053,162 @@ fixed — a StatefulSet's volume template is immutable, so the fix is: scale to
 zero, copy the data to the intended volume, delete the claim, recreate it bound
 to the right volume, scale back up.
 
+### Adding a dataset to a live NAS
+
+`nas_storage` never creates datasets, so a new entry under
+`nas_storage_zfs_pools[].datasets` is a hard `DATASET_MISSING` failure until the
+dataset exists. Promoting a directory that is already in use:
+
+1. Stop everything writing to it.
+2. `mv` the existing directory aside. Same pool, so it is a rename, not a copy.
+3. Create the dataset with encryption **inherited** from its parent — never
+   `zfs set encryption` on an existing dataset, which does not encrypt what is
+   already there:
+
+   ```bash
+   zfs create -o mountpoint=/mnt/<pool>/<name> -o atime=off -o compression=zstd \
+              -o com.sun:auto-snapshot=false <pool>/<name>
+   ```
+
+4. Move the content back and `chown` it.
+5. Prove it before the deploy: `mountpoint -q /mnt/<pool>/<name>` and
+   `zfs get encryption,keystatus,mountpoint <pool>/<name>`.
+
+**The bind-mount trap.** A bind mount captures its source at mount time, so
+after the rename the export serves a deleted filesystem — `findmnt` shows
+`//deleted` — even with `fstab` already correct. Re-point the server first
+(`umount -l` then `mount` per export, then `exportfs -ra`), then lazy-unmount on
+the clients. The role cannot detect this: a present mountpoint plus a present
+`fstab` entry reads as converged.
+
+### Expanding a zvol-backed volume
+
+1. Resize the zvol on the NAS, and keep the guest's disk entry in step:
+
+   ```bash
+   ssh {{ admin_user }}@{{ nas_host }}
+   sudo zfs set volsize=<new size> <pool>/appdata/<app>/data
+   sudo qm set <vmid> -scsi<N> \
+     /dev/zvol/<pool>/appdata/<app>/data,backup=0,size=<new size>
+   ```
+
+2. Make the guest see the new capacity, then grow the filesystem. A raw
+   `/dev/zvol` passthrough is not a storage-managed volume, so `qm resize` does
+   not apply and `resize2fs` against the stale capacity is a no-op. Stop and
+   start the VM, or rescan the SCSI device live:
+
+   ```bash
+   ssh {{ admin_user }}@<guest>
+   dev=$(basename "$(readlink -f /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi<N>)")
+   echo 1 | sudo tee "/sys/block/$dev/device/rescan"
+   sudo resize2fs /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi<N>
+   ```
+
+3. Raise the declared sizes in the same merge request: the `vm_additional_disks`
+   entry in `hosts.yml`, the PV's `capacity`, and the claim's request.
+
+4. Size any retention cap the workload enforces against the FILESYSTEM, not the
+   PV. The disk-usage alerts read `node_filesystem_avail_bytes`, which excludes
+   ext4's reserve, so a cap set from the PV size fires and never clears.
+
+### Reclaiming space in a zvol-backed volume
+
+A zvol-backed volume can show far more allocated on the host pool than the
+guest filesystem reports as used. Two things cause that, and both need a hand
+sweep.
+
+1. The filesystem inside the zvol frees blocks but does not issue DISCARD by
+   default, so the parent dataset never reclaims them. Trim it from inside the
+   guest, then re-read the dataset:
+
+   ```bash
+   ssh {{ admin_user }}@<guest>
+   sudo fstrim -v <mountpoint>
+
+   ssh {{ admin_user }}@{{ nas_host }}
+   sudo zfs list -o name,used,referenced,usedbysnapshots <pool>/appdata/<app>/data
+   ```
+
+2. Automatic snapshots of the dataset hold the freed blocks. Setting
+   `com.sun:auto-snapshot=false` stops creation **and** pruning, so flipping it
+   strands every snapshot already taken. List the auto-snapshots by name prefix
+   and destroy exactly those:
+
+   ```bash
+   ssh {{ admin_user }}@{{ nas_host }}
+   sudo zfs list -t snapshot -H -o name -r <pool>/appdata/<app> | grep zfs-auto-snap_
+   # if that list is what you intended:
+   sudo zfs list -t snapshot -H -o name -r <pool>/appdata/<app> | grep zfs-auto-snap_ \
+     | xargs -r -n1 sudo zfs destroy -v
+   ```
+
+   Filter by name prefix. An unbounded `@%` range also matches the replication
+   snapshots. Never destroy the incremental-base snapshot of a dataset under the
+   archive-replication source list: losing it forces a full re-send of that
+   subtree.
+
+### Kubelet image store on a node root filesystem
+
+`KubeletImageGCIneffective` means a node's root filesystem is above the kubelet's
+`image-gc-high-threshold`, so image GC runs continuously and never reaches its
+low watermark. That filesystem is also the image filesystem, so the container
+images are usually what filled it.
+
+```bash
+ssh {{ admin_user }}@<node>
+df -h /
+sudo du -sh /var/lib/rancher/k3s/agent/containerd
+sudo k3s crictl images
+sudo k3s crictl rmi --prune          # only images no container references
+```
+
+Pruning is safe during normal operation; pods re-pull on their next start. Start
+with the agents that carry the most image churn — CI runners and build agents.
+
+If pruning does not hold the node under the watermark, the disk is too small for
+the churn. `proxmox_vm_disk_size` applies at VM create only, so growing an
+existing node means resizing the disk on the hypervisor and running `growpart`
+plus `resize2fs` in the guest, or rebuilding the node from the inventory.
+
+### Encrypted swap
+
+Every `encrypted_swap` fallback branch exits 0 so the host keeps booting, so the
+textfile gauges are the only report that swap is not encrypted.
+`EncryptedSwapPlaintextFallback` means the host swaps to the plaintext device;
+`EncryptedSwapRestoreFailed` means neither the mapper nor the fallback came up,
+so the host runs with no swap.
+
+```bash
+ssh {{ admin_user }}@<host>
+swapon --show
+journalctl -t encrypted-swap -b
+systemctl status encrypted-swap-finalize.service
+```
+
+Re-running `task infra:deploy --limit <host>` re-applies the role. A mapper that
+fails again needs the journal: an `/dev/pve/swap` that is still in use by the
+plaintext device is the usual cause, and that clears on the next reboot.
+
 ---
 
 ## Backups and restore
+
+**Alert index**
+
+| Alert | Means | First move |
+|---|---|---|
+| `EtcdSnapshotStale` | the off-node copy of the etcd snapshot stopped landing | `task k3s:backup`, then the NAS export it copies to |
+| `OffsiteBackupFailed` / `OffsiteBackupStale` | the restic run failed, or stopped running | the storage host's restic unit and its journal |
+| `OffsiteBackupIncomplete` / `OffsiteBackupIncompleteProlonged` | restic exited 3: the snapshot exists but skipped unreadable paths, the second for two consecutive nights | the paths the restic unit logged on the storage host |
+| `OffsiteBackupVerifyStale` | the repository has not been verified recently | run the verify job by hand |
+| `ArchiveBackupFailed` / `ArchiveBackupStale` | replication to the archive pool failed or stopped | the archive pool's health, then the replication unit |
+| `ArchiveBackupDatasetStale` | one dataset stopped replicating while the others kept going | that dataset's snapshots on both sides |
+| `VzdumpBackupFailed` / `VzdumpBackupStale` | a hypervisor guest backup failed or stopped | the vzdump job on the owning host |
+| `VzdumpBackupNoGuests` | a vzdump run succeeded having selected no guest at all | the guest selection on that host's backup schedule |
+| `PveClusterBackupFailed` / `PveClusterBackupStale` | the /etc/pve backup failed or stopped; both stay inert until `nas_storage_pve_cluster_backup_enabled` is true | the backup storage's free space |
+| `BackupArtifactStale` / `BackupArtifactZeroBytes` | an application dump stopped landing, or landed empty | that app's dump CronJob and its last pod's logs |
+| `BackupArtifactNeverLanded` | no dump has ever landed for an app: the job never ran, or it writes outside the collector's glob | that app's dump CronJob, then the collector's glob for it |
+| `LocalPathPVExists` | a claim bound to the local-path class instead of a static volume | Storage, "Something landed on the wrong storage class" |
 
 What the generated cluster ships, and what it does **not**:
 
@@ -543,6 +1216,7 @@ What the generated cluster ships, and what it does **not**:
 |---|---|---|
 | ZFS snapshots on the storage host | on, once you declare the datasets | `nas_storage_zfs_pools` in `group_vars/nas.yml` |
 | Hypervisor guest backups (vzdump) | on for guests that opt in | `proxmox_backup_storage` / `proxmox_backup_vzdump_jobs` in `group_vars/nas.yml` |
+| Proxmox cluster config (/etc/pve) | **off by default** | `nas_storage_pve_cluster_backup_enabled` in `group_vars/nas.yml` |
 | etcd snapshots | on, taken by k3s; copied off-node to the NAS | `k3s_etcd_snapshot_*` in `group_vars/k3s.yml`; on demand with `task k3s:backup` |
 | Per-application logical dumps | per app | e.g. `kubernetes/apps/authentik/pg-dump.yaml` |
 | Replication to an archive pool | **off by default** | `nas_storage_archive_backup_enabled` in `group_vars/nas.yml` |
@@ -555,6 +1229,13 @@ means setting `restic_offsite_enabled: true`, filling in `restic_offsite_repo`,
 and adding the matching `op://` references to the `storage:deploy` task's `env:`
 block. The role asserts all of them, so a half-configured enable fails the
 deploy rather than backing up nothing quietly.
+
+The /etc/pve row is opt-in too. Set
+`nas_storage_pve_cluster_backup_enabled: true` on the storage host, which has to
+be a cluster member holding the backups dataset. Every other key for that tier
+has a working default. Until you set it there is no `pve_cluster_backup_*`
+metric, so the two `PveClusterBackup*` alerts stay silent about a cluster whose
+CA, node certs and guest definitions are unsaved.
 
 ### Enabling hypervisor guest backups (tier 2)
 
@@ -591,6 +1272,11 @@ proxmox_backup_vzdump_jobs:
     script: /usr/local/bin/vzdump-metrics-hook.sh
 ```
 
+In the **same change**, flip `cluster_vzdump_probe_metric` in `cluster-config`
+to `vzdump_backup_last_success_timestamp_seconds`. That key gates
+`VzdumpBackupStale`'s `absent()` arm, which is the only arm that fires when the
+hook stops emitting at all.
+
 ### Enabling archive replication (tier 3)
 
 The pool must already exist and be listed in `nas_storage_zfs_pools`; the role
@@ -609,6 +1295,11 @@ nas_storage_archive_backup_sources:
 # once those writes quiesce, so a half-written .vma is never captured.
 nas_storage_archive_backup_vzdump_target: ""
 ```
+
+In the **same change**, flip `cluster_archive_backup_probe_metric` in
+`cluster-config` to `archive_backup_last_success_timestamp_seconds`. That key
+gates `ArchiveBackupStale`'s `absent()` arm, which is the only arm that fires
+when replication stops emitting at all.
 
 ### Enabling offsite (tier 4)
 
@@ -631,8 +1322,14 @@ In the **same change**, flip `cluster_offsite_backup_probe_metric` in
 gates `OffsiteBackupStale`'s `absent()` arm, and it ships pointed at a metric
 that always exists so the alert stays inert until this tier actually runs.
 
-Put the cache directory on an **encrypted** dataset: it holds the repository
-tree — file paths — in plaintext even though the data blobs are client-encrypted.
+#### How the upload is triggered
+
+`restic-offsite.timer` is the role's default trigger. The archive-to-offsite
+chain is opt-in: `group_vars/nas.yml` also sets
+`nas_storage_archive_backup_on_success_units: [restic-offsite.service]`, which
+puts the upload behind a successful archive replication. The offsite copy is
+then always paired with a known-good local one, and the timer covers a night
+where the chain did not fire. Empty that list to run on the timer alone.
 
 Inspect what exists:
 
@@ -641,6 +1338,22 @@ task k3s:backup                                              # take an etcd snap
 ssh {{ admin_user }}@{{ nas_host }} 'zfs list -t snapshot'   # local snapshots
 ssh {{ admin_user }}@{{ nas_host }} 'ls /var/lib/vz/dump'    # hypervisor guest backups
 ```
+
+### Restoring etcd from a snapshot
+
+k3s takes the snapshot on the server nodes, and `task k3s:backup` takes one on
+demand. Restoring is a whole-control-plane operation, in this order:
+
+1. `sudo systemctl stop k3s` on **every** server.
+2. On one server:
+   `sudo k3s server --cluster-reset --cluster-reset-restore-path=/var/lib/rancher/k3s/server/db/snapshots/<snapshot>`,
+   then `sudo systemctl start k3s` and wait for it to report Ready.
+3. On each other server: `sudo rm -rf /var/lib/rancher/k3s/server/db/etcd` and
+   `sudo systemctl start k3s`, so it rejoins the reset member.
+
+Step 3 is the one that gets skipped, and skipping it leaves a divergent control
+plane: the reset node is a single-member cluster while the others still hold
+their own etcd data.
 
 Rehearse restores on a schedule, not after an incident:
 
@@ -653,6 +1366,49 @@ Two values are unrecoverable by design and belong somewhere **outside** the
 vault that holds them: the offsite repository password, and any application's
 own backup-encryption key. Losing either makes the corresponding copies
 decorative.
+
+---
+
+## kube-system fencing
+
+`kube-system` is fenced like every other namespace: an ingress default-deny from
+the `netpol-baseline` component plus a complete allow set, all of it in
+`kubernetes/infrastructure/configs/kube-system-policies/`.
+
+The deny is only safe while the allow set is complete, so the two must land in
+the same reconcile and be reviewed together. kured is reconciled by the
+controllers stage and CoreDNS and metrics-server by k3s itself; splitting the
+policies to sit beside each workload would let the deny land while an allow's
+stage is still pending. The `resources:` list is ordered allows-first because
+kustomize emits in list order and the component appends the deny last.
+
+**CoreDNS is the one allow that can break the cluster if it is narrowed.** A
+query reaches those pods three ways, which is why one rule carries three peer
+shapes:
+
+- every namespace, the path almost all traffic takes;
+- the pod CIDR, because a query aimed at the kube-dns ClusterIP from outside the
+  pod network is DNAT'd and masqueraded by kube-proxy and can arrive as the
+  sending node's flannel gateway address;
+- the LAN, as defence in depth for host-netns clients.
+
+The last two widen nothing: neither pod IPs nor the ClusterIP are LAN-routable,
+and the pod CIDR is a subset of what the namespace selector already admits.
+Confirm no host-side unit queries the cluster DNS ClusterIP before narrowing the
+LAN peer.
+
+metrics-server's allow is label-scoped to `k8s-app: metrics-server`, the k3s
+AddOn's label. Replacing the AddOn with the upstream chart needs a second policy
+selecting `app.kubernetes.io/name: metrics-server`; NetworkPolicies are
+additive, so two objects cover both label sets.
+
+Current residents and their ingress: CoreDNS `53/udp`+`53/tcp` from everything
+and `9153` from observability; metrics-server `10250` from the aggregation
+layer; kured `8080` from observability; kube-vip is hostNetwork, which
+NetworkPolicy never gates. `local-storage` sits in `k3s_disable`, so there is no
+local-path-provisioner and no default StorageClass: a PVC that omits
+`storageClassName` stays Pending. Adding a workload here means adding its allow
+in the same commit.
 
 ---
 
@@ -671,6 +1427,26 @@ decorative.
 kubectl logs -n flux-system deploy/kustomize-controller --tail=100
 kubectl logs -n flux-system deploy/helm-controller --tail=100
 ```
+
+### A MetalLB VIP receives nothing while the service looks healthy
+
+A frame addressed to a MetalLB VIP, rather than to the node's own address, is
+FORWARDED to the guest and filtered by the per-guest firewall, after the host
+bridge. It never reaches the hypervisor's own host-input chain, so a
+datacenter-level rule compiles into the wrong chain and does nothing.
+
+The receiver looks healthy throughout. Its listener is fine and injecting a
+packet inside the pod works, so the only symptom is that nothing arrives.
+
+Fix it with a per-guest security group in `group_vars/all.yml` — an `IN ACCEPT`
+from the sender to the VIP on that port — assigned in `hosts.yml` to **every**
+node the VIP can be announced from. A pod scheduled to a class of nodes but not
+pinned to one lets MetalLB announce from any of them.
+
+`MetalLBSpeakerNotScheduled` is the other shape of this. The speaker DaemonSet
+wants zero pods, usually because no node carries the
+`${cluster_node_label_domain}/ingress` label, so every VIP is still assigned and
+nothing announces it.
 
 ---
 
@@ -708,14 +1484,14 @@ update reintroduces the old answer.
 
 This repository holds *this cluster*. The building blocks are documented
 upstream:
-
+{% set lib_tree = links.lib_tree() %}{% set lib_blob = links.lib_blob() %}
 | What | Where |
 |---|---|
-| Role variables and behaviour | [`ansible_collections/weisssrv/infra/roles/<role>/README.md`](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) in weisssrv-lib |
-| The collection's inventory-wide variable table | [collection README](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/README.md) |
-| Role breaking changes across refs | [MIGRATING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/MIGRATING.md) |
-| CI template inputs | [docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md) |
-| What a `lib_ref` bump can break | [docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md) |
-| The generator, its answers and its own docs | [weisssrv-cluster-template](https://git.ericsweiss.com/eric/weisssrv-cluster-template) |
+| Role variables and behaviour | [`ansible_collections/weisssrv/infra/roles/<role>/README.md`]({{ lib_tree }}{{ lib_ref }}/ansible_collections/weisssrv/infra/roles) in weisssrv-lib |
+| The collection's inventory-wide variable table | [collection README]({{ lib_blob }}{{ lib_ref }}/ansible_collections/weisssrv/infra/README.md) |
+| Role breaking changes across refs | [MIGRATING.md]({{ lib_blob }}{{ lib_ref }}/ansible_collections/weisssrv/infra/MIGRATING.md) |
+| CI template inputs | [docs/INCLUDE-CONTRACT.md]({{ lib_blob }}{{ lib_ref }}/docs/INCLUDE-CONTRACT.md) |
+| What a `lib_ref` bump can break | [docs/VERSIONING.md]({{ lib_blob }}{{ lib_ref }}/docs/VERSIONING.md) |
+| The generator, its answers and its own docs | [weisssrv-cluster-template](https://github.com/ericsweiss/weisssrv-cluster-template) |
 
 This cluster's pipeline is described in [ci-pipeline.md](ci-pipeline.md).

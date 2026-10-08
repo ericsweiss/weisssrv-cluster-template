@@ -1,19 +1,15 @@
 ---
-# Grafana state (SQLite: service accounts, preferences) on NFS, so Grafana can
-# float to any node.
-#
-# The export directory is created and owned by the storage host's Ansible role —
-# a from-scratch build needs the storage deploy, not a manual mkdir. The export
-# squashes all client operations to a fixed uid:gid, so the container UID does
-# not matter but the directory ownership does.
+# Grafana state on NFS, so Grafana can float to any node. The storage host's
+# Ansible role creates and owns the export directory, so a from-scratch build
+# needs the storage deploy rather than a manual mkdir.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: grafana-data
   annotations:
-    # Lets Flux delete+recreate this PV when an immutable field (server,
-    # mountOptions) changes instead of stalling the Kustomization. Retain keeps
-    # the data.
+    # Lets Flux delete+recreate this PV if spec.nfs (server or path) changes -
+    # the only immutable field here; Retain keeps the data. The PVC must be gone
+    # first: a Bound PV blocks on the pv-protection finalizer.
     kustomize.toolkit.fluxcd.io/force: "Enabled"
   labels:
     app: grafana

@@ -1,0 +1,84 @@
+{#- SECRETS SEAM: partials/secrets.jinja is the one home. The vault here is
+    go-task's {{.OP_VAULT}} so `task secrets:show`, which reads the Taskfile tree
+    as text, matches the variable. -#}
+{%- import "partials/secrets.jinja" as secrets with context -%}
+{%- set secret_runner = secrets.secret_runner -%}
+{%- macro secret_ref(item, field) -%}{{ secrets.secret_ref(item, field, vault='{{.OP_VAULT}}') }}{%- endmacro -%}
+# https://taskfile.dev
+# Host-stack deployment and dry runs. k3s is taskfiles/k3s.yml; the
+# per-service plays (DNS, mail, storage) are in the root Taskfile.
+version: '3'
+
+{% raw -%}
+# Anchors aliased by the tasks below. YAML anchors do not cross files, so each
+# namespace file carries the precondition list it uses.
+x-preconditions:
+  op: &op_preconditions
+    - sh: command -v ansible-playbook
+      msg: "ansible-playbook not installed. pip install ansible, then: task ansible:install-collections"
+    - sh: command -v op
+      msg: "1Password CLI not installed: https://developer.1password.com/docs/cli/get-started/"
+    # `op account list`, not `op whoami`: with the desktop-app integration
+    # whoami reports "not signed in" in the non-interactive shell Task uses
+    # here.
+    - sh: op account list 2>/dev/null
+      msg: "1Password CLI not authenticated. Run: eval $(op signin)"
+
+tasks:
+  deploy:
+    desc: Deploy the full host stack (Proxmox, DNS, storage, mail — excludes k3s)
+    dir: "{{.ANSIBLE_DIR}}"
+    # Anchor shared with infra:check so dry-run and deploy can never disagree
+    # about which secrets are injected.
+    env: &infra_env
+      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
+      SMTP_RELAY_USER: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'username') }}{% raw %}
+      SMTP_RELAY_PASSWORD: {% endraw %}{{ secret_ref('SMTP Relay Auth', 'password') }}{% raw %}
+      SMTP_UPSTREAM_USER: {% endraw %}{{ secret_ref('SMTP Smarthost', 'username') }}{% raw %}
+      SMTP_UPSTREAM_PASSWORD: {% endraw %}{{ secret_ref('SMTP Smarthost', 'password') }}{% raw %}
+      ADGUARD_ADMIN_PASSWORD: {% endraw %}{{ secret_ref('AdGuard Home', 'password') }}{% raw %}
+      SAMBA_NAS_PASSWORD: {% endraw %}{{ secret_ref('Samba NAS User', 'password') }}{% raw %}
+      ACME_SSH_PRIVATE_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'private key') }}{% raw %}
+      ACME_SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'public key') }}{% raw %}
+      LOKI_PUSH_USER: {% endraw %}{{ secret_ref('Loki Push Auth', 'username') }}{% raw %}
+      LOKI_PUSH_PASSWORD: {% endraw %}{{ secret_ref('Loki Push Auth', 'password') }}{% raw %}
+{% endraw %}{% if vpn_tailscale %}      TAILSCALE_AUTH_KEY: {{ secret_ref('Tailscale Auth Key', 'credential') }}
+{% endif %}{% raw %}    preconditions: *op_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/site.yml {{.CLI_ARGS}}
+
+  check:
+    desc: Check mode — show what infra:deploy would change
+    dir: "{{.ANSIBLE_DIR}}"
+    env: *infra_env
+    preconditions: *op_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/site.yml --check --diff {{.CLI_ARGS}}
+
+  base:
+    desc: Deploy base host configuration only
+    dir: "{{.ANSIBLE_DIR}}"
+    env: &base_env
+      ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
+      SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
+      # base rewrites authorized_keys, so base.yml re-seeds the cert key after it.
+      ACME_SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'public key') }}{% raw %}
+    preconditions: *op_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/base.yml {{.CLI_ARGS}}
+
+  base-first-run:
+    desc: First base run on a host whose sudo still prompts (-K)
+    dir: "{{.ANSIBLE_DIR}}"
+    env: *base_env
+    preconditions: *op_preconditions
+    cmds:
+      - {% endraw %}{{ secret_runner() }}{% raw %} ansible-playbook -i {{.INVENTORY}} playbooks/base.yml -K {{.CLI_ARGS}}
+
+  verify:
+    desc: Run the post-deployment verification play
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible-playbook -i {{.INVENTORY}} playbooks/postflight.yml {{.CLI_ARGS}}
+{%- endraw %}

@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
-# Shared Flux render helpers: extract the postBuild substitution variables from
-# the cluster-versions ConfigMap and derive the kubeconform schema version. It
-# does NOT own the per-Kustomization build + kubeconform loop.
-#
-# Callers eval the output so the exports land in the caller's shell (works the
-# same under bash and go-task's mvdan/sh interpreter):
-#
-#   VARS=$(scripts/flux-render.sh export-versions "$CM") || exit 1
-#   eval "$VARS"          # exports every .data key + FLUX_ENVSUBST_VARS
-#   K8S_VER=$(scripts/flux-render.sh k8s-version "$CM")
+# ConfigMap -> eval-able shell exports, plus the kubeconform schema version.
+# The build + kubeconform loop stays in each caller: run-render-gates.sh here,
+# the render loops in weisssrv and the cluster template. docs/SCRIPTS.md.
 set -euo pipefail
 
 die() {
@@ -50,6 +43,10 @@ for key, value in data.items():
         sys.exit(f"flux-render: ERROR: invalid shell variable name in {cm}: {key}")
     if key in _RESERVED or key.endswith("_SHA256"):
         sys.exit(f"flux-render: ERROR: reserved variable name in {cm}: {key}")
+    # A newline would span several physical export lines, which the callers
+    # re-read line by line, and could not survive envsubst into YAML either.
+    if "\n" in str(value):
+        sys.exit(f"flux-render: ERROR: multi-line value for {key} in {cm}")
     print(f"export {key}={shlex.quote(str(value))}")
     names.append(key)
 allowlist = "".join(f"${{{key}}} " for key in names)

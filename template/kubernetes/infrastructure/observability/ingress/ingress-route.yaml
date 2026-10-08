@@ -24,8 +24,8 @@ spec:
     secretName: grafana-internal-tls
 ---
 # Loki push API over TLS, so host-side collectors can ship journald without the
-# plaintext NodePort hop. loki-push-auth adds basic auth because Loki itself runs
-# auth_enabled=false.
+# plaintext NodePort hop. Push-only by construction: the collectors' credential
+# must not also reach the query, label and delete APIs.
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -35,7 +35,7 @@ spec:
   entryPoints:
     - websecure
   routes:
-    - match: Host(`loki.${cluster_internal_domain}`)
+    - match: Host(`loki.${cluster_internal_domain}`) && PathPrefix(`/loki/api/v1/push`)
       kind: Rule
       middlewares:
         - name: lan-tailscale-only

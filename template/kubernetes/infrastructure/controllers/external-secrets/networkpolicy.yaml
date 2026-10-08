@@ -1,8 +1,6 @@
 # This namespace holds the secrets-backend credentials and every synced Secret,
-# so it is the one namespace that also runs default-deny EGRESS: a future pod
-# added here starts with no network until it is granted one explicitly.
-# The shared components supply DNS + apiserver (and public egress for the
-# Connect sync sidecar); these two policies are the local additions.
+# so it runs a namespace-wide default-deny egress. Shared components supply DNS,
+# apiserver and the sync pod's public egress; the backend ships its own allow.
 
 ---
 # Webhook: called by the kube-apiserver post-DNAT from whichever server is

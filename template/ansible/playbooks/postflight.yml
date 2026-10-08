@@ -1,6 +1,7 @@
 ---
-# Post-deployment verification. Read-only: every check either passes or fails
-# the play, nothing is changed. Plays are skipped cleanly under --limit/--tags.
+# Post-deployment verification. Every check passes or fails the play, and the only state touched
+# is one adguardhome-sync run that exercises the service sandbox. Plays skip cleanly under
+# --limit/--tags; each sets check_mode: false so its read-only probes feed the asserts real stdout.
 
 - name: Verify SSH access to all managed hosts
   hosts: base_managed
@@ -13,6 +14,7 @@
 - name: Verify base system health
   hosts: base_managed
   become: true
+  check_mode: false
   tasks:
     - name: Check root filesystem has at least 10% free
       ansible.builtin.assert:
@@ -35,11 +37,12 @@
       ansible.builtin.command: sudo -n true
       become: false
       changed_when: false
-      when: admin_user != 'root'
+      when: base_admin_user | default(admin_user) != 'root'
 
 - name: Verify Proxmox host services
   hosts: proxmox
   become: true
+  check_mode: false
   tasks:
     - name: Verify Tailscale is running
       ansible.builtin.command: tailscale status
@@ -47,6 +50,29 @@
       register: tailscale_status
       failed_when: tailscale_status.rc != 0
       when: tailscale_enabled | default(false) | bool
+
+    # Subnet routers only. Without this ACCEPT first in nat POSTROUTING, bridged
+    # guest traffic is masqueraded a second time and every VIP on the router's
+    # own host black-holes over Tailscale.
+    - name: Read the nat POSTROUTING chain
+      ansible.builtin.command: iptables -w 5 -t nat -S POSTROUTING
+      changed_when: false
+      register: postflight_nat_postrouting
+      when: tailscale_advertise_routes | default([]) | length > 0
+
+    - name: Verify the bridged-traffic masquerade bypass comes first
+      ansible.builtin.assert:
+        that:
+          - postflight_nat_postrouting.stdout_lines | length > 1
+          - postflight_nat_postrouting.stdout_lines[1] == postflight_bridge_masq_rule
+        fail_msg: >-
+          nat POSTROUTING does not start with the bridged-traffic ACCEPT -
+          check tailscale-bridge-masq-fix.timer on this host.
+      vars:
+        postflight_bridge_masq_rule: >-
+          -A POSTROUTING -m physdev --physdev-is-bridged -m mark --mark
+          0x40000/0xff0000 -j ACCEPT
+      when: tailscale_advertise_routes | default([]) | length > 0
 
     - name: Verify Postfix is running
       ansible.builtin.service:
@@ -59,6 +85,7 @@
 - name: Verify DNS services
   hosts: dns
   become: true
+  check_mode: false
   tasks:
     - name: Verify unbound is running
       ansible.builtin.service:
@@ -98,11 +125,10 @@
 - name: Verify certificate distribution
   hosts: dns_primary
   become: true
+  check_mode: false
   tasks:
-    # An unpinned target is filtered out of acme_certs_distribution_targets, so
-    # the certificate play skips it instead of failing. That is deliberate — a
-    # first deploy has to run before the guests whose keys these are exist — but
-    # it must not stay unnoticed: this is where a forgotten paste surfaces.
+    # An unpinned target is filtered out of acme_certs_distribution_targets and
+    # silently skipped by the certificate play. This assert surfaces it.
     - name: Assert every certificate distribution target has a pinned host key
       ansible.builtin.assert:
         that: item.host_key | default('') | length > 0
@@ -116,22 +142,14 @@
       loop_control:
         label: "{{ item.host }}"
 
-    # Exercises the real push channel end to end, short of pushing a
-    # certificate. The pinned forced command (`cert-receive`) runs regardless of
-    # what the client asks for, and with empty stdin it bails `FAIL: empty
-    # bundle`, exit 3 — nothing written, no service reloaded. Exit 3 therefore
-    # proves host-key pin, key auth, forced command, sudoers drop-in and
-    # receiver install all hold; 255 is an SSH refusal, 1 a missing receiver.
-    #
-    # acme_certs_ssh_key_path deliberately has NO default: it is set in
-    # group_vars/dns.yml, and an undefined-variable error here is the right
-    # outcome if that stops being true.
+    # Exercises the push channel end to end without pushing a certificate: the
+    # forced `cert-receive` command refuses empty stdin with exit 3. An
+    # ssh_no_sudo target has no forced command, so it really runs the payload.
     - name: Probe each certificate distribution target over the pinned-key channel
       ansible.builtin.command:
         argv:
           - ssh
-          # /dev/null on stdin: the receiver must see an empty bundle and refuse
-          # it. Never give this task a real bundle — it would install a cert.
+          # CRITICAL: /dev/null on stdin. A real bundle here installs a cert.
           - "-n"
           - "-i"
           - "{{ acme_certs_ssh_key_path }}"
@@ -146,12 +164,9 @@
           - "-p"
           - "{{ item.ssh_port | default(22) }}"
           - "{{ item.ssh_user | default(acme_certs_ssh_user) }}@{{ item.ip }}"
+          - echo success
       changed_when: false
       failed_when: false
-      # Read-only, so it runs under --check too — otherwise a check-mode
-      # `task infra:verify` would skip it and the assert below would blow up on
-      # a result that has no rc.
-      check_mode: false
       register: cert_target_ssh
       loop: "{{ acme_certs_distribution_targets | default([]) }}"
       loop_control:
@@ -160,8 +175,11 @@
     - name: Assert each target answered from the cert-receive forced command
       ansible.builtin.assert:
         that:
-          - item.rc == 3
-          - "'empty bundle' in (item.stderr | default(''))"
+          - >-
+            (item.item.ssh_no_sudo | default(false))
+            | ternary('success' in (item.stdout | default('')),
+                      item.rc == 3
+                      and 'empty bundle' in (item.stderr | default('')))
         fail_msg: >-
           {{ item.item.host }} ({{ item.item.ip }}) did not answer as a
           certificate distribution target: expected rc 3 with
@@ -187,36 +205,69 @@
       failed_when: postflight_service_check is changed
       when: adguard_sync_enabled | default(false) | bool
 
-    # An enabled timer says nothing about whether the DynamicUser +
-    # LoadCredential + StateDirectory sandbox can actually start in an
-    # unprivileged container. Trigger one run and check it did not die at the
-    # exec stage: an app-level failure is fine, a systemd exec status is not.
+    # Only way to prove the DynamicUser/LoadCredential/StateDirectory sandbox
+    # can start in an unprivileged container. It pushes the primary's config to
+    # the replica, so set postflight_exercise_sync=false to skip it.
+    - name: Read the sync service invocation before the trigger  # noqa: command-instead-of-module
+      ansible.builtin.command: >-
+        systemctl show adguardhome-sync.service --property=InvocationID --value
+      register: adguardhome_sync_invocation_before
+      changed_when: false
+      when:
+        - adguard_sync_enabled | default(false) | bool
+        - postflight_exercise_sync | default(true)
+
     - name: Trigger one sync run to exercise the sandbox  # noqa: command-instead-of-module
       ansible.builtin.command: systemctl start adguardhome-sync.service
-      changed_when: false
+      changed_when: true
       failed_when: false
-      when: adguard_sync_enabled | default(false) | bool
+      when:
+        - adguard_sync_enabled | default(false) | bool
+        - postflight_exercise_sync | default(true)
+
+    # A refused start job (masked unit, job rejected before exec) leaves
+    # ExecMainStatus holding the previous run, so a changed InvocationID is
+    # what proves this invocation ran. Both reads carry the trigger's guards.
+    - name: Read the sync service invocation after the trigger  # noqa: command-instead-of-module
+      ansible.builtin.command: >-
+        systemctl show adguardhome-sync.service --property=InvocationID --value
+      register: adguardhome_sync_invocation_after
+      changed_when: false
+      when:
+        - adguard_sync_enabled | default(false) | bool
+        - postflight_exercise_sync | default(true)
 
     - name: Read the sync service exec status  # noqa: command-instead-of-module
       ansible.builtin.command: >-
         systemctl show adguardhome-sync.service --property=ExecMainStatus --value
       register: adguardhome_sync_status
       changed_when: false
-      when: adguard_sync_enabled | default(false) | bool
+      when:
+        - adguard_sync_enabled | default(false) | bool
+        - postflight_exercise_sync | default(true)
 
     - name: Assert the sync service started under its sandbox
       ansible.builtin.assert:
         that:
+          - adguardhome_sync_status is not skipped
+          - >-
+            adguardhome_sync_invocation_after.stdout | trim
+            != adguardhome_sync_invocation_before.stdout | trim
           # 217 USER, 226 NAMESPACE, 238 STATE_DIRECTORY, 243 CREDENTIALS
           - adguardhome_sync_status.stdout | trim not in ['217', '226', '238', '243']
         fail_msg: >-
-          adguardhome-sync.service failed at the exec/sandbox stage
+          adguardhome-sync.service either did not start (masked, or the job was
+          refused before exec, leaving ExecMainStatus stale and the sandbox
+          unexercised) or failed at the exec/sandbox stage
           (ExecMainStatus={{ adguardhome_sync_status.stdout | trim }}).
-      when: adguard_sync_enabled | default(false) | bool
+      when:
+        - adguard_sync_enabled | default(false) | bool
+        - postflight_exercise_sync | default(true)
 
 - name: Verify SMTP relay
   hosts: mail
   become: true
+  check_mode: false
   tasks:
     - name: Verify Postfix is running
       ansible.builtin.service:
@@ -241,7 +292,17 @@
 - name: Verify NAS storage
   hosts: nas
   become: true
+  check_mode: false
   tasks:
+    - name: Assert the inventory declares at least one ZFS pool
+      ansible.builtin.assert:
+        that:
+          - nas_storage_zfs_pools | default([]) | length > 0
+        fail_msg: >-
+          nas_storage_zfs_pools is empty on {{ inventory_hostname }}; the pool
+          health check below would iterate over nothing and pass vacuously.
+        quiet: true
+
     - name: Check ZFS pool health
       ansible.builtin.command: "zpool status {{ item }}"
       changed_when: false
@@ -337,6 +398,7 @@
 - name: Verify persistent storage mounts
   hosts: k3s:app_servers
   become: true
+  check_mode: false
   tasks:
     - name: Verify each additional disk is mounted
       ansible.builtin.command: "findmnt {{ item.mount_point }}"
@@ -355,6 +417,7 @@
   become: true
   vars:
     nas_fqdn: "{{ (groups['nas'] | first) ~ '.' ~ internal_domain }}"
+  check_mode: false
   tasks:
     - name: Verify the tlshd handshake daemon is running
       ansible.builtin.service:
@@ -365,13 +428,13 @@
       failed_when: postflight_service_check is changed
       when: nfs_tls_enabled | default(false)
 
-    # Pods and their PVs float, so a node may legitimately carry zero NAS
-    # mounts; a no-match grep leaves the assert loop empty.
+    # A node may legitimately carry zero NAS mounts (grep rc 1); rc 2 is a
+    # broken probe and must fail rather than empty the assert loop.
     - name: Gather live NFS mounts from the NAS
       ansible.builtin.command:
         cmd: "grep {{ nas_fqdn }}: /proc/mounts"
       changed_when: false
-      failed_when: false
+      failed_when: nas_nfs_mounts.rc not in [0, 1]
       register: nas_nfs_mounts
       when: nfs_tls_enabled | default(false)
 

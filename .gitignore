@@ -4,10 +4,15 @@
 .env.*
 .tmp/
 
+# CI scratch — the render-validate job installs kustomize/kubeconform here.
+.bin/
+
 # Rendered template instances (the render-smoke gate and local `copier copy`
 # runs). Anchored so nothing under template/ can match by accident.
 /.render/
 /render/
+# render_cluster.py's scratch copy of the template source.
+/template-src/
 # The version checker's upstream-response cache, written inside a render.
 .version-cache/
 
@@ -18,6 +23,11 @@ __pycache__/
 venv/
 .pytest_cache/
 .ruff_cache/
+# coverage.py: local `coverage run` / pytest --cov output.
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 /build/
 /dist/
 

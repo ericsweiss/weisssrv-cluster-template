@@ -1,52 +1,27 @@
 #!/usr/bin/env python3
-"""check-versions.py - Automated version discovery for a pinned-versions repo.
+"""Compare pinned versions against upstream releases, and write the new pins.
 
-Checks the latest available versions from official sources and compares them
-against the versions pinned in a consumer vars file (conventionally
-ansible/inventories/prod/group_vars/all.yml).
-
-Supports:
-  - GitHub releases (binary tools, container images with GitHub releases)
-  - Docker Hub / ghcr.io / LinuxServer.io container image tags
-  - Helm chart versions from OCI/HTTP repositories
-  - APT package versions from live repo indexes
-
-WHAT to track is consumer data: the service registry, the vars file, and the
-per-service deploy command live in a config file (see load_config), not here.
-Resolution order: --config, then $CHECK_VERSIONS_CONFIG, then
-scripts/version-registry.{py,json} under the repo root.
-
-Usage:
-  ./check-versions.py                     # check all services
-  ./check-versions.py --service gluetun   # check a single service
-  ./check-versions.py --category helm     # check a category
-  ./check-versions.py --json              # JSON output
-  ./check-versions.py --update gluetun    # update the pin in the vars file
-  ./check-versions.py --update-all        # update every outdated pin
-  ./check-versions.py --check-coverage    # every *_version pin has a registry entry
-
-Environment:
-  GITHUB_TOKEN / GH_API_TOKEN - optional token for higher GitHub rate limits
-                 (unauthenticated: 60 req/hr, authenticated: 5000 req/hr)
-  CHECK_VERSIONS_CONFIG - config path (overridden by --config)
+Reads a consumer config and the vars file it names; exits 0 current, 1 outdated
+or unwritable, 2 on error. Contract: docs/SCRIPTS.md - check-versions.py.
 """
 
 import argparse
-import functools
 import gzip
 import http.client
 import json
 import os
 import re
+import shutil
 import socket
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Iterable, Optional
 
 # --- Configuration ---
 
@@ -97,10 +72,21 @@ class ServiceVersion:
     # A held update is reported but not actionable: it does not flip the exit
     # code or trigger MR comments. The registry entry documents why in notes.
     held: bool = False
+    # The pin lives where this repo cannot read it, so `current_version` is
+    # meaningless and a plain entry would report an update forever. Reported
+    # with the upstream release, not actionable; notes says where the pin is.
+    unreadable_current: bool = False
     # True only when this check performed a live network fetch (not a cache
     # hit or a manual/no-check service). Lets check_all skip the rate-limit
     # sleep on cache hits.
     fetched_live: bool = False
+    # Pins a human must rewrite with this one (a checksum). Written anyway,
+    # then flagged PAIRED-EDIT-REQUIRED; --check-partner-pins reds a stale one.
+    coupled_vars: list[str] = field(default_factory=list)
+    # Pins this script CAN compute: a `<version>-r1` revision pin, and a git SHA
+    # resolved from a tag. Moved in the same edit as the version.
+    revision_var: str = ""
+    sha_var: dict = field(default_factory=dict)
 
 
 # --- Consumer config ---
@@ -126,8 +112,7 @@ def resolve_config_path(explicit: Optional[str] = None, repo_root: Path = REPO_R
 def _read_config(path: Path) -> dict:
     """Parse a .json config, or import a .py module exposing CONFIG or SERVICE_REGISTRY.
 
-    The Python form exists so a consumer's registry keeps its inline rationale
-    comments (a JSON registry loses every "why we pin this" note) — it is repo
+    The Python form lets a consumer's registry keep inline comments; it is repo
     data, loaded with the same trust as this script.
     """
     if path.suffix == ".json":
@@ -153,26 +138,28 @@ def _read_config(path: Path) -> dict:
     raise SystemExit(f"ERROR: unsupported config format {path.suffix!r} (use .py or .json)")
 
 
+def read_registry(path: Path) -> dict:
+    """The registry as a mapping, for the gates that read it without loading it.
+
+    Raises ValueError on anything that cannot be used, so a caller does not have
+    to catch `_read_config`'s SystemExit.
+    """
+    try:
+        config = _read_config(Path(path))
+    except SystemExit as exc:
+        raise ValueError(str(exc).removeprefix("ERROR: ")) from exc
+    except Exception as exc:  # noqa: BLE001 - any load failure is operator error
+        raise ValueError(f"{path}: {exc}") from exc
+    if not isinstance(config, dict):
+        raise ValueError(f"{path}: the registry must define a mapping")
+    return config
+
+
 def load_config(path: Path, repo_root: Optional[Path] = None) -> dict:
     """Populate the module-level config globals from a consumer config file.
 
-    Schema (JSON object, or a .py module defining CONFIG / SERVICE_REGISTRY):
-
-        {
-          "vars_file": "ansible/inventories/prod/group_vars/all.yml",
-          "cache_dir": ".version-cache",
-          "default_deploy_command": "task infra:deploy",
-          "version_file_aliases": {"ci": ".gitlab-ci.yml"},
-          "untracked_allowlist": ["debian_version"],
-          "report_title": "Homelab Version Check Report",
-          "services": [
-            {"name": "k3s", "var_name": "k3s_version", "category": "github",
-             "github_repo": "k3s-io/k3s", "version_prefix": "v",
-             "deploy_command": "task maintenance:update-k3s-nodes"}
-          ]
-        }
-
-    Every path is resolved against `repo_root` (default: the script's repo).
+    Schema: weisssrv-lib docs/SCRIPTS.md - check-versions.py; worked example
+    examples/version-registry.example.py. Paths resolve against `repo_root`.
     """
     global SERVICE_REGISTRY, VARS_FILE, VERSION_FILE_ALIASES, CACHE_DIR
     global DEFAULT_DEPLOY_COMMAND, UNTRACKED_ALLOWLIST, REPO_ROOT, REPORT_TITLE
@@ -208,11 +195,16 @@ def load_config(path: Path, repo_root: Optional[Path] = None) -> dict:
 def missing_registry_entries() -> list[str]:
     """`*_version` pins present in the vars file with no registry entry.
 
-    An untracked pin is silently never reported as outdated, so `--check-coverage`
-    turns that into a CI failure. Pins with no upstream to track go in the
-    config's `untracked_allowlist`.
+    An untracked pin is never reported as outdated, so `--check-coverage` fails
+    on one. Pins with no upstream go in `untracked_allowlist`.
     """
     tracked = {s["var_name"] for s in SERVICE_REGISTRY}
+    # A companion pin is tracked BY its service entry, not as an entry of its own.
+    for svc in SERVICE_REGISTRY:
+        if svc.get("revision_var"):
+            tracked.add(svc["revision_var"])
+        if (svc.get("sha_var") or {}).get("var"):
+            tracked.add(svc["sha_var"]["var"])
     return sorted(
         v for v in read_current_versions()
         if (v.endswith("_version") or v.startswith("helm_chart_versions."))
@@ -221,20 +213,145 @@ def missing_registry_entries() -> list[str]:
     )
 
 
+def _top_level_pins(text: str) -> dict:
+    """Every top-level `key: value` in a vars file, comments and quotes stripped."""
+    pins = {}
+    for line in text.split("\n"):
+        if not line[:1] or line[:1].isspace() or ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip()
+        if not key or key.startswith("#"):
+            continue
+        val = val.strip()
+        if "#" in val:
+            val = val[: val.index("#")]
+        pins[key] = val.strip().strip('"').strip("'")
+    return pins
+
+
+def stale_partner_pins(base_text: str, head_text: str) -> list[str]:
+    """Registry pins whose value moved while a coupled partner stayed put."""
+    base = _top_level_pins(base_text)
+    head = _top_level_pins(head_text)
+    stale = []
+    for svc in SERVICE_REGISTRY:
+        coupled = svc.get("coupled_vars") or []
+        var = svc.get("var_name")
+        if not coupled or not var or var not in base or var not in head:
+            continue
+        if base[var] == head[var]:
+            continue
+        unmoved = [c for c in coupled if c in base and c in head and base[c] == head[c]]
+        if unmoved:
+            stale.append(
+                f"{var}: {base[var]} -> {head[var]}, but {', '.join(unmoved)} "
+                f"{'is' if len(unmoved) == 1 else 'are'} unchanged"
+            )
+    return stale
+
+
+def resolve_tag_sha(repo: str, tag: str) -> str:
+    """The COMMIT a tag resolves to, via `git ls-remote '<repo>' 'refs/tags/<tag>*'`.
+
+    An annotated tag's own object sha is not the commit: the peeled `^{}` line
+    is. A bare `refs/tags/<tag>` query hides the peel, so the pattern keeps it.
+    """
+    proc = subprocess.run(
+        ["git", "ls-remote", repo, f"{tag}*"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git ls-remote {repo} {tag} failed: {proc.stderr.strip()}")
+    peeled = ""
+    plain = ""
+    for line in proc.stdout.splitlines():
+        sha, _, ref = line.partition("\t")
+        ref = ref.strip()
+        if ref == f"{tag}^{{}}":
+            peeled = sha.strip()
+        elif ref == tag:
+            plain = sha.strip()
+    sha = peeled or plain
+    if not sha:
+        raise RuntimeError(f"{repo}: {tag} resolves to no object")
+    return sha
+
+
+def companion_pins(result: "ServiceVersion") -> list:
+    """(var, value) pairs this script computes alongside `result`'s version.
+
+    Raises RuntimeError when a declared sha_var cannot be resolved: an empty
+    sha would be written into a build that verifies the tag.
+    """
+    pairs = []
+    version = result.latest_version or ""
+    if result.revision_var:
+        pairs.append((result.revision_var, f"{version}-r1"))
+    sha_var = result.sha_var or {}
+    if sha_var.get("var"):
+        repo = sha_var.get("repo")
+        ref = sha_var.get("ref") or "refs/tags/{version}"
+        if not repo:
+            raise RuntimeError(f"{result.name}: sha_var has no `repo`")
+        pairs.append((sha_var["var"], resolve_tag_sha(repo, ref.format(version=version))))
+    return pairs
+
+
+def write_companion_pins(result: "ServiceVersion") -> list:
+    """Write `result`'s computed companions; returns the vars written."""
+    written = []
+    for var, value in companion_pins(result):
+        if not update_version_in_file(var, value):
+            raise RuntimeError(f"could not find {var} in {VARS_FILE.name}")
+        print(f"  also updated {var} -> {value}")
+        written.append(var)
+    return written
+
+
+def _run_check_partner_pins(base_ref: str) -> None:
+    """--check-partner-pins: fail while a coupled pin's partner is stale."""
+    try:
+        rel = VARS_FILE.relative_to(REPO_ROOT)
+    except ValueError:
+        rel = VARS_FILE
+    proc = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "show", f"{base_ref}:{rel.as_posix()}"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        print(
+            f"ERROR: cannot read {rel} at {base_ref}: {proc.stderr.strip()}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    stale = stale_partner_pins(proc.stdout, VARS_FILE.read_text())
+    if stale:
+        print(
+            f"ERROR: {len(stale)} version pin(s) moved without their paired value:",
+            file=sys.stderr,
+        )
+        for line in stale:
+            print(f"  - {line}", file=sys.stderr)
+        print(
+            "  Recompute the partner (checksum, digest or git SHA) and commit it "
+            "with the version bump.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"No stale paired pins against {base_ref}.")
+    sys.exit(0)
+
+
 # --- HTTP helpers ---
 
 def _urlopen_with_retry_full(req, timeout: int = REQUEST_TIMEOUT) -> tuple[str, bytes]:
-    """urlopen with a bounded retry on transient failures; return (content_type, body).
+    """urlopen with a bounded retry; returns (content_type, body).
 
-    Retries on URLError, socket.timeout, and HTTP 5xx (transient upstream
-    errors). HTTP 4xx — including a 403 rate-limit — is re-raised immediately
-    so callers can surface it as-is rather than masking it as a transient blip.
-    After RETRY_ATTEMPTS, the last exception is re-raised unchanged, so callers
-    behave identically to the no-retry version once retries are exhausted.
-
-    The Content-Type header is returned alongside the body so callers that
-    must distinguish a real payload from an HTML error page (fetch_apt_packages)
-    keep that sniffing logic while still going through the retry helper.
+    Retries URLError, socket.timeout and HTTP 5xx; 4xx re-raises at once. The
+    content type lets a caller tell a real payload from an HTML error page.
     """
     last_exc: Exception
     for attempt in range(1, RETRY_ATTEMPTS + 1):
@@ -250,9 +367,7 @@ def _urlopen_with_retry_full(req, timeout: int = REQUEST_TIMEOUT) -> tuple[str, 
         except (urllib.error.URLError, socket.timeout) as e:
             last_exc = e
         except http.client.IncompleteRead as e:
-            # Mid-body truncation (GitHub intermittently cuts large release
-            # payloads — observed as IncompleteRead on the ~25MB Codex asset
-            # list). Transient: the next attempt re-reads the full body.
+            # Mid-body truncation is transient: the next attempt re-reads the body.
             last_exc = e
         if attempt < RETRY_ATTEMPTS:
             time.sleep(RETRY_BACKOFF * attempt)
@@ -307,19 +422,9 @@ def github_api(path: str) -> dict | list:
 
 
 def fetch_apt_packages(base_url: str) -> str:
-    """Fetch apt Packages file, trying uncompressed first then .gz fallback.
+    """Fetch the apt Packages file, falling back to Packages.gz.
 
-    Some apt repositories only provide compressed Packages.gz files.
-    This function handles both cases for better reliability.
-
-    Args:
-        base_url: URL to the Packages file (without .gz extension)
-
-    Returns:
-        The contents of the Packages file as a string
-
-    Raises:
-        RuntimeError: If neither Packages nor Packages.gz can be fetched
+    Raises RuntimeError when neither can be fetched.
     """
     req_headers = {"User-Agent": "weisssrv-lib-version-check/1.0"}
 
@@ -334,10 +439,8 @@ def fetch_apt_packages(base_url: str) -> str:
             return False
         return True
 
-    # Try uncompressed first. Route through the bounded retry helper so a
-    # transient 5xx/timeout retries (same protection Tailscale's fetcher gets);
-    # the helper returns the Content-Type so the HTML-vs-payload sniff below is
-    # preserved.
+    # Uncompressed first, through the bounded retry helper; it returns the
+    # Content-Type for the HTML-vs-payload sniff below.
     try:
         req = urllib.request.Request(base_url, headers=req_headers)
         content_type, raw = _urlopen_with_retry_full(req, timeout=REQUEST_TIMEOUT)
@@ -418,17 +521,10 @@ def _write_cache(service_name: str, version: str) -> None:
 # --- Version parsing ---
 
 def parse_version_tuple(version_str: str) -> tuple:
-    """Parse a version string into a comparable tuple.
+    """Parse a version string into a comparable tuple of (type_rank, value).
 
-    Handles formats like:
-      1.2.3, v1.2.3, 2025.12.3, 1.2.3.4567, v1.33.7+k3s1, v1.35.2+k3s10
-
-    Numeric suffixes (like k3s1, k3s10) are handled by extracting all numeric
-    parts for proper ordering (so k3s10 > k3s9, not k3s10 < k3s9).
-
-    Returns a tuple of (type_rank, value) pairs where type_rank is 0 for ints
-    and 1 for strings. This ensures consistent comparison ordering: all ints
-    sort before all strings, and within each type, values compare naturally.
+    Handles v-prefixes, Debian epochs and numeric suffixes (k3s10 > k3s9).
+    type_rank is 0 for ints and 1 for strings, so ints sort before strings.
     """
     v = version_str.lstrip("v")
     # Drop a Debian epoch prefix (e.g. "1:1.80.0" -> "1.80.0") so the epoch
@@ -451,13 +547,10 @@ def parse_version_tuple(version_str: str) -> tuple:
 
 
 def version_tuple_greater(a: tuple, b: tuple) -> bool:
-    """Return True if version tuple a is newer than b.
+    """True when version tuple a is newer than b.
 
-    Segments are (type_rank, value) with 0 = numeric, 1 = string. At the same
-    position a numeric segment beats a string one: it is a version number, not a
-    pre-release suffix ("17.1-trixie" > "17-trixie"). A longer version with a
-    matching prefix is newer only when its extra segment is numeric ("17.1" >
-    "17", but "17-alpha" < "17").
+    At the same position a numeric segment beats a string one, so
+    "17.1-trixie" > "17-trixie", "17.1" > "17" and "17-alpha" < "17".
     """
     min_len = min(len(a), len(b))
     for i in range(min_len):
@@ -482,11 +575,7 @@ def version_tuple_greater(a: tuple, b: tuple) -> bool:
 
 
 def version_greater(a: str, b: str) -> bool:
-    """Return True if version a is greater than version b.
-
-    Uses version_tuple_greater for proper handling of versions with different
-    segment counts (e.g., "17.1-trixie" > "17-trixie").
-    """
+    """Compare parsed version tuples, e.g. "17.1-trixie" > "17-trixie"."""
     try:
         return version_tuple_greater(parse_version_tuple(a), parse_version_tuple(b))
     except (TypeError, ValueError):
@@ -495,40 +584,38 @@ def version_greater(a: str, b: str) -> bool:
         return a > b
 
 
-def version_compare(a: str, b: str) -> int:
-    """Compare two version strings for sorting.
+def highest_version(candidates: Iterable[str], *, skip_unparseable: bool = True) -> Optional[str]:
+    """The highest of `candidates` by parsed version tuple; None when none qualify.
 
-    Returns:
-        -1 if a < b, 0 if a == b, 1 if a > b
-
-    This is a comparator function suitable for use with functools.cmp_to_key.
-    Uses semantic comparison via parsed tuples, so "1.0.0" and "v1.0.0" are equal.
+    An unparseable candidate is skipped by default; pass skip_unparseable=False
+    to let its TypeError/ValueError propagate. Ties keep the first seen.
     """
-    a_tuple = parse_version_tuple(a)
-    b_tuple = parse_version_tuple(b)
-
-    if a_tuple == b_tuple:
-        return 0
-    if version_tuple_greater(a_tuple, b_tuple):
-        return 1
-    return -1
+    best: Optional[str] = None
+    best_tuple: Optional[tuple] = None
+    for candidate in candidates:
+        try:
+            vtuple = parse_version_tuple(candidate)
+        except (TypeError, ValueError):
+            if skip_unparseable:
+                continue
+            raise
+        if best_tuple is None or version_tuple_greater(vtuple, best_tuple):
+            best_tuple = vtuple
+            best = candidate
+    return best
 
 
 # --- Version fetchers ---
 
 def _debian_version_part_compare(a: str, b: str) -> int:
-    """Compare one Debian upstream_version or debian_revision part per
-    debian-policy §5.6.12: alternate non-digit and digit chunks. Non-digit
-    chunks compare lexically with the tweak that letters sort before all
-    non-letters and `~` sorts before everything (including the empty
-    string); digit chunks compare numerically.
+    """Compare one Debian upstream_version or debian_revision part.
+
+    Alternating non-digit and digit chunks per debian-policy 5.6.12: digits
+    compare numerically; non-digits lexically, `~` then letters then the rest.
     """
     def order(c: str) -> int:
-        # Sort key inside a non-digit chunk:
-        #   '~'  → -1   (sorts before end-of-string and before everything else)
-        #   ''   →  0   (end of chunk, before any non-tilde char)
-        #   letter → ord (a..z, A..Z) — sorts before non-letter non-tilde
-        #   other → ord + 256  (sorts after letters)
+        # Sort key in a non-digit chunk: '~' before end-of-chunk, which is
+        # before letters, which are before every other character.
         if c == "~":
             return -1
         if c == "":
@@ -567,16 +654,10 @@ def _debian_version_part_compare(a: str, b: str) -> int:
 
 
 def debian_version_compare(a: str, b: str) -> int:
-    """Compare two Debian package version strings per debian-policy
-    §5.6.12 (epoch:upstream_version[-debian_revision]). Returns -1, 0, +1.
+    """Compare two Debian version strings per debian-policy 5.6.12.
 
-    Reimplemented in pure Python so the controller doesn't need dpkg
-    installed (e.g. when run from a macOS dev machine). The ordering rules
-    below are asserted in test_check_versions.py (TestDebianVersionCompare):
-      0:1.98.4 < 1.98.5
-      1:0.4.6-1 > 0.4.6 (epoch wins)
-      0.5.0~rc1-1 < 0.5.0-1 (tilde is pre-release)
-      0.4.6-1ubuntu1 > 0.4.6-1 (revision tail)
+    Returns -1, 0 or +1. Pure Python, so dpkg need not be installed; the
+    ordering cases are asserted in tests/test_check_versions.py.
     """
     # Split the epoch (debian-policy §5.6.12: an unsigned integer). A
     # non-integer epoch is malformed and raises — falling back to epoch=0
@@ -618,10 +699,8 @@ def debian_version_compare(a: str, b: str) -> int:
 def _collect_apt_versions(text: str, package: str) -> list[str]:
     """All `Version:` values for `package` in a Debian Packages index.
 
-    Packages files are blank-line-separated stanzas, each with a `Package:` and
-    a `Version:` line. Returns the version of every stanza whose Package matches;
-    callers pick their own comparator (debian_version_compare vs the
-    parse_version_tuple family) and any pre-release filtering on the result.
+    Stanzas are blank-line separated. Callers pick their own comparator and
+    any pre-release filtering.
     """
     versions: list[str] = []
     in_pkg = False
@@ -634,47 +713,58 @@ def _collect_apt_versions(text: str, package: str) -> list[str]:
     return versions
 
 
-def fetch_apt_repo_version(svc: dict) -> str:
-    """Fetch latest version from a Debian apt repo's Packages index.
+def _fetch_packages_index(url: str) -> str:
+    """Text of one Debian Packages index, gunzipped when the payload is gzip.
 
-    Use for upstream-managed apt repos (e.g. pkgs.tailscale.com) where the
-    GitHub release cadence runs ahead of the apt publish cadence. Tracking
-    GitHub would advertise versions that `apt-get install` can't satisfy.
-
-    Required keys in `svc`:
-      apt_url:       URL to the (typically gzipped) Packages file (alias:
-                     apt_index_url), e.g.
-                     https://pkgs.tailscale.com/stable/debian/dists/trixie/main/binary-amd64/Packages.gz
-                     Detect gzip from the response payload header rather
-                     than the URL suffix — apt mirrors often serve the
-                     index with a redirect and/or the `.gz` may be
-                     stripped in the final URL.
-      apt_package:   Binary package name (e.g. "tailscale").
+    The payload is sniffed for gzip magic, not the URL suffix, because mirrors
+    redirect. A response that is not a Packages file falls back to `<url>.gz`.
     """
-    # `apt_url` is the name the published schema and the shipped example use;
-    # `apt_index_url` is the older spelling this function was written against.
-    url = svc.get("apt_url") or svc["apt_index_url"]
-    pkg = svc["apt_package"]
     req = urllib.request.Request(url, headers={"User-Agent": "weisssrv-lib-version-check/1.0"})
-    # Bounded retry on transient failures (see _urlopen_with_retry).
     raw = _urlopen_with_retry(req, timeout=30)
-    # gzip magic bytes are 0x1f 0x8b. Sniff the payload rather than the
-    # URL extension so an apt-mirror redirect that drops `.gz` from the
-    # path (or one that serves un-gzipped content over a `.gz` URL)
-    # parses correctly.
     text = (
         gzip.decompress(raw).decode("utf-8", errors="replace")
         if raw[:2] == b"\x1f\x8b"
         else raw.decode("utf-8", errors="replace")
     )
+    if "Package:" in text:
+        return text
+    if url.endswith(".gz"):
+        raise RuntimeError(f"no Packages stanzas in {url}")
+    return fetch_apt_packages(url)
 
-    # Collect every Version line for our target package, then return the
-    # highest using debian-policy version ordering (epochs, revisions, and `~`
-    # pre-release semantics — a plain string-tuple compare would silently get
-    # these wrong).
-    versions = _collect_apt_versions(text, pkg)
+
+def fetch_apt_repo_version(svc: dict) -> str:
+    """Highest version of `apt_package` in a Debian apt repo's Packages index.
+
+    Tracks the apt publish cadence, so a bump is always installable. Entry keys
+    `apt_url`, `apt_package` and `apt_exclude_regex`: docs/SCRIPTS.md.
+    """
+    urls = svc.get("apt_url") or svc["apt_index_url"]
+    if isinstance(urls, str):
+        urls = [urls]
+    pkg = svc["apt_package"]
+    exclude = svc.get("apt_exclude_regex", "")
+
+    versions: list[str] = []
+    errors: list[str] = []
+    for url in urls:
+        try:
+            text = _fetch_packages_index(url)
+        except (RuntimeError, urllib.error.URLError, OSError, gzip.BadGzipFile) as e:
+            errors.append(f"{url}: {e}")
+            continue
+        versions = _collect_apt_versions(text, pkg)
+        if exclude:
+            versions = [v for v in versions if not re.search(exclude, v, re.IGNORECASE)]
+        if versions:
+            break
+
     if not versions:
-        raise RuntimeError(f"package '{pkg}' not found in {url}")
+        detail = f"; attempts: {'; '.join(errors)}" if errors else ""
+        raise RuntimeError(f"package '{pkg}' not found in {', '.join(urls)}{detail}")
+
+    # debian-policy ordering: epochs, revisions and `~` pre-release semantics,
+    # all of which a plain string-tuple compare gets wrong.
     latest = versions[0]
     for v in versions[1:]:
         if debian_version_compare(v, latest) > 0:
@@ -683,16 +773,10 @@ def fetch_apt_repo_version(svc: dict) -> str:
 
 
 def fetch_github_release(svc: dict) -> str:
-    """Fetch latest release version from GitHub.
+    """Latest GitHub release version for `github_repo`.
 
-    When tag_filter is specified, collects all matching releases and returns
-    the one with the highest version number (not the most recently published).
-    This handles projects like Authentik that maintain multiple release branches
-    and may publish patches to older branches after newer releases.
-
-    Pagination: GitHub returns max 100 releases per page. For repos with many
-    releases, we paginate up to 5 pages (500 releases) to ensure we find all
-    matching versions.
+    With tag_filter the highest matching version wins, not the most recently
+    published, so a patch on an older branch cannot win. Paginates 5 pages.
     """
     repo = svc["github_repo"]
     tag_filter = svc.get("tag_filter")
@@ -722,12 +806,11 @@ def fetch_github_release(svc: dict) -> str:
             if len(releases) < 100:
                 break
 
-        if not matching_versions:
-            raise RuntimeError(f"No release matching {tag_filter}")
-
         # Highest by version, not most recent by date.
-        matching_versions.sort(key=functools.cmp_to_key(version_compare), reverse=True)
-        return matching_versions[0]
+        best = highest_version(matching_versions)
+        if best is None:
+            raise RuntimeError(f"No release matching {tag_filter}")
+        return best
     else:
         # Use latest release endpoint
         release = github_api(f"/repos/{repo}/releases/latest")
@@ -752,23 +835,13 @@ def _dockerhub_best_tag(
     return_full_tag: bool = False,
     name_filter: str = "",
     max_pages: int = 1,
+    page_size: int = 50,
 ) -> Optional[str]:
     """Highest Docker Hub tag of `image` matching `regex` (group 1 = version).
 
-    Shared by fetch_dockerhub_version and fetch_lsio_version. With
-    return_full_tag the original tag name is returned (what the pins store);
-    otherwise the captured version group is returned. version_prefix narrows both
-    the API query (Docker Hub `name=` filter) and the accepted tags (startswith)
-    to a release series; pin_major + current confine results to current's major.
-    name_filter narrows ONLY the API query (substring match, no startswith
-    constraint) — needed for suffix-style tag families like python's `-slim`,
-    which otherwise scroll off the last_updated page behind other variants.
-    Returns None if nothing matches; raises on a non-JSON response.
+    return_full_tag yields the tag itself, else the captured group.
+    version_prefix and pin_major narrow results; name_filter only the query.
     """
-    # For postgres, use larger page size to find alpine/trixie tags.
-    # For version_prefix-pinned services, use Docker Hub's name= filter so
-    # old tags that have scrolled off the first page are still found.
-    page_size = 100 if image == "library/postgres" else 50
     url = f"https://hub.docker.com/v2/repositories/{image}/tags?page_size={page_size}&ordering=last_updated"
     if name_filter:
         url += f"&name={name_filter}"
@@ -787,18 +860,16 @@ def _dockerhub_best_tag(
         url = data.get("next")
         pages += 1
 
-    # Extract the major version from `current` when pinning (e.g. "17-trixie"
-    # -> "17", "17.2-trixie" -> "17", "v1.2.3" -> "1"). Tolerate a leading "v" so
-    # v-prefixed schemes (k3s, gluetun, redis-exporter, ...) aren't silently
-    # un-pinned.
+    # Major version of `current` for the major pin ("17.2-trixie" -> "17"); a
+    # leading "v" is tolerated so v-prefixed schemes stay pinned.
     major_filter = None
     if pin_major and current:
         m = re.match(r"^v?(\d+)", current)
         if m:
             major_filter = m.group(1)
 
-    best = None
-    best_tuple = None
+    # Captured version -> the tag it came from; ties keep the first seen.
+    candidates: dict[str, str] = {}
     for result in results:
         tag_name = result.get("name", "")
         match = re.match(regex, tag_name)
@@ -808,36 +879,27 @@ def _dockerhub_best_tag(
         # (e.g. "v1.15." restricts to patch updates within 1.15.x).
         if version_prefix and not tag_name.startswith(version_prefix):
             continue
-        # Compare/filter on the CAPTURED version (group 1), not the raw tag: a
-        # leading "v" (or a regex prefix before the digits) must not bypass the
-        # major pin or wrongly reject valid same-major tags. A tag_regex with
-        # no capture group (the common shape, and what the shipped examples
-        # use) compares the whole tag instead of raising IndexError.
+        # Filter on the CAPTURED version, not the raw tag: a leading "v" must
+        # not bypass the major pin. A tag_regex with no capture group compares
+        # the whole tag.
         extracted = match.group(1) if match.lastindex else match.group(0)
         if major_filter:
             tag_major = re.match(r"^v?(\d+)", extracted)
             if not tag_major or tag_major.group(1) != major_filter:
                 continue  # Skip tags from a different major version
-        try:
-            vtuple = parse_version_tuple(extracted)
-        except (TypeError, ValueError):
-            continue
-        if best_tuple is None or version_tuple_greater(vtuple, best_tuple):
-            best_tuple = vtuple
-            best = tag_name if return_full_tag else extracted
-    return best
+        candidates.setdefault(extracted, tag_name)
+
+    best = highest_version(candidates)
+    if best is None:
+        return None
+    return candidates[best] if return_full_tag else best
 
 
 def fetch_dockerhub_version(svc: dict) -> str:
-    """Fetch latest version from Docker Hub using tag_regex.
+    """Latest Docker Hub version for `docker_image`, matched by `tag_regex`.
 
-    tag_regex MAY carry a capture group for the version portion (the value is
-    then the captured text); with no group the whole matching tag is used.
-    The highest matching version (by version tuple comparison) is returned as
-    the full tag name (that is what the pins store).
-
-    If pin_major_version is True, only returns versions matching the same major
-    version as the current version.
+    Returns the full tag name, which is what the pins store. tag_regex may
+    capture the version portion; with no group the whole tag is used.
     """
     image = svc["docker_image"]
     tag_regex = svc.get("tag_regex", r"^(v?\d+(?:\.\d+)*)$")
@@ -849,6 +911,7 @@ def fetch_dockerhub_version(svc: dict) -> str:
         current=svc.get("_current_version", ""),
         return_full_tag=True,
         name_filter=svc.get("dockerhub_name_filter", ""),
+        page_size=svc.get("dockerhub_page_size", 50),
     )
     if best_tag is None:
         raise RuntimeError(f"No matching tags found for {image} (regex: {tag_regex})")
@@ -856,13 +919,10 @@ def fetch_dockerhub_version(svc: dict) -> str:
 
 
 def fetch_lsio_version(svc: dict) -> str:
-    """Fetch latest version from LinuxServer.io Docker Hub images.
+    """Latest LinuxServer.io image version, captured by `lsio_version_regex`.
 
-    LinuxServer.io images use canonical version tags with prefixes:
-      version-vX.Y.Z (nzbget), version-X.Y.Z-rN (qbittorrent),
-      version-X.Y.Z.BUILD (*arr apps - stable branch)
-
-    The regex captures the version portion from the tag, which is returned.
+    Their tags carry a `version-` prefix, so the regex captures the version
+    portion and that is what is returned.
     """
     image = svc["docker_image"]
     version_regex = svc["lsio_version_regex"]
@@ -882,12 +942,10 @@ def fetch_lsio_version(svc: dict) -> str:
 
 
 def fetch_ghcr_version(svc: dict) -> str:
-    """Fetch latest version tag from GitHub Container Registry.
+    """Latest GHCR tag for `ghcr_image` matching `tag_filter`.
 
-    Uses the registry's anonymous pull-token flow plus the standard Docker
-    Registry HTTP API tags/list endpoint. This works for public packages
-    without a GITHUB_TOKEN — the GitHub packages REST API requires auth even
-    for public images, which would make tokenless runs error.
+    Uses the anonymous pull-token flow and the Docker Registry tags/list API,
+    so public images resolve without a GITHUB_TOKEN.
     """
     image = svc["ghcr_image"]
     tag_filter = svc.get("tag_filter", r"^v?\d+\.\d+")
@@ -905,19 +963,9 @@ def fetch_ghcr_version(svc: dict) -> str:
     if not isinstance(tags_resp, dict):
         raise RuntimeError(f"Unexpected non-JSON tag list for ghcr.io/{image}")
 
-    best_version = None
-    best_tuple = None
-    for tag in tags_resp.get("tags") or []:
-        if not re.match(tag_filter, tag):
-            continue
-        try:
-            vtuple = parse_version_tuple(tag)
-        except (TypeError, ValueError):
-            continue
-        if best_tuple is None or version_tuple_greater(vtuple, best_tuple):
-            best_tuple = vtuple
-            best_version = tag
-
+    best_version = highest_version(
+        tag for tag in (tags_resp.get("tags") or []) if re.match(tag_filter, tag)
+    )
     if best_version is None:
         raise RuntimeError(f"No matching tags found for ghcr.io/{image}")
 
@@ -925,18 +973,9 @@ def fetch_ghcr_version(svc: dict) -> str:
 
 
 def fetch_helm_version(svc: dict) -> str:
-    """Fetch latest chart version from a Helm repository index.
+    """Latest chart version for `helm_chart` from `helm_repo`'s index.yaml.
 
-    Parses the index.yaml manually to avoid PyYAML dependency.
-    The format is:
-        entries:
-          chartname:
-          - apiVersion: v2
-            version: X.Y.Z
-          - apiVersion: v2
-            version: X.Y.Z
-          otherchartname:
-          ...
+    The index is parsed by hand so PyYAML stays optional.
     """
     repo_url = svc["helm_repo"]
     chart_name = svc["helm_chart"]
@@ -951,10 +990,8 @@ def fetch_helm_version(svc: dict) -> str:
     in_entries = False
     in_chart = False
     chart_indent = 0
-    # Indent of the first key of each chart entry (the list-item content
-    # column). The chart's own `version:` is a direct child key of the entry
-    # and sits at this column; a dependency/maintainer `version:` nests deeper,
-    # so pinning the match here keeps a dependency version from being collected.
+    # Indent of each chart entry's first key. The chart's own `version:` sits
+    # at this column; a dependency or maintainer `version:` nests deeper.
     entry_key_indent = None
     versions = []
 
@@ -1004,99 +1041,27 @@ def fetch_helm_version(svc: dict) -> str:
                 if not re.search(r"(alpha|beta|rc|dev|snapshot)", ver, re.IGNORECASE):
                     versions.append(ver)
 
-    if not versions:
+    best = highest_version(versions)
+    if best is None:
         raise RuntimeError(f"No versions found for chart {chart_name}")
-
-    versions.sort(key=functools.cmp_to_key(version_compare), reverse=True)
-    return versions[0]
-
-
-def fetch_plex_version(svc: dict) -> str:
-    """Fetch latest Plex Media Server version from Plex apt repository.
-
-    Queries the actual apt repository Packages file to get the version
-    that's available for installation, rather than the Plex downloads API
-    which may advertise versions not yet available in apt.
-
-    Collects all plexmediaserver versions and returns the highest one,
-    since the Packages file may contain multiple versions.
-    """
-    # v2 repo URL (Plex >= 1.43.0).
-    packages_url = "https://repo.plex.tv/deb/dists/public/main/binary-amd64/Packages"
-    raw = fetch_apt_packages(packages_url)
-
-    versions = _collect_apt_versions(raw, "plexmediaserver")
-    if not versions:
-        raise RuntimeError("Could not find plexmediaserver version in apt repository")
-
-    versions.sort(key=functools.cmp_to_key(version_compare), reverse=True)
-    return versions[0]
-
-
-def fetch_gitlab_version(svc: dict) -> str:
-    """Fetch latest GitLab EE version from GitLab apt repository.
-
-    Queries the actual apt repository Packages file to get the version
-    that's available for installation. Uses fetch_apt_packages to handle
-    both uncompressed and .gz formats.
-    """
-    # trixie (Debian 13) first, falling back to bookworm (Debian 12).
-    packages_urls = [
-        "https://packages.gitlab.com/gitlab/gitlab-ee/debian/dists/trixie/main/binary-amd64/Packages",
-        "https://packages.gitlab.com/gitlab/gitlab-ee/debian/dists/bookworm/main/binary-amd64/Packages",
-    ]
-
-    raw = None
-    errors = []
-    for url in packages_urls:
-        try:
-            raw = fetch_apt_packages(url)
-            if raw and raw.strip():
-                break
-        except RuntimeError as e:
-            errors.append(f"{url}: {e}")
-            continue
-
-    if not raw:
-        raise RuntimeError(
-            ("Could not fetch GitLab apt repository Packages file; attempts: "
-             + "; ".join(errors)) if errors else "Could not fetch GitLab apt Packages"
-        )
-
-    # Collect every gitlab-ee Version (X.Y.Z-ee.N), skip pre-releases, and keep
-    # the highest by semantic ordering with (type_rank, value) tuples.
-    best_version = None
-    best_tuple = None
-    for version in _collect_apt_versions(raw, "gitlab-ee"):
-        if re.search(r"(rc|beta|alpha)", version, re.IGNORECASE):
-            continue
-        try:
-            vtuple = parse_version_tuple(version)
-            if best_tuple is None or version_tuple_greater(vtuple, best_tuple):
-                best_tuple = vtuple
-                best_version = version
-        except (TypeError, ValueError):
-            pass
-
-    if not best_version:
-        raise RuntimeError("Could not find gitlab-ee version in apt repository")
-
-    return best_version
+    return best
 
 
 # --- Vars-file parser (simple YAML extraction without PyYAML) ---
 
-def read_pinned_image_versions() -> dict[str, str]:
-    """Current tags of digest-locked `image:` pins that live outside the vars file.
+# var_name -> the version_file paths that resolved no current version. A
+# renamed manifest would otherwise drop the pin out of tracking silently.
+UNRESOLVED_PINS: dict[str, list[str]] = {}
 
-    A registry entry with `version_file` is read from that file instead: an alias
-    from the config's `version_file_aliases`, or one or more repo-relative
-    manifest paths. Extract the tag (between ':' and the '@sha256:' digest) for
-    each so a stale pin is still flagged. `image_ref` overrides the image name
-    matched in the file when it differs from the API lookup name (a ghcr.io/
-    registry prefix, Docker Hub's library/ namespace).
+
+def read_pinned_image_versions() -> dict[str, str]:
+    """Current versions of pins that live outside the vars file.
+
+    A `version_file` entry names an alias or paths; the default matcher is an
+    `image:` line, and `pin_regex` replaces it for any other pin shape.
     """
     versions: dict[str, str] = {}
+    UNRESOLVED_PINS.clear()
     repo_root = REPO_ROOT
     for svc in SERVICE_REGISTRY:
         version_file = svc.get("version_file")
@@ -1108,6 +1073,12 @@ def read_pinned_image_versions() -> dict[str, str]:
             paths = [repo_root / version_file]
         else:
             paths = [repo_root / p for p in version_file]
+        pin_regex = svc.get("pin_regex")
+        if pin_regex:
+            if re.compile(pin_regex).groups < 1:
+                raise RuntimeError(
+                    f"{svc['var_name']}: pin_regex needs one capture group for the version"
+                )
         image = svc.get("image_ref") or svc.get("docker_image", "")
         # Collect the tag from every readable path (not break-on-first) so
         # divergent pins between manifests that must share one tag are caught.
@@ -1117,44 +1088,42 @@ def read_pinned_image_versions() -> dict[str, str]:
                 content = path.read_text()
             except OSError:
                 continue
-            m = re.search(
-                rf"^\s*image:\s*{re.escape(image)}:([\w.+-]+?)(?:@sha256:[0-9a-f]+)?\s*$",
-                content,
-                re.MULTILINE,
-            )
+            if pin_regex:
+                m = re.search(pin_regex, content, re.MULTILINE)
+            else:
+                m = re.search(
+                    rf"^\s*image:\s*{re.escape(image)}:([\w.+-]+?)(?:@sha256:[0-9a-f]+)?\s*$",
+                    content,
+                    re.MULTILINE,
+                )
             if m:
                 matched.append((path, m.group(1)))
         if not matched:
+            if not svc.get("unreadable_current"):
+                UNRESOLVED_PINS[svc["var_name"]] = [str(p) for p in paths]
             continue
         distinct = {tag for _, tag in matched}
         if len(distinct) > 1:
             detail = ", ".join(
                 f"{p.relative_to(repo_root)}={tag}" for p, tag in matched
             )
-            # Fail loudly instead of silently selecting matched[0]: manifests that
-            # must share one image tag have drifted, and swallowing that lets CI
-            # go green with divergent pins. Raising surfaces it through the
-            # blocking scripts:test unit run (which calls this on the real tree).
+            # Files that must share one pinned version have diverged - an
+            # error, not a pick-first.
             raise RuntimeError(
-                f"{svc['var_name']} pins diverge across manifests "
-                f"that must share one tag: {detail}"
+                f"{svc['var_name']} pins diverge across files "
+                f"that must share one version: {detail}"
             )
         versions[svc["var_name"]] = matched[0][1]
     return versions
 
 
 def read_current_versions() -> dict[str, str]:
-    """Read the currently pinned versions from the vars file, without a YAML parser.
-
-    Returns a dict mapping var_name to current version string.
-    """
+    """Pinned versions read out of the vars file, without a YAML parser."""
     content = VARS_FILE.read_text()
     versions = {}
 
-    # Registered pins whose var_name does NOT follow the `*_version` convention
-    # (e.g. lxc_template, a Proxmox appliance FILENAME rather than a semver) —
-    # read those by exact top-level key match so they still resolve to a current
-    # value instead of showing "unknown". version_file pins live elsewhere.
+    # Registered pins whose var_name breaks the `*_version` convention (an
+    # lxc_template filename, say) are read by exact top-level key match.
     extra_keys = {
         s["var_name"] for s in SERVICE_REGISTRY
         if s.get("var_name") and "_version" not in s["var_name"] and not s.get("version_file")
@@ -1187,7 +1156,9 @@ def read_current_versions() -> dict[str, str]:
         # other mapping and must not be read (or later rewritten) as top level.
         at_top_level = not line[:1].isspace()
         _key = stripped.split(":")[0].strip()
-        if not in_helm and at_top_level and ":" in stripped and ("_version" in _key or _key in extra_keys):
+        if not in_helm and at_top_level and ":" in stripped and (
+            _key.endswith("_version") or _key in extra_keys
+        ):
             key, _, val = stripped.partition(":")
             key = key.strip()
             val = val.strip().strip('"').strip("'")
@@ -1201,10 +1172,34 @@ def read_current_versions() -> dict[str, str]:
     return versions
 
 
-def update_version_in_file(var_name: str, new_version: str) -> bool:
-    """Update a pin in the vars file, preserving formatting and comments.
+def _rewrite_pin_line(line: str, key: str, new_version: str, *, always_quote: bool) -> str:
+    """One pin line rewritten to `new_version`, keeping its indent and comment.
 
-    Returns True if the file was modified.
+    A trailing "Currently deployed <v>" note is refreshed with it. The value is
+    quoted when always_quote is set or when the old value already was.
+    """
+    value = line.split(":", 1)[1]
+    comment = ""
+    if "#" in line:
+        comment_text = re.sub(
+            r"Currently deployed \S+",
+            f"Currently deployed {new_version}",
+            line.split("#", 1)[1],
+        )
+        comment = f"# {comment_text.strip()}" if comment_text.strip() else ""
+        if "#" in value:
+            value = value[:value.index("#")]
+    quoted = always_quote or value.strip().startswith(('"', "'"))
+    new_val = f'"{new_version}"' if quoted else new_version
+    indent = " " * (len(line) - len(line.lstrip()))
+    rewritten = f"{indent}{key}: {new_val}"
+    return f"{rewritten}  {comment}" if comment else rewritten
+
+
+def update_version_in_file(var_name: str, new_version: str) -> bool:
+    """Rewrite a pin in the vars file, keeping its formatting and comment.
+
+    False when the key is absent or the pin is digest-locked elsewhere.
     """
     # version_file entries are digest-locked outside the vars file: flag the
     # update but never auto-rewrite the @sha256 pin — bumping a supply-chain
@@ -1239,26 +1234,7 @@ def update_version_in_file(var_name: str, new_version: str) -> bool:
                 in_helm = True
                 continue
             if in_helm and line.startswith("  ") and line.strip().startswith(f"{chart_key}:"):
-                # Preserve the comment portion
-                comment = ""
-                if "#" in line:
-                    # Find comment after the value
-                    parts = line.split("#", 1)
-                    comment_text = parts[1]
-                    # Update "Currently deployed" comment
-                    comment_text = re.sub(
-                        r"Currently deployed \S+",
-                        f"Currently deployed {new_version}",
-                        comment_text,
-                    )
-                    comment = f"# {comment_text.strip()}" if comment_text.strip() else ""
-
-                indent = len(line) - len(line.lstrip())
-                prefix = " " * indent + f'{chart_key}: "{new_version}"'
-                if comment:
-                    lines[i] = f"{prefix}  {comment}"
-                else:
-                    lines[i] = prefix
+                lines[i] = _rewrite_pin_line(line, chart_key, new_version, always_quote=True)
                 modified = True
                 break
             if in_helm and not line.startswith(" ") and line.strip() and not line.strip().startswith("#"):
@@ -1268,39 +1244,7 @@ def update_version_in_file(var_name: str, new_version: str) -> bool:
             # Column-0 anchor: an indented key of the same name belongs to
             # another mapping and rewriting it would de-nest it.
             if line.startswith(f"{var_name}:"):
-                # Preserve the comment portion
-                comment = ""
-                if "#" in line:
-                    parts = line.split("#", 1)
-                    comment_text = parts[1]
-                    # Update "Currently deployed" comment
-                    comment_text = re.sub(
-                        r"Currently deployed \S+",
-                        f"Currently deployed {new_version}",
-                        comment_text,
-                    )
-                    comment = f"# {comment_text.strip()}" if comment_text.strip() else ""
-
-                # Determine quoting style from original
-                old_val_part = line.split(":", 1)[1]
-                if "#" in old_val_part:
-                    old_val_part = old_val_part[:old_val_part.index("#")]
-                old_val_part = old_val_part.strip()
-
-                uses_quotes = old_val_part.startswith('"') or old_val_part.startswith("'")
-
-                if uses_quotes:
-                    new_val = f'"{new_version}"'
-                else:
-                    new_val = new_version
-
-                indent = len(line) - len(line.lstrip())
-                prefix = " " * indent + f"{var_name}: {new_val}"
-                # Pad to align comment (rough alignment)
-                if comment:
-                    lines[i] = f"{prefix}  {comment}"
-                else:
-                    lines[i] = prefix
+                lines[i] = _rewrite_pin_line(line, var_name, new_version, always_quote=False)
                 modified = True
                 break
 
@@ -1311,6 +1255,36 @@ def update_version_in_file(var_name: str, new_version: str) -> bool:
 
 
 # --- Main logic ---
+
+# category -> (report heading, fetcher name). One table drives check_service's
+# dispatch, the report groups and the --category choices; "manual" has no
+# fetcher, and a registry entry outside the map renders under "Other".
+CATEGORIES: dict[str, tuple[str, str]] = {
+    "github": ("GitHub Releases", "fetch_github_release"),
+    "dockerhub": ("Container Images (Docker Hub)", "fetch_dockerhub_version"),
+    "ghcr": ("Container Images (GHCR)", "fetch_ghcr_version"),
+    "lsio": ("Container Images (LinuxServer.io)", "fetch_lsio_version"),
+    "helm": ("Helm Charts", "fetch_helm_version"),
+    "apt_repo": ("APT Repositories (upstream)", "fetch_apt_repo_version"),
+    "manual": ("Manual / APT Managed", ""),
+}
+
+
+def is_actionable(result: "ServiceVersion") -> bool:
+    """An update a consumer can act on: not errored, held or current-unreadable."""
+    return (
+        result.update_available
+        and not result.error
+        and not result.held
+        and not result.unreadable_current
+    )
+
+
+def fetcher_for(category: str) -> Optional[Callable[[dict], str]]:
+    """The fetcher for `category`, resolved by name at call time."""
+    _label, name = CATEGORIES.get(category, ("", ""))
+    return globals().get(name) if name else None
+
 
 def _annotate_latest_resolution(result: ServiceVersion, current: str) -> None:
     """When a service tracks 'latest', surface the resolved version in the notes
@@ -1335,7 +1309,19 @@ def check_service(svc_def: dict, current_versions: dict[str, str], use_cache: bo
         var_name=var_name,
         notes=notes,
         held=bool(svc_def.get("held", False)),
+        unreadable_current=bool(svc_def.get("unreadable_current", False)),
+        coupled_vars=list(svc_def.get("coupled_vars") or []),
+        revision_var=str(svc_def.get("revision_var") or ""),
+        sha_var=dict(svc_def.get("sha_var") or {}),
     )
+
+    if current == "unknown" and var_name in UNRESOLVED_PINS:
+        result.error = (
+            f"{var_name}: no version_file resolved a current version "
+            f"(tried {', '.join(UNRESOLVED_PINS[var_name])}); the pin is no "
+            "longer tracked"
+        )
+        return result
 
     if "github_repo" in svc_def:
         result.source_url = f"https://github.com/{svc_def['github_repo']}/releases"
@@ -1373,25 +1359,11 @@ def check_service(svc_def: dict, current_versions: dict[str, str], use_cache: bo
         svc_def_with_current = svc_def.copy()
         svc_def_with_current["_current_version"] = current
 
-        if category == "github":
-            latest = fetch_github_release(svc_def_with_current)
-        elif category == "dockerhub":
-            latest = fetch_dockerhub_version(svc_def_with_current)
-        elif category == "lsio":
-            latest = fetch_lsio_version(svc_def)
-        elif category == "ghcr":
-            latest = fetch_ghcr_version(svc_def)
-        elif category == "helm":
-            latest = fetch_helm_version(svc_def)
-        elif category == "plex":
-            latest = fetch_plex_version(svc_def)
-        elif category == "gitlab":
-            latest = fetch_gitlab_version(svc_def)
-        elif category == "apt_repo":
-            latest = fetch_apt_repo_version(svc_def)
-        else:
+        fetcher = fetcher_for(category)
+        if fetcher is None:
             result.error = f"Unknown category: {category}"
             return result
+        latest = fetcher(svc_def_with_current)
 
         result.latest_version = latest
         _write_cache(name, latest)
@@ -1405,10 +1377,8 @@ def check_service(svc_def: dict, current_versions: dict[str, str], use_cache: bo
     except RuntimeError as e:
         result.error = str(e)
     except Exception as e:
-        # Include the exception type so unknown failures ('NoneType' object
-        # has no attribute 'foo') are diagnosable without re-running under
-        # a debugger. Set DEBUG=1 in the environment to also print the
-        # full traceback.
+        # Include the exception type so unknown failures are diagnosable
+        # without a debugger.
         result.error = f"Unexpected {type(e).__name__}: {e}"
         if os.environ.get("DEBUG"):
             import traceback
@@ -1453,20 +1423,6 @@ def check_all(
 
 # --- Output formatting ---
 
-# The categories check_service() knows how to resolve. Also the --category
-# choices; a registry entry outside this map renders under "Other".
-CATEGORY_LABELS = {
-    "github": "GitHub Releases",
-    "dockerhub": "Container Images (Docker Hub)",
-    "ghcr": "Container Images (GHCR)",
-    "lsio": "Container Images (LinuxServer.io)",
-    "helm": "Helm Charts",
-    "gitlab": "GitLab (packages.gitlab.com)",
-    "plex": "Plex Media Server",
-    "apt_repo": "APT Repositories (upstream)",
-    "manual": "Manual / APT Managed",
-}
-
 GREEN = "\033[32m"
 RED = "\033[31m"
 YELLOW = "\033[33m"
@@ -1497,11 +1453,11 @@ def format_table(results: list[ServiceVersion]) -> str:
     lines.append(c(DIM, f"Checked: {time.strftime('%Y-%m-%d %H:%M:%S')}"))
     lines.append("")
 
-    categories = CATEGORY_LABELS
+    categories = {key: label for key, (label, _fetcher) in CATEGORIES.items()}
 
     # Counted over every result, not only the printed ones, so an unrecognised
     # category cannot skew the summary.
-    updates_available = sum(1 for r in results if r.update_available and not r.held and not r.error)
+    updates_available = sum(1 for r in results if is_actionable(r))
     errors = sum(1 for r in results if r.error)
 
     groups = [(k, n, [r for r in results if r.category == k]) for k, n in categories.items()]
@@ -1530,6 +1486,8 @@ def format_table(results: list[ServiceVersion]) -> str:
             if r.error:
                 status = c(RED, "ERROR")
                 latest_str = "?"
+            elif r.unreadable_current:
+                status = c(DIM, "CURRENT UNREADABLE")
             elif r.update_available and r.held:
                 status = c(DIM, "HELD")
             elif r.update_available:
@@ -1551,8 +1509,9 @@ def format_table(results: list[ServiceVersion]) -> str:
 
     lines.append(c(BOLD, "--- Summary ---"))
     total = len(results)
-    held = sum(1 for r in results if r.update_available and r.held)
-    up_to_date = total - updates_available - held - errors
+    held = sum(1 for r in results if r.update_available and r.held and not r.error)
+    unreadable = sum(1 for r in results if r.unreadable_current and not r.error)
+    up_to_date = total - updates_available - held - unreadable - errors
     lines.append(f"  Total services: {total}")
     lines.append(f"  Up to date:     {c(GREEN, str(up_to_date))}")
     if updates_available > 0:
@@ -1561,6 +1520,10 @@ def format_table(results: list[ServiceVersion]) -> str:
         lines.append(f"  Updates:        {updates_available}")
     if held > 0:
         lines.append(f"  Held:           {c(DIM, str(held))} (documented holds, not actionable)")
+    if unreadable > 0:
+        lines.append(
+            f"  Pin elsewhere:  {c(DIM, str(unreadable))} (current version not readable here)"
+        )
     if errors > 0:
         lines.append(f"  Errors:         {c(RED, str(errors))}")
     else:
@@ -1569,10 +1532,10 @@ def format_table(results: list[ServiceVersion]) -> str:
 
     if updates_available > 0:
         lines.append(c(DIM, "To update a specific service:"))
-        lines.append(c(DIM, "  task maintenance:update-version SERVICE=<name>"))
+        lines.append(c(DIM, "  check-versions.py --update <name>"))
         lines.append(c(DIM, ""))
         lines.append(c(DIM, "To update all outdated services:"))
-        lines.append(c(DIM, "  task maintenance:update-all-versions"))
+        lines.append(c(DIM, "  check-versions.py --update-all"))
         lines.append("")
 
     return "\n".join(lines)
@@ -1581,13 +1544,8 @@ def format_table(results: list[ServiceVersion]) -> str:
 def format_json(results: list[ServiceVersion]) -> str:
     """Format results as JSON.
 
-    Summary semantics: `updates_available` counts ACTIONABLE updates only;
-    registry-held updates (held=True) are excluded and counted separately
-    in `updates_held`. version-check-ci.py keys its exit code and MR
-    comment off this distinction. The same rule holds per service: a held
-    entry reports `update_available: false` (with `held: true` and the newer
-    `latest_version` keeping the hold visible), so no JSON consumer can act
-    on a held update without deliberately parsing the hold.
+    `updates_available` counts actionable updates only; held ones are counted
+    in `updates_held` and report `update_available: false` per service.
     """
     data = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -1595,9 +1553,14 @@ def format_json(results: list[ServiceVersion]) -> str:
         "services": [],
         "summary": {
             "total": len(results),
-            "up_to_date": sum(1 for r in results if not r.update_available and not r.error),
-            "updates_available": sum(1 for r in results if r.update_available and not r.held),
+            "up_to_date": sum(
+                1
+                for r in results
+                if not r.update_available and not r.error and not r.unreadable_current
+            ),
+            "updates_available": sum(1 for r in results if is_actionable(r)),
             "updates_held": sum(1 for r in results if r.update_available and r.held),
+            "updates_current_unreadable": sum(1 for r in results if r.unreadable_current),
             "errors": sum(1 for r in results if r.error),
         },
     }
@@ -1609,18 +1572,17 @@ def format_json(results: list[ServiceVersion]) -> str:
             "var_name": r.var_name,
             "current_version": r.current_version,
             "latest_version": r.latest_version,
-            # A held update is NOT available: every consumer of the per-service
-            # JSON that keys an action off this flag (bump bots, MR comments)
-            # would otherwise need its own `and not held` guard, and the one
-            # that forgets bumps a pin straight through a documented hold. The
-            # hold stays visible through `held: true` + `latest_version`.
-            "update_available": r.update_available and not r.held,
+            "update_available": is_actionable(r),
             "source_url": r.source_url,
         }
         if r.error:
             entry["error"] = r.error
         if r.held:
             entry["held"] = True
+        if r.unreadable_current:
+            entry["unreadable_current"] = True
+        if r.coupled_vars:
+            entry["coupled_vars"] = list(r.coupled_vars)
         if r.notes:
             entry["notes"] = r.notes
         if r.release_url:
@@ -1633,12 +1595,10 @@ def format_json(results: list[ServiceVersion]) -> str:
 # --- CLI ---
 
 def get_deploy_command(result: ServiceVersion) -> str:
-    """How to roll out a bumped pin — registry data, with two derived fallbacks.
+    """How to roll out a bumped pin.
 
-    Per-service `deploy_command` in the config wins. A `version_file` pin has no
-    deploy step by construction (the tag + @sha256 digest are edited in place
-    where the pin lives), so it gets a derived instruction naming those files.
-    Anything else falls back to the config's `default_deploy_command`.
+    Per-service `deploy_command` wins; a `version_file` pin gets a derived
+    instruction naming those files; otherwise `default_deploy_command`.
     """
     svc = next(
         (s for s in SERVICE_REGISTRY if s.get("var_name") == result.var_name),
@@ -1662,7 +1622,7 @@ def get_deploy_command(result: ServiceVersion) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the CLI parser. --category is validated against CATEGORY_LABELS."""
+    """Build the CLI parser. --category is validated against CATEGORIES."""
     parser = argparse.ArgumentParser(
         prog="check-versions.py",
         description="Compare pinned versions against their upstream releases.",
@@ -1677,9 +1637,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--service", metavar="NAME", type=str.lower,
                         help="Check services matching NAME only")
     parser.add_argument("--category", metavar="CAT", type=str.lower,
-                        choices=sorted(CATEGORY_LABELS),
+                        choices=sorted(CATEGORIES),
                         help="Check one category only (%s)"
-                             % ", ".join(sorted(CATEGORY_LABELS)))
+                             % ", ".join(sorted(CATEGORIES)))
     parser.add_argument("--json", action="store_true", dest="json_output",
                         help="Output as JSON")
     parser.add_argument("--no-cache", action="store_true",
@@ -1694,6 +1654,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="List all tracked services and exit")
     parser.add_argument("--check-coverage", action="store_true",
                         help="Fail if a *_version pin has no registry entry")
+    parser.add_argument("--check-partner-pins", metavar="BASE_REF",
+                        help="Fail if a coupled pin moved and its partner did not")
     parser.add_argument("--config", metavar="PATH",
                         help="Consumer config (default: $CHECK_VERSIONS_CONFIG, "
                              "then scripts/version-registry.{py,json})")
@@ -1727,6 +1689,12 @@ def _run_update(service_name: str) -> None:
         print(f"{result.name} is already at the latest version ({result.current_version})")
         sys.exit(0)
 
+    if result.unreadable_current:
+        print(f"{result.name}'s pin is not readable from this repo: "
+              f"{result.notes or 'see the registry entry'}")
+        print(f"Latest upstream release: {result.latest_version}. Edit the pin where it lives.")
+        sys.exit(0)
+
     if result.held:
         print(f"{result.name} is held back: {result.notes or 'documented hold'}")
         print(f"Not updating (would write {result.latest_version} into {VARS_FILE.name}).")
@@ -1736,9 +1704,22 @@ def _run_update(service_name: str) -> None:
     print(f"Updating {result.name}: {result.current_version} -> {result.latest_version}")
     if update_version_in_file(result.var_name, result.latest_version):
         print(f"Updated {result.var_name} in {VARS_FILE.name}")
+        try:
+            write_companion_pins(result)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if result.notes:
+            print(f"  {result.notes}")
+        step = 1
         print("\nNext steps:")
-        print(f"  1. Review the change: git diff {VARS_FILE}")
-        print(f"  2. Deploy the update: {get_deploy_command(result)}")
+        if result.coupled_vars:
+            step += 1
+            print(f"  1. PAIRED EDIT REQUIRED: also update "
+                  f"{', '.join(result.coupled_vars)} in {VARS_FILE.name}"
+                  + (f" - {result.notes}" if result.notes else ""))
+        print(f"  {step}. Review the change: git diff {VARS_FILE}")
+        print(f"  {step + 1}. Deploy the update: {get_deploy_command(result)}")
         sys.exit(0)
 
     # No write means the pin was renamed or the file format changed. Fail
@@ -1754,11 +1735,26 @@ def _run_update_all() -> None:
     write_failed = []
     errored = [r for r in results if r.error]
     held_skipped = [r for r in results if r.update_available and r.held and not r.error]
+    unreadable_skipped = [r for r in results if r.unreadable_current and not r.error]
+    # A coupled pin IS written; its partner value (a checksum, a git SHA) is a
+    # hand edit this script cannot compute, so it is flagged loudly instead.
+    # --check-partner-pins reds the MR while a partner is still stale.
+    paired = []
     for r in results:
-        if r.update_available and not r.error and not r.held:
+        if is_actionable(r):
             print(f"Updating {r.name}: {r.current_version} -> {r.latest_version}")
             if update_version_in_file(r.var_name, r.latest_version):
+                try:
+                    write_companion_pins(r)
+                except RuntimeError as exc:
+                    print(f"  ERROR: {exc}")
+                    write_failed.append(r)
+                    continue
                 updated.append(r)
+                if r.coupled_vars:
+                    paired.append(r)
+                if r.notes:
+                    print(f"  {r.notes}")
             else:
                 print(f"  ERROR: Could not find {r.var_name} in {VARS_FILE.name}")
                 write_failed.append(r)
@@ -1781,6 +1777,23 @@ def _run_update_all() -> None:
             print(f"  - {r.name}: {r.current_version} -> {r.latest_version} "
                   f"({r.notes or 'documented hold'})")
 
+    if unreadable_skipped:
+        print(f"\nNOTE: {len(unreadable_skipped)} pin(s) live outside this repo and were not written:")
+        for r in unreadable_skipped:
+            print(f"  - {r.name}: upstream {r.latest_version} "
+                  f"({r.notes or 'see the registry entry'})")
+
+    if paired:
+        print("\n" + "=" * 72)
+        print(f"PAIRED-EDIT-REQUIRED: {len(paired)} pin(s) were written whose partner")
+        print("value must be recomputed by hand before this change can merge:")
+        for r in paired:
+            print(f"  - {r.var_name} -> {r.latest_version}; also update "
+                  f"{', '.join(r.coupled_vars)} in {VARS_FILE.name}"
+                  + (f" - {r.notes}" if r.notes else ""))
+        print("`--check-partner-pins <base-ref>` fails while a partner is stale.")
+        print("=" * 72)
+
     if updated:
         print(f"\nUpdated {len(updated)} services in {VARS_FILE.name}")
 
@@ -1797,12 +1810,8 @@ def _run_update_all() -> None:
             for svc in services:
                 print(f"       # Updates: {svc}")
 
-        print("\n  3. Verify deployments:")
-        print("     task k3s:status")
-        print("     task infra:verify")
-
-        print("\n  4. Commit changes:")
-        print("     git add -A && git commit -m 'Update service versions'")
+        print("\n  3. Commit the change:")
+        print(f"     git add {VARS_FILE} && git commit")
     elif not errored:
         print("\nAll services are up to date!")
 
@@ -1820,6 +1829,9 @@ def main():
         repo_root,
     )
 
+    if args.check_partner_pins:
+        _run_check_partner_pins(args.check_partner_pins)
+
     if args.check_coverage:
         missing = missing_registry_entries()
         if missing:
@@ -1836,8 +1848,7 @@ def main():
 
     if args.clear_cache:
         if CACHE_DIR.exists():
-            for f in CACHE_DIR.iterdir():
-                f.unlink()
+            shutil.rmtree(CACHE_DIR, ignore_errors=True)
             print(f"Cache cleared: {CACHE_DIR}")
         else:
             print("No cache to clear")
@@ -1874,7 +1885,12 @@ def main():
             print("Run with --list to see available services")
             sys.exit(1)
 
-    results = check_all(services=services, category_filter=category_filter, use_cache=use_cache)
+    try:
+        results = check_all(services=services, category_filter=category_filter, use_cache=use_cache)
+    except ValueError as exc:
+        # 2, not 1: exit 1 is "updates available", which a wrapper acts on.
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     if args.json_output:
         print(format_json(results))
@@ -1883,7 +1899,7 @@ def main():
 
     # Exit code: 0 = all up to date, 1 = updates available, 2 = errors
     has_errors = any(r.error for r in results)
-    has_updates = any(r.update_available and not r.held for r in results)
+    has_updates = any(is_actionable(r) for r in results)
     if has_errors:
         sys.exit(2)
     elif has_updates:

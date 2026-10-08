@@ -1,0 +1,30 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - storage.yaml
+  - release.yaml
+  # nodeport.yaml is not reconciled: an always-on NodePort is an
+  # unauthenticated push/read path on every node IP. It is an apply-on-demand
+  # fallback; see its own header.
+
+# Loki ruler rule files, delivered to the loki-sc-rules sidecar. The
+# loki_rule:"1" label matches the sidecar's LABEL env, and the
+# k8s-sidecar-target-directory annotation names the tenant subdir it writes to.
+generatorOptions:
+  # Stable name (no content hash) so the sidecar keeps discovering it and no
+  # orphan rule ConfigMaps accumulate.
+  disableNameSuffixHash: true
+  labels:
+    loki_rule: "1"
+  annotations:
+    k8s-sidecar-target-directory: /rules/fake
+configMapGenerator:
+  - name: loki-rules-host-log-staleness
+    files:
+      - host-log-staleness.yaml
+{%- if git_backend == 'gitlab_selfhosted' %}
+  - name: loki-rules-runner-reaper
+    files:
+      - runner-reaper.yaml
+{%- endif %}

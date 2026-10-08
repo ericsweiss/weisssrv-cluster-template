@@ -1,7 +1,7 @@
 ---
 # Publishes DNS records for Ingresses, Services and Traefik IngressRoutes into
 # the EXTERNAL zone. The internal zone is served by the LAN resolver, not here.
-# The provider block is the DNS-backend seam — see infrastructure/README.md.
+# The provider block is the DNS-backend seam — see ../../../README.md § Backend seams.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -10,6 +10,9 @@ metadata:
 spec:
   interval: 30m
   releaseName: external-dns
+  # Revert out-of-band edits; the repo rule lives in traefik/release.yaml.
+  driftDetection:
+    mode: enabled
   chart:
     spec:
       chart: external-dns
@@ -20,10 +23,9 @@ spec:
         namespace: flux-system
       interval: 12h
   install:
-    # The provider token Secret is created by the configs stage, which depends
-    # on this one. Without disableWait, Helm --wait blocks on pod readiness ->
-    # pods block on the Secret -> bootstrap deadlock. Upgrades run in steady
-    # state where the Secret already exists.
+    # The provider token Secret comes from the configs stage, which depends on
+    # this one. Without disableWait, Helm --wait blocks on pods that block on
+    # the Secret: bootstrap deadlock. Upgrades run with the Secret present.
     disableWait: true
     remediation:
       retries: 3
@@ -40,6 +42,9 @@ spec:
       # Proxy public records (hides the origin IP, absorbs DDoS). Drop this for
       # records that need the origin reachable directly.
       - --cloudflare-proxied
+      # IngressRoutes here and in the app template annotate with the alpha
+      # prefix; external-dns >= 0.22 defaults to external-dns.kubernetes.io/.
+      - --annotation-prefix=external-dns.alpha.kubernetes.io/
     env:
       - name: CF_API_TOKEN
         valueFrom:

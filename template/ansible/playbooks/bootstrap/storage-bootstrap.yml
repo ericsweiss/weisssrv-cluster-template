@@ -1,15 +1,10 @@
 ---
-# INTERACTIVE. Brings a NAS with EMPTY (or missing) datasets up to the layout
-# group_vars/nas.yml declares, then configures the storage services on top.
-# Use it for first NAS setup, disaster recovery, or after adding a pool —
-# `task storage:deploy` is the day-2 path and refuses to run against a NAS whose
-# declared datasets do not exist yet.
-#
-# ZFS POOLS ARE NEVER CREATED HERE. `zpool create` is destructive and pool
-# geometry is a hardware decision, so this playbook stops and tells you which
-# pools to create by hand (docs/RUNBOOKS.md "Storage bootstrap"). Datasets are
-# created only after you confirm the list; existing datasets are left alone and
-# no data is destroyed.
+# CRITICAL: INTERACTIVE. Brings a NAS with empty or missing datasets up to the
+# layout group_vars/nas.yml declares, then configures the storage services.
+# ZFS POOLS ARE NEVER CREATED HERE: the playbook stops and names the pools to
+# create by hand (docs/RUNBOOKS.md "Storage bootstrap"). Datasets are created
+# only after you confirm the list; existing datasets are left alone.
+# `task storage:deploy` is the day-2 path.
 #
 #   task disaster-recovery:storage-bootstrap
 
@@ -111,10 +106,8 @@
         fail_msg: "Not confirmed — aborting."
       when: datasets_to_create | length > 0
 
-    # An encrypted dataset carries `encryption:` but no keyformat/keylocation
-    # (the key arrives at boot from the secrets backend), and `zfs create -o
-    # encryption=...` without them fails. Those are created by hand — see
-    # docs/RUNBOOKS.md "Storage bootstrap".
+    # Encrypted datasets are skipped here: they carry no keyformat/keylocation
+    # and are created by hand per docs/RUNBOOKS.md "Storage bootstrap".
     - name: Create the missing datasets
       ansible.builtin.command: >
         zfs create
@@ -130,12 +123,9 @@
         - "'encryption' not in item.1.properties"
       changed_when: true
 
-    # Same loop/when shape as the create task: ansible-lint's mock templating
-    # rejects a standalone `vars:` subelements expression but accepts this form.
-    # A hard stop, not a notice: the plays below create export directories and
-    # configure services over whatever sits at the dataset's mountpoint, so
-    # continuing past a missing encrypted dataset writes data onto the parent
-    # (unencrypted) filesystem.
+    # CRITICAL: a hard stop, not a notice. Continuing past a missing encrypted
+    # dataset writes the exports onto the parent unencrypted filesystem.
+    # The loop shape mirrors the create task to satisfy ansible-lint.
     - name: Stop until encrypted datasets are created by hand
       ansible.builtin.fail:
         msg: >-
@@ -162,10 +152,9 @@
         gid: "{{ nas_storage_media_gid | default(2000) }}"
         state: present
 
-    # The nas_storage role creates /export and the bind TARGETS, but a bind
-    # source is a path inside a dataset it does not own; on a fresh pool it does
-    # not exist yet and the role's bind would fail. Ownership matches each
-    # export's squash so the first write lands with the right ids.
+    # The nas_storage role creates the bind targets but not these sources, which
+    # live inside datasets it does not own. Ownership matches each export's
+    # squash so the first write lands with the right ids.
     - name: Create the bind sources declared in nas_storage_exports
       ansible.builtin.file:
         path: "{{ item.bind_source }}"
@@ -219,7 +208,7 @@
         tasks_from: samba.yml
       when: nas_storage_samba_shares | default([]) | length > 0
 
-- name: Verify the result
+- name: Verify and report the storage result
   hosts: nas
   become: true
   gather_facts: false
@@ -235,11 +224,24 @@
       changed_when: false
       failed_when: false
 
+    - name: Assert every declared NFS export is live
+      ansible.builtin.assert:
+        that:
+          - nfs_verification.rc == 0
+          - nfs_verification.stdout_lines | length > 1
+          - nas_storage_exports | map(attribute='path')
+            | difference(nfs_verification.stdout | regex_findall('^(/\S+)', multiline=True))
+            | length == 0
+        fail_msg: >-
+          showmount -e localhost did not list every declared export, so the k3s
+          NFS PVs will not mount. Check `systemctl status nfs-server` and
+          `exportfs -v` before running `task infra:verify`.
+
     - name: Report the result
       ansible.builtin.debug:
         msg:
           - "Datasets:"
           - "{{ mounted_datasets.stdout_lines | map('regex_replace', '^', '  ') | join('\n') }}"
           - "NFS exports:"
-          - "{{ nfs_verification.stdout_lines | default(['  (showmount failed)']) | map('regex_replace', '^', '  ') | join('\n') }}"
+          - "{{ nfs_verification.stdout_lines | map('regex_replace', '^', '  ') | join('\n') }}"
           - "Next: `task infra:verify`, then `zpool status` and the SMART checks."

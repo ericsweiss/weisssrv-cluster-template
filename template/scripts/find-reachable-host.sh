@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# Print the first reachable SSH target from the arguments (each optionally
-# user@-prefixed), or exit 1 if none respond. For task wrappers that need any
-# one cluster entry point — pass the candidates in preference order.
-#
+# Print the first reachable SSH target from the arguments, or exit 1 if none
+# respond. Targets may be user@-prefixed; pass them in preference order.
 # Usage: find-reachable-host.sh <ssh-target> [<ssh-target> ...]
-#   find-reachable-host.sh user@10.0.0.10 user@10.0.0.11
-#   find-reachable-host.sh host-a host-b     # ssh-config resolves the user
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -1,6 +1,6 @@
 ---
 # Stops both replicas being evicted by a drain. Does not protect against hard
-# node loss if they co-locate — see the spread note in hpa.yaml.
+# node loss if they co-locate — see ../../../README.md § In-cluster DNS.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

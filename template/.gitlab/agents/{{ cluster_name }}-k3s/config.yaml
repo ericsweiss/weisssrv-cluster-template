@@ -1,0 +1,13 @@
+---
+# No ci_access grant: nothing in CI uses the agent's kubeconfig, and its
+# ServiceAccount is cluster-admin — a standing grant hands every merge-request
+# pipeline that identity. Narrow the ServiceAccount before adding one.
+observability:
+  logging:
+    level: warn
+
+# remote_development off: agentk >= v19 hard-fails at startup on its synchronous
+# apiserver probe, which races NetworkPolicy enforcement. The browser Web IDE
+# and its ide.git extension host need no agent grant.
+remote_development:
+  enabled: false

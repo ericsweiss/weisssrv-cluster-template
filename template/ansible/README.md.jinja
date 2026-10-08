@@ -1,0 +1,120 @@
+{%- import "partials/links.jinja" as links with context -%}
+# Ansible
+
+Configuration management for the Proxmox hosts, the LXC and VM guests, and the
+k3s node VMs. Everything *inside* the k3s cluster belongs to Flux, not Ansible.
+
+**There is no `roles/` directory.** Every role lives in the `weisssrv.infra`
+collection in [weisssrv-lib]({{ links.lib_home() }}), pinned in
+`requirements.yml`; playbooks address roles by FQCN (`weisssrv.infra.base`).
+This repo is the *site*: inventory, playbook composition, and the integration
+tests that exercise the roles together.
+
+| Path | What lives there |
+|---|---|
+| `requirements.yml` | The `weisssrv.infra` pin (`{{ lib_ref }}` today) and the galaxy collections it needs. Bumping the platform is a bump of `version:` here |
+| `inventories/prod/hosts.yml` | Hosts, groups, guest sizing{% if storage_backend == 'zfs' %}, and the `vm_additional_disks` zvols{% endif %} |
+| `inventories/prod/group_vars/all.yml` | Single source for every version pin |
+| `inventories/prod/group_vars/<group>.yml`, `host_vars/<host>.yml` | Group and host values. The roles are generic, so the site data they need lives here |
+| `playbooks/` | Entry points. `site.yml` is the fan-out; the per-area playbooks mirror the `deploy-*` CI jobs |
+| `playbooks/tasks/` | Task files several playbooks include |
+| `integration-tests/` | Multi-role molecule stacks |
+| `molecule/` | Shared prepare and warm-up tasks the stacks import |
+| `TESTING.md` | What this repo tests and how to run it |
+
+Deployment commands are `task infra:*` and `task k3s:*`. Run `task --list` for
+the current set. Every task is idempotent and safe to re-run.
+
+## Changing a role
+
+Roles are not edited here. The workflow is:
+
+1. Change the role in weisssrv-lib. Its molecule scenario lives with it.
+2. Merge there and cut a release tag.
+3. Here, in ONE merge request: bump `version:` in `requirements.yml`, bump
+   `WEISSSRV_LIB_REF` in `.gitlab-ci.yml`, run `scripts/check-lib-pins.py --fix`,
+   re-vendor the byte-identical scripts, then
+   `ansible-galaxy install -r requirements.yml --force` and re-run the gates.
+
+Step 3 also carries the inventory changes a renamed variable needs. Every role
+variable is read through `| default(...)`, so a name left un-renamed does not
+raise. It silently takes the role default. The collection's `MIGRATING.md` has
+the old to new map.
+
+To iterate against an unmerged library change, point `version:` at a branch,
+re-run `ansible-galaxy install -r requirements.yml --force`, and set it back to
+a tag before opening the merge request.
+
+## Guest playbooks and the cert-distribution key
+
+`weisssrv.infra.base` rewrites each guest's `authorized_keys`, which drops the
+`acme_certs` distribution key pinned there. The loss only shows at the next
+renewal, so `base.yml` and `mail.yml` each end with a play on `dns_primary` that
+re-seeds the targets through the role's `seed-target` tasks. A new playbook that
+applies `base` to a cert target needs the same play.
+
+`acme_certs_distribution_targets` is derived in `group_vars/dns.yml` from
+`_acme_certs_targets`, and an entry with an empty `host_key` is filtered out.
+Print the pins with `task certs:show-host-keys` and paste them in, or the target
+stops receiving the wildcard. `docs/RUNBOOKS.md` § Certificates has the rest.
+
+## Code conventions
+
+`CLAUDE.md` and `AGENTS.md` point here rather than restating these.
+
+- **Fully-qualified names.** `ansible.builtin.apt`, not `apt`;
+  `weisssrv.infra.base`, not `base`. `ansible-lint` enforces it under
+  `task ansible:lint`.
+- **snake_case variables, prefixed with their role** (`adguard_home_http_port`).
+  A few inventory-wide names (`admin_user`, `timezone`, `dns_servers`,
+  `internal_domain`{% if storage_backend == 'zfs' %}, `vm_additional_disks`{% endif %}) are aliased by the roles and keep their
+  bare form. The collection README's alias table is the list of record.
+- **Variable precedence**, low to high: a group's `vars:` block written inside
+  `hosts.yml`, then `group_vars/all.yml`, then `group_vars/<group>.yml`, then a
+  host's vars inside `hosts.yml`, then `host_vars/<host>.yml`. A group override
+  written in `hosts.yml` is the lowest of those, so anything under `group_vars/`
+  beats it. Put an override that must hold in `group_vars/<group>.yml`.
+- **`no_log: true` on every task that handles a secret** — rendering a password
+  into a file, passing a credential, reading one from the environment.
+  `ansible-lint` matches known password module parameters only, so apply it by
+  hand.
+- **Tags.** Playbooks tag roles at the `roles:` level. `--tags <x>` matches
+  nothing and exits 0 when `<x>` is not a declared tag, so check with
+  `ansible-playbook <playbook> --list-tasks --tags <x>` before putting a command
+  in a runbook.
+- **Mirror the nearest neighbour.** Copy the closest playbook or inventory block
+  instead of inventing a shape. The handler and service patterns the roles
+  follow are in the collection's own README.
+- **Cross-cutting roles are listed twice on purpose.** `node_exporter_host` and
+  `alloy_host` run in `site.yml`'s own plays AND in each per-area playbook, so a
+  standalone deploy does not leave metrics or log shipping behind. Each one
+  carries a `# Shared with site.yml` marker.
+{%- if storage_backend == 'zfs' %}
+- **`nfs_tls` is narrower.** It runs where a host mounts the NAS exports with
+  `xprtsec=tls`: the Proxmox hosts, the k3s nodes, and the NAS itself as the
+  server. Add it by hand when a new guest needs a TLS mount.
+{%- endif %}
+- **`ansible.cfg` sizing and trust.** `forks = 15` is sized to the CI runner
+  build container's memory cap; raise the two together. There is no
+  fact-caching backend, so facts are gathered once per run and never outlive
+  it. `StrictHostKeyChecking=accept-new` records a key on first contact and
+  refuses a changed one. After a legitimate rebuild run `ssh-keygen -R <host>`
+  and let accept-new record the new key. Never set `host_key_checking=False`.
+
+## Testing
+
+- `task ansible:lint` lints the whole `ansible/` tree.
+- `task ansible:test` runs the integration-test stacks. Docker must be running.
+- Per-role molecule scenarios run in weisssrv-lib, against the role.
+- `task infra:verify` runs `playbooks/postflight.yml` against production.
+
+Details, the stack inventory and the container caveats are in
+[TESTING.md](TESTING.md).
+
+## Secrets
+
+Host-side tooling resolves {% if secrets_backend == 'onepassword' %}`op://` references into the `{{ onepassword_vault }}` vault
+at runtime through `op run`{% else %}its {{ secrets_backend }} references at runtime{% endif %}. The references live in the invoking
+`Taskfile.yml` task's `env:` block and in the matching CI job's `variables:`,
+never as literals and never in the inventory. `task secrets:show` prints the
+live set, and `docs/RUNBOOKS.md` § Rotating a secret has the rotation paths.

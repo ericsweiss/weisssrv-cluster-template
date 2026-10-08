@@ -60,6 +60,25 @@ spec:
           memory: 256Mi
     admissionController:
       enabled: true
+      # CRITICAL: this webhook is on the admission path for every pod and is
+      # failurePolicy: Ignore, so pods admitted while it is down run at the raw
+      # manifest numbers. The chart renders the PDB only when replicas > 1.
+      replicaCount: 2
+      podDisruptionBudget:
+        minAvailable: 1
+      # Soft, not required: a hard rule would leave the second replica Pending
+      # on a single-node or tightly-labelled cluster.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: vpa
+                    app.kubernetes.io/instance: vpa
+                    app.kubernetes.io/component: admission-controller
       resources:
         requests:
           cpu: 25m

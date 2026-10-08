@@ -490,15 +490,6 @@
           "expr": "100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job=\"node-exporter\", mode=\"idle\"}[5m]))) * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info)",
           "legendFormat": "{{ nodename }}",
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "100",
-          "legendFormat": "limit",
-          "refId": "B"
         }
       ]
     },
@@ -612,15 +603,6 @@
           "expr": "100 * (1 - node_memory_MemAvailable_bytes{job=\"node-exporter\"} / node_memory_MemTotal_bytes{job=\"node-exporter\"}) * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info)",
           "legendFormat": "{{ nodename }}",
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "100",
-          "legendFormat": "limit",
-          "refId": "B"
         }
       ]
     },
@@ -911,7 +893,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "label_join((1 - node_filesystem_avail_bytes{job=\"node-exporter\", fstype!~\"tmpfs|overlay|squashfs\", mountpoint!~\"/boot.*\"} / node_filesystem_size_bytes{job=\"node-exporter\", fstype!~\"tmpfs|overlay|squashfs\", mountpoint!~\"/boot.*\"}) * 100 * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info), \"mount_key\", \":\", \"instance\", \"mountpoint\")",
+          "expr": "label_join((1 - node_filesystem_avail_bytes{job=~\"${cluster_node_exporter_job_regex}\", fstype!~\"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660|fuse.lxcfs\", mountpoint!~\"/boot.*\"} / node_filesystem_size_bytes{job=~\"${cluster_node_exporter_job_regex}\", fstype!~\"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660|fuse.lxcfs\", mountpoint!~\"/boot.*\"}) * 100 * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info), \"mount_key\", \":\", \"instance\", \"mountpoint\")",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -922,7 +904,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "label_join(node_filesystem_size_bytes{job=\"node-exporter\", fstype!~\"tmpfs|overlay|squashfs\", mountpoint!~\"/boot.*\"} * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info), \"mount_key\", \":\", \"instance\", \"mountpoint\")",
+          "expr": "label_join(node_filesystem_size_bytes{job=~\"${cluster_node_exporter_job_regex}\", fstype!~\"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660|fuse.lxcfs\", mountpoint!~\"/boot.*\"} * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info), \"mount_key\", \":\", \"instance\", \"mountpoint\")",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -933,7 +915,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "label_join(node_filesystem_avail_bytes{job=\"node-exporter\", fstype!~\"tmpfs|overlay|squashfs\", mountpoint!~\"/boot.*\"} * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info), \"mount_key\", \":\", \"instance\", \"mountpoint\")",
+          "expr": "label_join(node_filesystem_avail_bytes{job=~\"${cluster_node_exporter_job_regex}\", fstype!~\"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660|fuse.lxcfs\", mountpoint!~\"/boot.*\"} * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info), \"mount_key\", \":\", \"instance\", \"mountpoint\")",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1102,18 +1084,9 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(1 - node_filesystem_avail_bytes{job=\"node-exporter\", fstype!~\"tmpfs|overlay|squashfs\", mountpoint!~\"/boot.*\"} / node_filesystem_size_bytes{job=\"node-exporter\", fstype!~\"tmpfs|overlay|squashfs\", mountpoint!~\"/boot.*\"}) * 100 * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info)",
+          "expr": "(1 - node_filesystem_avail_bytes{job=~\"${cluster_node_exporter_job_regex}\", fstype!~\"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660|fuse.lxcfs\", mountpoint!~\"/boot.*\"} / node_filesystem_size_bytes{job=~\"${cluster_node_exporter_job_regex}\", fstype!~\"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660|fuse.lxcfs\", mountpoint!~\"/boot.*\"}) * 100 * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info)",
           "legendFormat": "{{ nodename }} {{ mountpoint }}",
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "100",
-          "legendFormat": "limit",
-          "refId": "B"
         }
       ]
     },
@@ -1513,7 +1486,7 @@
           "sort": "desc"
         }
       },
-      "description": "VMs without QEMU guest agent installed report 0% disk usage. This is expected for HAOS and other appliance VMs.",
+      "description": "VMs without the QEMU guest agent report 0% disk usage. Expected for appliance images that cannot install it.",
       "title": "VM Disk Usage %",
       "type": "timeseries",
       "targets": [
@@ -2565,15 +2538,6 @@
           "expr": "max by (id) (pve_cpu_usage_ratio{id=~\"node/.*\"}) * 100",
           "legendFormat": "{{ id }}",
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "100",
-          "legendFormat": "limit",
-          "refId": "B"
         }
       ]
     },
@@ -2687,15 +2651,6 @@
           "expr": "max by (id) (pve_memory_usage_bytes{id=~\"node/.*\"}) / max by (id) (pve_memory_size_bytes{id=~\"node/.*\"}) * 100",
           "legendFormat": "{{ id }}",
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "100",
-          "legendFormat": "limit",
-          "refId": "B"
         }
       ]
     },
@@ -3044,7 +2999,7 @@
           }
         ]
       },
-      "description": "PVC usage from kubelet volume stats. NFS-backed PVCs show the underlying share usage, not individual PVC consumption. hostPath PVCs (zvol mounts) do not report kubelet volume stats \u2014 see the ZFS Zvol Usage panel on the Infrastructure dashboard.",
+      "description": "PVC usage from kubelet volume stats. NFS-backed PVCs show the underlying share usage, not individual PVC consumption. hostPath PVCs (zvol mounts) do not report kubelet volume stats — see the ZFS Zvol Usage panel on the Infrastructure dashboard.",
       "title": "PVC Usage",
       "type": "table",
       "targets": [
@@ -3216,7 +3171,7 @@
         "sizing": "auto",
         "valueMode": "color"
       },
-      "description": "CPU requests as a percentage of allocatable CPU per node. Shows scheduling pressure \u2014 when this reaches 100%, no more pods with CPU requests can be scheduled on that node.",
+      "description": "CPU requests as a percentage of allocatable CPU per node. Shows scheduling pressure — when this reaches 100%, no more pods with CPU requests can be scheduled on that node.",
       "title": "CPU Requests vs Allocatable",
       "type": "bargauge",
       "targets": [
@@ -3294,7 +3249,7 @@
         "sizing": "auto",
         "valueMode": "color"
       },
-      "description": "Memory requests as a percentage of allocatable memory per node. Shows scheduling pressure \u2014 when this reaches 100%, no more pods with memory requests can be scheduled on that node.",
+      "description": "Memory requests as a percentage of allocatable memory per node. Shows scheduling pressure — when this reaches 100%, no more pods with memory requests can be scheduled on that node.",
       "title": "Memory Requests vs Allocatable",
       "type": "bargauge",
       "targets": [
@@ -3595,6 +3550,7 @@
       ]
     }
   ],
+  "refresh": "1m",
   "schemaVersion": 39,
   "tags": [
     "cluster",

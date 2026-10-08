@@ -1,24 +1,19 @@
 ---
-# weisssrv-cluster-template — answer schema.
-#
-# Every question below is recorded in the generated repo's .copier-answers.yml
-# and replayed on `copier update`, so the set is API: renaming or removing a
-# question is a breaking change for every cluster generated from this template.
-#
-# Site identity (domains, IPs, vault name) deliberately has NO default — a
-# cluster cannot be generated without it. Values that are genuinely generic
-# (timezone, backend selection, library ref) do carry one.
+# Answer schema; each ANSWERED question lands in .copier-answers.yml and replays
+# on `copier update`, so renaming or removing one is breaking. Identity answers
+# have no default; validators reject malformed or colliding values.
 
-_min_copier_version: "9.0.0"
+_min_copier_version: "9.15.0"
 _subdirectory: template
 _templates_suffix: .jinja
 _answers_file: .copier-answers.yml
 
 # Jinja defaults, minus surprises: trim_blocks/lstrip_blocks stay OFF so the
-# `{%- ... -%}` whitespace control used throughout template/ behaves the way it
-# reads. Templates must not rely on block trimming.
+# `{%- ... -%}` whitespace control reads as it behaves. StrictUndefined fails the
+# render on an unknown answer name, and needs the copier floor set above.
 _envops:
   keep_trailing_newline: true
+  undefined: jinja2.StrictUndefined
 
 # Replaces copier's built-in list, so the built-ins are repeated here.
 _exclude:
@@ -42,13 +37,15 @@ _message_after_copy: |
     1. cd into the new directory, `git init`, and make the first commit.
     2. Fill in ansible/inventories/prod/hosts.yml (per-host facts go inline on
        each host entry), then run `task hosts:sync`.
-    3. Create the {{ secrets_backend }} items the generated
-       ansible/inventories/prod/group_vars/all.yml references; the full
-       inventory with field names is the template's PRE-SETUP.md:
-       https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/PRE-SETUP.md
+    3. Create the {{ secrets_backend }} items the generated repository
+       references; the full inventory with titles and field names is the
+       template's PRE-SETUP.md:
+       https://github.com/ericsweiss/weisssrv-cluster-template/blob/main/docs/PRE-SETUP.md
+       `task secrets:show` in the new repo prints the host-side references;
+       the in-cluster items are PRE-SETUP's "In-cluster" table.
     4. Follow the bring-up order in the generated README.md ("Bring-up"),
        or the long form at
-       https://git.ericsweiss.com/eric/weisssrv-cluster-template/-/blob/main/docs/SETUP.md
+       https://github.com/ericsweiss/weisssrv-cluster-template/blob/main/docs/SETUP.md
 
   Everything in kubernetes/ reads its site values from the cluster-config
   ConfigMap, not from literals — edit that ConfigMap, never the manifests,
@@ -67,9 +64,12 @@ _message_after_update: |
 cluster_name:
   type: str
   help: >-
-    Short name for this cluster. Becomes the Proxmox cluster name, the
-    kubernetes/clusters/<name>/ directory Flux bootstraps into, and the
-    prefix of generated hostnames.
+    Short name for this cluster. Becomes the kubernetes/clusters/<name>/
+    directory Flux bootstraps into, the git project name expected under
+    git_namespace, the prefix of the 1Password Connect server and ESO token,
+    and the cluster's name throughout the generated docs. Hostnames do not
+    come from it — they come from the starter roster in
+    ansible/inventories/prod/hosts.yml.
   placeholder: "homelab"
   validator: >-
     {% if not (cluster_name | regex_search('^[a-z][a-z0-9-]{1,30}[a-z0-9]$')) %}
@@ -82,7 +82,11 @@ internal_domain:
   type: str
   help: >-
     Zone for internal service names (resolved by the cluster's own DNS to LAN
-    addresses). Also used as the Kubernetes node-label namespace.
+    addresses). Also used as the Kubernetes node-label namespace. It must also
+    be a public zone the DNS backend's API token can solve over DNS-01: the
+    ClusterIssuer validates the internal wildcard over PUBLIC DNS, so a zone you
+    do not own publicly leaves that certificate pending and Traefik serving its
+    own self-signed one.
   placeholder: "lan.example.com"
   validator: >-
     {% if not (internal_domain | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$')) %}
@@ -108,6 +112,27 @@ external_domain:
 # Network
 # --------------------------------------------------------------------------
 
+# Computed, not questions: `when: false` keeps every `help: computed — not
+# asked` entry unprompted and out of .copier-answers.yml while its rendered
+# default stays in scope below. An answer file naming one overrides that default.
+ipv4_octets_re:
+  type: str
+  help: computed — not asked
+  when: false
+  default: '((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])'
+
+ipv4_re:
+  type: str
+  help: computed — not asked
+  when: false
+  default: '^{{ ipv4_octets_re }}$'
+
+ipv4_cidr_re:
+  type: str
+  help: computed — not asked
+  when: false
+  default: '^{{ ipv4_octets_re }}/(8|1[0-9]|2[0-9]|3[0-2])$'
+
 lan_cidr:
   type: str
   help: >-
@@ -115,51 +140,13 @@ lan_cidr:
     NFS export allowlists and NetworkPolicy egress rules are derived from it.
   placeholder: "192.168.1.0/24"
   validator: >-
-    {% if not (lan_cidr | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(8|1[0-9]|2[0-9]|3[0-2])$')) %}
+    {% if not (lan_cidr | regex_search(ipv4_cidr_re)) %}
     lan_cidr must be an IPv4 network in CIDR form with a /8-/32 prefix,
     e.g. 192.168.1.0/24
     {% endif %}
 
-lan_prefix:
-  type: str
-  help: >-
-    First three octets of the LAN, used to compose host addresses in the
-    inventory. Defaults to the network part of lan_cidr; override only if the
-    LAN is not a /24.
-  default: "{{ lan_cidr.split('/')[0].rsplit('.', 1)[0] }}"
-  validator: >-
-    {% if not (lan_prefix | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){2}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
-    lan_prefix must be three octets with no trailing dot, e.g. 192.168.0
-    {% endif %}
-
-# The three entries below are COMPUTED VALUES, not questions: `when: false`
-# means copier never prompts for them and records nothing in
-# .copier-answers.yml, but their rendered defaults are in scope for every
-# question that follows. They exist so the address scheme is written once
-# instead of once per address question.
-reserved_address_bands:
-  type: yaml
-  help: computed — not asked
-  when: false
-  # [first octet, last octet, what holds it]. hosts.yml composes guest
-  # addresses from these, so an answer inside one is an address a generated
-  # guest also takes. Keep in step with
-  # template/ansible/inventories/prod/hosts.yml.jinja.
-  default: |
-    - [11, 19, "the .11-.19 Proxmox host band"]
-    - [23, 23, "the SMTP relay address (.23, vmid 123)"]
-    - [31, 39, "the .31-.39 k3s server band (vmids 131+)"]
-    - [41, 49, "the .41-.49 k3s agent band (vmids 141+)"]
-
-reserved_address_note:
-  type: str
-  help: computed — not asked
-  when: false
-  default: >-
-    Pick one outside .11-.19, .23, .31-.39 and .41-.49; the starter scheme
-    leaves .1-.10, .20-.22, .24-.30 and .50+ free, and hosts.yml's header lists
-    the whole layout.
-
+# Computed — the rule is above ipv4_octets_re. lan_address_range sits above
+# lan_prefix, which reads it.
 lan_address_range:
   type: yaml
   help: computed — not asked
@@ -172,11 +159,70 @@ lan_address_range:
     {%- set _size = 2 ** (32 - (lan_cidr.split('/')[1] | int)) -%}
     [{{ _n - (_n % _size) }}, {{ _n - (_n % _size) + _size - 1 }}]
 
-# RULE: a validator may only compare an answer against answers declared ABOVE
-# it — copier renders validators against the answers given so far, so a forward
-# reference is undefined interactively. The gateway-vs-VIP collision is
-# therefore tested on the three VIP questions below. Enforced by
-# tests/test_copier_config.py, which also carries the band-collision rationale.
+reserved_address_bands:
+  type: yaml
+  help: computed — not asked
+  when: false
+  # [first octet, last octet, what holds it]. An answer inside a band collides
+  # with a generated guest. Keep in step with hosts.yml.jinja. compute_node_count
+  # finds the agent band by its first octet, 41, so appending a band is safe.
+  default: |
+    - [11, 19, "the .11-.19 Proxmox host band"]
+    - [23, 23, "the SMTP relay address (.23, vmid 123)"]
+    - [31, 39, "the .31-.39 k3s server band (vmids 131+)"]
+    - [41, 49, "the .41-.49 k3s agent band (vmids 141+)"]
+
+reserved_address_note:
+  type: str
+  help: computed — not asked
+  when: false
+  default: >-
+    {%- set _taken = [] -%}
+    {%- set _free = [] -%}
+    {%- set _ns = namespace(next=1) -%}
+    {%- for _lo, _hi, _name in reserved_address_bands -%}
+    {%- set _ = _taken.append('.' ~ _lo if _lo == _hi else '.' ~ _lo ~ '-.' ~ _hi) -%}
+    {%- if _ns.next < _lo -%}
+    {%- set _ = _free.append('.' ~ _ns.next if _ns.next == _lo - 1 else '.' ~ _ns.next ~ '-.' ~ (_lo - 1)) -%}
+    {%- endif -%}
+    {%- set _ns.next = _hi + 1 -%}
+    {%- endfor -%}
+    {%- set _ = _free.append('.' ~ _ns.next ~ '+') -%}
+    Pick one outside {{ _taken | join(', ') }}; the starter scheme leaves
+    {{ _free | join(', ') }} free, and hosts.yml's header lists the whole layout.
+
+lan_prefix:
+  type: str
+  help: >-
+    First three octets of the LAN, used to compose host addresses in the
+    inventory. Defaults to the network part of lan_cidr; override only if the
+    LAN is not a /24.
+  default: "{{ lan_cidr.split('/')[0].rsplit('.', 1)[0] }}"
+  validator: >-
+    {% if not (lan_prefix | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){2}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    lan_prefix must be three octets with no trailing dot, e.g. 192.168.0
+    {% else %}
+    {% set _a = (lan_prefix ~ '.1').split('.') | map('int') | list %}
+    {% set _v = _a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3] %}
+    {% set _ns = namespace(top=0) %}
+    {% for _lo, _hi, _name in reserved_address_bands %}
+    {% if _hi > _ns.top %}{% set _ns.top = _hi %}{% endif %}
+    {% endfor %}
+    {% if _v < lan_address_range[0] or _v > lan_address_range[1] %}
+    lan_prefix must sit inside lan_cidr ({{ lan_cidr }}) — every host, guest and
+    scrape target in the starter roster is composed from it, so a prefix outside
+    the LAN puts the whole inventory off the network the firewall sets allow.
+    {% elif _v - 1 + _ns.top > lan_address_range[1] %}
+    lan_cidr ({{ lan_cidr }}) is too narrow for the starter roster: composed from
+    lan_prefix {{ lan_prefix }} it reaches {{ lan_prefix }}.{{ _ns.top }}, which is
+    outside the LAN, so the k3s agents would be created off the network. Answer a
+    wider lan_cidr.
+    {% endif %}
+    {% endif %}
+
+# RULE: a validator may only compare an answer against answers declared above
+# it; a forward reference is undefined interactively. The gateway-vs-VIP
+# collision is therefore tested on the VIP questions. See test_copier_config.py.
 lan_gateway:
   type: str
   help: >-
@@ -186,7 +232,7 @@ lan_gateway:
     `task infra:deploy` stops. Usually the LAN's .1.
   default: "{{ lan_prefix }}.1"
   validator: >-
-    {% if not (lan_gateway | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    {% if not (lan_gateway | regex_search(ipv4_re)) %}
     lan_gateway must be an IPv4 address, e.g. {{ lan_prefix }}.1
     {% else %}
     {% set _a = lan_gateway.split('.') | map('int') | list %}
@@ -212,7 +258,7 @@ k3s_api_vip:
     outside the DHCP pool, and on the LAN — nothing assigns it statically.
   placeholder: "{{ lan_prefix }}.161"
   validator: >-
-    {% if not (k3s_api_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    {% if not (k3s_api_vip | regex_search(ipv4_re)) %}
     k3s_api_vip must be an IPv4 address, e.g. {{ lan_prefix }}.161
     {% else %}
     {% set _a = k3s_api_vip.split('.') | map('int') | list %}
@@ -241,7 +287,7 @@ metallb_public_vip:
     your router port-forwards 80/443 to).
   placeholder: "{{ lan_prefix }}.100"
   validator: >-
-    {% if not (metallb_public_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    {% if not (metallb_public_vip | regex_search(ipv4_re)) %}
     metallb_public_vip must be an IPv4 address, e.g. {{ lan_prefix }}.100
     {% else %}
     {% set _a = metallb_public_vip.split('.') | map('int') | list %}
@@ -270,7 +316,7 @@ metallb_internal_vip:
     *.{{ internal_domain }} here.
   placeholder: "{{ lan_prefix }}.101"
   validator: >-
-    {% if not (metallb_internal_vip | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    {% if not (metallb_internal_vip | regex_search(ipv4_re)) %}
     metallb_internal_vip must be an IPv4 address, e.g. {{ lan_prefix }}.101
     {% else %}
     {% set _a = metallb_internal_vip.split('.') | map('int') | list %}
@@ -292,6 +338,18 @@ metallb_internal_vip:
     {% endif %}
     {% endif %}
 
+vip_labels:
+  type: yaml
+  help: computed — not asked
+  when: false
+  # Address -> what holds it, for the validators that report a collision with an
+  # already-answered VIP.
+  default: >-
+    {"{{ k3s_api_vip }}": "the k3s API VIP",
+     "{{ metallb_public_vip }}": "the public MetalLB VIP",
+     "{{ metallb_internal_vip }}": "the internal MetalLB VIP",
+     "{{ lan_gateway }}": "the LAN gateway"}
+
 k3s_pod_cidr:
   type: str
   help: >-
@@ -300,7 +358,7 @@ k3s_pod_cidr:
     nodes already carry.
   default: "10.42.0.0/16"
   validator: >-
-    {% if not (k3s_pod_cidr | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(8|1[0-9]|2[0-9]|3[0-2])$')) %}
+    {% if not (k3s_pod_cidr | regex_search(ipv4_cidr_re)) %}
     k3s_pod_cidr must be an IPv4 network in CIDR form, e.g. 10.42.0.0/16
     {% else %}
     {% set _p = k3s_pod_cidr.split('/') %}
@@ -323,7 +381,7 @@ k3s_service_cidr:
     or the LAN.
   default: "10.43.0.0/16"
   validator: >-
-    {% if not (k3s_service_cidr | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/(8|1[0-9]|2[0-9]|3[0-2])$')) %}
+    {% if not (k3s_service_cidr | regex_search(ipv4_cidr_re)) %}
     k3s_service_cidr must be an IPv4 network in CIDR form, e.g. 10.43.0.0/16
     {% else %}
     {% set _s = k3s_service_cidr.split('/') %}
@@ -359,6 +417,12 @@ upstream_dns_servers:
     the containers are CREATED at, not pre-existing servers to forward to.
     Two (one per host) is the smallest resilient answer.
 
+    A cluster that runs its own recursive resolver elsewhere removes three
+    things: ansible/playbooks/dns.yml, the unbound-exporter entry in
+    kubernetes/infrastructure/observability/exporters/kustomization.yaml, and
+    cluster_unbound_exporter_addresses in cluster-config. Left in place, those
+    scrape targets stay permanently down and feed TargetDown.
+
     These are the ONLY guest addresses you choose here. Every other one in the
     starter inventory is composed from a fixed scheme (.11+ hosts, .23 relay,
     .31+ k3s servers, .41+ agents), and a resolver's Proxmox vmid is DERIVED
@@ -368,26 +432,21 @@ upstream_dns_servers:
   default: "{{ lan_prefix }}.21 {{ lan_prefix }}.22"
   validator: >-
     {% set _addrs = upstream_dns_servers.split() %}
-    {% set _vips = {k3s_api_vip: 'the k3s API VIP',
-                    metallb_public_vip: 'the public MetalLB VIP',
-                    metallb_internal_vip: 'the internal MetalLB VIP',
-                    lan_gateway: 'the LAN gateway'} %}
+    {% set _vips = vip_labels %}
     {% set ns = namespace(taken=[]) %}
     {% for a in _addrs %}
     {% set _o = a.split('.')[-1] | int %}
     {% if a in _vips %}
     {% set ns.taken = ns.taken + [a ~ ' is ' ~ _vips[a]] %}
-    {% elif a.startswith(lan_prefix ~ '.') and 11 <= _o <= 19 %}
-    {% set ns.taken = ns.taken + [a ~ ' is in the .11-.19 Proxmox host band'] %}
-    {% elif a.startswith(lan_prefix ~ '.') and _o == 23 %}
-    {% set ns.taken = ns.taken + [a ~ ' is the SMTP relay (.23, vmid 123)'] %}
-    {% elif a.startswith(lan_prefix ~ '.') and 31 <= _o <= 39 %}
-    {% set ns.taken = ns.taken + [a ~ ' is in the .31-.39 k3s server band (vmids 131+)'] %}
-    {% elif a.startswith(lan_prefix ~ '.') and 41 <= _o <= 49 %}
-    {% set ns.taken = ns.taken + [a ~ ' is in the .41-.49 k3s agent band (vmids 141+)'] %}
+    {% elif a.startswith(lan_prefix ~ '.') %}
+    {% for _lo, _hi, _name in reserved_address_bands %}
+    {% if _lo <= _o <= _hi %}
+    {% set ns.taken = ns.taken + [a ~ ' is in ' ~ _name] %}
     {% endif %}
     {% endfor %}
-    {% if not (upstream_dns_servers | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])( ((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))*$')) %}
+    {% endif %}
+    {% endfor %}
+    {% if not (upstream_dns_servers | regex_search('^' ~ ipv4_octets_re ~ '( ' ~ ipv4_octets_re ~ ')*$')) %}
     upstream_dns_servers must be one or more IPv4 addresses separated by single
     spaces, e.g. "{{ lan_prefix }}.21 {{ lan_prefix }}.22"
     {% elif _addrs | unique | list | length != _addrs | length %}
@@ -395,13 +454,9 @@ upstream_dns_servers:
     per address, so a repeat is one resolver, not two.
     {% elif ns.taken %}
     upstream_dns_servers collides with the addresses the starter inventory
-    composes: {{ ns.taken | join('; ') }}. These are the only resolver addresses
-    you pick, but they are NOT the only ones generated — hosts.yml lays out
-    .11+ (Proxmox hosts), .23 (SMTP relay), .31+ (k3s servers) and .41+ (k3s
-    agents), and a resolver's vmid is 100 + its last octet, so a collision here
-    duplicates BOTH the address and the vmid (pct and qm share one namespace).
-    Pick addresses outside those bands — .21/.22 if they are free, otherwise
-    anything in .20-.22, .24-.30 or .50+.
+    composes: {{ ns.taken | join('; ') }}. A resolver's vmid is 100 + its last
+    octet, so a collision duplicates BOTH the address and the vmid (pct and qm
+    share one namespace). {{ reserved_address_note }}
     {% endif %}
 
 # --------------------------------------------------------------------------
@@ -459,15 +514,9 @@ timezone:
     America/Los_Angeles.
     {% endif %}
 
-# --------------------------------------------------------------------------
-# Backends — the four seam axes
-#
-# git_backend (forge), secrets_backend, storage_backend and dns_backend are
-# enums with one implemented value each; an unimplemented choice fails here
-# rather than producing a repo that never reconciles. What a new implementation
-# must provide: docs/ARCHITECTURE.md "Backend seams" (Kubernetes side) and
-# weisssrv-lib docs/EXTENSIBILITY.md (Ansible and CI).
-# --------------------------------------------------------------------------
+# Backends — the four seam axes. git_backend, secrets_backend, storage_backend
+# and dns_backend are enums with one implemented value each; an unimplemented
+# choice fails here. New implementations: docs/ARCHITECTURE.md "Backend seams".
 
 git_backend:
   type: str
@@ -497,7 +546,8 @@ git_host:
   help: >-
     Hostname of the git server, without scheme or path — the Flux GitRepository
     URL, the CI include refs and the container registry host are built from it.
-  default: "{% if git_backend == 'github' %}github.com{% endif %}"
+  # No default: git_backend has one implemented value, so a per-backend default
+  # would have one arm. Give it back when the GitHub arm ships.
   placeholder: "git.example.com"
   validator: >-
     {% if not (git_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$')) %}
@@ -538,14 +588,15 @@ secrets_backend:
   default: onepassword
   choices:
     1Password (CLI + Connect): onepassword
+    HashiCorp Vault (not implemented): vault
   validator: >-
     {% if secrets_backend != 'onepassword' %}
     secrets_backend '{{ secrets_backend }}' is not implemented — only
     'onepassword' generates the ClusterSecretStore, the Connect controller and
-    the references the deploy jobs resolve. The host-side half is the
-    secret_runner() / secret_ref() macros at the top of Taskfile.yml.jinja, which
-    fail the render rather than emitting an empty reference for a backend they
-    have no branch for. See docs/ARCHITECTURE.md "Backend seams".
+    the references the deploy jobs resolve. The host-side half is the macros in
+    partials/secrets.jinja, which fail the render rather than emitting an empty
+    reference for a backend they have no branch for. See docs/ARCHITECTURE.md
+    "Backend seams".
     {% endif %}
 
 storage_backend:
@@ -560,6 +611,7 @@ storage_backend:
   default: zfs
   choices:
     ZFS on the NAS node: zfs
+    Ceph/CSI (not implemented): csi
   validator: >-
     {% if storage_backend != 'zfs' %}
     storage_backend '{{ storage_backend }}' is not implemented — only 'zfs'
@@ -608,26 +660,25 @@ dns_backend:
   default: cloudflare
   choices:
     Cloudflare: cloudflare
+    Route53 (not implemented): route53
   validator: >-
     {% if dns_backend != 'cloudflare' %}
     dns_backend '{{ dns_backend }}' is not implemented — only 'cloudflare' ships
     a Terraform zone module, an external-dns provider and a DNS-01 solver.
     {% endif %}
 
-# --------------------------------------------------------------------------
-# Starter host roster
-#
-# The inventory is NOT generated from answers — hosts.yml is a skeleton you
-# fill in. These four shape that skeleton and the handful of in-cluster
-# manifests that must name a host before the inventory exists.
-# --------------------------------------------------------------------------
+# Starter host roster and the node-level pins the manifests need before the
+# inventory exists. The inventory is not generated from answers: hosts.yml is a
+# skeleton you fill in.
 
 compute_node_count:
   type: int
   help: >-
     Number of compute (non-NAS) Proxmox hosts in the starter inventory. With
     the NAS node that is compute_node_count + 1 hosts; 2 gives the three-node
-    etcd quorum k3s wants. Edit hosts.yml afterwards either way.
+    etcd quorum k3s wants. Edit hosts.yml afterwards either way. An answer of 1
+    is two hosts in total, and the roster then lays out a single k3s server: one
+    etcd member, and no tolerance for losing it.
 
     It also sizes two generated address bands: compute hosts at .12 upwards and
     one k3s agent per Proxmox host at .41 upwards, whose .41-.49 band is the
@@ -639,24 +690,23 @@ compute_node_count:
   validator: >-
     {% set _n = compute_node_count | int %}
     {% set _resolvers = upstream_dns_servers.split() %}
-    {% set _vips = {k3s_api_vip: 'the k3s API VIP',
-                    metallb_public_vip: 'the public MetalLB VIP',
-                    metallb_internal_vip: 'the internal MetalLB VIP',
-                    lan_gateway: 'the LAN gateway'} %}
+    {% set _vips = vip_labels %}
+    {% set _base = 11 %}
+    {% set _agent_band = (reserved_address_bands | selectattr(0, 'equalto', 41) | list | first) %}
     {% set ns = namespace(taken=[]) %}
     {% for i in range(1, _n + 1) %}
-    {% set _o = 11 + i %}
+    {% set _o = _base + i %}
     {% set _a = lan_prefix ~ '.' ~ _o %}
     {% if _a in _vips %}
     {% set ns.taken = ns.taken + ['pve-node-%02d' | format(i) ~ ' would take ' ~ _a ~ ', ' ~ _vips[_a]] %}
     {% elif _a in _resolvers %}
     {% set ns.taken = ns.taken + ['pve-node-%02d' | format(i) ~ ' would take ' ~ _a ~ ', a resolver'] %}
-    {% elif _o == 23 %}
-    {% set ns.taken = ns.taken + ['pve-node-%02d' | format(i) ~ ' would take ' ~ _a ~ ', the SMTP relay'] %}
-    {% elif 31 <= _o <= 39 %}
-    {% set ns.taken = ns.taken + ['pve-node-%02d' | format(i) ~ ' would take ' ~ _a ~ ', in the k3s server band'] %}
-    {% elif 41 <= _o <= 49 %}
-    {% set ns.taken = ns.taken + ['pve-node-%02d' | format(i) ~ ' would take ' ~ _a ~ ', in the k3s agent band'] %}
+    {% else %}
+    {% for _lo, _hi, _name in reserved_address_bands %}
+    {% if not (_lo <= _base <= _hi) and _lo <= _o <= _hi %}
+    {% set ns.taken = ns.taken + ['pve-node-%02d' | format(i) ~ ' would take ' ~ _a ~ ', in ' ~ _name] %}
+    {% endif %}
+    {% endfor %}
     {% endif %}
     {% endfor %}
     {% if _n < 1 %}
@@ -666,12 +716,22 @@ compute_node_count:
     compute_node_count {{ _n }} composes host addresses that are already
     claimed: {{ ns.taken | join('; ') }}. Generate 8 or fewer and extend
     hosts.yml by hand.
-    {% elif 41 + _n > 49 %}
+    {% elif _agent_band[0] + _n > _agent_band[1] %}
     compute_node_count {{ _n }} puts {{ _n + 1 }} k3s agents at
-    {{ lan_prefix }}.41-{{ lan_prefix }}.{{ 41 + _n }}, past the .41-.49 agent
-    band and into .50+, which the starter scheme leaves for the application
-    guests you add later. Generate 8 or fewer and extend hosts.yml by hand.
+    {{ lan_prefix }}.{{ _agent_band[0] }}-{{ lan_prefix }}.{{ _agent_band[0] + _n }},
+    past {{ _agent_band[2] }} and into .{{ _agent_band[1] + 1 }}+, which the
+    starter scheme leaves for the application guests you add later. Generate
+    {{ _agent_band[1] - _agent_band[0] }} or fewer and extend hosts.yml by hand.
     {% endif %}
+
+# Short labels partials/roster.jinja generates. A service answer reusing one
+# puts two inventory entries under one host name, and Ansible merges them into a
+# single machine in both groups.
+roster_label_re:
+  type: str
+  help: computed — not asked
+  when: false
+  default: '^(pve-node|dns|k3s-srv|k3s-agt)-[0-9]{2}$'
 
 nas_host:
   type: str
@@ -682,11 +742,11 @@ nas_host:
     name outside that zone fails the handshake for the same reason an IP does.
     Its short name is also the storage host's name in the Ansible inventory, so
     this answer renames the host on both sides at once.
-  default: "pve-nas-01.{{ internal_domain }}"
+  default: "nas-01.{{ internal_domain }}"
   validator: >-
     {% if not (nas_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$')) %}
     nas_host must be a fully-qualified lowercase hostname, e.g.
-    pve-nas-01.{{ internal_domain }}
+    nas-01.{{ internal_domain }}
     {% elif not nas_host.endswith('.' ~ internal_domain) %}
     nas_host must sit under internal_domain ({{ internal_domain }}) — e.g.
     {{ nas_host.split('.')[0] }}.{{ internal_domain }}. The internal wildcard
@@ -696,6 +756,16 @@ nas_host:
     does not resolve on the LAN either. The symptom is Grafana, Loki and the
     authentik backup PV stuck unbound on a tlshd handshake error, several phases
     after this answer.
+    {% elif '.' in nas_host[: -(internal_domain | length + 1)] %}
+    nas_host must be ONE label under internal_domain ({{ internal_domain }}) —
+    e.g. {{ nas_host.split('.')[0] }}.{{ internal_domain }}. The internal
+    wildcard is *.{{ internal_domain }} and a DNS wildcard matches one label
+    only, so {{ nas_host }} fails the NFS TLS handshake; the inventory keeps
+    only the short name, so the two layers would also disagree.
+    {% elif nas_host.split('.')[0] | regex_search(roster_label_re) %}
+    nas_host's short name {{ nas_host.split('.')[0] }} is one the starter roster
+    already generates, so hosts.yml would carry two entries under it and Ansible
+    would merge them into one machine. Pick another name.
     {% endif %}
 
 smtp_host:
@@ -719,6 +789,22 @@ smtp_host:
     answers for that zone only, so a name outside it neither resolves on the LAN
     nor presents a certificate the null clients will submit to. This one fails
     quietly: mail queues instead of erroring.
+    {% elif '.' in smtp_host[: -(internal_domain | length + 1)] %}
+    smtp_host must be ONE label under internal_domain ({{ internal_domain }}) —
+    e.g. {{ smtp_host.split('.')[0] }}.{{ internal_domain }}. Submission is
+    `smtpd_tls_security_level: encrypt` against the *.{{ internal_domain }}
+    wildcard, which matches one label only; the inventory keeps just the short
+    name. This one fails quietly: mail queues instead of erroring.
+    {% elif smtp_host.split('.')[0] == nas_host.split('.')[0] %}
+    smtp_host and nas_host share the short name {{ nas_host.split('.')[0] }},
+    which hosts.yml uses as the host name in both the nas and mail groups.
+    Ansible merges them into one machine, so the relay's Postfix config and
+    `pct create` for the relay's vmid both land on the storage node. Pick
+    another name.
+    {% elif smtp_host.split('.')[0] | regex_search(roster_label_re) %}
+    smtp_host's short name {{ smtp_host.split('.')[0] }} is one the starter
+    roster already generates, so hosts.yml would carry two entries under it and
+    Ansible would merge them into one machine. Pick another name.
     {% endif %}
 
 node_exporter_job_regex:
@@ -747,6 +833,26 @@ node_exporter_job_regex:
     The rules referencing them would match no series, and a rule that matches
     nothing never fires. Add labels, do not replace them:
     "node-exporter|node-exporter-host|{{ node_exporter_job_regex.split('|') | first }}".
+    {% endif %}
+
+k3s_image_gc_high_threshold:
+  type: int
+  help: >-
+    Root-filesystem percentage at which the kubelet starts garbage-collecting
+    images (`image-gc-high-threshold`, against a 50% low watermark).
+    KubeletImageGCIneffective trips at min(answer + 5, 79) after a two-hour
+    hold, so from 74 up the headroom above the kubelet watermark shrinks to
+    nothing. The default suits a 64G node root disk; raise it only when yours
+    are large enough that the remaining headroom is still tens of gigabytes.
+  default: 70
+  validator: >-
+    {% if k3s_image_gc_high_threshold | int < 55 %}
+    k3s_image_gc_high_threshold must be at least 55: it has to stay clear of the
+    50% low watermark, or the kubelet garbage-collects on every pull.
+    {% elif k3s_image_gc_high_threshold | int > 79 %}
+    k3s_image_gc_high_threshold must be at most 79: from 80 up, the
+    DiskUsageWarning inhibit in alertmanager-config.yaml mutes
+    KubeletImageGCIneffective permanently.
     {% endif %}
 
 # --------------------------------------------------------------------------
@@ -790,7 +896,7 @@ gpu:
     driver and container toolkit on the GPU agent, and the in-cluster device
     plugin (time-sliced). GPU TELEMETRY IS NOT SHIPPED — DCGM needs a chart
     pin in your own version file; the four-step recipe is in
-    kubernetes/infrastructure/observability/README.md (GPU telemetry).
+    docs/RUNBOOKS.md (Adding DCGM GPU telemetry).
   default: none
   choices:
     No GPU: none
@@ -807,6 +913,35 @@ use_unifi:
     before the first apply — nothing else in the cluster depends on it, and off
     leaves your router exactly as it is.
   default: false
+
+compose_app_guests:
+  type: yaml
+  help: >-
+    Single-VM docker-compose guests `task collect-state` should collect from,
+    as a list of mappings. Each needs `host`, `label` and `compose_dir`;
+    `nginx_cert`, `backup_glob`, `backup_timer`, `backup_prom` and `health_url`
+    are optional and default to "-", which drops that section of the report.
+    Empty ships the collector with no compose call sites — add guests as you
+    build them. Example:
+    [{host: 10.0.0.56, label: nextcloud, compose_dir: /opt/nextcloud/compose,
+    health_url: "http://127.0.0.1:8080/status.php"}]
+  default: []
+  validator: >-
+    {% for guest in compose_app_guests %}
+    {% if not (guest.host is defined and guest.label is defined and guest.compose_dir is defined) %}
+    every compose_app_guests entry needs host, label and compose_dir
+    {% elif not (guest.label | string | regex_search('^[a-z][a-z0-9-]*$')) %}
+    compose_app_guests label {{ guest.label }} must be a lowercase slug: it
+    names the report section and the run_section label.
+    {% elif (guest | dictsort | map(attribute=1) | map('string') | join(' ')) | regex_search('[\'"$`]') %}
+    compose_app_guests values must not contain a quote, $ or a backtick: they
+    are interpolated into the collector's shell argv and into the run_section
+    label, where bash would expand them.
+    {% elif (guest | dictsort | map(attribute=1) | map('string') | join('|')) | regex_search(' ') %}
+    compose_app_guests values must not contain a space: each is passed as one
+    shell word to the collector.
+    {% endif %}
+    {% endfor %}
 
 # --------------------------------------------------------------------------
 # Library pin
@@ -833,13 +968,23 @@ lib_ref:
     sources. Use a RELEASE TAG (vX.Y.Z) — the library's include contract is
     explicit that a branch is never a valid pin, and a branch deleted after
     merge takes every include, module source and collection install with it.
-  default: "v0.17.1"
+    Never answer a tag OLDER than the default below: the generated playbooks are
+    written against the role contracts of the release the template pins, and an
+    older pin takes the role defaults silently rather than failing. The
+    proxmox-ha play, for one, leaves the cluster-wide HA reconcile `run_once`
+    to the role; an older role runs it from every node at once, writing /etc/pve
+    concurrently.
+  default: "v0.18.0"
   validator: >-
     {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
     lib_ref must be a release TAG of the form vX.Y.Z (e.g. v1.2.3). A branch is
     never a valid pin: the generated repo's scripts/check-lib-pins.py enforces
     the same shape on every `include:` entry, so a branch answered here fails
     the very first pipeline.
+    {% elif (lib_ref[1:].split('.') | map('int') | list) < [0, 18, 0] %}
+    lib_ref must be v0.18.0 or newer. The generated playbooks are written
+    against that release's role contracts, and an older pin takes the role
+    defaults silently rather than failing.
     {% endif %}
 
 lib_project:
@@ -893,9 +1038,41 @@ ci_cpu_selector:
     {{ internal_domain }}/cpu=modern
     {% endif %}
 
+license:
+  type: str
+  help: >-
+    License for the generated repository. `mit` writes a LICENSE file and a
+    README section; `none` leaves the repository unlicensed.
+  choices:
+    MIT: mit
+    None: none
+  default: mit
+
+license_holder:
+  type: str
+  help: Copyright holder named in LICENSE.
+  when: "{{ license == 'mit' }}"
+  placeholder: "Your Name"
+  validator: >-
+    {% if license == 'mit' and not license_holder | trim %}
+    license_holder is required when license is mit.
+    {% endif %}
+
+license_year:
+  type: str
+  help: Copyright year named in LICENSE.
+  when: "{{ license == 'mit' }}"
+  placeholder: "2026"
+  validator: >-
+    {% if license == 'mit' and not (license_year | regex_search('^[0-9]{4}$')) %}
+    license_year must be a four-digit year.
+    {% endif %}
+
 enable_semantic_release:
   type: bool
   help: >-
     Add the release stage and the semantic-release include to the generated
     pipeline. Off by default: a cluster repo is normally released by hand.
+    scripts/semantic-release.py ships either way; this answer only adds the
+    stage that runs it.
   default: false

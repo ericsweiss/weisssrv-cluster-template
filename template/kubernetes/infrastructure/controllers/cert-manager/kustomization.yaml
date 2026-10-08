@@ -8,10 +8,30 @@ resources:
   - namespace.yaml
   - release.yaml
   - networkpolicy.yaml
+  - pdb.yaml
 
 components:
   - ../../../components/netpol-baseline
   - ../../../components/netpol-egress-dns
   - ../../../components/netpol-egress-apiserver
-  # ACME directory + the DNS provider API + the DNS-01 self-check.
+  # ACME directory + the DNS provider API.
   - ../../../components/netpol-egress-public
+
+patches:
+  # cert-manager also needs PUBLIC DNS: the DNS-01 solver queries the zone's
+  # authoritative nameservers directly, and without :53 outbound every
+  # challenge stalls. Patched here so no other namespace gets it.
+  - target:
+      kind: NetworkPolicy
+      name: allow-egress-public
+    patch: |
+      - op: add
+        path: /spec/egress/0/ports/-
+        value:
+          protocol: UDP
+          port: 53
+      - op: add
+        path: /spec/egress/0/ports/-
+        value:
+          protocol: TCP
+          port: 53

@@ -1,9 +1,7 @@
 ---
-# Pull-through registry cache. See README.md.
-#
-# replicas 1 + Recreate: the cache is a single-instance node-local store
-# (emptyDir). A second replica is just a second cold cache — there is nothing to
-# make HA, and nothing to lose on a restart.
+# Pull-through registry cache; one replica over node-local scratch, so a second
+# replica would only be a second cold cache. Configuration and the
+# self-hosted-upstream recipe: README.md.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -39,9 +37,6 @@ spec:
       nodeSelector:
         ${cluster_node_label_domain}/general: "true"
       automountServiceAccountToken: false
-      # An upstream whose name resolves publicly but is served by this cluster's
-      # internal VIP needs a pod-scoped `hostAliases` pin, or pods hairpin out to
-      # the WAN and back — the recipe is in README.md § Name resolution.
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -56,6 +51,9 @@ spec:
           image: registry:${registry_cache_version}
           imagePullPolicy: IfNotPresent
           env:
+            # The registry is assumed to be registry.<git_host>. A registry on
+            # another host or port is a hand edit here and in the molecule
+            # fallback image tag (ansible/TESTING.md).
             - name: REGISTRY_PROXY_REMOTEURL
               value: https://registry.${cluster_git_host}
             - name: REGISTRY_PROXY_USERNAME
@@ -112,13 +110,19 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 5
           resources:
+            # emptyDir.sizeLimit below is the cache cap; this request is what
+            # ranks the pod by its own usage under node pressure.
             requests:
               cpu: 50m
               memory: 128Mi
+              ephemeral-storage: 10Gi
             limits:
               # No CPU limit (blob proxying is bursty and I/O-bound); memory
               # capped because OOM is a real failure mode.
               memory: 512Mi
+              # Above the emptyDir cap below, which shares this budget with the
+              # rotated container logs; at the cap the kubelet evicts first.
+              ephemeral-storage: 12Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -129,8 +133,8 @@ spec:
               mountPath: /var/lib/registry
       volumes:
         # Node-local scratch with a hard cap: exceeding it evicts the pod, which
-        # reschedules and re-warms. Size it to the working set of images you
-        # actually pull through.
+        # reschedules and re-warms. Size it to the images you pull through, and
+        # keep the container's ephemeral-storage limit above it.
         - name: cache
           emptyDir:
             sizeLimit: 10Gi

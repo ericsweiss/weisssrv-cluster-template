@@ -1,20 +1,7 @@
 ---
-# The CONTRAST fixture. answers-weisssrv-shaped.yml deliberately has the shape
-# of the reference cluster, which makes it blind to one whole class of defect: a
-# value hardcoded from that cluster (192.168.0.100, a NAS hostname, a runner
-# tag) renders byte-identical to a correct substitution, so no assertion on that
-# render alone can tell them apart.
-#
-# Every answer here is therefore deliberately UNLIKE its counterpart in the
-# other fixture — different LAN, different domains, different names, different
-# vault, different runner tag — and every optional module is OFF, which is the
-# other half of the coverage (the `{% if %}` branches the shaped fixture never
-# takes). test_render_b_carries_no_fixture_a_values asserts that nothing from
-# fixture A survives into this render.
-#
-# Every question in copier.yml must have an entry here too — except `lib_ref`,
-# which neither fixture answers so that both inherit copier.yml's default (see
-# test_answer_fixture_covers_every_question's `inherited` set).
+# Contrast fixture: every answer unlike answers-weisssrv-shaped.yml and every
+# optional module off, covering the branches the shaped render never takes.
+# Only `lib_ref` is unanswered, so both fixtures inherit copier.yml's default.
 cluster_name: brinemoor
 internal_domain: internal.brinemoor.test
 external_domain: brinemoor.test
@@ -51,11 +38,13 @@ dns_backend: cloudflare
 compute_node_count: 4
 nas_host: vault-keeper.internal.brinemoor.test
 smtp_host: postmark.internal.brinemoor.test
-# Both shipped job labels plus a third of this cluster's own: the shape an
-# operator who ADDS an exporter ends up with, and the only kind of divergence
-# copier.yml's validator permits (dropping either shipped label is rejected —
-# the rules naming it would match no series).
+# Both shipped job labels plus one of this cluster's own: the shape an operator
+# who adds an exporter ends up with. Dropping a shipped label is the divergence
+# copier.yml's validator rejects.
 node_exporter_job_regex: node-exporter|node-exporter-host|hostwatch
+# Off the default, so the render proves the watermark reaches both the kubelet
+# args and the KubeletImageGCIneffective rule from one answer.
+k3s_image_gc_high_threshold: 78
 
 # Every optional module OFF — the branches the shaped fixture never renders.
 vpn_tailscale: false
@@ -73,3 +62,12 @@ lib_project: eric/weisssrv-lib
 ci_runner_tag: tidal-privileged
 ci_cpu_selector: internal.brinemoor.test/cpu=modern
 enable_semantic_release: true
+
+# Empty, the shipped default: the collector renders no compose call sites.
+compose_app_guests: []
+
+# Unlicensed: no LICENSE file and no README section. The two gated answers
+# are answered anyway, so the fixture covers the whole question set.
+license: none
+license_holder: Grace Hopper
+license_year: '2019'

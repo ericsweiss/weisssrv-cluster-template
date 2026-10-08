@@ -1,13 +1,7 @@
 ---
-# Emergency-fallback NodePort for the Loki push API. APPLY-ON-DEMAND ONLY — it is
-# deliberately absent from kustomization.yaml, because an always-on NodePort is an
-# unauthenticated push/read path on every node IP that bypasses the basic-auth
-# ingress and the allow-loki-ingress NetworkPolicy.
-#
-# If the ingress path is down:
-#   kubectl apply -f kubernetes/infrastructure/observability/loki/nodeport.yaml
-# point the affected hosts' collectors at http://<any-node>:31100, then
-# `kubectl delete -f` it once the ingress is restored.
+# Apply on demand only, and deliberately absent from kustomization.yaml. An
+# always-on NodePort is an unauthenticated Loki push/read path on every node IP.
+# Recipe and teardown: README.md and RUNBOOKS.md#loki-push-emergency-fallback.
 apiVersion: v1
 kind: Service
 metadata:

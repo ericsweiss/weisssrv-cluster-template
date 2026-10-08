@@ -1,0 +1,57 @@
+# Security posture — {{ cluster_name }}
+
+What is encrypted here, and what is not. The value of this page is the honest
+`No` rows: an aspirational list of goals tells you nothing, while a ledger tells
+you which path an attacker reads in the clear.
+
+Fill each `Confirm` row in as you bring the cluster up, and re-check the page
+whenever a storage tier, a resolver or an ingress path changes. Nothing gates
+it, so a stale row is worse than a missing one.
+
+## At rest
+
+| Subsystem | Encrypted? | Notes |
+|---|---|---|
+{%- if storage_backend == 'zfs' %}
+| ZFS datasets | Confirm per pool | `zfs_encryption_pools` in `group_vars/nas.yml` (or `host_vars/<host>.yml` when more than one Proxmox host has encrypted pools) names the pools whose keys load at boot. Every pool not in that list is plaintext on disk. List both halves here by name |
+| zvol- and NFS-backed PVCs | Inherits the parent | A PVC is as encrypted as the dataset its zvol or export sits under. Name which pool each app's data lands on |
+{%- else %}
+| Primary storage | Confirm | Name the backend, which volumes it encrypts and which it does not |
+| PVCs | Inherits the parent | A PVC is as encrypted as the volume behind it |
+{%- endif %}
+| Hypervisor root filesystem | No | The host's own root is plaintext. Anything written outside an encrypted dataset — logs, caches, a stray dump — is readable from the disk |
+| Host swap | Confirm | The `encrypted_swap` role maps swap through dm-crypt, and every fallback branch exits 0 so a host still boots with plaintext swap. `EncryptedSwapPlaintextFallback` reports the gap and `EncryptedSwapRestoreFailed` the swapless half, both off the `encrypted_swap_mapper_active` gauge; treat a firing alert as a plaintext row, not a noisy alert |
+| k3s etcd secrets | Confirm | k3s secrets encryption is off unless the server flag is set and the re-encrypt has finished. Until then every Kubernetes Secret is plaintext in etcd on the server nodes |
+{%- if secrets_backend == 'onepassword' %}
+| Secrets-backend on-disk cache | No | The Connect credentials file and the token the hosts read are plaintext files on the host. Their protection is file mode and who can reach the host, not encryption |
+{%- else %}
+| Secrets-backend on-disk cache | Confirm | Whatever the backend writes to a host is usually a plaintext credential file. Its protection is file mode and host access |
+{%- endif %}
+| Terraform state | Confirm | State lives in the HTTP backend named in `terraform/README.md`. It holds every attribute the providers read back, so treat it as a secret store and check how the forge stores it at rest |
+| Offsite copy | Yes | `restic_offsite` encrypts client-side, so the remote holds opaque blobs. The local cache holds the repository tree — file **paths** — in plaintext, so that cache belongs on an encrypted dataset |
+
+## In transit
+
+| Path | Encrypted? | Notes |
+|---|---|---|
+| Edge to origin | Confirm | Depends on the DNS and proxy answers. Record whether the public edge re-encrypts to the origin or terminates and forwards in the clear |
+| Client to ingress | Yes | Traefik terminates TLS for every published hostname on both the public and the internal VIP |
+| Pod to pod | Mixed | `k3s_flannel_backend` is `wireguard-native`, which encrypts **cross-node** traffic only. Two pods on the same node talk over the local bridge in the clear |
+| Ingress to VM backends | Confirm | A route that fronts a guest leaves the cluster. Record whether each backend speaks TLS or plain HTTP on the LAN |
+| NFS | Yes | The exports set `xprtsec: tls` and reject plaintext. Clients mount **by hostname**: the wildcard certificate has no address SAN, so an IP mount fails the handshake. List any documented plaintext exception by host |
+| Samba | Confirm | SMB3 encryption is per share. Record which shares enforce it; `nas_storage_samba_shares` is the list |
+| Resolver to upstream | Yes | The resolvers forward over DoT, and AdGuard serves DoT and DoQ on `853` |
+| LAN client to resolver | No | Plaintext `:53` is what clients actually use. The encrypted listeners exist, but nothing forces a client onto them |
+| Relay to smarthost | Yes | The relay authenticates to its upstream over TLS, and submission to the relay itself is `smtpd_tls_security_level: encrypt` against the internal wildcard |
+{%- if vpn_tailscale %}
+| Overlay VPN | Yes | The tailnet is WireGuard end to end. A subnet route is encrypted to the router and plaintext from there onward, so the last hop is as encrypted as the row above it |
+{%- else %}
+| Overlay VPN | Confirm | Record the remote-access path and where its encryption stops. A subnet route is plaintext past the router |
+{%- endif %}
+
+## Related documentation
+
+- [docs/RUNBOOKS.md](RUNBOOKS.md) § Rotating a secret — what each credential is
+  and how it rotates
+- [docs/RUNBOOKS.md](RUNBOOKS.md) § Certificates — the issuance and
+  distribution path behind the TLS rows above

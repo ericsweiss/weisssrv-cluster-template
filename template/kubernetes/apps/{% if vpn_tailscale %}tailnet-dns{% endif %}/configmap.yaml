@@ -9,18 +9,17 @@ metadata:
 data:
   Corefile: |
     # Override zone: names that must resolve to a real LAN address rather than
-    # to Traefik. List the direct-IP names your DNS layer defines here, and keep
-    # this in sync with that rewrite list.
-    ${cluster_nas_host} ${cluster_smtp_host} {
+    # to Traefik. Which names belong here: README.md, The override list. Parity
+    # with the resolver's rewrites is enforced by check-tailnet-dns-parity.py.
+    ${cluster_nas_host} ${cluster_smtp_host} dns.${cluster_internal_domain} k3s.${cluster_internal_domain} vip-public.${cluster_internal_domain} {
         errors
         forward . ${cluster_upstream_dns_servers}
         cache 30
     }
 
-    # Default: every other internal name is Traefik-fronted, so answer with a
-    # CNAME to the Traefik tailnet device. The client's MagicDNS resolves that
-    # to the device's tailnet address and connects over the mesh. Query types
-    # other than A/AAAA fall through to the LAN resolvers.
+    # Every other internal name is Traefik-fronted, so answer with a CNAME to
+    # the Traefik tailnet device, which MagicDNS resolves over the mesh. Query
+    # types other than A/AAAA fall through to the LAN resolvers.
     ${cluster_internal_domain} {
         errors
         template IN A ${cluster_internal_domain} {

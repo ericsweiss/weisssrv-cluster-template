@@ -29,3 +29,29 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+
+---
+# The egress half of the same contract: the external-secrets namespace runs
+# default-deny egress, so ESO needs this to reach Connect. Matched by pod, not
+# ClusterIP — kube-proxy DNATs before policy evaluation.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-onepassword-connect
+  namespace: external-secrets
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: external-secrets
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: onepassword-connect
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8081

@@ -3,7 +3,7 @@
 
 provider "registry.terraform.io/tailscale/tailscale" {
   version     = "0.29.2"
-  constraints = "~> 0.29"
+  constraints = "~> 0.29.0"
   hashes = [
     "h1:SSZ93MdSAaJ1Xi/VIvZDz5z1sve3BIS+WqDKACvJut0=",
     "h1:eADNOR3ZnirZXCP+3k0hy9CKQK8sgeVC0lpo08UntZY=",

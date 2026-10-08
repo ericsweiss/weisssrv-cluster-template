@@ -15,7 +15,7 @@ not an optimisation.
 | namespace PSS `enforce: baseline` | admission blocks privileged / host\* escalation |
 | `gitlab-runner-jobs` ServiceAccount | no RoleBinding, no mounted token — a job cannot read the runner token Secret, other jobs' pod specs (which carry CI variables), or exec into the manager |
 | `shared-jobs-egress` NetworkPolicy | internet only: RFC1918 and the LAN are blocked; DNS, the kube-API and GitLab-via-ingress are the exceptions |
-| namespace-wide `default-deny-egress` | a job that uses its `pods:create` RBAC to spawn an *unlabelled* auxiliary pod gets no egress at all, instead of unrestricted |
+| namespace-wide `default-deny-egress` | a pod without a runner-class label gets no egress at all, instead of unrestricted |
 | ResourceQuota + LimitRange | a job cannot starve resident workloads |
 
 `protected: false` is an accepted risk: it lets the runner accept jobs from
@@ -51,6 +51,12 @@ the runner submits 403s the job rather than throttling it.
 | Runner token | secrets item **GitLab Runner** → field `runner-token` |
 | Job image | `runners.config` TOML, digest-pinned |
 | Tag | `k8s-deploy` (plus untagged) |
+
+`managers-egress` assumes `${cluster_git_host}` resolves to this cluster's
+internal ingress, plus public `:443` for the callbacks GitLab redirects to. A
+GitLab reached directly on the LAN needs its own `ipBlock` rule in
+`networkpolicy.yaml`, or the manager never registers and simply never appears
+connected.
 
 The token is a `glrt-*` authentication token. The chart's projected-secrets
 volume needs BOTH `runner-token` and `runner-registration-token` keys even though

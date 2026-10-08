@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
-# Verify every changed Ansible role, playbook and inventory file matches at
-# least one deploy-* job's `changes:` list in the CI file. A failure means an
-# Ansible asset was modified but no deploy job will pick it up: either wire the
-# path into a deploy-* rule, or list it (with a rationale) in the coverage
-# config, which is where every consumer-specific path lives.
-#
-# Usage:  check-deploy-coverage.sh [BASE_REF]
-# Config: $DEPLOY_COVERAGE_CONFIG (default scripts/deploy-coverage.conf);
-#         format and defaults in examples/deploy-coverage.example.conf,
-#         contract in docs/SCRIPTS.md. Absent config = every list empty.
+# Fail when a changed Ansible role, playbook or inventory file matches no deploy
+# job's `changes:` list, or when a job lists a literal path that does not exist.
+# Usage: [BASE_REF]; $DEPLOY_COVERAGE_CONFIG; contract in docs/SCRIPTS.md.
 
 set -euo pipefail
+
+# ci_yaml.py is imported from this script's own directory: vendor both.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+export SCRIPT_DIR
 
 CONFIG="${DEPLOY_COVERAGE_CONFIG:-scripts/deploy-coverage.conf}"
 
@@ -76,8 +73,7 @@ if [ -f "$CONFIG" ]; then
     done < "$CONFIG"
 fi
 
-# ERE-safe forms of the configured directories (only '.' needs escaping in the
-# path shapes these settings accept).
+# ERE-safe forms of the configured directories.
 ere() { printf '%s' "${1//./\\.}"; }
 ROLES_ERE=$(ere "$ROLES_DIR")
 PLAYBOOKS_ERE=$(ere "$PLAYBOOKS_DIR")
@@ -118,9 +114,7 @@ if ! git merge-base --is-ancestor "$BASE_REF" HEAD 2>/dev/null \
     exit 2
 fi
 
-# One diff for every extraction below; `|| true` on each pipe covers the
-# "nothing in this category" case. --diff-filter=d drops deletions: a removed
-# asset has nothing left to roll out. Renames surface via their added path.
+# --diff-filter=d drops deletions; a removed asset has nothing to roll out.
 DIFF_FILES=$(git diff --name-only --diff-filter=d "$BASE_REF"...HEAD)
 
 CHANGED_ROLES=$(
@@ -149,8 +143,7 @@ CHANGED_INVENTORY_PATHS=$(
         || true
 )
 
-# Read into arrays line by line: a path containing whitespace must stay one
-# entry. (A read loop rather than mapfile, which needs bash 4.)
+# Line-by-line: a path containing whitespace must stay one entry.
 to_array() {
     local line
     ARRAY_OUT=()
@@ -165,36 +158,37 @@ to_array "$CHANGED_ROLES";           CHANGED_ROLES_LIST=(${ARRAY_OUT[@]+"${ARRAY
 to_array "$CHANGED_PLAYBOOKS";       CHANGED_PLAYBOOKS_LIST=(${ARRAY_OUT[@]+"${ARRAY_OUT[@]}"})
 to_array "$CHANGED_INVENTORY_PATHS"; CHANGED_INVENTORY_LIST=(${ARRAY_OUT[@]+"${ARRAY_OUT[@]}"})
 
+COVERAGE_SKIPPED=0
 if [ -z "$CHANGED_ROLES" ] && [ -z "$CHANGED_PLAYBOOKS" ] && [ -z "$CHANGED_INVENTORY_PATHS" ]; then
-    echo "No Ansible role/playbook/inventory changes in this diff; deploy coverage check skipped."
-    exit 0
+    echo "No Ansible role/playbook/inventory changes in this diff; the coverage arm is skipped."
+    COVERAGE_SKIPPED=1
 fi
 
 # Every path string under `rules: -> changes:` of every deploy job. Custom YAML
 # tags (`!reference`) resolve to None so the walker skips that rule entry; the
 # referenced job's own `changes:` block is collected independently.
-DEPLOY_PATHS=$(
+DEPLOY_JOB_PATHS=$(
     python3 - "$CI_FILE" "$JOB_PREFIX" "$JOB_STAGE" <<'PYEOF'
+import os
 import sys
-import yaml
 
+sys.path.insert(0, os.environ["SCRIPT_DIR"])
 
-class _CILoader(yaml.SafeLoader):
-    """SafeLoader that tolerates GitLab's custom tags. Subclassed so the
-    constructor is not registered on the global SafeLoader."""
-
-
-# Empty suffix on add_multi_constructor catches every '!<anything>' tag.
-_CILoader.add_multi_constructor("!", lambda loader, suffix, node: None)
+try:
+    from ci_yaml import NullTagCILoader, jobs, load_ci  # noqa: E402
+except ImportError:
+    print(
+        "ERROR: ci_yaml.py must sit next to this script — vendor both "
+        "(see weisssrv-lib scripts/vendorable-paths.yml).",
+        file=sys.stderr,
+    )
+    raise SystemExit(2) from None
 
 ci_path, job_prefix, job_stage = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(ci_path) as f:
-    ci = yaml.load(f, Loader=_CILoader)
+ci = load_ci(ci_path, loader=NullTagCILoader)
 
 paths = set()
-for job_name, job in (ci or {}).items():
-    if not isinstance(job, dict):
-        continue
+for job_name, job in jobs(ci).items():
     if not job_name.startswith(job_prefix):
         continue
     if job.get("stage") != job_stage:
@@ -216,15 +210,51 @@ for job_name, job in (ci or {}).items():
             continue
         for change in changes:
             if isinstance(change, str):
-                paths.add(change)
+                paths.add((job_name, change))
 
-for p in sorted(paths):
-    print(p)
+for job_name, path in sorted(paths):
+    print("%s\t%s" % (job_name, path))
 PYEOF
 )
 
-# Mapped roles: any '<roles_dir>/<name>' prefix inside a deploy job's changes:
-# list. Captures both `<roles_dir>/<name>/**` and any literal-file forms.
+# The path column alone, for the coverage arms below.
+DEPLOY_PATHS=$(printf '%s\n' "$DEPLOY_JOB_PATHS" | cut -f2- | sort -u)
+
+# A literal changes: entry that no longer exists stops triggering its job
+# silently, so a rename leaves the deploy path dead with nothing to notice.
+STALE_FAILED=0
+STALE_ENTRIES=$(
+    while IFS=$'\t' read -r job path; do
+        [ -z "$path" ] && continue
+        # A glob matches a tree, so only a literal entry can be proved dead.
+        if [[ "$path" == *'*'* || "$path" == *'?'* ]]; then continue; fi
+        if [[ "$path" == *'['* || "$path" == *'{'* ]]; then continue; fi
+        [ -e "$path" ] || printf '%s\t%s\n' "$job" "$path"
+    done <<< "$DEPLOY_JOB_PATHS"
+)
+
+if [ -n "$STALE_ENTRIES" ]; then
+    {
+        echo "ERROR: The following deploy jobs list a changes: path that does not exist:"
+        echo ""
+        while IFS=$'\t' read -r job path; do
+            [ -z "$path" ] && continue
+            echo "  - $job: $path"
+        done <<< "$STALE_ENTRIES"
+        echo ""
+        echo "A literal path left behind by a rename or a deletion matches nothing,"
+        echo "so the job stops triggering on the file that replaced it. Point the"
+        echo "entry at the real carrier, or drop it from $CI_FILE."
+        echo ""
+    } >&2
+    STALE_FAILED=1
+fi
+
+if [ "$COVERAGE_SKIPPED" -eq 1 ]; then
+    exit "$STALE_FAILED"
+fi
+
+# Any "<roles_dir>/<name>" prefix in a deploy job's changes: list.
 MAPPED_ROLES=$(
     printf '%s\n' "$DEPLOY_PATHS" \
         | grep -oE "^${ROLES_ERE}/[A-Za-z0-9_-]+" \
@@ -233,10 +263,8 @@ MAPPED_ROLES=$(
         || true
 )
 
-# Mapped playbooks: every '<playbooks_dir>/<path>.yml' that appears verbatim in
-# a deploy job's changes: list. Wildcards like `<playbooks_dir>/**` are
-# intentionally NOT given coverage credit, so a single ** can't silently mask a
-# missing trigger for a newly added playbook.
+# Playbooks named verbatim in a deploy job's changes: list. A `**` wildcard gets
+# no coverage credit, so it cannot mask a missing trigger.
 MAPPED_PLAYBOOKS=$(
     printf '%s\n' "$DEPLOY_PATHS" \
         | grep -oE "^${PLAYBOOKS_ERE}/[A-Za-z0-9_./-]+\.ya?ml$" \
@@ -245,9 +273,7 @@ MAPPED_PLAYBOOKS=$(
         || true
 )
 
-# Mapped inventory paths: explicit '<inventory_dir>/<path>.yml' entries. Same
-# wildcard caveat as playbooks; a `group_vars/**` glob does NOT confer coverage
-# on every group_var file.
+# Inventory paths named verbatim in a deploy job's changes: list.
 MAPPED_INVENTORY_PATHS=$(
     printf '%s\n' "$DEPLOY_PATHS" \
         | grep -oE "^${INVENTORY_ERE}/[A-Za-z0-9_./-]+\.ya?ml$" \
@@ -256,10 +282,7 @@ MAPPED_INVENTORY_PATHS=$(
         || true
 )
 
-# Use `grep -Fxq` (fixed-string, whole-line) for membership checks: the
-# path/role identifiers contain `.`, `/`, and other regex metachars, so
-# a `grep -qx` would silently treat them as regexes and risk false
-# matches on e.g. "k3s-srv" vs "k3s.srv".
+# -Fxq: identifiers contain regex metacharacters.
 in_list() {
     local needle="$1"
     shift
@@ -297,7 +320,7 @@ for inv in ${CHANGED_INVENTORY_LIST[@]+"${CHANGED_INVENTORY_LIST[@]}"}; do
     fi
 done
 
-FAILED=0
+FAILED="$STALE_FAILED"
 
 if [ "${#UNMAPPED_ROLES[@]}" -gt 0 ]; then
     {

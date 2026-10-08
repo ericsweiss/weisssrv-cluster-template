@@ -1,0 +1,32 @@
+---
+# yamllint's `relaxed` (comment rules off, line-length and most style rules at
+# warning level) with line-length off outright, document-start back on as a
+# warning, and the rules ansible-lint's yaml rule requires. See lint/README.md.
+
+# CRITICAL: never vendor this as a repo-root `.yamllint`. ansible-lint discovers
+# one there and merges it over its own yaml[*] rules.
+extends: relaxed
+
+rules:
+  line-length: disable
+  document-start:
+    present: true
+    level: warning
+  # ansible-lint rejects a config it discovers without these and turns fix mode
+  # off. Warning level, so re-vendoring cannot red a consumer's yaml-lint job.
+  comments:
+    min-spaces-from-content: 1
+    level: warning
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
+    level: warning
+  # One blank line between blocks (warning, as in `relaxed`).
+  empty-lines:
+    max: 1
+
+# Provider checkouts are not the repo's YAML, and a local tree has them
+# wherever `terraform init` ran.
+ignore: |
+  .terraform/
+  terraform/**/.terraform/

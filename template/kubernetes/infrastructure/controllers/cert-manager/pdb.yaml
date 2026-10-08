@@ -1,0 +1,15 @@
+---
+# The webhook validates every cert-manager CR write and its
+# ValidatingWebhookConfiguration is failurePolicy: Fail, so keep one of the two
+# replicas (release.yaml webhook.replicaCount) up across kured drains.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cert-manager-webhook
+  namespace: cert-manager
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook
+      app.kubernetes.io/instance: cert-manager

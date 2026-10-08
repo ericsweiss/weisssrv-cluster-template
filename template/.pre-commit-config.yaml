@@ -1,0 +1,129 @@
+---
+# Local guardrails: run `pre-commit install` once, then these run on every
+# commit. They mirror the secret scan and yamllint the pipeline runs, so
+# problems surface before the push. Revs are pinned; bump them in an MR.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        # The profile the CI yaml-lint job and `task lint:yamllint` select with -c.
+        args: [-c, lint/yamllint-relaxed.yml]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # The two mutating hooks skip the byte-identical library copies listed
+      # under `vendored:` in scripts/vendored-manifest.yml: a normalisation
+      # there reds test_vendored_byte_identity.py, and the fix is upstream.
+      - id: end-of-file-fixer
+        exclude: &vendored_copies >-
+          (?x)^( ansible/molecule/prepare-common\.yml |
+          ansible/molecule/tasks/container-warmup\.yml |
+          ansible/molecule/tasks/prepare-apt-disable\.yml |
+          ansible/molecule/tasks/prepare-base\.yml | lint/yamllint-relaxed\.yml | scripts/(
+          check-backup-artifact-apps\.py | check-ci-include-job-names\.py |
+          check-cluster-invariants\.py | check-comment-length\.py | check-dashboards\.py |
+          check-default-deny-coverage\.py | check-deploy-coverage\.sh | check-doc-links\.py
+          | check-helm-repo-parity\.py | check-hpa-vpa-invariant\.py | check-lib-pins\.py |
+          check-netpol-except-parity\.py | check-nfs-tls\.py | check-pvc-storageclass\.py |
+          check-role-inputs\.py |
+          check-scrape-netpol\.py | check-secretstore-scope\.py | check-taskfile\.sh |
+          check-version-checksums\.py | check-versions\.py | ci-fetch-tools\.py |
+          ci_playbook_invocations\.py |
+          ci_yaml\.py | cluster-config-value\.sh | collect-state-lib\.sh |
+          deploy-verify-lib\.sh | extract-prometheus-config\.py | find-reachable-host\.sh |
+          flux-env\.sh | flux-render\.sh | gate_common\.py | generate-hosts-env\.py |
+          generate-versions-configmap\.py | inventory_tree\.py | kubeconform-skipped\.py |
+          lint-prometheus-config\.sh | maintenance-run-with-verify\.sh | molecule-retry\.sh
+          | resolve-tool\.sh | sanitize-junit-expected-failures\.py | semantic-release\.py |
+          shell-lib\.sh | supervised-apply-guard\.sh | validate-helm-values\.py |
+          version-bump-mr\.py ) )$
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+        exclude: *vendored_copies
+      - id: check-merge-conflict
+      - id: check-yaml
+        # --unsafe: syntax-only parse, so GitLab's `!reference` and Ansible's
+        # `!vault` tags do not false-fail.
+        args: [--allow-multiple-documents, --unsafe]
+
+  # The gates needing no cluster and no downloaded binary, each mirroring one CI
+  # lint job. The PyYAML ones install it into their own hook venv, so the host
+  # python3 needs none, and `always_run` keeps them on a deletion-only commit.
+  - repo: local
+    hooks:
+      - id: check-taskfile
+        name: Taskfile-referenced scripts resolve
+        entry: bash scripts/check-taskfile.sh
+        language: system
+        files: ^(Taskfile\.yml|taskfiles/.*\.ya?ml|scripts/)
+        pass_filenames: false
+        always_run: true
+      - id: netpol-except-parity
+        name: egress fence
+        entry: python scripts/check-netpol-except-parity.py --config scripts/netpol-except.yaml kubernetes/
+        language: python
+        additional_dependencies: ["pyyaml==6.0.2"]
+        files: ^(kubernetes/|scripts/netpol-except\.yaml|scripts/check-netpol-except-parity\.py)
+        pass_filenames: false
+        always_run: true
+      - id: cluster-literals
+        name: no literal domain, CIDR or VIP
+        entry: python scripts/check-cluster-literals.py
+        language: python
+        additional_dependencies: ["pyyaml==6.0.2"]
+        files: ^(kubernetes/|ansible/inventories/prod/group_vars/|scripts/check-cluster-literals\.py)
+        pass_filenames: false
+        always_run: true
+      - id: kustomization-coverage
+        name: every manifest is listed, every kustomization lists one
+        entry: python scripts/check-kustomization-coverage.py kubernetes/
+        language: python
+        additional_dependencies: ["pyyaml==6.0.2"]
+        files: ^(kubernetes/|scripts/check-kustomization-coverage\.py)
+        pass_filenames: false
+        always_run: true
+      - id: flux-version-pin
+        name: one Flux version
+        entry: python scripts/check-flux-version-pin.py
+        language: python
+        additional_dependencies: ["pyyaml==6.0.2"]
+        files: ^(kubernetes/|ansible/inventories/prod/group_vars/all\.yml|scripts/check-flux-version-pin\.py)
+        pass_filenames: false
+        always_run: true
+      - id: version-coverage
+        name: every pin is in the version registry
+        entry: python scripts/check-versions.py --check-coverage
+        language: python
+        additional_dependencies: ["pyyaml==6.0.2"]
+        files: ^(ansible/inventories/prod/group_vars/all\.yml|scripts/version-registry\.py|scripts/check-versions\.py)
+        pass_filenames: false
+        always_run: true
+      - id: comment-length
+        name: comment blocks within the house limit
+        entry: python scripts/check-comment-length.py --config scripts/comment-length.yaml
+        language: python
+        additional_dependencies: ["pyyaml==6.0.2"]
+        files: ^(ansible/|docker/|kubernetes/|scripts/|taskfiles/|Taskfile\.yml)
+        pass_filenames: false
+        always_run: true
+      - id: doc-links
+        name: doc links resolve
+        entry: python3 scripts/check-doc-links.py
+        language: system
+        files: \.md$
+        pass_filenames: false
+        always_run: true
+      - id: check-skill-refs
+        name: skill-cited repo paths resolve
+        entry: python3 scripts/check-skill-refs.py
+        language: system
+        files: ^(\.claude/|docs/|scripts/)
+        pass_filenames: false
+        always_run: true

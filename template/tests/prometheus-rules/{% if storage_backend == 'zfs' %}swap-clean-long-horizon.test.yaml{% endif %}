@@ -1,0 +1,47 @@
+---
+# promtool unit tests for the swap-clean arms. SwapCleanSkipped needs a 3-day
+# horizon: min_over_time stays 0 while any run inside the window cleared, so one
+# skipped day reads healthy and only an unbroken streak trips it.
+rule_files:
+  - rules.yaml
+evaluation_interval: 30m
+tests:
+  - interval: 30m
+    input_series:
+      # Cleared once at the start, then skipped for the rest of the horizon.
+      - series: 'swap_clean_last_run_skipped{instance="nas:9101"}'
+        values: '0+0x1 1+0x148'
+      - series: 'swap_clean_skip_reason_info{instance="nas:9101", reason="conflicting_unit_active"}'
+        values: '1+0x150'
+      # A failed run, then a clean one.
+      - series: 'swap_clean_last_run_success{instance="nas:9101"}'
+        values: '0+0x100 1+0x50'
+    alert_rule_test:
+      # The cleared run is still inside the 3-day window.
+      - eval_time: 48h
+        alertname: SwapCleanSkipped
+        exp_alerts: []
+      # It has aged out, but the 1h hold has not elapsed.
+      - eval_time: 73h
+        alertname: SwapCleanSkipped
+        exp_alerts: []
+      - eval_time: 73h30m
+        alertname: SwapCleanSkipped
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'nas:9101'
+      # Inside the 1h hold.
+      - eval_time: 30m
+        alertname: SwapCleanFailed
+        exp_alerts: []
+      - eval_time: 1h30m
+        alertname: SwapCleanFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'nas:9101'
+      # Recovered: the gauge reads 1 again.
+      - eval_time: 54h
+        alertname: SwapCleanFailed
+        exp_alerts: []

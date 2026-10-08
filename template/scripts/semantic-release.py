@@ -1,34 +1,8 @@
 #!/usr/bin/env python3
 """Cut a release from the conventional commits since the last version tag.
 
-Decides the bump (feat -> minor, fix/perf/refactor -> patch, `!` or a BREAKING
-CHANGE trailer -> major), renders notes grouped by type, and creates the tag and
-the Release in ONE Releases API call — both forges create the tag from the ref
-when `tag_name` does not exist yet, which on GitLab is the only tag-write a
-CI_JOB_TOKEN can perform (the Tags API is read-only for job tokens).
-
-Two backends, selected with `--platform`; only the two API calls differ.
-  gitlab (default)  POST $CI_API_V4_URL/projects/:id/releases, `JOB-TOKEN:`
-  github            POST $GITHUB_API_URL/repos/:owner/:repo/releases,
-                    `Authorization: Bearer` + the versioned Accept header
-Everything above them — parsing, the bump decision, the notes — is forge-neutral.
-
-No releasable commit -> no release, exit 0. Re-running on an already-released
-commit is therefore a no-op — EXCEPT when the last version tag carries no
-Release (a run that died between the two halves of that one call, or, on
-GitHub, a tag pushed by hand or a Release deleted out from under its tag): that
-half-finished state is detected wherever the orphan tag sits, and the missing
-Release is backfilled from the tag's own commit range before any new tag is cut.
-
-Stdlib only. The decision path is `plan_release(tags, log_output, ...)`: it takes
-raw `git` output and returns the plan, so it is testable without a repo or a
-server.
-
-Usage (see ci/release/semantic-release.yml and
-ci/release/github-release-workflow.example.yml):
-  scripts/semantic-release.py --dry-run
-  scripts/semantic-release.py --output release.json
-  scripts/semantic-release.py --platform github --output release.json
+Creates the tag and the Release in one API call; --platform picks gitlab or
+github. Stdlib only. Contract: docs/SCRIPTS.md - semantic-release.py.
 """
 from __future__ import annotations
 
@@ -262,10 +236,8 @@ def plan_existing_tag(
 ) -> Plan:
     """Plan that re-creates the Release for a tag that ALREADY exists.
 
-    Crash recovery only. The notes come from the tag's own commit range
-    (`<earlier tag>..<tag>`), so the recovered Release reads exactly like the one
-    the half-failed run would have published. `log_reader` takes a git range and
-    returns raw `git log` output, keeping this testable without a repo.
+    Crash recovery only: the notes come from `<earlier tag>..<tag>`, so the
+    recovered Release reads like the one the half-failed run would have cut.
     """
     earlier = latest_version_tag([t for t in tags if t != tag], tag_prefix)
     commits = parse_log(log_reader("%s..%s" % (earlier, tag) if earlier else tag))
@@ -278,12 +250,9 @@ def plan_existing_tag(
     return Plan(True, bump_level(commits), earlier, tag, version, render_notes(commits, compare_url), commits)
 
 
-# Every way a forge call can fail. Only HTTPError carries a status and a body,
-# so a handler reaching for `exc.code` must not see the others.
-#   UnicodeDecodeError:        non-UTF-8 body (json.loads raises this, not
-#                              JSONDecodeError).
-#   http.client.HTTPException: truncated response (IncompleteRead and friends);
-#                              not an OSError subclass.
+# Every way a forge call can fail; only HTTPError carries a status and a body.
+# json.loads raises UnicodeDecodeError on a non-UTF-8 body; a truncated read
+# raises http.client.HTTPException, which is not an OSError.
 API_ERRORS = (
     urllib.error.HTTPError,
     urllib.error.URLError,
@@ -297,11 +266,8 @@ API_ERRORS = (
 def describe_api_error(exc: BaseException) -> str:
     """One line naming a failed forge call, whatever shape the failure took.
 
-    Must never raise. An HTTPError body is stream-backed, so `read()` can fail
-    on its own — a reset or a truncated response mid-read — and a throw from
-    HERE lands inside the handler that called it, skipping the write_plan below
-    and losing the artifact. That is the exact failure this helper exists to
-    prevent, so the status is kept and the unreadable body is reported as such.
+    Must never raise: a throw here lands in the caller's handler and loses the
+    plan artifact, so an unreadable HTTPError body is reported, not propagated.
     """
     if isinstance(exc, urllib.error.HTTPError):
         try:
@@ -322,10 +288,9 @@ GITHUB_HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
-# The env each CI injects, in the same four roles. `token` is the env var the
-# job is expected to put the token in — GitLab's is set by
-# ci/release/semantic-release.yml, GitHub's is the built-in name that
-# `env: GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}` conventionally fills.
+# The env each CI injects, in the same four roles. `token` names the variable
+# the job puts the token in: ci/release/semantic-release.yml sets GitLab's,
+# GITHUB_TOKEN is GitHub's conventional name.
 ENV_BY_PLATFORM = {
     "gitlab": {
         "api_url": "CI_API_V4_URL",
@@ -377,9 +342,8 @@ def github_api_request(
 ) -> dict:
     """The same call against GitHub: bearer auth plus the versioned Accept header.
 
-    `token_header` is accepted and ignored — GitHub's auth header is fixed — so
-    the two requesters stay interchangeable at the one seam that picks between
-    them, and neither the callers nor their test doubles change arity.
+    `token_header` is accepted and ignored, so the two requesters stay
+    interchangeable at the seam that picks between them.
     """
     headers = {"Authorization": "Bearer %s" % token}
     headers.update(GITHUB_HEADERS)
@@ -394,9 +358,8 @@ def _requester(platform: str) -> Callable:
 def _releases_url(api_url: str, project_id: str, platform: str = "gitlab") -> str:
     """The Releases collection URL.
 
-    GitLab addresses a project by numeric id or fully URL-encoded path, so a
-    path-style id's separator becomes `%2F`; GitHub's `:owner/:repo` is TWO path
-    segments and that slash has to survive.
+    A GitLab path-style id is URL-encoded to `%2F`; GitHub's `:owner/:repo` is
+    two path segments, so that slash survives.
     """
     base = api_url.rstrip("/")
     if platform == "github":
@@ -424,18 +387,9 @@ def get_release(
     request: Optional[Callable] = None,
     platform: str = "gitlab",
 ) -> Optional[dict]:
-    """The Release for `tag`, or None when the tag carries none (HTTP 404).
+    """The Release for `tag`, or None when the tag carries none (404 on both forges).
 
-    Both forges answer 404 for a tag that exists with no Release, so the
-    crash-recovery probe reads the same on either. GitHub documents its
-    releases/tags endpoint as returning the PUBLISHED release, so a draft someone
-    left behind should read as "missing" here and the backfill below should fail
-    loudly against that tag rather than quietly publishing a second Release.
-
-    The explicit draft check below does not assume that documented behaviour: if
-    the endpoint never returns a draft it is a no-op, and if it ever does (an
-    authenticated token with push access is the case usually cited) a draft would
-    otherwise be mistaken for a published release and skip recovery entirely.
+    A GitHub draft reads as missing here, so crash-recovery is never skipped by one.
     """
     url = _release_by_tag_url(api_url, project_id, tag, platform)
     try:
@@ -461,13 +415,8 @@ def create_release(
 ) -> dict:
     """Create the tag (from `ref`) and the Release in one call.
 
-    Both forges create `plan.tag` from the ref when it does not exist yet and
-    ignore the ref when it does (GitHub documents `target_commitish` as "unused
-    if the Git tag already exists"), which is what lets the crash-recovery
-    backfill be a plain create against the orphan tag. The tags themselves
-    differ: GitLab's is ANNOTATED and carries `tag_message`, while GitHub's
-    Releases API only writes a lightweight ref — there the notes live in the
-    Release body alone.
+    Both forges ignore `ref` when the tag exists, so the crash-recovery backfill
+    is a plain create. GitLab's tag is annotated; GitHub's is a lightweight ref.
     """
     url = _releases_url(api_url, project_id, platform)
     if platform == "github":
@@ -523,14 +472,10 @@ def write_plan(
     recovered: str = "",
     recovery_check: str = "",
 ) -> None:
-    """Serialise the outcome. `released` is what actually happened, not the plan.
+    """Serialise the outcome. `released` is what happened, not the plan.
 
-    The artifact is published `when: always`, so it must never claim a tag that
-    the API call did not create; a failed run carries the reason instead.
-    `recovered` names an earlier tag whose missing Release this run backfilled;
-    `recovery_check` is "failed" when the run could not determine whether there
-    was anything to back-fill, so a skipped repair is visible to whoever reads
-    the artifact rather than only to whoever scrolls the job log.
+    Published `when: always`, so a failed run carries the reason instead of a
+    tag. `recovery_check` is "failed" when a skipped repair could not be judged.
     """
     if not path:
         return
@@ -553,7 +498,8 @@ def write_plan(
         json.dump(payload, handle, indent=2)
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI parser."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo-dir", default=".")
     parser.add_argument("--tag-prefix", default="v")
@@ -596,7 +542,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--output", default="", help="Write the plan as JSON to this path.")
     parser.add_argument("--dry-run", action="store_true", help="Print the plan; create nothing.")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def _fail(output: str, plan: Plan, message: str, **plan_fields) -> int:
+    """Record a failed run in the plan artifact, print one line, return 1."""
+    write_plan(output, plan, released=False, **plan_fields)
+    print("ERROR: %s" % message, file=sys.stderr)
+    return 1
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
 
     # Each forge names the same four facts differently; a flag always wins.
     env = ENV_BY_PLATFORM[args.platform]
@@ -604,10 +561,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     project_id = args.project_id or os.environ.get(env["project"], "")
     token_env = args.token_env or env["token"]
     compare_template = compare_url_template(args.platform, project_id)
-    # `--merged HEAD` is load-bearing: the newest tag fixes both the next
-    # version and the commit range the notes come from, so a higher tag cut on
-    # an unrelated branch must not be considered. CI sets GIT_DEPTH: 0, so
-    # reachability is real rather than an artefact of a shallow clone.
+    # `--merged HEAD` is load-bearing: the newest reachable tag fixes both the
+    # next version and the notes range, so a higher tag on an unrelated branch
+    # is ignored. CI sets GIT_DEPTH: 0 so reachability is real.
     tags = git(["tag", "--list", "--merged", "HEAD"], args.repo_dir).split()
     previous = latest_version_tag(tags, args.tag_prefix)
     # A shallow clone can lack the previous tag's commit; the job sets GIT_DEPTH: 0.
@@ -631,11 +587,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else ""
     )
 
-    # Crash recovery for a tag that exists with no Release (GitLab creates the
-    # tag first; a hand-pushed tag or a deleted Release reaches the same state).
-    # Left alone, every later run computes an empty range and reports "nothing
-    # to release" forever. The orphan tag is looked up wherever it sits, not
-    # only while it is still on HEAD.
+    # Crash recovery: a tag that exists with no Release is backfilled from its
+    # own commit range. See docs/VERSIONING.md.
     recovery = None
     recovery_check = ""
     if previous and have_api and not args.dry_run:
@@ -644,10 +597,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 api_url, project_id, token, previous, args.token_header, platform=args.platform
             )
         except API_ERRORS as exc:
-            # The probe is a REPAIR check, not a precondition for the release it
-            # precedes: a 429/502/timeout/garbled body here must not cost a
-            # healthy release that the POST below would have created.
-            # Unknown -> assume healthy.
+            # The probe is a repair check, not a precondition: a transient
+            # failure here must not cost the release the POST below creates.
+            # Unknown means assume healthy.
             existing = {}
             recovery_check = "failed"
             print(
@@ -682,23 +634,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if not have_api:
-        write_plan(args.output, plan, released=False, error="missing token / api url / project id")
-        print(
-            "ERROR: need $%s, $%s and $%s to create the release."
+        return _fail(
+            args.output,
+            plan,
+            "need $%s, $%s and $%s to create the release."
             % (token_env, env["api_url"], env["project"]),
-            file=sys.stderr,
+            error="missing token / api url / project id",
         )
-        return 1
-    # The backfill carries its OWN handler and its own record. Sharing one with
-    # the new tag's POST below misattributes every outcome: a failure reads as
-    # the new tag failing (wrong tag in the artifact, wrong tag in the log), and
-    # a success followed by a failed cut is lost entirely.
+    # Separate handler and record so a backfill failure is reported against the
+    # backfill tag, not the new one.
     recovered_tag = ""
     if recovery is not None:
-        # New work landed on top of the orphan: backfill its Release from its own
-        # commit range first, so those commits appear in exactly one set of
-        # notes, then cut the new tag below. The tag already exists, so the API
-        # ignores `ref`; pass the tag itself as the truthful value.
+        # Backfill the orphan's Release from its own commit range first, so its
+        # commits appear in exactly one set of notes. The tag exists, so the API
+        # ignores `ref`; the tag itself is passed as the truthful value.
         try:
             create_release(
                 api_url,
@@ -711,20 +660,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         except API_ERRORS as exc:
             detail = describe_api_error(exc)
-            write_plan(
+            return _fail(
                 args.output,
                 plan,
-                released=False,
+                "backfilling the missing Release for %s failed (%s) — the new tag %s "
+                "was NOT cut. Fix or delete %s, then re-run."
+                % (recovery.tag, detail, plan.tag, recovery.tag),
                 error="backfill of %s failed: %s" % (recovery.tag, detail),
                 recovery_check=recovery_check,
             )
-            print(
-                "ERROR: backfilling the missing Release for %s failed (%s) — the new "
-                "tag %s was NOT cut. Fix or delete %s, then re-run."
-                % (recovery.tag, detail, plan.tag, recovery.tag),
-                file=sys.stderr,
-            )
-            return 1
         recovered_tag = recovery.tag
         print("Backfilled the missing Release for %s." % recovery.tag)
 
@@ -734,16 +678,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
     except API_ERRORS as exc:
         detail = describe_api_error(exc)
-        write_plan(
+        return _fail(
             args.output,
             plan,
-            released=False,
+            "release creation failed (%s)" % detail,
             error=detail,
             recovered=recovered_tag,
             recovery_check=recovery_check,
         )
-        print("ERROR: release creation failed (%s)" % detail, file=sys.stderr)
-        return 1
     write_plan(
         args.output,
         plan,
@@ -761,9 +703,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 def run_cli(argv: Optional[Sequence[str]] = None) -> int:
-    """main() with each failure mode reduced to one actionable line: a shallow
-    clone, an unreachable API and a non-JSON body surface as a message rather
-    than a traceback. The forge is not named — both platforms reach here.
+    """main() with each failure mode reduced to one actionable line.
+
+    CalledProcessError first: it is not an OSError, so the order is safe.
     """
     try:
         return main(argv)
@@ -772,17 +714,8 @@ def run_cli(argv: Optional[Sequence[str]] = None) -> int:
             "ERROR: %s failed: %s" % (" ".join(exc.cmd), (exc.stderr or "").strip()),
             file=sys.stderr,
         )
-    except urllib.error.HTTPError as exc:
-        print(
-            "ERROR: Releases API call failed (HTTP %s): %s"
-            % (exc.code, exc.read().decode(errors="replace")),
-            file=sys.stderr,
-        )
-    except (urllib.error.URLError, OSError) as exc:
-        # URLError covers DNS/connection failures; socket timeouts arrive as OSError.
-        print("ERROR: %s: %s" % (type(exc).__name__, exc), file=sys.stderr)
-    except json.JSONDecodeError as exc:
-        print("ERROR: the Releases API returned a non-JSON body: %s" % exc, file=sys.stderr)
+    except API_ERRORS as exc:
+        print("ERROR: Releases API call failed: %s" % describe_api_error(exc), file=sys.stderr)
     return 1
 
 

@@ -1,7 +1,6 @@
 ---
-# Rolls workloads whose mounted ConfigMap changed — a plain Flux reconcile
-# updates the ConfigMap but leaves the pod's mounted copy stale. Opt-in only:
-# Reloader does nothing to workloads without the
+# Rolls workloads whose mounted ConfigMap changed; a plain Flux reconcile
+# leaves the pod's mounted copy stale. Opt-in: nothing happens without the
 # `reloader.stakater.com/auto: "true"` annotation.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
@@ -11,6 +10,9 @@ metadata:
 spec:
   interval: 30m
   releaseName: reloader
+  # Revert out-of-band edits; the repo rule lives in traefik/release.yaml.
+  driftDetection:
+    mode: enabled
   chart:
     spec:
       chart: reloader

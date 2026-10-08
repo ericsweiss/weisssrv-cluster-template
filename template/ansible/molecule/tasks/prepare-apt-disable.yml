@@ -1,0 +1,12 @@
+---
+# Stops the apt background timers so unattended-upgrades cannot race a role's
+# apt tasks on the dpkg lock.
+- name: Disable apt background services
+  ansible.builtin.raw: |
+    systemctl stop apt-daily.timer 2>/dev/null || true
+    systemctl stop apt-daily-upgrade.timer 2>/dev/null || true
+    systemctl stop unattended-upgrades.service 2>/dev/null || true
+    systemctl disable apt-daily.timer 2>/dev/null || true
+    systemctl disable apt-daily-upgrade.timer 2>/dev/null || true
+    exit 0
+  changed_when: false

@@ -10,6 +10,10 @@ metadata:
     type: local
     app: authentik
 spec:
+  # Pre-bound, so no other empty-storageClass PVC can grab this PV first.
+  claimRef:
+    namespace: authentik
+    name: authentik-postgres-data
   capacity:
     storage: 10Gi
   accessModes:
@@ -44,18 +48,12 @@ spec:
   volumeName: authentik-postgres-data
 
 ---
-# Landing zone for the nightly logical pg_dump. The block device above is a
-# crash-consistent snapshot only; these dumps are the restorable copy — and,
-# being on a file-walkable dataset, they are what the offsite backup can actually
-# pick up (a raw block device cannot be walked).
-#
-# DEPLOY ORDER: the storage host's Ansible role creates and owns the export
-# directory. Run the storage deploy BEFORE this PV reconciles, or the first
-# CronJob run has nothing to mount.
-#
-# Hostname (not IP) + xprtsec=tls: the server certificate has no IP SAN, so an IP
-# mount fails the handshake. `server` is immutable on a bound PV — the force
-# annotation lets Flux delete+recreate on a change (Retain keeps the data).
+# CRITICAL: landing zone for the nightly logical pg_dump, on a file-walkable
+# dataset the offsite tier picks up. Deploy the storage host's Ansible role
+# first or the first CronJob run has nothing to mount. Mount by hostname with
+# xprtsec=tls: the server certificate has no IP SAN, so an IP mount fails the
+# handshake. `server` is immutable on a bound PV, so the force annotation lets
+# Flux delete and recreate it; Retain keeps the data.
 apiVersion: v1
 kind: PersistentVolume
 metadata:

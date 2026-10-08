@@ -1,52 +1,73 @@
-{%- set lib_url_ = lib_url -%}
-{%- set lib_project = lib_project | default(lib_url_.split('://')[1].split('/', 1)[1] | replace('.git', '')) -%}
-{%- set runner_tag = ci_runner_tag | default('infrastructure') -%}
-{%- set cpu_selector = ci_cpu_selector | default(internal_domain ~ '/cpu=modern') -%}
+{%- set runner_tag = ci_runner_tag -%}
+{%- set cpu_selector = ci_cpu_selector -%}
+{#- Exact patch tag: a two-component tag floats, so a Terraform minor release
+    lands mid-pipeline between plan and apply. -#}
+{%- set terraform_image = 'hashicorp/terraform:1.15.9' -%}
 {%- set cluster_dir = 'kubernetes/clusters/' ~ cluster_name -%}
 {%- set versions_cm = 'kubernetes/infrastructure/sources/versions-configmap.yaml' -%}
-{#- SECRETS SEAM, the pipeline half of Taskfile.yml.jinja's. `secret_ref()`
-    composes one reference, `secret_read()` the command that fetches one to
-    stdout, and `secret_runner()` the wrapper that resolves the references a
-    job's environment holds (emitted once, as $SECRET_RUNNER). Every credential
-    site below emits their output, so a second backend is a branch here plus the
-    matching `secrets_backend` choice in copier.yml. The else-branches subscript
-    an empty mapping to hand `mandatory` an undefined value: an unimplemented
-    backend fails the RENDER instead of generating a pipeline whose deploy jobs
-    resolve nothing.
-
-    One thing stays backend-specific by nature: the library deploy fragment
-    included below fetches the SSH key with `op read` itself. A second backend
-    replaces that include (docs/ci-pipeline.md § Backend seams). -#}
-{%- macro secret_ref(item, field) -%}
-{%- if secrets_backend == 'onepassword' -%}
-op://{{ onepassword_vault }}/{{ item }}/{{ field }}
-{%- else -%}
-{{ {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no reference syntax — add a branch to secret_ref() in .gitlab-ci.yml.jinja') }}
+{#- Every host the starter inventory names, so a host_vars file gets literal
+    coverage: check-deploy-coverage.sh credits a named path, never a glob. -#}
+{%- from "partials/roster.jinja" import pve_hosts, smtp_name, dns_names,
+    k3s_server_names, k3s_agent_names with context -%}
+{%- set inventory_hosts = pve_hosts + [smtp_name] + dns_names
+    + k3s_server_names + k3s_agent_names -%}
+{#- Each deploy job's `changes:` list, and with it the union deploy-verify runs
+    on. Spelled once so the two cannot drift apart. -#}
+{%- set deploy_paths = {
+      'base': [
+        'ansible/inventories/prod/hosts.yml',
+        'ansible/inventories/prod/group_vars/all.yml',
+        'ansible/inventories/prod/group_vars/proxmox.yml',
+        'ansible/inventories/prod/group_vars/services.yml',
+        'ansible/inventories/prod/host_vars/**/*',
+        'ansible/playbooks/base.yml',
+        'ansible/playbooks/site.yml',
+        'ansible/requirements.yml',
+      ],
+      'dns': [
+        'ansible/inventories/prod/group_vars/dns.yml',
+        'ansible/playbooks/dns.yml',
+        'ansible/requirements.yml',
+      ],
+      'storage': [
+        'ansible/inventories/prod/group_vars/nas.yml',
+        'ansible/playbooks/storage.yml',
+        'ansible/requirements.yml',
+      ],
+      'mail': [
+        'ansible/inventories/prod/group_vars/mail.yml',
+        'ansible/playbooks/mail.yml',
+        'ansible/requirements.yml',
+      ],
+      'k3s': [
+        'ansible/inventories/prod/hosts.yml',
+        'ansible/inventories/prod/group_vars/all.yml',
+        'ansible/inventories/prod/group_vars/k3s.yml',
+        'ansible/playbooks/k3s.yml',
+        'ansible/playbooks/k3s-provision-vms.yml',
+        'ansible/requirements.yml',
+      ],
+    } -%}
+{%- for h in inventory_hosts -%}
+{%- set _ = deploy_paths['base'].append('ansible/inventories/prod/host_vars/' ~ h ~ '.yml') -%}
+{%- endfor -%}
+{%- if dns_backend == 'cloudflare' -%}
+{%- set _ = deploy_paths.update({'terraform': ['terraform/cloudflare/**/*']}) -%}
 {%- endif -%}
-{%- endmacro -%}
-{%- macro secret_read(item, field) -%}
-{%- if secrets_backend == 'onepassword' -%}
-op read "{{ secret_ref(item, field) }}"
-{%- else -%}
-{{ {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no fetch command — add a branch to secret_read() in .gitlab-ci.yml.jinja') }}
-{%- endif -%}
-{%- endmacro -%}
-{%- macro secret_runner() -%}
-{%- if secrets_backend == 'onepassword' -%}
-op run --
-{%- else -%}
-{{ {}['unimplemented'] | mandatory('secrets_backend ' ~ secrets_backend ~ ' has no host-side runner — add a branch to secret_runner() in .gitlab-ci.yml.jinja') }}
-{%- endif -%}
-{%- endmacro -%}
+{#- SECRETS SEAM: partials/secrets.jinja is the one home for these five macros,
+    shared with Taskfile.yml.jinja. An unimplemented backend fails the RENDER
+    there, naming the macro. docs/ARCHITECTURE.md Backend seams. -#}
+{%- import "partials/secrets.jinja" as secrets with context -%}
+{%- set secret_ref = secrets.secret_ref -%}
+{%- set secret_read = secrets.secret_read -%}
+{%- set secret_runner = secrets.secret_runner -%}
+{%- set secret_vault = secrets.secret_vault -%}
+{%- set secret_gate_var = secrets.secret_gate_var -%}
+{%- set gate_var = secret_gate_var() -%}
 ---
 # CI for the {{ cluster_name }} cluster. Generic lint / validate / security /
-# review jobs are pulled from {{ lib_project }} at a pinned ref; only the deploy
-# jobs and the wiring below are local. See docs/ci-pipeline.md for the runner,
-# schedule and credential prerequisites.
-#
-# `include: project:` resolves on THIS GitLab instance, so the library must
-# exist here as {{ lib_project }} — mirror or fork it if the cluster does not
-# live on the instance that hosts it.
+# review jobs come from {{ lib_project }} at a pinned ref; only the deploy jobs
+# and the wiring below are local. Prerequisites: docs/ci-pipeline.md.
 stages:
   - lint
   - validate
@@ -55,30 +76,24 @@ stages:
   - ai-review
   - gate
   - deploy
-  # Post-deploy verification, a SEPARATE stage rather than a deploy-stage job
-  # with `needs:` on the deploys: a job that declares ANY `needs:` starts as soon
-  # as those needs complete and ignores stage order, and a need that was created
-  # and then FAILED blocks it (`optional: true` only tolerates one that was never
-  # created). deploy-verify therefore carries NO `needs:` — stage order alone
-  # sequences it — plus `when: always`, so a partly-failed deploy stage is still
-  # verified instead of leaving the cluster unchecked.
+  # Post-deploy verification is its own stage: a job with any `needs:` ignores
+  # stage order and a failed need blocks it. deploy-verify therefore carries no
+  # `needs:` and `when: always` — docs/ci-pipeline.md § Stages.
   - verify
   - maintenance
-{%- if enable_semantic_release | default(false) %}
+{%- if enable_semantic_release %}
   - release
 {%- endif %}
 
 # Settings every job inherits unless it says otherwise.
 default:
-  # PINNED, and stated here rather than left to the runner: a job with no image
-  # runs on whatever the runner's config names as its default, which is neither
-  # reviewable nor reproducible from this repository. The deploy fragment
-  # apt-installs and pip-installs, so the image must be Debian-based with pip.
+  # Pinned here rather than left to the runner default, which is not reviewable
+  # from this repository. The deploy fragment apt-installs and pip-installs, so
+  # the image must be Debian-based with pip.
   image: python:3.13-slim
-  # An UNTAGGED job goes to whichever runner accepts untagged work — the shared,
-  # non-root, LAN-blocked one — where an apt-get and any SSH reach to the hosts
-  # both fail. Every job below and every library include already carries this
-  # tag; the default is what makes a forgotten one land correctly anyway.
+  # An untagged job goes to the shared, non-root, LAN-blocked runner, where
+  # apt-get and every SSH reach to the hosts fail. This default catches a job
+  # that forgets the tag.
   tags: ["{{ runner_tag }}"]
   # Cancel a superseded pipeline's jobs on a new commit — see the workflow
   # policy below. Deploys, the gate and the terraform plan/apply override this
@@ -86,19 +101,11 @@ default:
   interruptible: true
 
 workflow:
-  # AUTHORITATIVE description of this pipeline's cancellation policy; jobs that
-  # override `interruptible` point here rather than restating it.
-  #
-  # MR refs: `on_new_commit: interruptible` — a new push cancels the previous
-  # pipeline's interruptible jobs instead of letting them pile up on a scarce
-  # runner. GitLab's project default is "conservative", which stops cancelling as
-  # soon as any non-interruptible job has started, so it leaves them running.
-  #
-  # main: `on_new_commit: none` (the rule below) — a merged pipeline always runs
-  # to completion. Cancelling one would skip validation-gate and leave the first
-  # merge's deploys unmet, with its `changes:` not re-covered by the second
-  # pipeline. Rapid merges instead QUEUE at the deploy jobs' `resource_group`s,
-  # which are per target and oldest-first.
+  # CRITICAL: MR refs cancel a superseded pipeline's interruptible jobs; main
+  # never cancels (the rule below), because cancelling skips validation-gate and
+  # leaves the first merge's deploys unmet. Rapid merges queue at the deploy
+  # jobs' oldest-first `resource_group`s instead.
+  # docs/ci-pipeline.md § Cancellation policy.
   auto_cancel:
     on_new_commit: interruptible
   rules:
@@ -106,50 +113,80 @@ workflow:
     - if: '$CI_COMMIT_BRANCH == "main"'
       auto_cancel:
         on_new_commit: none
-    # version-bump-bot runs on a pipeline schedule; without this clause the
-    # schedule creates no pipeline at all.
+    # Every schedule creates a pipeline; each opt-in job selects itself on
+    # $SCHEDULE_TYPE.
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 variables:
-  # Single source for the library pin. `include:` CANNOT read this — GitLab
-  # resolves includes before job variables exist — so every entry below repeats
-  # the tag as a literal and scripts/check-lib-pins.py (vendored from the
-  # library, run by tests/test_lib_pins.py) fails the pipeline if one drifts or
-  # pins a branch. Bump here, then `scripts/check-lib-pins.py --fix`.
+  # Single source for the library pin. `include:` cannot read it, so every entry
+  # below repeats the tag literally and scripts/check-lib-pins.py fails a drifted
+  # or branch pin. Bump here, then `scripts/check-lib-pins.py --fix`.
   WEISSSRV_LIB_REF: "{{ lib_ref }}"
   # The project half of the same pin, so the gate checks the includes this
   # cluster actually resolves (a fork or mirror answers lib_project).
   LIB_PROJECT: "{{ lib_project }}"
   PYYAML_VERSION: "6.0.2"
+  # Pre-seeded for check-doc-links' backticked-path pass; inert until the library
+  # pin ships it.
+  CHECK_DOC_LINKS_PATHS: "1"
+  # fnmatch exceptions for cited paths that are not files here: the library's own
+  # docs, the forge-hosted terraform states, a gitignored plan file, and the
+  # vendored-copy checker that lives in the library.
+  CHECK_DOC_LINKS_IGNORE: "docs/[A-Z]* terraform/state/* */tfplan */check-vendored-copies.py"
   # Single source for the Ansible the local jobs pip-install. `include:` inputs
   # cannot read it (they resolve before this block exists), so the deploy-base
   # entry below repeats the literal — bump the two together.
-  ANSIBLE_VERSION: "11.6.0"
-  # The command that resolves the secret references in a job's environment. Every
-  # deploy script goes through it rather than naming a backend's CLI, so the
-  # `secrets_backend` seam has one runtime half and one render-time half (the
-  # secret_ref macro that writes the references themselves).
+  ANSIBLE_VERSION: "14.4.0"
+  # kustomize for the cluster-verify server-side dry-run, pinned with the
+  # sha256 the script verifies the downloaded tarball against. Same pin as
+  # scripts/ci-fetch-tools.py, so one kustomize version runs in every job.
+  KUSTOMIZE_VERSION: "5.8.2"
+  KUSTOMIZE_SHA256: "06af0a202c2b831207d0173f9c9cdb1b30abceca0747cb3fbb72792d26055c95"
+  # The command that resolves a job's secret references. Every deploy script
+  # goes through it rather than naming a backend CLI, so `secrets_backend` has
+  # one runtime half here and one render-time half in the secret_ref macro.
   SECRET_RUNNER: "{{ secret_runner() }}"
+  # One exact patch tag for every terraform job, lint and credentialed alike.
+  # The plan/apply and drift jobs hold vault credentials, so append
+  # @sha256:<digest> here when you resolve one.
+  TF_JOB_IMAGE: "{{ terraform_image }}"
+  # The Python image for jobs that have already been handed vault credentials or
+  # a kubeconfig, so a repointed upstream tag would execute there. Append
+  # @sha256:<digest> here when you resolve one; lint-only jobs stay floating.
+  PY_JOB_IMAGE: "python:3.13-slim"
+  # git reads these three as config, so every clone of the library — terraform
+  # init, ansible-galaxy, molecule's dependency step — authenticates with the
+  # job token and no ~/.gitconfig. Only credential-less URLs are rewritten.
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: "url.https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/.insteadOf"
+  GIT_CONFIG_VALUE_0: "https://${CI_SERVER_HOST}/"
 
 include:
+  # Local: the integration-test matrix, split out so its `changes:` trigger can
+  # name a file that only it lives in (see the header there).
+  - local: .gitlab/ci/integration-jobs.yml
+
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: ["{{ runner_tag }}"]
-      # -c .yamllint, not -d relaxed: the repo's config is what pre-commit and
-      # `task lint` use, and a job that ignores it reports different findings.
-      config: "-c .yamllint"
-      targets: "ansible/ kubernetes/ terraform/ scripts/ .gitlab-ci.yml Taskfile.yml"
+      # -c lint/yamllint-relaxed.yml, not -d relaxed: the repo's config is what
+      # `task lint` uses, and a different config reports different findings.
+      config: "-c lint/yamllint-relaxed.yml"
+      targets: "ansible/ kubernetes/ terraform/ scripts/ taskfiles/ lint/ .gitlab-ci.yml .gitlab/ Taskfile.yml"
       changes:
         - "ansible/**/*"
         - "kubernetes/**/*"
         - "terraform/**/*"
         - "scripts/**/*.yml"
+        - "scripts/**/*.yaml"
         - "Taskfile.yml"
-        - ".yamllint"
+        - "taskfiles/**/*.yml"
+        - "lint/yamllint-relaxed.yml"
         - ".gitlab-ci.yml"
+        - ".gitlab/**/*"
 
   # collections_path is empty: this repo ships no in-repo collection, so the
   # only search path is the galaxy install of weisssrv.infra from requirements.yml.
@@ -169,6 +206,20 @@ include:
         - ".ansible-lint"
         - ".ansible-lint-ignore"
         - ".gitlab-ci.yml"
+
+  # kubectl + the kubeconfig, pulled into cluster-verify's before_script. The item
+  # and field names are the include's own defaults (K3s Kubeconfig / kubeconfig),
+  # and the stored value is base64.
+  - project: {{ lib_project }}
+    ref: {{ lib_ref }}
+    file: /ci/deploy/kubectl-setup.yml
+    inputs:
+      op_vault: "{{ secret_vault() }}"
+      # Pinned here, not left to the include's default, so it is reviewable next
+      # to k3s_version in group_vars/all.yml: keep it within one minor of that.
+      # sha256 is the linux/amd64 binary, from <version>/bin/linux/amd64/kubectl.sha256.
+      kubectl_version: "v1.37.1"
+      kubectl_sha256: "65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8"
 
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
@@ -190,10 +241,14 @@ include:
     inputs:
       tags: ["{{ runner_tag }}"]
       image: python:3.13-slim
+      # ruff is pinned here; include inputs resolve before job variables exist.
+      ruff_version: "0.16.7"
       # kubernetes/ is in the list for the Python a manifest delivers through a
       # configMapGenerator (the DDNS CronJob's program): a real file so ruff can
       # see it, which an inlined heredoc could not be.
       targets: "scripts tests kubernetes"
+      # `changes:` must name the same surface as `targets:`, or the job skips a
+      # source commit.
       changes:
         - "scripts/**/*.py"
         - "tests/**/*.py"
@@ -202,62 +257,48 @@ include:
         - "pyproject.toml"
         - ".gitlab-ci.yml"
 
-  # tests/ holds the cluster invariants (substitution coverage, no site literals
-  # in the Kubernetes tree) and the library-pin gate. apt_packages is cleared and
-  # the FULL python image used so the job stays runnable on a non-root runner.
-  #
-  # `changes:` must name every file the suite READS, not just the ones it lives
-  # next to: test_lib_pins.py reads ansible/requirements.yml, Taskfile.yml and
-  # terraform/*/*.tf to prove they pin the same library ref as this file's
-  # `ref:`. Without those three entries an MR that bumps only a pin — the exact
-  # change the gate exists for — never starts the job that would catch it.
-  # test_cluster_invariants.py reads four more by the same rule:
-  # ansible/inventories/prod/hosts.yml (the address-consistency asserts),
-  # .copier-answers.yml (the site-values-not-in-the-k8s-tree assert, which
-  # sources the literals to hunt for from the answers file), the whole
-  # ansible/playbooks/ tree and scripts/deploy-coverage.conf (the playbook
-  # gates: every playbook the Taskfile names exists, and every playbook is
-  # mapped to a deploy job or acknowledged in the conf). Deleting or renaming a
-  # playbook touches ONLY that tree, so without it the gate is silent on the
-  # exact change it exists for.
-  #
-  # test_vendored_byte_identity.py is the one suite here that needs the
-  # library itself: it runs the library's check-vendored-copies.py
-  # engine over scripts/vendored-manifest.yml and never skips, so
-  # `setup_command` clones the library at the pinned ref into
-  # $WEISSSRV_LIB_PATH (the job override below declares the path). The clone
-  # carries the JOB TOKEN rather than being anonymous, so a private library
-  # works too — it must then list this project on its CI/CD job-token
-  # allowlist. `apt_packages: ""` leaves no apt-get to install git, which is
-  # why the FULL python image (which ships it) is not optional here.
-  # `changes:` covers the whole of scripts/ for the same suite: every file
-  # there is a vendored copy or the site data one reads, and an edit to a
-  # vendored .sh must start the job that would catch it.
+  # tests/ + scripts/ = cluster invariants, the gate suites, the library-pin
+  # gate. `changes:` must name every file they read — docs/ci-pipeline.md.
+  # test_vendored_byte_identity.py reads the library from the clone below.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/test/python-tests.yml
     inputs:
       tags: ["{{ runner_tag }}"]
       image: python:3.13
-      apt_packages: ""
-      test_dir: "tests"
-      setup_command: 'mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/{{ lib_project }}.git" "$WEISSSRV_LIB_PATH"'
+      # jq: test_collect_state_lib.py drives the collector's jq filters.
+      # ansible-core: test_deploy_preflight.py fails rather than skips without it,
+      # and the pin is the core line requirements.txt's `ansible==` resolves to.
+      apt_packages: "jq"
+      pip_packages: "ansible-core==2.21.5"
+      test_dir: "tests scripts"
+      setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/{{ lib_project }}.git" "$WEISSSRV_LIB_PATH"'
       changes:
         - "tests/**/*"
         - "kubernetes/**/*"
         - "scripts/**/*"
+        - "docs/**/*"
         - "ansible/requirements.yml"
-        - "ansible/inventories/prod/hosts.yml"
+        - "ansible/inventories/prod/**/*"
         - "ansible/playbooks/**/*"
+        - "ansible/integration-tests/**/*"
+        - "ansible/TESTING.md"
         - ".copier-answers.yml"
         - "Taskfile.yml"
-        - "terraform/**/*.tf"
-        # The lint profiles the vendored-copy manifest declares as forks: an
-        # edit to one must run the gate that holds it against the library.
+        - "taskfiles/**/*.yml"
+        - "terraform/**/*"
+        - ".gitignore"
+        # Every path the vendored-copy manifest declares outside scripts/,
+        # fork or byte-identical copy: an edit to one must run the gate that
+        # holds it against the library.
         - "ruff.toml"
         - ".editorconfig"
+        - "lint/yamllint-relaxed.yml"
         - ".gitleaks.toml"
         - ".gitlab/secret-detection-ruleset.toml"
+        - ".pre-commit-config.yaml"
+        - ".gitattributes"
+        - "ansible/molecule/**/*"
         - ".gitlab-ci.yml"
 
   - project: {{ lib_project }}
@@ -265,64 +306,56 @@ include:
     file: /ci/validate/terraform.yml
     inputs:
       tags: ["{{ runner_tag }}"]
+      image: "{{ terraform_image }}"
       fmt_dir: "terraform/"
       module_glob: "terraform/*/"
       changes:
         - "terraform/**/*"
         - ".gitlab-ci.yml"
 
-  # Substitute mode mirrors what kustomize-controller does at reconcile time:
-  # every ${placeholder} in a rendered Kustomization must resolve to a postBuild
-  # ConfigMap key, and the result is kubeconform'd.
-  #
-  # flux_render_script is scripts/flux-env.sh, NOT the vendored flux-render.sh:
-  # this cluster substitutes from TWO ConfigMaps (cluster-versions for pins,
-  # cluster-config for domains/VIPs/CIDRs) while the library helper takes one
-  # file per call, and flux-env.sh is the wrapper that adds the second. Passing
-  # the vendored copy directly would forfeit every cluster_* key — and `task
-  # flux:lint` calls flux-env.sh too, so both see identical variables.
-  #
-  # extra_validation runs the cluster-invariant gates the library ships against
-  # the SAME rendered corpus kubeconform sees. Each one covers a class the
-  # kustomize/kubeconform pass structurally cannot: the corpus never renders a
-  # chart, so `.spec.values` is unvalidated; an HPA/VPA pair fighting over one
-  # workload is schema-valid; a PVC with no storageClassName is rewritten by the
-  # DefaultStorageClass admission plugin at create time; a scraped namespace
-  # behind an ingress default-deny reports only as TargetDown; and a
-  # ClusterSecretStore with no conditions is readable from every namespace.
-  # `changes:` below therefore names the gate scripts and their policy files too
-  # — a change that loosens one must run the job it loosens.
-  # require_cluster_root is FALSE here because a freshly generated cluster has no
-  # gotk-components.yaml / gotk-sync.yaml until `flux bootstrap` runs, and the
-  # input defaults to true — which would fail the very first pipeline on a root
-  # it cannot build yet. Flip it to true (or drop the line) once bootstrapped:
-  # from then on it is the gate that fails a cluster which has LOST its
-  # flux-system content, instead of silently skipping the build.
+  # flux-lint in substitute mode. flux_render_script is scripts/flux-env.sh, the
+  # wrapper that adds the second ConfigMap this cluster substitutes from;
+  # flux-render.sh parses one file — docs/ci-pipeline.md § flux-lint.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/validate/flux-lint.yml
     inputs:
       tags: ["{{ runner_tag }}"]
       substitute: true
+      # false until `flux bootstrap` has created gotk-sync.yaml — see README.
+      # After bootstrap, flip to true: it fails a cluster that has LOST its
+      # flux-system content instead of silently skipping the build.
       require_cluster_root: false
       cluster_dir: "{{ cluster_dir }}"
       versions_configmap: "{{ versions_cm }}"
       flux_render_script: "scripts/flux-env.sh"
       skipped_script: "scripts/kubeconform-skipped.py"
-      extra_validation: 'echo "=== Checking HPA/VPA invariant ==="; python3 scripts/check-hpa-vpa-invariant.py --require-chart-native-vpas --policy-config scripts/autoscaling-policy.yaml < "$RENDER_ALL" || FAILED=1; echo "=== Checking scrape/NetworkPolicy invariant ==="; python3 scripts/check-scrape-netpol.py < "$RENDER_ALL" || FAILED=1; echo "=== Checking ingress default-deny coverage ==="; python3 scripts/check-default-deny-coverage.py < "$RENDER_ALL" || FAILED=1; echo "=== Checking ClusterSecretStore scoping ==="; python3 scripts/check-secretstore-scope.py < "$RENDER_ALL" || FAILED=1; echo "=== Checking PVC storageClassName ==="; python3 scripts/check-pvc-storageclass.py < "$RENDER_ALL" || FAILED=1; echo "=== Schema-validating HelmRelease values blocks (helm template) ==="; MERGED_CM=$(mktemp /tmp/merged-cm-XXXXXX.yaml); scripts/flux-env.sh merged-configmap "{{ versions_cm }}" > "$MERGED_CM" && python3 scripts/validate-helm-values.py --kubeconform --releases scripts/helm-values-releases.yaml --versions-configmap "$MERGED_CM" --policy-config scripts/autoscaling-policy.yaml || FAILED=1; rm -f "$MERGED_CM"'
+      # The revision taskfiles/flux.yml pins as CRD_CATALOG_REF, so `task
+      # flux:lint` and this job resolve CR schemas against one catalog.
+      crd_catalog_ref: "ad3b08c5045129d7bb1eeffd8e61719b2c8dd1e2"
+      # With a baseline set, a kind skipped outside it fails the job rather than
+      # degrading the run to core kinds in silence.
+      expected_skipped_file: "scripts/kubeconform-expected-skipped.txt"
+      extra_validation: 'bash scripts/flux-corpus-gates.sh "$RENDER_ALL" "{{ versions_cm }}" || FAILED=1'
       changes:
         - "kubernetes/**/*"
         - "ansible/inventories/prod/group_vars/all.yml"
+        - "ansible/inventories/prod/group_vars/nas.yml"
         - "scripts/autoscaling-policy.yaml"
+        - "scripts/check-backup-artifact-apps.py"
         - "scripts/helm-values-releases.yaml"
         - "scripts/check-hpa-vpa-invariant.py"
         - "scripts/check-scrape-netpol.py"
         - "scripts/check-default-deny-coverage.py"
         - "scripts/check-secretstore-scope.py"
         - "scripts/check-pvc-storageclass.py"
+        - "scripts/check-nfs-tls.py"
+        - "scripts/gate_common.py"
         - "scripts/validate-helm-values.py"
+        - "scripts/flux-corpus-gates.sh"
         - "scripts/flux-env.sh"
         - "scripts/kubeconform-skipped.py"
+        - "scripts/kubeconform-expected-skipped.txt"
         - ".gitlab-ci.yml"
 
   # Doc-link rot: the checker is vendored (scripts/check-doc-links.py) and
@@ -332,19 +365,28 @@ include:
     ref: {{ lib_ref }}
     file: /ci/lint/docs-link-check.yml
     inputs:
+      job_name: lint-docs-links
       tags: ["{{ runner_tag }}"]
       changes:
-        - "docs/**/*"
-        - "README.md"
-        - "**/README.md"
+        - "**/*.md"
         - "scripts/check-doc-links.py"
         - ".gitlab-ci.yml"
 
-  # Findings BLOCK (the library default). The paired allowlists ship
-  # with the repo — .gitleaks.toml and .gitlab/secret-detection-ruleset.toml —
-  # so the `op://` references and the published supply-chain sha256 pins this
-  # tree is full of do not fail the job. Amend .gitleaks.toml (with a rationale)
-  # rather than disabling the gate.
+  # The comment-length house rule, the CI half of `task lint:comment-length`.
+  # scripts/comment-length.yaml carries the scan scope and the vendored copies
+  # the gate skips, because their comments are the library's.
+  - project: {{ lib_project }}
+    ref: {{ lib_ref }}
+    file: /ci/lint/comment-length.yml
+    inputs:
+      tags: ["{{ runner_tag }}"]
+      config: "--config scripts/comment-length.yaml"
+      changes:
+        - "**/*"
+
+  # Findings block. The paired allowlists .gitleaks.toml and
+  # .gitlab/secret-detection-ruleset.toml keep the secret references and sha256
+  # pins green. Amend .gitleaks.toml rather than disabling the gate.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/security/secret-detection.yml
@@ -372,17 +414,9 @@ include:
         - job: secret_detection
           optional: true
 
-  # The READ-ONLY half of the version pair: reports what is available and changes
-  # nothing, so an MR author sees pin drift while they are already looking at the
-  # diff. The bot below is the other half, acting on drift when nobody is looking.
-  # A repo wants both — this one needs no token and no schedule.
-  #
-  # The report is written even when the checker exits 1 ("updates available"),
-  # because the redirect creates the file before the exit code exists. The -s
-  # guard covers the other case: a checker that dies mid-run leaves an EMPTY
-  # report, which uploads as a perfectly valid-looking artifact saying nothing is
-  # available. That is the wrong answer delivered quietly, so it exits non-zero
-  # instead — visible as a warning, since this job is soft-fail everywhere.
+  # The read-only half of the version pair: reports pin drift on the MR, needs no
+  # token and no schedule. The -s guard is why the report is checked: a checker
+  # that dies mid-run leaves an EMPTY artifact that reads as "nothing available".
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/maintenance/version-check.yml
@@ -394,45 +428,52 @@ include:
         [ -s "$REPORT_PATH" ] ||
         { echo "check-versions wrote no report (rc=$RC)"; exit 2; };
         exit "$RC"
+      # Stated, not inherited: rc=1 is "updates available", rc=2 a checker
+      # error, and the weekly sweep must red on the second.
+      soft_fail_exit_codes: [1]
       changes:
         - "ansible/inventories/prod/group_vars/all.yml"
         - "kubernetes/**/*"
         - ".gitlab-ci.yml"
 
-  # Weekly pin refresh. Runs ONLY from a pipeline schedule (or a manual web run)
-  # and needs $VERSION_BUMP_BOT_TOKEN — see docs/ci-pipeline.md for both.
-  #
-  # check_command is the non-interactive twin of `task maintenance:update-all-versions`
-  # and runs the VENDORED scripts/check-versions.py, exactly as the Taskfile
-  # does: the checker resolves its registry relative to its own parent's parent,
-  # so a copy run out of a library checkout looks for the registry inside that
-  # checkout and finds nothing. Keep the two in step — including --nested-key,
-  # without which every helm_chart_versions_* key vanishes from the regenerated
-  # ConfigMap.
-  #
-  # Exit-code handling mirrors the Taskfile rather than `|| true`: rc 1 is
-  # "updates available" (information, and the whole point of the run) while rc 2
-  # is a real failure that must turn the job red — a blanket `|| true` would
-  # keep the weekly job green while it checked nothing.
+  # Weekly pin refresh, schedule-only, needs $VERSION_BUMP_BOT_TOKEN.
+  # check_command is the non-interactive twin of
+  # `task maintenance:update-all-versions` — docs/ci-pipeline.md § Version bumps.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/maintenance/version-bump-bot.yml
     inputs:
       tags: ["{{ runner_tag }}"]
+      # The job runs beside a PAT, so it is pinned to one trusted branch. A
+      # LITERAL name: $CI_DEFAULT_BRANCH does not expand inside a quoted
+      # `rules:if`.
+      run_branch: "main"
+      # Only the version-bump schedule may open an MR; the nightly full-test
+      # schedule must not. The `web` clause keeps the manual run, because the
+      # library ANDs `gate` into that rule too.
+      gate: '$VERSION_BUMP_BOT_TOKEN && ($SCHEDULE_TYPE == "version-bump" || $CI_PIPELINE_SOURCE == "web")'
       setup_command: "pip install --user --quiet pyyaml==$PYYAML_VERSION"
+      # CRITICAL: the soft-fail codes apply to the WHOLE check_command, so only
+      # the report step may reach rc 1 ("updates available"). Every later step
+      # remaps its failure to 2: on the soft-fail list a crashed step reads as
+      # "updates found", the bot then runs with an unmodified tree and the MR
+      # manager closes the standing bot MR.
+      check_soft_fail_exit_codes: "1"
       check_command: >-
-        python3 scripts/check-versions.py --json > version-report.json ||
-        { RC=$?; [ "$RC" -le 1 ] || exit "$RC"; };
-        python3 scripts/check-versions.py --update-all || exit $?;
+        RC=0;
+        python3 scripts/check-versions.py --json > version-report.json || RC=$?;
+        [ "$RC" -le 1 ] || exit 2;
+        python3 scripts/check-versions.py --update-all || exit 2;
         python3 scripts/generate-versions-configmap.py
         --vars-file ansible/inventories/prod/group_vars/all.yml
         --output {{ versions_cm }}
         --nested-key helm_chart_versions
-        --regen-command "task flux:sync-versions" || exit $?
+        --regen-command "task flux:sync-versions" || exit 2;
+        exit "$RC"
       paths: "ansible/inventories/prod/group_vars/all.yml kubernetes/"
       report_path: "version-report.json"
       title: "chore(deps): {{ cluster_name }} version bumps"
-{%- if enable_semantic_release | default(false) %}
+{%- if enable_semantic_release %}
 
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
@@ -449,23 +490,16 @@ include:
     ref: {{ lib_ref }}
     file: /ci/templates/install-1password.yml
 
-  # `.deploy-base` — the toolchain every Ansible deploy job extends: the op CLI
-  # and dependency cache, a pinned Ansible, a 0600 ansible.cfg copy, the deploy
-  # SSH key, a TOFU keyscan of scripts/hosts.env, and the collection install.
-  # `apt_packages` defaults to `git`, which ansible-galaxy needs to install
-  # weisssrv.infra from the `git+` source requirements.yml pins.
-  #
-  # This fragment is the 1Password-bound half of the `secrets_backend` seam: it
-  # reads the SSH key with `op read` and exports the Loki push references. A
-  # different backend replaces the include, not just the macros at the top of
-  # this file.
+  # `.deploy-base` — the toolchain every Ansible deploy job extends: op CLI,
+  # pinned Ansible, ansible.cfg, the deploy SSH key, a keyscan of hosts.env and
+  # the collection install. The secrets_backend seam: docs/ci-pipeline.md.
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
     file: /ci/deploy/deploy-base.yml
     inputs:
       tags: ["{{ runner_tag }}"]
-      op_vault: "{{ onepassword_vault }}"
-      ansible_version: "11.6.0"
+      op_vault: "{{ secret_vault() }}"
+      ansible_version: "14.4.0"
 
   - project: {{ lib_project }}
     ref: {{ lib_ref }}
@@ -480,31 +514,51 @@ include:
 # Local jobs
 # ==============================================================================
 
-# Additive override of the library-generated python-tests job: the checkout path
-# its setup_command writes and tests/test_vendored_byte_identity.py reads.
-# Declared here rather than as an include input because that template exposes no
-# `variables` input. Inside the build directory (not /tmp) so the clone is
-# cleaned up with the workspace.
+# CRITICAL: GitLab evaluates `rules:changes` as TRUE for every pipeline source
+# but push and merge_request_event, so without the `web` arm below a "Run
+# pipeline" button on main fires every deploy job unattended. Pulled in as
+# `- !reference [.skip-schedule-web, rules]`; `.drift-schedule-rule` further
+# down is the schedule-only twin the read-only drift jobs use.
+.skip-schedule-web:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: never
+
+# Additive override of the library python-tests job: the checkout path its
+# setup_command writes and tests/test_vendored_byte_identity.py reads. Declared
+# here because that template exposes no `variables` input.
 python-tests:
-  # Repeats the include's `tags` input rather than inheriting it: a reader (and
-  # the template's render gate) sees only this file, where a job with no tag
-  # would land on the untagged runner. The value is the same on both sides, so
-  # the merge is a no-op.
+  # Repeats the include's `tags` input rather than inheriting it, so a reader and
+  # the render gate see the tag in this file. Same value on both sides, so the
+  # merge is a no-op.
   tags: ["{{ runner_tag }}"]
   variables:
     WEISSSRV_LIB_PATH: "$CI_PROJECT_DIR/.tmp/weisssrv-lib"
 
-# The version-bump-bot below only reports pins that exist in
-# scripts/version-registry.py. A pin added to all.yml without an entry there is
-# never checked and never mentioned — the weekly job stays green while it
-# silently skips it, which is the worst shape a security gate can take. This is
-# the offline check that keeps the registry in step with the pins; it needs no
-# credentials and no network, hence stage: lint rather than maintenance.
-version-coverage:
+# Shared shape for the local lint gates, so the image, the runner tag and the
+# PyYAML pin have one home. `rules:` stays per job: `extends` REPLACES a list
+# rather than merging it, so each job's arms live with its `changes:` anchor.
+.lint-gate:
   stage: lint
   image: python:3.13-slim
   tags: ["{{ runner_tag }}"]
   needs: []
+
+# The gates that import PyYAML. --user, like every other unprivileged pip here:
+# docs/ci-pipeline.md tells the operator only the three privileged jobs need a
+# root-capable runner, and a bare `pip install` cannot write site-packages.
+.pyyaml-gate:
+  extends: .lint-gate
+  before_script:
+    - pip install --user --quiet "pyyaml==$PYYAML_VERSION"
+
+# The version-bump-bot only reports pins that exist in
+# scripts/version-registry.py; one missing there is skipped while the weekly job
+# stays green. This offline check keeps the registry in step with the pins.
+version-coverage:
+  extends: .lint-gate
   script:
     - python3 scripts/check-versions.py --check-coverage
   rules:
@@ -524,52 +578,108 @@ version-coverage:
         - ".gitlab-ci.yml"
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
-# Two files in this repository are OUTPUTS, not sources: scripts/hosts.env is
-# generated from the inventory and {{ versions_cm }} from
-# group_vars/all.yml. Nothing else ever compares them against their source
-# again — flux-lint substitutes FROM the ConfigMap, so it renders and passes on
-# a stale pin, and the version-bump bot reads all.yml, so it reports that pin as
-# current. The MR diff then shows only all.yml and the cluster keeps running the
-# old version. This is the job that closes that: regenerate each file into a
-# temp dir and diff. `task lint:repo-sync` is the identical local gate.
-repo-sync:
-  stage: lint
-  image: python:3.13-slim
-  tags: ["{{ runner_tag }}"]
-  needs: []
-  before_script:
-    # --user, like every other unprivileged pip here: docs/ci-pipeline.md tells
-    # the operator only the three privileged jobs need a root-capable runner,
-    # and a bare `pip install` cannot write site-packages as non-root.
-    - pip install --user --quiet "pyyaml==$PYYAML_VERSION"
+# The bump bot rewrites a version pin and leaves the checksum paired with it
+# alone, so a stale hash passes every offline gate and fails at deploy time.
+# Needs network egress, which is why `task lint` does not run it.
+version-checksums:
+  extends: .pyyaml-gate
+  script:
+    - python3 scripts/check-version-checksums.py --allow-empty
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &version_checksum_paths
+        - "ansible/inventories/prod/group_vars/all.yml"
+        - "scripts/version-registry.py"
+        - "scripts/check-version-checksums.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *version_checksum_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# The flux CLI cluster-verify downloads, the versions ConfigMap and the committed
+# gotk-components.yaml are one pin in three places. A CLI newer than the manifest
+# installs a control plane nobody reviewed. Mirrors `task lint:flux-version-pin`.
+flux-version-pin:
+  extends: .lint-gate
+  script:
+    - python3 scripts/check-flux-version-pin.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &flux_version_pin_paths
+        - "ansible/inventories/prod/group_vars/all.yml"
+        - "{{ versions_cm }}"
+        - "kubernetes/clusters/*/flux-system/gotk-components.yaml"
+        - "scripts/check-flux-version-pin.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *flux_version_pin_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# Three files here are OUTPUTS, not sources, and nothing else compares them
+# against what generates them, so a stale copy ships green. Regenerate and diff.
+# What each arm covers: docs/ci-pipeline.md § check-generated-files.
+check-generated-files:
+  extends: .pyyaml-gate
   script:
     - |
-      set -uo pipefail
-      FAILED=0
+      # errexit explicit here so run_check's `set +e`/`set -e` pair restores a
+      # known state rather than whatever the runner preamble left.
+      set -euo pipefail
+      overall=0; failed=""
       OUT=$(mktemp -d)
 
-      python3 scripts/generate-hosts-env.py \
-        --inventory ansible/inventories/prod/hosts.yml \
-        --map scripts/hosts-env-map.yml \
-        --output "$OUT/hosts.env" \
-        --regen-command "task hosts:sync" >/dev/null
-      if ! diff -u scripts/hosts.env "$OUT/hosts.env"; then
-        echo "ERROR: scripts/hosts.env is out of sync with ansible/inventories/prod/hosts.yml"
-        echo "Run: task hosts:sync and commit the result."
-        FAILED=1
-      fi
+      run_check() {
+        name="$1"; shift
+        printf 'section_start:%s:%s[collapsed=true]\r\033[0K== %s\n' "$(date +%s)" "$name" "$name"
+        # Not `"$@" || rc=$?`: bash suppresses errexit throughout an AND-OR
+        # list, so a check's own `set -e` never fires and a crashed generator
+        # reads as a pass. `set +e` is what lets the driver report every check.
+        set +e
+        ( set -eo pipefail; "$@" )
+        rc=$?
+        set -e
+        printf 'section_end:%s:%s\r\033[0K\n' "$(date +%s)" "$name"
+        if [ "$rc" -ne 0 ]; then overall=1; failed="$failed $name"; echo "FAILED: $name (rc=$rc)"; fi
+      }
 
-      python3 scripts/generate-versions-configmap.py \
-        --vars-file ansible/inventories/prod/group_vars/all.yml \
-        --output "$OUT/versions-configmap.yaml" \
-        --nested-key helm_chart_versions \
-        --regen-command "task flux:sync-versions" >/dev/null
-      if ! diff -u {{ versions_cm }} "$OUT/versions-configmap.yaml"; then
-        echo "ERROR: {{ versions_cm }} is out of sync with group_vars/all.yml"
-        echo "Run: task flux:sync-versions and commit the result."
-        FAILED=1
-      fi
-      exit $FAILED
+      # Generated to a temp path rather than in place: the workspace stays clean
+      # for the other checks, and the argv (which the generated header embeds)
+      # mirrors the task that regenerates the committed copy.
+      check_hosts_env() {
+        python3 scripts/generate-hosts-env.py \
+          --inventory ansible/inventories/prod/hosts.yml \
+          --map scripts/hosts-env-map.yml \
+          --output "$OUT/hosts.env" \
+          --regen-command "task hosts:sync" >/dev/null
+        if ! diff -u scripts/hosts.env "$OUT/hosts.env"; then
+          echo "ERROR: scripts/hosts.env is out of sync with ansible/inventories/prod/hosts.yml"
+          echo "Run: task hosts:sync and commit the result."
+          return 1
+        fi
+      }
+
+      check_versions_configmap() {
+        python3 scripts/generate-versions-configmap.py \
+          --vars-file ansible/inventories/prod/group_vars/all.yml \
+          --output "$OUT/versions-configmap.yaml" \
+          --nested-key helm_chart_versions \
+          --regen-command "task flux:sync-versions" >/dev/null
+        if ! diff -u {{ versions_cm }} "$OUT/versions-configmap.yaml"; then
+          echo "ERROR: {{ versions_cm }} is out of sync with group_vars/all.yml"
+          echo "Run: task flux:sync-versions and commit the result."
+          return 1
+        fi
+      }
+
+      run_check hosts-env-sync check_hosts_env
+      run_check flux-versions-sync check_versions_configmap
+      run_check host-log-staleness python3 scripts/generate-host-log-staleness.py --check
+      [ "$overall" -eq 0 ] || echo "Failed sync checks:$failed"
+      exit "$overall"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
@@ -577,35 +687,24 @@ repo-sync:
       changes: &repo_sync_paths
         - "ansible/inventories/prod/hosts.yml"
         - "ansible/inventories/prod/group_vars/all.yml"
+        - "ansible/playbooks/site.yml"
         - "scripts/hosts.env"
         - "scripts/hosts-env-map.yml"
         - "scripts/generate-hosts-env.py"
         - "scripts/generate-versions-configmap.py"
+        - "scripts/generate-host-log-staleness.py"
+        - "kubernetes/infrastructure/observability/loki/host-log-staleness.yaml"
         - "{{ versions_cm }}"
         - ".gitlab-ci.yml"
     - if: '$CI_COMMIT_BRANCH == "main"'
       changes: *repo_sync_paths
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
-# The LAN fence. Public egress is written as `ipBlock: {cidr: 0.0.0.0/0,
-# except: [...]}` and the except-list is what keeps a compromised pod off the
-# LAN, loopback and cloud-metadata ranges — repeated in every policy that needs
-# it, because kustomize has no mechanism to share a list fragment. This compares
-# each one against the canonical sets, and also catches the two edits that
-# re-open the LAN without touching an except-list: an egress rule with no `to:`
-# peers, and blocks that individually look specific but together contain a whole
-# fenced range. Deliberate exceptions are declared in scripts/netpol-except.yaml
-# with their reason.
-#
-# It reads the manifests on disk rather than the rendered corpus, so it also
-# covers `kubernetes/clusters/*/flux-system/`, which no Kustomization builds.
+# The LAN fence: every public-egress except-list against the canonical sets,
+# plus the edits that re-open the LAN without touching one. Exceptions live in
+# scripts/netpol-except.yaml. What it reads: docs/ci-pipeline.md § flux-lint.
 netpol-parity:
-  stage: lint
-  image: python:3.13-slim
-  tags: ["{{ runner_tag }}"]
-  needs: []
-  before_script:
-    - pip install --user --quiet "pyyaml==$PYYAML_VERSION"
+  extends: .pyyaml-gate
   script:
     - python3 scripts/check-netpol-except-parity.py --config scripts/netpol-except.yaml kubernetes/
   rules:
@@ -621,11 +720,155 @@ netpol-parity:
       changes: *netpol_parity_paths
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
-# The `changes:` list on a deploy job is a contract, and nothing else enforces
-# it: a playbook or inventory path that no deploy job lists goes green on every
-# MR while never actually deploying. This fails the MR that introduces the gap,
-# and takes `scripts/deploy-coverage.conf` as the acknowledged-manual list
-# (every entry there needs an inline rationale).
+# A literal domain, CIDR or VIP in a substituted tree renders and applies, so no
+# other gate sees it. Mirrors `task lint:cluster-literals`.
+cluster-literals:
+  extends: .pyyaml-gate
+  script:
+    - python3 scripts/check-cluster-literals.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &cluster_literals_paths
+        - "kubernetes/**/*"
+        - "ansible/inventories/prod/group_vars/*.yml"
+        - "scripts/check-cluster-literals.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *cluster_literals_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# A manifest no kustomization.yaml lists is invisible to kubeconform, the corpus
+# gates and Flux; an emptied list prunes what it applied. Mirrors
+# `task lint:kustomization-coverage`.
+kustomization-coverage:
+  extends: .pyyaml-gate
+  script:
+    - python3 scripts/check-kustomization-coverage.py kubernetes/
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &kustomization_coverage_paths
+        - "kubernetes/**/*"
+        - "scripts/check-kustomization-coverage.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *kustomization_coverage_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# A scenario directory with no `parallel:matrix` entry never runs, and reads as
+# green because nothing executed it. Mirrors `task lint:integration-matrix`.
+check-integration-matrix:
+  extends: .pyyaml-gate
+  script:
+    - python3 scripts/check-integration-matrix-coverage.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &integration_matrix_paths
+        - "ansible/integration-tests/**/*"
+        - ".gitlab/ci/integration-jobs.yml"
+        - "scripts/check-integration-matrix-coverage.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *integration_matrix_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# tflint over every root, mirroring `task terraform:tflint`. It catches what
+# fmt/validate do not: deprecated syntax, unused declarations and
+# provider-specific rules. No .tflint.hcl today, so --init fetches no plugins.
+terraform-tflint:
+  stage: lint
+  needs: []
+  tags: ["{{ runner_tag }}"]
+  image:
+    name: ghcr.io/terraform-linters/tflint:v0.61.0@sha256:b835d64d66abfdbc146694b918eb3cd733ec772465ad511464d4e8bebbdd6732
+    entrypoint: [""]
+  script:
+    - cd terraform
+    - tflint --init
+    - tflint --recursive --minimum-failure-severity=error
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &terraform_lint_paths
+        - "terraform/**/*"
+        - ".tflint.hcl"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *terraform_lint_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# Runs promtool/amtool over the alert rules and Alertmanager config: the
+# kube-prometheus-stack HelmRelease values, an ExternalSecret template no other
+# gate parses, and the per-app PrometheusRule CRs.
+prometheus-config-lint:
+  extends: .lint-gate
+  # The promtool unit tests dominate this job: promtool re-evaluates the whole
+  # rule corpus once per evaluation_interval, per test file. Shard the files
+  # across parallel instances so wall time is the slowest shard, not the sum.
+  parallel: 4
+  variables:
+    # promtool unit-tests the extracted rules against tests/prometheus-rules/*.test.yaml;
+    # the Taskfile points at the same directory. A new platform alert rule gets
+    # a case there.
+    RULE_TESTS_DIR: "tests/prometheus-rules"
+    # The per-app PrometheusRule CRs; the platform rules are inline in the
+    # kube-prometheus-stack release. REQUIRE_RULES_DIR stays unset: this repo
+    # ships no shared rules tree for it to require.
+    RULES_DIR: "kubernetes/apps"
+    REQUIRE_RELEASE_RULES: "1"
+  before_script:
+    # The binaries come from the vendored fetcher, whose pins and sha256s are
+    # the library's. Each run downloads and verifies them afresh.
+    - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
+    - pip install --user --quiet "pyyaml==$PYYAML_VERSION"
+    - python3 scripts/ci-fetch-tools.py promtool amtool
+    - promtool --version && amtool --version
+  script:
+    - |
+      set -eo pipefail
+      # This shard's slice of the unit tests, round-robin over the file list.
+      # Any *.rules.yaml goes into every shard: the *.test.yaml files load them
+      # by name, relative to their own directory.
+      shard="${CI_PROJECT_DIR}/.rule-tests-shard"
+      rm -rf "$shard"; mkdir -p "$shard"
+      for rules_file in "$RULE_TESTS_DIR"/*.rules.yaml; do
+        [ -e "$rules_file" ] || break
+        cp "$rules_file" "$shard"/
+      done
+      index=0; copied=0
+      for test_file in "$RULE_TESTS_DIR"/*.test.yaml; do
+        if [ "$(( index % CI_NODE_TOTAL + 1 ))" = "$CI_NODE_INDEX" ]; then
+          cp "$test_file" "$shard"/
+          copied=$(( copied + 1 ))
+        fi
+        index=$(( index + 1 ))
+      done
+      echo "shard ${CI_NODE_INDEX}/${CI_NODE_TOTAL}: ${copied} of ${index} unit-test file(s)"
+      RULE_TESTS_DIR="$shard" bash scripts/lint-prometheus-config.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &prometheus_config_paths
+        - "kubernetes/infrastructure/observability/kube-prometheus-stack/**/*"
+        - "kubernetes/apps/**/prometheusrule.yaml"
+        - "tests/prometheus-rules/**/*"
+        - "scripts/extract-prometheus-config.py"
+        - "scripts/lint-prometheus-config.sh"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *prometheus_config_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# The `changes:` list on a deploy job is a contract nothing else enforces: a
+# path no deploy job lists goes green while never deploying. This fails that MR;
+# scripts/deploy-coverage.conf is the acknowledged-manual list.
 deploy-coverage:
   stage: lint
   # The FULL python image: the checker shells out to git, which python:*-slim
@@ -646,15 +889,15 @@ deploy-coverage:
       changes:
         - "ansible/**/*"
         - "scripts/deploy-coverage.conf"
+        - "scripts/check-deploy-coverage.sh"
+        - "scripts/ci_yaml.py"
         - ".gitlab-ci.yml"
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
-# Credential-free preflight over the deploy jobs themselves: every
-# `ansible-playbook` invocation in a job extending .deploy-base names a playbook
-# that exists, and every `--tags` selection reaches at least one task. A tag that
-# matches nothing makes a deploy job a green no-op — the failure mode nothing
-# else in this pipeline can see, because the play still exits 0.
-deploy-preflight:
+# Credential-free preflight over the deploy jobs: every `ansible-playbook` call
+# names a playbook that exists and every `--tags` selection reaches a task. A tag
+# matching nothing makes a deploy job a green no-op.
+check-deploy-playbooks:
   stage: validate
   needs: []
   # The FULL python image: ansible-galaxy installs weisssrv.infra from a git+ URL.
@@ -662,182 +905,76 @@ deploy-preflight:
   tags: ["{{ runner_tag }}"]
   before_script:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
-    - pip install --quiet "ansible==$ANSIBLE_VERSION" "pyyaml==$PYYAML_VERSION"
-    - for i in 1 2 3; do ansible-galaxy collection install -r ansible/requirements.yml && break; [ "$i" = 3 ] && exit 1; echo "galaxy install failed (attempt $i) - retrying in 20s"; sleep 20; done
+    # --user, like every other unprivileged pip here; the PATH line puts the
+    # console scripts it installs (ansible-galaxy, ansible-playbook) on PATH,
+    # which a --user install alone does not.
+    - export PATH="$(python -m site --user-base)/bin:$PATH"
+    - pip install --user --quiet "ansible==$ANSIBLE_VERSION" "pyyaml==$PYYAML_VERSION"
+    # --force: galaxy skips an already-installed collection, so a warm cache
+    # would preflight against the previous release's roles after a pin bump.
+    - for i in 1 2 3; do ansible-galaxy collection install --force -r ansible/requirements.yml && break; [ "$i" = 3 ] && exit 1; echo "galaxy install failed (attempt $i) - retrying in 20s"; sleep 20; done
   script:
-    - |
-      python3 - <<'PREFLIGHT'
-      import re
-      import shlex
-      import subprocess
-      import sys
-      from pathlib import Path
-
-      import yaml
-
-      class Loader(yaml.SafeLoader):
-          pass
-
-      # The pipeline uses !reference throughout; resolve every unknown tag to None.
-      Loader.add_multi_constructor("!", lambda *_: None)
-
-      ANSIBLE_DIR = Path("ansible")
-      pipeline = yaml.load(Path(".gitlab-ci.yml").read_text(), Loader=Loader)
-
-      VALUE_FLAGS = ("-i", "--inventory", "--inventory-file", "-e", "--extra-vars")
-
-      def invocations(text):
-          """Every `ansible-playbook` call in a job's script -> (inventory, playbook, argv).
-
-          Read the argv rather than a fixed argument ORDER: both
-          `-i <inv> <playbook>` and `-i <inv> -e "..." <playbook>` occur, and a
-          YAML flow scalar can fold two calls onto one line.
-          """
-          found = []
-          for segment in text.split("ansible-playbook")[1:]:
-              # The next shell command is not part of this argv.
-              segment = re.split(r"[;&|\n]", segment, maxsplit=1)[0]
-              try:
-                  tokens = shlex.split(segment)
-              except ValueError:
-                  # An unbalanced quote is the tail of the enclosing `bash -c '...'`.
-                  tokens = segment.replace('"', " ").replace("'", " ").split()
-              inventory = None
-              playbook = None
-              index = 0
-              while index < len(tokens):
-                  token = tokens[index]
-                  if token in VALUE_FLAGS:
-                      if token.startswith("-i") or token.startswith("--inventory"):
-                          inventory = tokens[index + 1] if index + 1 < len(tokens) else None
-                      index += 2
-                      continue
-                  if playbook is None and not token.startswith("-") and token.endswith(".yml"):
-                      playbook = token
-                  index += 1
-              if playbook:
-                  found.append((inventory, playbook, " ".join(tokens)))
-          return found
-
-      TAGS = re.compile(r"--(?:skip-)?tags[= ]+(?P<tags>[A-Za-z0-9_,.-]+)")
-      # `--list-tasks` prints one `TAGS: [a, b]` per selected task. `always` tasks
-      # are printed for ANY selection, so output alone proves nothing — the
-      # requested tag must appear in a task's own tag list.
-      TASK_TAGS = re.compile(r"TAGS: \[([^\]]*)\]")
-
-      failures = []
-      playbooks = set()
-      selections = 0
-
-      for name, job in pipeline.items():
-          if not isinstance(job, dict) or name.startswith("."):
-              continue
-          # extends is a string OR a list; a job naming several parents must not
-          # slip the preflight.
-          parents = job.get("extends") or []
-          if isinstance(parents, str):
-              parents = [parents]
-          if not {".deploy-base", ".maintenance-base"}.intersection(parents):
-              continue
-          script = "\n".join(str(line) for line in job.get("script") or [])
-          parsed = invocations(script)
-          # Refuse to shrink silently: a shape the parser cannot read would cost
-          # coverage with no output at all.
-          written = script.count("ansible-playbook")
-          if len(parsed) < written:
-              failures.append(
-                  f"{name}: parsed {len(parsed)} of {written} `ansible-playbook` "
-                  "invocation(s) - this job is written in a shape the preflight "
-                  "parser does not understand, so its playbook/tag checks were "
-                  "skipped. Fix invocations() rather than the job."
-              )
-          for inventory, playbook, argv in parsed:
-              if not (ANSIBLE_DIR / playbook).is_file():
-                  failures.append(f"{name}: playbook ansible/{playbook} does not exist")
-                  continue
-              playbooks.add(playbook)
-              tags = sorted({
-                  t
-                  for m in TAGS.finditer(argv)
-                  for t in m.group("tags").split(",")
-                  if t
-              })
-              # A job may omit `-i` and take ansible.cfg's default inventory.
-              # Omitting the flag reproduces that; `-i None` is a TypeError.
-              inventory_argv = ["-i", inventory] if inventory else []
-              for tag in tags:
-                  selections += 1
-                  proc = subprocess.run(
-                      ["ansible-playbook", *inventory_argv, playbook,
-                       "--list-tasks", "--tags", tag],
-                      cwd=ANSIBLE_DIR, capture_output=True, text=True,
-                  )
-                  if proc.returncode != 0:
-                      failures.append(
-                          f"{name}: --list-tasks failed for {playbook} --tags {tag}\n"
-                          f"{proc.stderr.strip()}"
-                      )
-                      continue
-                  selected = any(
-                      tag in [t.strip() for t in m.group(1).split(",")]
-                      for m in TASK_TAGS.finditer(proc.stdout)
-                  )
-                  if selected:
-                      print(f"OK   {name}: {playbook} --tags {tag}")
-                  else:
-                      failures.append(
-                          f"{name}: `--tags {tag}` on {playbook} selects NO task - "
-                          "that deploy step is a silent no-op"
-                      )
-
-      if not playbooks:
-          failures.append(
-              "preflight resolved 0 playbooks - candidate-job selection or "
-              "invocation parsing is no longer inspecting the deploy jobs"
-          )
-
-      # The starter deploy jobs run whole playbooks, so 0 tag selections is the
-      # expected state, not a fault - it only means the no-op-tag guard had
-      # nothing to inspect.
-      print(f"\n{len(playbooks)} playbook(s), {selections} tag selection(s) checked")
-      if failures:
-          print("", file=sys.stderr)
-          for f in failures:
-              print(f"FAIL {f}", file=sys.stderr)
-          sys.exit(1)
-      PREFLIGHT
+    - python3 scripts/deploy-preflight.py
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes: &deploy_preflight_paths
         # Everything the answer depends on: the playbooks and tags it walks, the
-        # inventory `--list-tasks` parses, the collection pin it installs, and the
-        # deploy jobs it reads the invocations out of.
+        # inventory `--list-tasks` parses, the collection pin it installs, the
+        # deploy jobs it reads the invocations out of, and the checker itself.
         - "ansible/playbooks/**/*"
         - "ansible/inventories/prod/**/*"
         - "ansible/requirements.yml"
         - "ansible/ansible.cfg"
+        - "scripts/deploy-preflight.py"
+        - "scripts/ci_yaml.py"
         - ".gitlab-ci.yml"
     - if: '$CI_COMMIT_BRANCH == "main"'
       changes: *deploy_preflight_paths
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
+# The collection's roles assert their required inputs. An opt-in role invoked
+# with its flag set nowhere, and an asserted input with no default and no
+# assignment, fail on every host the role touches. Mirrors `task lint:role-inputs`.
+check-role-inputs:
+  stage: lint
+  needs: []
+  # The FULL python image: ansible-galaxy installs weisssrv.infra from a git+ URL.
+  image: python:3.13
+  tags: ["{{ runner_tag }}"]
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
+    - export PATH="$(python -m site --user-base)/bin:$PATH"
+    - pip install --user --quiet "ansible==$ANSIBLE_VERSION" "pyyaml==$PYYAML_VERSION"
+    - ansible-galaxy collection install --force -r ansible/requirements.yml -p .ansible-home/collections
+  script:
+    # --allow-empty: a starter cluster composes no opt-in role, and an arm with
+    # nothing to examine reports rather than fails. --allow-unknown exempts a
+    # chart version whose name happens to carry a role's prefix.
+    - |
+      python3 scripts/check-role-inputs.py --allow-empty \
+        --allow-unknown "gitlab_runner_helm_version=a chart version the Flux substitution reads, not a role variable" \
+        --roles-dir .ansible-home/collections/ansible_collections/weisssrv/infra/roles \
+        --inventory ansible/inventories/prod \
+        --playbooks ansible/playbooks
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &role_inputs_paths
+        - "ansible/inventories/prod/**/*"
+        - "ansible/playbooks/**/*"
+        - "ansible/requirements.yml"
+        - "scripts/check-role-inputs.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *role_inputs_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
 # ==============================================================================
-# GATE STAGE — the single dependency every deploy job carries.
-#
-# Stage order alone does NOT gate a deploy job that declares `needs:`, and a job
-# whose every needs: entry was DROPPED (the needed job's rules excluded it) has
-# an EMPTY needs set, which GitLab starts immediately — before its own stage.
-# Deploy jobs therefore need THIS job non-optionally rather than naming lint
-# jobs directly: it always exists on a main pipeline, so the needs set is never
-# empty and stage order is never bypassed.
-# https://docs.gitlab.com/ci/yaml/#needsoptional
-#
-# Path-filtered jobs are listed optional; secret_detection has no path filter
-# and always runs on main, which is what keeps this gate's own needs set
-# non-empty. The drift plans and pr-agent-review are `allow_failure: true` and
-# so could never block anything.
+# GATE STAGE — the one dependency every deploy job carries. Stage order does not
+# gate a job that declares `needs:` — docs/ci-pipeline.md § The validation gate.
 validation-gate:
   stage: gate
   image: alpine:3.23
@@ -859,7 +996,7 @@ validation-gate:
       optional: true
     - job: flux-lint
       optional: true
-    - job: docs-link-check
+    - job: lint-docs-links
       optional: true
     - job: terraform-fmt
       optional: true
@@ -869,58 +1006,65 @@ validation-gate:
       optional: true
     - job: version-coverage
       optional: true
-    - job: repo-sync
+    - job: check-generated-files
       optional: true
     - job: deploy-coverage
       optional: true
-    - job: deploy-preflight
+    - job: check-deploy-playbooks
       optional: true
     - job: netpol-parity
       optional: true
+    - job: kustomization-coverage
+      optional: true
+    - job: cluster-literals
+      optional: true
+    - job: prometheus-config-lint
+      optional: true
+    - job: terraform-tflint
+      optional: true
+    - job: flux-version-pin
+      optional: true
+    - job: check-integration-matrix
+      optional: true
+    - job: check-role-inputs
+      optional: true
+    # Expands to one need per matrix instance, well under GitLab's 50-need cap.
+    - job: integration-tests
+      optional: true
     # Always created on a main pipeline (no path filter)
     - job: secret_detection
+    # An image-build job added later belongs here as `optional: true` too: every
+    # deploy job declares `needs:`, so GitLab runs the DAG past a red build.
   script:
-    # Every deploy job gates on `$CI_COMMIT_BRANCH == "main" &&
-    # $OP_SERVICE_ACCOUNT_TOKEN`. With the token unset or empty those jobs are
-    # never CREATED, so main goes green having deployed nothing. This gate has no
-    # token clause of its own, so it is the one place that can say so out loud.
+    # Every deploy job gates on `$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}`,
+    # so with the variable unset they are never created and main goes green
+    # having deployed nothing. This gate has no token clause, so it can say so.
     - |
-      if [ -z "$OP_SERVICE_ACCOUNT_TOKEN" ]; then
-        echo "ERROR: OP_SERVICE_ACCOUNT_TOKEN is unset/empty on a main pipeline." >&2
+      if [ -z "${{ gate_var }}" ]; then
+        echo "ERROR: {{ gate_var }} is unset/empty on a main pipeline." >&2
         echo "       Every deploy job gates on it and was silently skipped," >&2
         echo "       deploying nothing while the pipeline reports success." >&2
         echo "       Set the CI/CD variable (masked, protected) and re-run." >&2
         exit 1
       fi
     - echo "All applicable checks passed - deploy jobs may proceed"
-  # These rules MUST stay a superset of every deploy job's: a deploy job needing
-  # a gate that was not created fails pipeline CREATION. Deploy jobs are
-  # main-only and skip schedules, so this is that set without the token clause
-  # (the gate itself needs no credentials).
+  # A superset of every deploy job's rules: a deploy job needing a gate that was
+  # not created fails pipeline creation. Deploy jobs are main-only and skip
+  # schedules, so this is that set without the token clause.
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
-      when: never
+    - !reference [.skip-schedule-web, rules]
     - if: '$CI_COMMIT_BRANCH == "main"'
 
 # ==============================================================================
-# Deploy — starter set. One job per playbook, gated to main + a changes list, so
-# a merge deploys exactly what it touched. Every job needs validation-gate
-# (non-optional). Adding a playbook means adding a job: the pattern is
-# documented in docs/ci-pipeline.md. `.deploy-base` itself comes from the
-# library (see the include above).
-# ==============================================================================
+# Deploy — starter set: one job per playbook, gated to main plus a changes list.
+# Adding a playbook means adding a job — docs/ci-pipeline.md § Adding one.
 
 # Each job's `variables:` mirror the matching Taskfile task's `env:`, minus the
-# Loki push pair that `.deploy-base` declares for every deploy. $SECRET_RUNNER
-# resolves EVERY reference in the environment, so a job declares what its
-# playbook needs and nothing more — an item the vault lacks is a hard failure,
-# not an unused variable.
-# Runs site.yml, the full host stack — the CI twin of `task infra:deploy`. It
-# has to: its trigger list includes the whole inventory and the roles site.yml
-# adds on top of base.yml (Proxmox host config, certs, firewall, host metrics
-# and log shipping), and a job that ran only base.yml would report a green
-# deploy for changes it never applied. The three group jobs below are the fast
-# path for a change scoped to one group.
+# Loki push pair `.deploy-base` declares — docs/ci-pipeline.md § CI/CD variables.
+
+# Runs site.yml, the full host stack — the CI twin of `task infra:deploy`. Its
+# trigger list covers the whole inventory, so a base.yml-only job would report a
+# green deploy for changes it never applied.
 deploy-ansible-base:
   stage: deploy
   extends: .deploy-base
@@ -947,19 +1091,14 @@ deploy-ansible-base:
   environment:
     name: production/ansible-base
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
-      when: never
-    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+    - !reference [.skip-schedule-web, rules]
+    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
+      # Cluster-wide inventory. The per-group group_vars files belong to the
+      # group jobs below, so a DNS-only edit does not re-run every host.
       changes:
-        # Cluster-wide inventory. The per-group group_vars files belong to the
-        # group jobs below, so a DNS-only edit does not re-run every host.
-        - "ansible/inventories/prod/hosts.yml"
-        - "ansible/inventories/prod/group_vars/all.yml"
-        - "ansible/inventories/prod/group_vars/proxmox.yml"
-        - "ansible/inventories/prod/host_vars/**/*"
-        - "ansible/playbooks/base.yml"
-        - "ansible/playbooks/site.yml"
-        - "ansible/requirements.yml"
+{%- for path in deploy_paths['base'] %}
+        - "{{ path }}"
+{%- endfor %}
 
 # The DNS stack alone — the CI twin of `task dns:deploy`. dns.yml runs one
 # resolver at a time, so a bad change never takes both down at once.
@@ -967,10 +1106,10 @@ deploy-ansible-dns:
   stage: deploy
   extends: .deploy-base
   resource_group: deploy-ansible-dns
-  needs:
+  # Ordering only, stated once for the three group jobs: base is not created for
+  # a group-only change, so it stays optional — validation-gate is the real gate.
+  needs: &needs_after_base
     - job: validation-gate
-    # Ordering only: base is not created for a DNS-only change, so this must
-    # stay optional — validation-gate above is what actually gates the deploy.
     - job: deploy-ansible-base
       optional: true
   variables:
@@ -987,12 +1126,12 @@ deploy-ansible-dns:
   environment:
     name: production/ansible-dns
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
-      when: never
-    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+    - !reference [.skip-schedule-web, rules]
+    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
       changes:
-        - "ansible/inventories/prod/group_vars/dns.yml"
-        - "ansible/playbooks/dns.yml"
+{%- for path in deploy_paths['dns'] %}
+        - "{{ path }}"
+{%- endfor %}
 
 # The NAS alone — the CI twin of `task storage:deploy`. Add the restic
 # references here too when you enable the offsite backup role.
@@ -1002,8 +1141,11 @@ deploy-ansible-storage:
   resource_group: deploy-ansible-storage
   needs:
     - job: validation-gate
-    # Ordering only — see deploy-ansible-dns.
     - job: deploy-ansible-base
+      optional: true
+    # storage.yml runs nfs_tls in SERVER mode on the NAS, which asserts the
+    # wildcard cert and key that acme_certs (dns.yml) distributes.
+    - job: deploy-ansible-dns
       optional: true
   variables:
     SSH_PUBLIC_KEY: "{{ secret_ref('SSH Key', 'public key') }}"
@@ -1014,12 +1156,12 @@ deploy-ansible-storage:
   environment:
     name: production/ansible-storage
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
-      when: never
-    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+    - !reference [.skip-schedule-web, rules]
+    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
       changes:
-        - "ansible/inventories/prod/group_vars/nas.yml"
-        - "ansible/playbooks/storage.yml"
+{%- for path in deploy_paths['storage'] %}
+        - "{{ path }}"
+{%- endfor %}
 
 # The SMTP relay alone. Every host's null client submits through it, so a relay
 # change is worth deploying without re-running the whole stack.
@@ -1027,11 +1169,7 @@ deploy-ansible-mail:
   stage: deploy
   extends: .deploy-base
   resource_group: deploy-ansible-mail
-  needs:
-    - job: validation-gate
-    # Ordering only — see deploy-ansible-dns.
-    - job: deploy-ansible-base
-      optional: true
+  needs: *needs_after_base
   variables:
     ROOT_EMAIL_ALIAS: "{{ secret_ref('Email Config', 'root_alias') }}"
     SSH_PUBLIC_KEY: "{{ secret_ref('SSH Key', 'public key') }}"
@@ -1039,18 +1177,21 @@ deploy-ansible-mail:
     SMTP_RELAY_PASSWORD: "{{ secret_ref('SMTP Relay Auth', 'password') }}"
     SMTP_UPSTREAM_USER: "{{ secret_ref('SMTP Smarthost', 'username') }}"
     SMTP_UPSTREAM_PASSWORD: "{{ secret_ref('SMTP Smarthost', 'password') }}"
+    # base rewrites the relay's authorized_keys, so mail.yml re-seeds the
+    # cert-distribution key from the primary resolver afterwards.
+    ACME_SSH_PUBLIC_KEY: "{{ secret_ref('Cert Distribution Key', 'public key') }}"
   script:
     - cd ansible
     - $SECRET_RUNNER ansible-playbook -i inventories/prod playbooks/mail.yml
   environment:
     name: production/ansible-mail
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
-      when: never
-    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+    - !reference [.skip-schedule-web, rules]
+    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
       changes:
-        - "ansible/inventories/prod/group_vars/mail.yml"
-        - "ansible/playbooks/mail.yml"
+{%- for path in deploy_paths['mail'] %}
+        - "{{ path }}"
+{%- endfor %}
 
 # Manual: a k3s change can restart the control plane, so an operator triggers it
 # after reading the diff.
@@ -1074,58 +1215,33 @@ deploy-ansible-k3s:
   environment:
     name: production/k3s
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
-      when: never
-    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+    - !reference [.skip-schedule-web, rules]
+    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
       changes:
-        - "ansible/inventories/prod/hosts.yml"
-        - "ansible/inventories/prod/group_vars/all.yml"
-        - "ansible/inventories/prod/group_vars/k3s.yml"
-        - "ansible/playbooks/k3s.yml"
-        - "ansible/playbooks/k3s-provision-vms.yml"
+{%- for path in deploy_paths['k3s'] %}
+        - "{{ path }}"
+{%- endfor %}
       when: manual
       allow_failure: false
 
-# Every Terraform module sources the library over `git::https://`, so `init`
-# needs a git credential. GIT_CONFIG_* is the env form of `git config --global`,
-# which keeps this a variables-only fragment the library's own terraform-validate
-# job can extend without its script being rewritten.
-#
-# Scoped to {{ git_host }} — this pipeline's OWN instance — on purpose:
-# CI_JOB_TOKEN is only valid where it was issued, so rewriting any other host's
-# URLs would send the token off-instance for nothing. It reaches
-# {{ lib_project }} only if that project's job-token allowlist includes this one,
-# or it is public. A library hosted elsewhere needs its own credential (a netrc
-# entry or a deploy token) instead; mirroring it here is the simpler answer, and
-# the `include:` block already requires that.
-.terraform-git-credential:
-  tags: ["{{ runner_tag }}"]
-  variables:
-    GIT_CONFIG_COUNT: "1"
-    GIT_CONFIG_KEY_0: "url.https://gitlab-ci-token:${CI_JOB_TOKEN}@{{ git_host }}/.insteadOf"
-    GIT_CONFIG_VALUE_0: "https://{{ git_host }}/"
-
-# Keys-only override of the library's terraform-validate job: it runs
-# `terraform init -backend=false`, which still fetches the modules. The tag
-# repeats what the include's `tags` input already passes.
+# Keys-only override of the library's terraform-validate job: the tag repeats
+# what the include's `tags` input already passes, so a reader and the render gate
+# see it in this file. The git credential is a top-level variable.
 terraform-validate:
-  extends: .terraform-git-credential
   tags: ["{{ runner_tag }}"]
 {% if dns_backend == 'cloudflare' %}
 # Pre-merge preview of the zone change, and the plan deploy-terraform applies.
-# The directory is the literal `terraform/cloudflare` the payload ships, and the
-# pair of jobs is gated on the answer instead — composing the path from
-# `dns_backend` would render a pipeline pointing at a directory no render
-# creates, failing at `cd` instead of at generation time.
+# The directory is the literal `terraform/cloudflare` the payload ships and the
+# job pair is gated on the answer, so no render points at a missing directory.
 terraform-plan:
   stage: validate
-  extends: [.terraform-http-backend, .terraform-git-credential]
+  extends: .terraform-http-backend
   needs: []
   tags: ["{{ runner_tag }}"]
   # A cancelled plan leaves deploy-terraform with no artifact to apply.
   interruptible: false
   image:
-    name: hashicorp/terraform:1.15
+    name: $TF_JOB_IMAGE
     entrypoint: [""]
   before_script:
     - !reference [.install-1password-alpine, before_script]
@@ -1135,8 +1251,10 @@ terraform-plan:
     # mask supply-chain drift.
     - terraform init -lockfile=readonly
     - |
-      export TF_VAR_cloudflare_api_token=$({{ secret_read("Cloudflare Terraform Token", "credential") }})
-      export TF_VAR_cloudflare_account_id=$({{ secret_read("Cloudflare Terraform Token", "username") }})
+      set -eo pipefail
+      TF_VAR_cloudflare_api_token=$({{ secret_read("Cloudflare Terraform Token", "credential") }})
+      TF_VAR_cloudflare_account_id=$({{ secret_read("Cloudflare Terraform Token", "username") }})
+      export TF_VAR_cloudflare_api_token TF_VAR_cloudflare_account_id
       terraform plan -input=false -no-color -lock-timeout=120s -out=tfplan
     # Change counts for the merge request's Terraform widget.
     - |
@@ -1147,47 +1265,46 @@ terraform-plan:
          "delete":(map(select(.=="delete"))|length)}
       ' > tfplan.json
   artifacts:
-    # The binary plan embeds rendered resource attributes, including anything a
-    # provider does not mark sensitive; restrict download to developer+.
-    # deploy-terraform still gets it through needs:artifacts, which `access`
+    # The binary plan holds every TF_VAR value in the clear, so nobody downloads
+    # it. deploy-terraform still gets it through needs:artifacts, which `access`
     # does not gate.
-    access: developer
+    access: none
     paths:
       - terraform/cloudflare/tfplan
     reports:
       terraform: terraform/cloudflare/tfplan.json
-    # A day, not an hour: deploy-terraform is a manual job in a later stage and
-    # the plan must still exist when someone presses it.
-    expire_in: 1 day
+    # A week, not a day: deploy-terraform is a manual job and the plan must still
+    # exist when someone presses it.
+    expire_in: 1 week
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
-    # This is the only job that reads the secret store on a merge-request ref.
-    # It earns that because it is the only pre-merge view of a change an
-    # operator then applies from main. Marking OP_SERVICE_ACCOUNT_TOKEN
-    # protected removes the plan from merge requests; a tokenless pipeline gets
-    # no plan at all, which is a skip, not a clean plan.
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $OP_SERVICE_ACCOUNT_TOKEN'
+    # `terraform plan` evaluates the branch's own provider, data and module
+    # blocks with a live API token, so this rule is inert while {{ gate_var }} is
+    # masked and protected. The source-project clause keeps a fork's branch out.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && ${{ gate_var }} && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
       changes:
-        - "terraform/cloudflare/**/*"
-    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+{%- for path in deploy_paths['terraform'] %}
+        - "{{ path }}"
+{%- endfor %}
+    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
       changes:
-        - "terraform/cloudflare/**/*"
+{%- for path in deploy_paths['terraform'] %}
+        - "{{ path }}"
+{%- endfor %}
 
 deploy-terraform:
   stage: deploy
-  extends: [.terraform-http-backend, .terraform-git-credential]
+  extends: .terraform-http-backend
   # Same reasoning as .deploy-base: .install-1password-alpine installs a package
   # and this job holds a live API token, so it belongs on the privileged runner.
   tags: ["{{ runner_tag }}"]
   interruptible: false
   image:
-    name: hashicorp/terraform:1.15
+    name: $TF_JOB_IMAGE
     entrypoint: [""]
-  # validation-gate first, so the lint/validate/test stages gate the apply;
-  # terraform-plan second, to fetch the saved plan. Both needs are NON-optional:
-  # terraform-plan carries the same rules as this job, so the plan always exists
-  # when this one is offered, and an optional entry here could be dropped and
+  # validation-gate gates the apply on lint, validate and test; terraform-plan
+  # supplies the saved plan. Both are non-optional: a dropped optional need would
   # leave the apply reaching for an artifact that is not there.
   needs:
     - job: validation-gate
@@ -1200,157 +1317,159 @@ deploy-terraform:
     # -lockfile=readonly: provider hashes are committed; CI rewriting them would
     # mask supply-chain drift.
     - terraform init -lockfile=readonly
+    # Deletions are the destructive class here: a removed record takes a name
+    # offline. Set ALLOW_DNS_DELETE=1 on the manual run to permit them.
+    - |
+      set -eo pipefail
+      deletes=$(terraform show -json tfplan | jq '[.resource_changes[]?.change.actions? | select(index("delete"))] | length')
+      if [ "$deletes" -gt 0 ] && [ "${ALLOW_DNS_DELETE:-0}" != "1" ]; then
+        echo "ERROR: plan deletes $deletes resource(s); re-run with ALLOW_DNS_DELETE=1" >&2
+        exit 1
+      fi
     # Applies the SAVED plan, so what ships is what the merge request showed.
     # A fresh apply-time plan could delete a record nobody reviewed.
     - |
-      export TF_VAR_cloudflare_api_token=$({{ secret_read("Cloudflare Terraform Token", "credential") }})
-      export TF_VAR_cloudflare_account_id=$({{ secret_read("Cloudflare Terraform Token", "username") }})
+      set -eo pipefail
+      TF_VAR_cloudflare_api_token=$({{ secret_read("Cloudflare Terraform Token", "credential") }})
+      TF_VAR_cloudflare_account_id=$({{ secret_read("Cloudflare Terraform Token", "username") }})
+      export TF_VAR_cloudflare_api_token TF_VAR_cloudflare_account_id
       terraform apply -auto-approve -lock-timeout=120s tfplan
   environment:
     name: production/cloudflare
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
-      when: never
-    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+    - !reference [.skip-schedule-web, rules]
+    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
       changes:
-        - "terraform/cloudflare/**/*"
+{%- for path in deploy_paths['terraform'] %}
+        - "{{ path }}"
+{%- endfor %}
       when: manual
       allow_failure: false
 {% endif %}
-{%- if vpn_tailscale %}
-# Read-only drift plan for the tailnet ACL. It never applies — that stays
-# supervised (terraform/tailscale/README.md) — so a console hot-fix would
-# otherwise sit undetected until someone happened to plan. Exit-code and state
-# handling as in authentik-drift-plan below.
-tailscale-drift-plan:
+# CRITICAL: no {{ gate_var }} guard here. A guard REMOVES the job
+# when the credential is revoked or rescoped, so out-of-band drift goes
+# undetected behind a green pipeline; unguarded, the vault read reds the job.
+.drift-schedule-rule:
+  rules:
+    # No changes: filter, so it catches an admin-console edit made when nothing
+    # in-repo moved.
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+
+# Shared shape of the read-only terraform drift-plan jobs. Each job adds
+# TF_DRIFT_DIR, its own TF_HTTP_* state paths, the vault reads and the plan, and
+# its own rules.
+.terraform-drift-plan:
   stage: validate
-  extends: [.terraform-http-backend, .terraform-git-credential]
+  extends: .terraform-http-backend
   needs: []
   tags: ["{{ runner_tag }}"]
   image:
-    name: hashicorp/terraform:1.15
+    name: $TF_JOB_IMAGE
     entrypoint: [""]
+  before_script:
+    - !reference [.install-1password-alpine, before_script]
+    - cd "$TF_DRIFT_DIR"
+    # -lockfile=readonly: provider hashes are committed; CI rewriting them would
+    # mask supply-chain drift.
+    - terraform init -lockfile=readonly
+  # Exit 2 is the drift signal and stays advisory; exit 1 is a broken plan and
+  # turns the job red.
+  allow_failure:
+    exit_codes: [2]
+
+{%- if vpn_tailscale %}
+# Read-only drift plan for the tailnet ACL. It never applies — that stays
+# supervised (terraform/tailscale/README.md) — so a console hot-fix would
+# otherwise sit undetected until someone happened to plan.
+tailscale-drift-plan:
+  extends: .terraform-drift-plan
   variables:
+    TF_DRIFT_DIR: "terraform/tailscale"
     TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/tailscale"
     TF_HTTP_LOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/tailscale/lock"
     TF_HTTP_UNLOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/tailscale/lock"
-  before_script:
-    - !reference [.install-1password-alpine, before_script]
   script:
-    - cd terraform/tailscale
-    - terraform init -lockfile=readonly
     - |
-      export TF_VAR_tailscale_oauth_client_id=$({{ secret_read("Tailscale OAuth", "client id") }})
-      export TF_VAR_tailscale_oauth_client_secret=$({{ secret_read("Tailscale OAuth", "credential") }})
+      set -eo pipefail
+      TF_VAR_tailscale_oauth_client_id=$({{ secret_read("Tailscale OAuth", "client id") }})
+      TF_VAR_tailscale_oauth_client_secret=$({{ secret_read("Tailscale OAuth", "credential") }})
+      export TF_VAR_tailscale_oauth_client_id TF_VAR_tailscale_oauth_client_secret
       terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
-  allow_failure: true
   rules:
-    # The schedule is the real detector: no changes: filter, so it catches an
-    # admin-console edit made when nothing in-repo moved.
-    - if: '$CI_PIPELINE_SOURCE == "schedule" && $OP_SERVICE_ACCOUNT_TOKEN'
+    - !reference [.drift-schedule-rule, rules]
     # Post-merge, before the supervised apply. No merge_request_event rule:
     # this materializes vault secrets into a job running an unmerged branch's
     # own code, and an advisory signal does not justify that.
-    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
       changes:
         - "terraform/tailscale/**/*"
 {% endif %}
 # Read-only drift plan for the SSO objects. The apply is `task
-# terraform:authentik-apply`, which refuses to run non-interactively, so this
-# job is the only thing that notices an admin-UI edit. -detailed-exitcode exits
-# 2 on a non-empty diff (a plain plan exits 0), which is what makes
-# allow_failure render drift as a warning rather than a pass. Own state name,
-# so the three TF_HTTP_*ADDRESS vars are overridden.
-#
-# Add a TF_VAR_ line here for every client-secret variable you add — a missing
-# one fails the plan, which is the intended behaviour, not drift.
+# terraform:authentik-apply`, which refuses to run non-interactively, so this job
+# is the only thing that notices an admin-UI edit. Own state name below.
 authentik-drift-plan:
-  stage: validate
-  extends: [.terraform-http-backend, .terraform-git-credential]
-  needs: []
-  tags: ["{{ runner_tag }}"]
-  image:
-    name: hashicorp/terraform:1.15
-    entrypoint: [""]
+  extends: .terraform-drift-plan
   variables:
+    TF_DRIFT_DIR: "terraform/authentik"
     TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/authentik"
     TF_HTTP_LOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/authentik/lock"
     TF_HTTP_UNLOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/authentik/lock"
-  before_script:
-    - !reference [.install-1password-alpine, before_script]
   script:
-    - cd terraform/authentik
-    - terraform init -lockfile=readonly
     - |
-      export TF_VAR_authentik_token=$({{ secret_read("Authentik Terraform Token", "credential") }})
-      export TF_VAR_oauth2_client_secret_grafana=$({{ secret_read("Grafana SSO", "oidc-client-secret") }})
+      set -eo pipefail
+      # One line per client-secret variable the root declares: a missing one
+      # fails the plan, which is the intended behaviour, not drift.
+      TF_VAR_authentik_token=$({{ secret_read("Authentik Terraform Token", "credential") }})
+      TF_VAR_oauth2_client_secret_grafana=$({{ secret_read("Grafana SSO", "oidc-client-secret") }})
+      export TF_VAR_authentik_token TF_VAR_oauth2_client_secret_grafana
       terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
-  allow_failure: true
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule" && $OP_SERVICE_ACCOUNT_TOKEN'
+    - !reference [.drift-schedule-rule, rules]
     # No merge_request_event rule: this job reads every OIDC client secret.
-    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
       changes:
         - "terraform/authentik/**/*"
 {% if use_unifi %}
 # Read-only drift plan for the gateway's own segmentation. The apply is `task
-# terraform:unifi-apply`, which refuses to run non-interactively, so this job is
-# the only thing that notices a console edit. Exit-code, allow_failure and rule
-# handling as in authentik-drift-plan above.
-#
-# It reaches the console over the LAN, so it reports drift only on a runner that
-# can — a runner elsewhere fails the plan at the first data read, which is
-# advisory here rather than a broken pipeline.
-#
-# Add a TF_VAR_ line here for every WLAN passphrase variable the root declares:
-# a missing one fails the plan, which is the intended behaviour, not drift.
+# terraform:unifi-apply`, which refuses to run non-interactively. It reads the
+# console over the LAN, so a runner off the LAN fails the plan.
 unifi-drift-plan:
-  stage: validate
-  extends: [.terraform-http-backend, .terraform-git-credential]
-  needs: []
-  tags: ["{{ runner_tag }}"]
-  image:
-    name: hashicorp/terraform:1.15
-    entrypoint: [""]
+  extends: .terraform-drift-plan
   variables:
+    TF_DRIFT_DIR: "terraform/unifi"
     TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/unifi"
     TF_HTTP_LOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/unifi/lock"
     TF_HTTP_UNLOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/unifi/lock"
-  before_script:
-    - !reference [.install-1password-alpine, before_script]
   script:
-    - cd terraform/unifi
-    - terraform init -lockfile=readonly
     - |
-      export TF_VAR_unifi_api_url=$({{ secret_read("UniFi Controller", "url") }})
-      export TF_VAR_unifi_api_key=$({{ secret_read("UniFi Controller", "api-key") }})
-      export TF_VAR_wlan_passphrase_iot=$({{ secret_read("WiFi IoT", "password") }})
-      export TF_VAR_wlan_passphrase_guest=$({{ secret_read("WiFi Guest", "password") }})
+      set -eo pipefail
+      # One line per WLAN passphrase variable the root declares: a missing one
+      # fails the plan, which is the intended behaviour, not drift.
+      TF_VAR_unifi_api_url=$({{ secret_read("UniFi Controller", "url") }})
+      TF_VAR_unifi_api_key=$({{ secret_read("UniFi Controller", "api-key") }})
+      TF_VAR_wlan_passphrase_iot=$({{ secret_read("WiFi IoT", "password") }})
+      TF_VAR_wlan_passphrase_guest=$({{ secret_read("WiFi Guest", "password") }})
+      export TF_VAR_unifi_api_url TF_VAR_unifi_api_key TF_VAR_wlan_passphrase_iot TF_VAR_wlan_passphrase_guest
       terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
-  allow_failure: true
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule" && $OP_SERVICE_ACCOUNT_TOKEN'
+    - !reference [.drift-schedule-rule, rules]
     # No merge_request_event rule: this job reads every WLAN passphrase.
-    - if: '$CI_COMMIT_BRANCH == "main" && $OP_SERVICE_ACCOUNT_TOKEN'
+    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
       changes:
         - "terraform/unifi/**/*"
 {% endif %}
 # ==============================================================================
-# VERIFY STAGE — read-only, runs after the deploy stage whatever it did.
+# VERIFY STAGE — verification only, runs after the deploy stage whatever it did.
 # ==============================================================================
 
-# The postflight play: SSH reachability, disk headroom, service state, on every
-# managed host. It extends .deploy-base for the SSH key and the collection, and
-# changes nothing — a failure here means the deploy left the fleet in a state
-# the assertions reject.
-#
-# `when: always` is relative to the WHOLE pipeline, not just the deploy stage: on
-# a main pipeline that matches the rules below but fails at lint or validate, the
-# deploys are blocked by validation-gate and this job still runs, verifying hosts
-# nothing was deployed to. It is read-only, so that is a second failure surface
-# on an already-red pipeline rather than a risk — no rule can see gate status.
+# The postflight play: SSH reachability, disk headroom and service state on every
+# managed host. Its only write is one adguardhome-sync run, so a failure means the
+# deploy left the fleet in a state the assertions reject.
 deploy-verify:
   stage: verify
+  # Relative to the whole pipeline: a main pipeline red at lint still runs this,
+  # verifying hosts nothing was deployed to. It deploys nothing, so that is one
+  # more failure surface on an already-red pipeline rather than a risk.
   when: always
   extends: .deploy-base
   script:
@@ -1358,16 +1477,58 @@ deploy-verify:
     - $SECRET_RUNNER ansible-playbook -i inventories/prod playbooks/postflight.yml
   environment:
     name: production/verify
-  # Each deploy job's rules verbatim, so this job appears if and only if at least
-  # one deploy job does and the two trigger sets cannot drift. Rules are
-  # first-match-wins and every block starts with the same schedule guard, so
-  # schedules stay excluded; a manual deploy's rule makes this manual too.
+  # The union of every deploy job's paths, rendered from the same map, so the two
+  # trigger sets cannot drift. Not a `!reference` to a deploy job's rules: that
+  # brings its `when:` and would override this job's `when: always`.
   rules:
-    - !reference [deploy-ansible-base, rules]
-    - !reference [deploy-ansible-dns, rules]
-    - !reference [deploy-ansible-storage, rules]
-    - !reference [deploy-ansible-mail, rules]
-    - !reference [deploy-ansible-k3s, rules]
-{%- if dns_backend == 'cloudflare' %}
-    - !reference [deploy-terraform, rules]
-{%- endif %}
+    - !reference [.skip-schedule-web, rules]
+    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
+      changes:
+{%- for path in deploy_paths.values() | sum(start=[]) | unique | sort %}
+        - "{{ path }}"
+{%- endfor %}
+
+# The in-cluster half of verification: server-side dry-run of the rendered
+# manifests, a forced Flux reconcile, then Ready gates. Read-only, and separate
+# from deploy-verify so a missing kubeconfig spares the host-side checks.
+cluster-verify:
+  stage: verify
+  when: always
+  extends: .install-1password
+  image: $PY_JOB_IMAGE
+  tags: ["{{ runner_tag }}"]
+  interruptible: false
+  before_script:
+    - !reference [.install-1password, before_script]
+    # jq parses the kubectl JSON scripts/deploy-verify.sh reads (Flux CR readiness).
+    - apt-get install -y -qq jq
+    - !reference [.kubectl-setup, before_script]
+    - kubectl version --output=yaml --request-timeout=5s
+  script:
+    - python3 scripts/check-flux-version-pin.py
+    - |
+      set -eo pipefail
+      # flux CLI alongside the kubectl .kubectl-setup installs: verification
+      # queries Flux CRs. Version and sha256 are one pin, so bump both;
+      # check-flux-version-pin.py holds it equal to the ConfigMap and gotk.
+      FLUX_VERSION="2.9.0"
+      # Per-job download dir: a fixed /tmp path collides when two jobs share /tmp.
+      dl=$(mktemp -d)
+      curl -fsSL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_amd64.tar.gz" -o "$dl/flux.tar.gz"
+      echo "7aa9779fc7ec6d030e609dab7dbed8c6fc9e3a7f4670834ad02369268aaf341f  $dl/flux.tar.gz" | sha256sum -c -
+      tar xzf "$dl/flux.tar.gz" -C /usr/local/bin flux
+      rm -rf "$dl"
+      flux --version
+    - bash scripts/deploy-verify.sh
+  environment:
+    name: production/cluster-verify
+  # Fires on a kubernetes/ change as well as on any deploy: a GitOps-only commit
+  # matches no deploy job's paths, and it is exactly the change Flux applies.
+  rules:
+    - !reference [.skip-schedule-web, rules]
+    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
+      changes:
+        - "kubernetes/**/*"
+{%- for path in deploy_paths.values() | sum(start=[]) | unique | sort %}
+        - "{{ path }}"
+{%- endfor %}

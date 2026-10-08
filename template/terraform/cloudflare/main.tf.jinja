@@ -6,5 +6,38 @@ module "zone" {
   account_id = var.cloudflare_account_id
   zone_name  = var.external_domain
 
+  # Pinned here, not inherited from the module defaults: a library default
+  # change must never silently move this zone's TLS posture on a `lib_ref` bump.
+  # Managing these at all is why the Terraform token carries Zone Settings:Edit.
+  manage_zone_settings = true
+  zone_settings = {
+    ssl                      = "strict" # Full (strict): requires a valid cert on the origin
+    always_use_https         = "on"
+    min_tls_version          = "1.2"
+    automatic_https_rewrites = "on"
+    tls_1_3                  = "on"
+
+    # http2, polish, mirage and webp are read-only over the API; Auto Minify is not a
+    # settable zone setting.
+    http3       = "on"
+    zero_rtt    = "off"
+    early_hints = "off"
+    brotli      = "on"
+
+    cache_level       = "aggressive"
+    browser_cache_ttl = 14400 # 4 hours
+
+    development_mode = "off"
+
+    hsts = {
+      enabled            = true
+      max_age            = 31536000 # 1 year
+      include_subdomains = true
+      nosniff            = true
+      # preload is off: submission to the browser preload list is hard to undo.
+      preload = false
+    }
+  }
+
   records = local.dns_records
 }

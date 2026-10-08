@@ -1,0 +1,28 @@
+---
+# promtool unit tests for OffsiteBackupIncompleteProlonged. Its 36h hold spans
+# two nightly runs, so it needs a horizon the 5m backups file cannot afford; the
+# input interval matches evaluation_interval so no sample goes stale.
+rule_files:
+  - rules.yaml
+evaluation_interval: 30m
+tests:
+  - interval: 30m
+    input_series:
+      # Sticky across two consecutive nights: no rc=0 run cleared it.
+      - series: 'restic_offsite_last_run_incomplete{instance="nas:9101", job="node-exporter-host"}'
+        values: '1+0x80'
+      # One incomplete night, then cleared: the 36h arm must never reach it.
+      - series: 'restic_offsite_last_run_incomplete{instance="pve-01:9101", job="node-exporter-host"}'
+        values: '1+0x24 0+0x56'
+    alert_rule_test:
+      # Inside the 36h hold.
+      - eval_time: 35h30m
+        alertname: OffsiteBackupIncompleteProlonged
+        exp_alerts: []
+      - eval_time: 36h30m
+        alertname: OffsiteBackupIncompleteProlonged
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: 'nas:9101'
+              job: node-exporter-host

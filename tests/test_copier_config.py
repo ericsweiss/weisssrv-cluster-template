@@ -5,13 +5,18 @@ cluster. These tests pin the schema and the mechanics the template relies on.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import sys
+import tomllib
 from pathlib import Path
 
 import jinja2
 import pytest
+import render_cluster
 import yaml
+from conftest import copier_env, load_script
 from jinja2 import meta
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -20,11 +25,9 @@ QUESTIONS = {k: v for k, v in CONFIG.items() if not k.startswith("_")}
 TEMPLATE_ROOT = REPO_ROOT / CONFIG["_subdirectory"]
 TEMPLATES_SUFFIX = CONFIG["_templates_suffix"]
 
-# `when: false` entries: copier evaluates their default and puts it in scope for
-# every question below, but never prompts and records nothing in
-# .copier-answers.yml. They are shared machinery, not answers, so the gates that
-# hold an operator-facing question (documented, answered by the fixtures) do not
-# apply to them.
+# `when: false` entries: shared machinery, in scope for every question below but
+# never prompted and never recorded. The gates that hold an operator-facing
+# question do not apply to them.
 COMPUTED = {
     name
     for name, question in QUESTIONS.items()
@@ -99,7 +102,40 @@ def test_template_mechanics():
     assert CONFIG["_subdirectory"] == "template"
     assert CONFIG["_templates_suffix"] == ".jinja"
     assert CONFIG["_answers_file"] == ".copier-answers.yml"
-    assert CONFIG["_min_copier_version"].split(".")[0] == "9"
+    assert CONFIG["_envops"]["undefined"] == "jinja2.StrictUndefined", (
+        "a mis-spelled or renamed answer name must fail the render; jinja's "
+        "default Undefined renders it as an empty string and stays green"
+    )
+    floor = tuple(int(part) for part in CONFIG["_min_copier_version"].split("."))
+    assert floor >= (9, 15), (
+        f"_min_copier_version {CONFIG['_min_copier_version']} is below 9.15, the "
+        "first copier that resolves _envops.undefined into a class; an older one "
+        "passes the raw string to jinja2 and `copier copy` dies with a TypeError"
+    )
+
+
+def test_copier_rejects_an_undeclared_answer_name(tmp_path):
+    """`_envops.undefined: jinja2.StrictUndefined`, end to end. Without it a
+    misspelled name renders as the empty string, so a manifest ships a blank
+    value or a `{% if %}` silently takes its false arm — both green."""
+    src = render_cluster.copy_source(tmp_path)
+    (src / "template" / ("probe.txt" + TEMPLATES_SUFFIX)).write_text(
+        "{{ not_a_declared_answer }}\n"
+    )
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "copier", "copy", "--defaults", "--trust",
+            "--data-file", str(render_cluster.ANSWERS),
+            str(src), str(tmp_path / "out"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, "an undeclared answer name rendered anyway"
+    assert "not_a_declared_answer" in result.stdout + result.stderr, (
+        "the render failed for some other reason:\n" + result.stdout + result.stderr
+    )
 
 
 @pytest.mark.parametrize("name", sorted(NO_DEFAULT))
@@ -130,12 +166,60 @@ IMPLEMENTED_BACKENDS = {
 }
 
 
+# Choice lists whose every value is implemented, so the seam tests below do not
+# apply to them. A new enum belongs in this set or in IMPLEMENTED_BACKENDS.
+FULLY_IMPLEMENTED_ENUMS = ("gpu", "license")
+
+# Each enum's exact choice set. A choice list may name only values the render
+# produces or the validator rejects by name.
+ENUM_CHOICES = {
+    "git_backend": {"gitlab_selfhosted", "github"},
+    "secrets_backend": {"onepassword", "vault"},
+    "storage_backend": {"zfs", "csi"},
+    "dns_backend": {"cloudflare", "route53"},
+    "gpu": {"none", "nvidia"},
+    "license": {"mit", "none"},
+}
+
+
+def test_every_enum_is_covered_by_a_seam_test():
+    """A choices-bearing question in neither set is an enum no test holds, so a
+    sixth seam could ship without a validator branch or a render arm."""
+    declared = {
+        name
+        for name, question in QUESTIONS.items()
+        if isinstance(question, dict) and question.get("choices")
+    }
+    covered = set(IMPLEMENTED_BACKENDS) | set(FULLY_IMPLEMENTED_ENUMS)
+    assert declared == covered, (
+        "copier.yml enums no seam test covers: "
+        f"{sorted(declared - covered)}; named but not declared: "
+        f"{sorted(covered - declared)}"
+    )
+    assert set(ENUM_CHOICES) == covered, (
+        "ENUM_CHOICES must pin every enum: missing "
+        f"{sorted(covered - set(ENUM_CHOICES))}"
+    )
+
+
+@pytest.mark.parametrize("name", sorted(ENUM_CHOICES))
+def test_enum_choice_sets_are_pinned(name):
+    """`choices` is advisory under `--data`, so a new value has to be a decision
+    here rather than an edit to copier.yml alone."""
+    values = set((QUESTIONS[name].get("choices") or {}).values())
+    assert values == ENUM_CHOICES[name], (
+        f"{name} choices changed to {sorted(values)}; pin the new set here in "
+        "the same change as the render arm or the validator branch"
+    )
+    default = QUESTIONS[name].get("default")
+    assert default in values, f"{name} defaults to {default!r}, outside its choices"
+
+
 @pytest.mark.parametrize("name", sorted(IMPLEMENTED_BACKENDS))
 def test_unimplemented_backend_choices_fail_at_copy_time(name):
-    """A choice with no implementation must stop the render, not produce a repo
-    that looks complete and never reconciles. The validator is what enforces it:
-    `--data` bypasses the choice list, and a choice list is not a contract with
-    the tree anyway."""
+    """A backend choice with no implementation stops the render. The choice list
+    is what an operator picks from; the validator is what names the files an
+    implementation has to write."""
     implemented = IMPLEMENTED_BACKENDS[name]
     assert QUESTIONS[name].get("default") == implemented
     validator = QUESTIONS[name].get("validator", "")
@@ -146,15 +230,87 @@ def test_unimplemented_backend_choices_fail_at_copy_time(name):
     rejected = _validator_message(name, **{name: "no-such-backend"})
     assert rejected, f"{name} accepted an unimplemented value"
     assert not _validator_message(name, **{name: implemented})
+    # The choice list is what an operator actually picks from, so a declared but
+    # unimplemented value is the one the validator has to reject.
+    declared = set((QUESTIONS[name].get("choices") or {}).values()) - {implemented}
+    for value in sorted(declared):
+        assert _validator_message(name, **{name: value}), (
+            f"{name} accepts the declared choice {value!r}, which has no implementation"
+        )
+
+
+@pytest.mark.parametrize("name", sorted(IMPLEMENTED_BACKENDS))
+def test_seam_questions_offer_an_unimplemented_choice(name):
+    """copier parses `choices` before validators, on the --data path too, so a
+    seam listing only its implemented value answers every other value with a bare
+    'invalid choice' and never reaches the validator naming the files to write."""
+    choices = QUESTIONS[name].get("choices") or {}
+    unimplemented = sorted(set(choices.values()) - {IMPLEMENTED_BACKENDS[name]})
+    assert unimplemented, (
+        f"{name} declares only {IMPLEMENTED_BACKENDS[name]!r}, so its validator is "
+        "unreachable — add a labelled placeholder choice for a second backend"
+    )
+    for label, value in choices.items():
+        if value in unimplemented:
+            assert "not implemented" in label, (
+                f"{name} choice {value!r} has no implementation but its label "
+                f"{label!r} does not say so"
+            )
+
+
+# Files that may define a secrets macro: the partial that owns them, plus the two
+# consumers, so a macro defined locally again is still caught.
+SECRETS_MACRO_FILES = (
+    "partials/secrets.jinja",
+    "template/.gitlab-ci.yml.jinja",
+    "template/Taskfile.yml.jinja",
+)
+# The Taskfile tree's namespace files wrap the macros too.
+SECRETS_MACRO_GLOBS = ("template/taskfiles/*.yml.jinja",)
+SECRETS_MACRO_DOC = "docs/ARCHITECTURE.md"
+
+
+def test_every_secrets_macro_is_documented():
+    """docs/ARCHITECTURE.md is the only description of the secrets seam, because
+    both consumers point at it instead of explaining themselves."""
+    macros: set[str] = set()
+    paths = []
+    for name in SECRETS_MACRO_FILES:
+        path = REPO_ROOT / name
+        assert path.exists(), f"{name} is gone; update SECRETS_MACRO_FILES"
+        paths.append(path)
+    for pattern in SECRETS_MACRO_GLOBS:
+        globbed = sorted(REPO_ROOT.glob(pattern))
+        assert globbed, f"{pattern} matches nothing; update SECRETS_MACRO_GLOBS"
+        paths += globbed
+    for path in paths:
+        macros |= set(re.findall(r"{%-?\s*macro\s+(secret_\w+)", path.read_text()))
+    assert macros, (
+        "no secrets macro found in " + ", ".join(SECRETS_MACRO_FILES) + " — the "
+        "seam moved, so this gate is checking nothing"
+    )
+    doc = (REPO_ROOT / SECRETS_MACRO_DOC).read_text()
+    missing = sorted(macro for macro in macros if macro not in doc)
+    assert not missing, (
+        f"secrets macros {missing} are absent from {SECRETS_MACRO_DOC}; the seam's "
+        "only description must name every macro a generated cluster emits from"
+    )
 
 
 class _AnyFilter(dict):
-    """Jinja's parser needs every filter/test to resolve before it will walk a
-    template. The generated tree uses copier's extra filters, so stand every
-    unknown name in for a no-op — only the variable NAMES matter here."""
+    """Stands an unknown filter or test in for a no-op so Jinja's parser walks a
+    template using copier's extras. Parsing only: a rendering environment must
+    reject an unknown name rather than return an empty string."""
 
     def get(self, key, default=None):  # noqa: D102 - dict protocol
         return super().get(key, lambda *a, **kw: "")
+
+
+def test_an_unknown_filter_fails_the_rendering_environment():
+    """A validator reaching for a filter copier does not provide must raise, or
+    every accept-side assertion in this file passes vacuously."""
+    with pytest.raises(jinja2.TemplateAssertionError):
+        copier_env().from_string("{{ 'x' | no_such_filter }}").render()
 
 
 def _template_variables() -> dict[str, set[str]]:
@@ -183,10 +339,11 @@ def _template_variables() -> dict[str, set[str]]:
 
 
 def test_every_template_variable_is_a_declared_question():
-    """A variable the template reads but copier never asks for renders as the
-    `| default(...)` fallback — or, without one, as an empty string. Either way
-    the operator has no way to set it and no answer is recorded for
-    `copier update`."""
+    """Every variable template/ reads is declared in copier.yml.
+
+    StrictUndefined turns a typo into a render error; this test names the
+    offending path or file instead, and runs without a render.
+    """
     undeclared = {
         name: sorted(sites)
         for name, sites in _template_variables().items()
@@ -215,10 +372,16 @@ def test_no_question_is_dead():
 def _validator_message(name: str, **context) -> str:
     """Render a question's validator the way copier does: a non-empty result is
     the rejection message, an empty one means the answer is accepted."""
-    env = jinja2.Environment()  # noqa: S701 - rendering our own config, no user input
-    env.filters = _AnyFilter(env.filters)
-    env.filters["regex_search"] = lambda value, pattern: re.search(pattern, str(value))
-    return env.from_string(QUESTIONS[name]["validator"]).render(**context).strip()
+    env = copier_env()
+    # The hoisted regexes are declared above every question that reads them, so
+    # copier has them in scope for all of them.
+    octets = _computed("ipv4_octets_re")
+    shared = {
+        "ipv4_octets_re": octets,
+        "ipv4_re": _computed("ipv4_re", ipv4_octets_re=octets),
+        "ipv4_cidr_re": _computed("ipv4_cidr_re", ipv4_octets_re=octets),
+    }
+    return env.from_string(QUESTIONS[name]["validator"]).render(**{**shared, **context}).strip()
 
 
 # The two job labels the template SHIPS, and therefore the two the alert rules
@@ -239,10 +402,9 @@ SHIPPED_EXPORTER_JOBS = ("node-exporter", "node-exporter-host")
     ],
 )
 def test_node_exporter_job_regex_validator_requires_the_shipped_jobs(answer, rejected):
-    """The answer is free text, but only values containing BOTH shipped job
-    labels are ever correct for an unmodified render — a value that drops one
-    renders `job=~"..."` into rules that then match zero series, and a rule
-    matching nothing never fires and never alerts anyone to its own silence."""
+    """node_exporter_job_regex accepts only values containing both shipped job
+    labels. Dropping one renders rules that match zero series, and a rule
+    matching nothing never fires."""
     message = _validator_message("node_exporter_job_regex", node_exporter_job_regex=answer)
     assert bool(message) is rejected, (
         f"node_exporter_job_regex={answer!r} was "
@@ -260,25 +422,24 @@ def test_node_exporter_default_names_every_shipped_job():
     )
 
 
-# Answers that need no prose: their inline `help` is self-contained AND nothing
-# outside the template has to be arranged before answering them. Everything else
-# must be named in an operator doc, because the operator decides it BEFORE the
-# first prompt appears. Keep this list short — an entry is documentation given
-# up.
+# Answers that need no prose: their inline `help` is self-contained and nothing
+# outside the template has to be arranged first. Everything else must be named
+# in an operator doc. Keep this list short.
 DOC_EXEMPT = {
     "lan_prefix": "derived from lan_cidr; the prompt's default is the answer",
     "alert_email": "defaults to admin_email, which the docs cover",
     "enable_semantic_release": "a repo-workflow toggle with no external prerequisite",
+    "license": "a repo-workflow choice with no external prerequisite",
+    "license_holder": "the copyright line, prompted only when license is mit",
+    "license_year": "the copyright line, prompted only when license is mit",
 }
 
 _DOCS = ("PRE-SETUP.md", "SETUP.md")
 
 
 def test_every_question_is_named_in_an_operator_doc():
-    """A question named in neither doc is one an operator meets for the first
-    time at the prompt, with no chance to have prepared for it — which is how
-    `tailnet_dns_suffix` came to ship a sentinel default that passes its own
-    validator and leaves the tailnet resolver permanently broken."""
+    """Every question is named in an operator doc. One named in neither is met
+    for the first time at the prompt, with nothing prepared for it."""
     prose = "\n".join(
         (REPO_ROOT / "docs" / name).read_text(encoding="utf-8")
         for name in _DOCS
@@ -296,17 +457,108 @@ def test_every_question_is_named_in_an_operator_doc():
     )
 
 
-def test_answer_fixture_covers_every_question():
-    fixture = yaml.safe_load((REPO_ROOT / "tests" / "answers-weisssrv-shaped.yml").read_text())
-    conditional = {name for name, q in QUESTIONS.items() if "when" in q}
-    # lib_ref is deliberately left unanswered: copier.yml's default is the single
-    # source of the library pin, and inheriting it makes render-validate exercise
-    # exactly the released tag — so there is no second literal to keep in step.
-    inherited = {"lib_ref"}
-    missing = set(QUESTIONS) - set(fixture) - conditional - inherited
+FIXTURES = ("answers-weisssrv-shaped.yml", "answers-unlike.yml")
+
+# lib_ref is deliberately left unanswered: copier.yml's default is the single
+# source of the library pin, and inheriting it makes validate-rendered-cluster exercise
+# exactly the released tag — so there is no second literal to keep in step.
+INHERITED = {"lib_ref"}
+
+
+@pytest.mark.parametrize("fixture_name", FIXTURES)
+def test_answer_fixture_covers_every_question(fixture_name):
+    """Every prompted question is answered in both fixtures, gated ones included.
+
+    A `when:` expression still records an answer, so exempting the gated
+    questions would let one lose its fixture value and render the default.
+    """
+    fixture = yaml.safe_load((REPO_ROOT / "tests" / fixture_name).read_text())
+    missing = set(QUESTIONS) - COMPUTED - set(fixture) - INHERITED
     assert not missing, (
-        f"tests/answers-weisssrv-shaped.yml does not answer {sorted(missing)} — "
+        f"tests/{fixture_name} does not answer {sorted(missing)} — "
         "the render test would silently exercise the default instead"
+    )
+
+
+@pytest.mark.parametrize("fixture_name", FIXTURES)
+def test_no_fixture_answers_a_computed_question(fixture_name):
+    """copier takes a `--data-file` value over a SKIPPED question's default, so a
+    computed entry named in an answer file replaces the expression the render
+    exists to prove instead of being ignored."""
+    answers = yaml.safe_load((REPO_ROOT / "tests" / fixture_name).read_text())
+    answered = COMPUTED & set(answers)
+    assert not answered, (
+        f"tests/{fixture_name} answers computed entries {sorted(answered)} — "
+        "copier would use those values instead of copier.yml's expressions"
+    )
+    unknown = sorted(set(answers) - set(QUESTIONS))
+    assert not unknown, f"tests/{fixture_name} answers questions that do not exist: {unknown}"
+
+
+# Paths a question's prose names, so an operator sent to a file finds one. A
+# `weisssrv-lib ` prefix marks a LIBRARY path, which this repository cannot see.
+_PROSE_PATH_RE = re.compile(
+    r"(?<![\w/.<])((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+"
+    r"\.(?:py|yml|yaml|md|sh|tf|json|toml|jinja))"
+)
+_PROSE_FIELDS = ("help", "validator", "default", "placeholder")
+
+
+def _repo_path_index() -> set[str]:
+    index: set[str] = set()
+    for base in (TEMPLATE_ROOT, REPO_ROOT):
+        for path in base.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(base).as_posix()
+            if relative.startswith(".git/") or "__pycache__" in relative:
+                continue
+            index.add(relative)
+            if relative.endswith(TEMPLATES_SUFFIX):
+                index.add(relative[: -len(TEMPLATES_SUFFIX)])
+    return index
+
+
+def test_every_path_a_question_names_exists():
+    """A question's prose is where an operator is told which file to read or
+    edit. A renamed or moved file leaves the prose pointing at nothing, and no
+    other gate reads these strings."""
+    index = _repo_path_index()
+    missing = []
+    for name, question in QUESTIONS.items():
+        if not isinstance(question, dict):
+            continue
+        for field in _PROSE_FIELDS:
+            text = question.get(field)
+            if not isinstance(text, str):
+                continue
+            flat = " ".join(text.split())
+            for match in _PROSE_PATH_RE.finditer(flat):
+                named = match.group(1)
+                if "weisssrv-lib " in flat[max(0, match.start() - 20) : match.start()]:
+                    continue
+                if any(p == named or p.endswith("/" + named) for p in index):
+                    continue
+                missing.append(f"{name}.{field} names {named}")
+    assert not missing, "copier.yml prose names paths that do not exist:\n  " + "\n  ".join(missing)
+
+
+def test_the_two_fixtures_cover_both_values_of_every_boolean():
+    """Each bool decides whether a conditionally-named file, Taskfile block or CI
+    job renders. A value no fixture takes is a branch no test ever renders."""
+    shaped = yaml.safe_load((REPO_ROOT / "tests" / "answers-weisssrv-shaped.yml").read_text())
+    unlike = yaml.safe_load((REPO_ROOT / "tests" / "answers-unlike.yml").read_text())
+    uncovered = []
+    for name, question in QUESTIONS.items():
+        if not isinstance(question, dict) or question.get("type") != "bool":
+            continue
+        default = question.get("default")
+        taken = {bool(answers.get(name, default)) for answers in (shaped, unlike)}
+        uncovered += [f"{name}={missing}" for missing in sorted({True, False} - taken)]
+    assert not uncovered, (
+        "neither answer fixture exercises: "
+        + ", ".join(sorted(uncovered))
+        + " — that branch of its conditional files and CI jobs is never rendered by a test"
     )
 
 
@@ -330,20 +582,9 @@ def _referenced_questions(text: str) -> set[str]:
 
 
 def test_no_question_references_an_answer_asked_later():
-    """A validator can only compare against answers already given.
-
-    `lan_gateway` carried `{% elif lan_gateway in [k3s_api_vip | default(''),
-    ...] %}` while all three VIPs are asked AFTER it. Interactively the names
-    were undefined, `| default('')` collapsed the test to `x in ['', '', '']`,
-    and the check passed everything — while the `--data-file` path used by these
-    very tests supplied all answers up front and made it fire. So the harness
-    exercised the arm in the one mode where it could work and the operator met it
-    in the mode where it could not.
-
-    This is the general form: a check that reads as enforcement and enforces
-    nothing on the documented path. Move the comparison DOWN to the later
-    question rather than reaching forward from the earlier one.
-    """
+    """No validator forward-references a later answer: it is undefined
+    interactively and supplied on the `--data-file` path, so it enforces
+    nothing in the mode operators use."""
     violations: list[str] = []
     for name, question in QUESTIONS.items():
         if not isinstance(question, dict):
@@ -386,11 +627,67 @@ VIP_ANSWERS = {
 }
 
 
+def _vip_labels(vips: dict = VIP_ANSWERS) -> dict:
+    """The address -> label map the collision validators read, rendered from
+    copier.yml so the shared entry is under test too."""
+    return {"vip_labels": _computed("vip_labels", **vips)}
+
+
+def test_vip_labels_names_every_answered_address():
+    """A VIP missing from the map is an answer the collision validators compare
+    against nothing, so they accept it."""
+    labels = _vip_labels()["vip_labels"]
+    assert set(labels) == set(VIP_ANSWERS.values()), (
+        f"vip_labels does not cover every VIP answer: {sorted(labels)}"
+    )
+    assert all(labels.values()), "vip_labels carries an empty label"
+
+
+def test_no_validator_restates_the_vip_label_map():
+    """vip_labels is the one home for the map. A validator composing its own
+    drifts the moment a VIP question is added."""
+    offenders = sorted(
+        name
+        for name, question in QUESTIONS.items()
+        if isinstance(question, dict)
+        and isinstance(question.get("validator"), str)
+        and "the k3s API VIP" in question["validator"]
+    )
+    assert not offenders, (
+        "validators compose their own VIP label map instead of reading "
+        "vip_labels: " + ", ".join(offenders)
+    )
+
+
+# A band spelled inside a validator instead of read from
+# reserved_address_bands: `31 <= _o <= 39`, `_o == 23`, `.41-.49`.
+_BAND_LITERAL = re.compile(r"\d+\s*<=\s*_[a-z0-9_]+\s*<=\s*\d+|_o\s*==\s*\d+|\.\d+-\.\d+")
+
+
+def test_no_validator_restates_a_reserved_band():
+    """reserved_address_bands is the one place the address scheme is written.
+    A validator spelling a band as a literal accepts an answer that collides
+    with a generated guest as soon as the bands move."""
+    offenders = [
+        f"{name}: {match.group(0)}"
+        for name, question in sorted(QUESTIONS.items())
+        if isinstance(question, dict) and isinstance(question.get("validator"), str)
+        for match in [_BAND_LITERAL.search(question["validator"])]
+        if match
+    ]
+    assert not offenders, (
+        "validators restate a reserved address band instead of iterating "
+        "reserved_address_bands:\n  " + "\n  ".join(offenders)
+    )
+
+
 def _dns_message(answer: str) -> str:
     return _validator_message(
         "upstream_dns_servers",
         upstream_dns_servers=answer,
         lan_prefix="192.168.0",
+        **_address_shared(),
+        **_vip_labels(),
         **VIP_ANSWERS,
     )
 
@@ -431,6 +728,8 @@ def _compute_count_message(count: int, resolvers: str = "192.168.0.21 192.168.0.
         compute_node_count=count,
         upstream_dns_servers=resolvers,
         lan_prefix="192.168.0",
+        **_address_shared(),
+        **_vip_labels(),
         **VIP_ANSWERS,
     )
 
@@ -454,12 +753,32 @@ def test_compute_node_count_stops_at_the_agent_band_ceiling():
     assert "192.168.0.50" in message, f"the message does not name the address that overflows: {message}"
 
 
+def test_the_agent_band_ceiling_survives_a_new_reserved_band():
+    """The bands list is documented as extensible, so the ceiling must bind to
+    the .41 band by identity rather than to whichever entry is last."""
+    shared = _address_shared()
+    shared["reserved_address_bands"] = shared["reserved_address_bands"] + [
+        [60, 69, "an application guest band added later"]
+    ]
+    message = _validator_message(
+        "compute_node_count",
+        compute_node_count=9,
+        upstream_dns_servers="192.168.0.21 192.168.0.22",
+        lan_prefix="192.168.0",
+        **shared,
+        **_vip_labels(),
+        **VIP_ANSWERS,
+    )
+    assert message, "9 was accepted once a band above .49 was appended"
+    assert "192.168.0.50" in message, f"the ceiling moved to the new band: {message}"
+
+
 @pytest.mark.parametrize(
     "count,expected",
     [
         (10, "a resolver"),        # pve-node-10 at .21
         (12, "the SMTP relay"),    # pve-node-12 at .23
-        (20, "the k3s server band"),
+        (20, "k3s server band"),
     ],
 )
 def test_compute_node_count_rejects_counts_that_reach_a_claimed_address(count, expected):
@@ -472,13 +791,9 @@ def test_compute_node_count_rejects_counts_that_reach_a_claimed_address(count, e
 
 @pytest.mark.parametrize("name", sorted(VIP_ANSWERS))
 def test_compute_node_count_rejects_a_count_that_reaches_a_vip(name):
-    """The VIPs and the gateway are answered ABOVE this question, so they are
-    comparable here — and a compute host landing on one is a collision hosts.yml
-    composes silently.
-
-    The shipped defaults sit outside the compute band, so each VIP is moved onto
-    pve-node-02's address in turn: a test parametrized over the defaults alone
-    would skip every case and assert nothing.
+    """The VIPs and the gateway are answered above this question, so a compute
+    host landing on one is comparable here. Each VIP is moved onto pve-node-02's
+    address in turn; the shipped defaults sit outside the band.
     """
     collide = "192.168.0.13"  # pve-node-02, the second host of a count-2 render
     vips = dict(VIP_ANSWERS, **{name: collide})
@@ -487,6 +802,8 @@ def test_compute_node_count_rejects_a_count_that_reaches_a_vip(name):
         compute_node_count=2,
         upstream_dns_servers="192.168.0.21 192.168.0.22",
         lan_prefix="192.168.0",
+        **_address_shared(),
+        **_vip_labels(vips),
         **vips,
     )
     assert message, f"{collide} was accepted as a compute host, but it is {name}"
@@ -560,18 +877,18 @@ def _computed(name: str, **context):
     """Render one `when: false` computed value the way copier does — its default
     is evaluated once and is in scope for every question below it."""
     question = QUESTIONS[name]
-    env = jinja2.Environment()  # noqa: S701 - rendering our own config, no user input
-    env.filters = _AnyFilter(env.filters)
-    rendered = env.from_string(str(question["default"])).render(**context)
+    rendered = copier_env().from_string(str(question["default"])).render(**context)
     return yaml.safe_load(rendered) if question.get("type") == "yaml" else rendered.strip()
 
 
-def _address_shared(lan_cidr: str) -> dict:
-    """The computed values the four address validators read. Rendered from
-    copier.yml rather than restated, so the shared block is under test too."""
+def _address_shared(lan_cidr: str = "192.168.0.0/24") -> dict:
+    """The computed values the address validators read. Rendered from copier.yml
+    rather than restated, so the shared block is under test too; the note reads
+    the bands, as it does in copier's own scope."""
+    bands = _computed("reserved_address_bands")
     return {
-        "reserved_address_bands": _computed("reserved_address_bands"),
-        "reserved_address_note": _computed("reserved_address_note"),
+        "reserved_address_bands": bands,
+        "reserved_address_note": _computed("reserved_address_note", reserved_address_bands=bands),
         "lan_address_range": _computed("lan_address_range", lan_cidr=lan_cidr),
     }
 
@@ -590,11 +907,10 @@ def _address_message(name: str, answer: str) -> str:
 @pytest.mark.parametrize("name", sorted(ADDRESS_QUESTIONS))
 @pytest.mark.parametrize("answer", sorted(COMPOSED_BANDS))
 def test_address_answers_reject_the_composed_bands(name, answer):
-    """The mirror of the upstream_dns_servers and compute_node_count checks:
-    hosts.yml composes guest addresses from fixed bands, so a VIP or a gateway
-    inside one is an address a generated guest also takes. kube-vip and MetalLB
-    answer ARP for it, and nothing downstream compares the two — the VIPs are
-    not inventory hosts."""
+    """hosts.yml composes guest addresses from fixed bands, so a VIP or gateway
+    inside one is an address a generated guest also takes. The VIPs are not
+    inventory hosts, so nothing downstream compares the two.
+    """
     message = _address_message(name, answer)
     assert message, (
         f"{name} accepted {answer} ({COMPOSED_BANDS[answer]}), which hosts.yml "
@@ -621,6 +937,49 @@ def test_address_answers_accept_addresses_outside_the_bands(name, answer):
     assert not message, f"{name} rejected {answer}, which collides with nothing: {message}"
 
 
+def _lan_prefix_message(lan_cidr: str, prefix: str) -> str:
+    return _validator_message(
+        "lan_prefix",
+        lan_prefix=prefix,
+        lan_cidr=lan_cidr,
+        lan_address_range=_computed("lan_address_range", lan_cidr=lan_cidr),
+        reserved_address_bands=_computed("reserved_address_bands"),
+    )
+
+
+@pytest.mark.parametrize(
+    "lan_cidr,prefix,rejected",
+    [
+        ("192.168.0.0/24", "192.168.0", False),
+        ("172.20.0.0/16", "172.20.9", False),    # any third octet of a /16
+        ("192.168.0.0/26", "192.168.0", False),  # ends at .63, clear of the roster
+        ("192.168.0.0/24", "192.168.1", True),   # the neighbouring /24
+        ("192.168.0.0/24", "10.0.0", True),
+        ("192.168.0.0/24", "192.168.0.", True),  # shape
+        ("192.168.0.0/28", "192.168.0", True),   # ends at .15, under the roster
+        ("192.168.0.0/27", "192.168.0", True),   # ends at .31, under the roster
+    ],
+)
+def test_lan_prefix_must_sit_inside_the_lan(lan_cidr, prefix, rejected):
+    """lan_prefix composes every host, guest and scrape target in the starter
+    roster, so a prefix outside lan_cidr puts the whole inventory off the network
+    the firewall sets and the NFS export allowlist are derived from."""
+    message = _lan_prefix_message(lan_cidr, prefix)
+    assert bool(message) is rejected, f"{prefix} in {lan_cidr}: {message or 'accepted'}"
+
+
+def test_a_lan_too_narrow_for_the_roster_is_rejected_by_its_top_address():
+    """The `.1` address fits every prefix length, so checking it alone accepts a
+    LAN that the roster's own k3s agent band already overruns."""
+    bands = _computed("reserved_address_bands")
+    top = max(hi for _lo, hi, _name in bands)
+    message = _lan_prefix_message("192.168.0.0/28", "192.168.0")
+    assert f"192.168.0.{top}" in message, (
+        f"the message does not name the address the roster reaches: {message}"
+    )
+    assert "192.168.0.0/28" in message, f"the message does not name the prefix: {message}"
+
+
 @pytest.mark.parametrize(
     "answer,rejected",
     [
@@ -635,29 +994,82 @@ def test_address_answers_accept_addresses_outside_the_bands(name, answer):
     ],
 )
 def test_onepassword_vault_must_be_one_uri_segment(answer, rejected):
-    """The answer is the first path segment of `op://<vault>/<item>/<field>`,
-    and ~99 emission sites interpolate it raw. A slash re-splits the URI and
-    surfaces as an item-not-found error inside a deploy job, naming nothing; a
-    colon splits the unquoted YAML key the ClusterSecretStore renders it as, and
-    that failure takes the whole manifest build with it."""
+    """The answer is the first path segment of `op://<vault>/<item>/<field>` and
+    is interpolated raw everywhere. A slash re-splits the URI; a colon splits
+    the unquoted YAML key the ClusterSecretStore renders it as.
+    """
     message = _validator_message("onepassword_vault", onepassword_vault=answer)
     assert bool(message) is rejected, f"{answer!r}: {message or 'accepted'}"
 
 
+def _fqdn_context(name: str) -> dict:
+    """What the service-FQDN validators compare an answer against: the roster
+    labels it may not reuse, plus nas_host, which smtp_host checks itself
+    against."""
+    context = {
+        "internal_domain": "lan.example.com",
+        "roster_label_re": _computed("roster_label_re"),
+    }
+    if name != "nas_host":
+        context["nas_host"] = "nas-01.lan.example.com"
+    return context
+
+
 @pytest.mark.parametrize("name", ["nas_host", "smtp_host"])
 def test_service_fqdns_must_sit_under_the_internal_domain(name):
-    """The internal wildcard covers `*.<internal_domain>` and nothing else, and
-    the NFS PVs mount by name with `xprtsec=tls`, which verifies its SAN. A name
-    in another zone fails the handshake exactly as an IP mount does, and the
-    internal resolver does not answer for it either."""
-    inside = _validator_message(
-        name, **{name: "box.lan.example.com"}, internal_domain="lan.example.com"
-    )
-    outside = _validator_message(
-        name, **{name: "box.example.com"}, internal_domain="lan.example.com"
-    )
+    """The answer must sit inside internal_domain: the wildcard certificate
+    covers `*.<internal_domain>` only, and the NFS PVs verify its SAN with
+    `xprtsec=tls`."""
+    inside = _validator_message(name, **{name: "box.lan.example.com"}, **_fqdn_context(name))
+    outside = _validator_message(name, **{name: "box.example.com"}, **_fqdn_context(name))
     assert not inside, f"{name} rejected a name inside internal_domain"
     assert outside, f"{name} accepted a name outside internal_domain"
+
+
+@pytest.mark.parametrize("name", ["nas_host", "smtp_host"])
+def test_service_fqdns_must_be_one_label_under_the_internal_domain(name):
+    """A DNS wildcard matches one label, so `*.<internal_domain>` does not cover
+    a deeper name — and the inventory keeps only the short name, so the two
+    layers disagree as well."""
+    message = _validator_message(
+        name, **{name: "box.rack1.lan.example.com"}, **_fqdn_context(name)
+    )
+    assert message, f"{name} accepted a two-label name the wildcard cannot cover"
+    assert "box.lan.example.com" in message, (
+        f"the message does not name the one-label form to use: {message}"
+    )
+
+
+@pytest.mark.parametrize(
+    "nas,smtp,rejected",
+    [
+        ("nas-01.lan.example.com", "smtp-relay.lan.example.com", False),
+        ("store.lan.example.com", "store.lan.example.com", True),
+        ("nas-01.lan.example.com", "dns-01.lan.example.com", True),
+    ],
+)
+def test_service_short_names_must_not_collide(nas, smtp, rejected):
+    """Both answers' short names are inventory host names. A repeat puts one name
+    under two groups, and Ansible merges them into a single machine that the
+    storage and the mail plays both target."""
+    message = _validator_message(
+        "smtp_host",
+        smtp_host=smtp,
+        nas_host=nas,
+        internal_domain="lan.example.com",
+        roster_label_re=_computed("roster_label_re"),
+    )
+    assert bool(message) is rejected, f"{nas} / {smtp}: {message or 'accepted'}"
+
+
+def test_nas_host_rejects_a_label_the_roster_generates():
+    """nas_host is asked first, so its guard is against the labels the starter
+    roster composes rather than against smtp_host."""
+    context = _fqdn_context("nas_host")
+    assert _validator_message("nas_host", nas_host="k3s-srv-01.lan.example.com", **context), (
+        "a label the roster already generates was accepted"
+    )
+    assert not _validator_message("nas_host", nas_host="nas-01.lan.example.com", **context)
 
 
 def test_tailnet_dns_suffix_rejects_its_own_placeholder():
@@ -682,15 +1094,51 @@ def test_tailnet_dns_suffix_has_no_default():
 
 
 # --------------------------------------------------------------------------
+# The gitleaks configs extend the default ruleset
+# --------------------------------------------------------------------------
+
+# This repository's own allowlist and the one every generated cluster renders.
+GITLEAKS_CONFIGS = (
+    REPO_ROOT / ".gitleaks.toml",
+    TEMPLATE_ROOT / (".gitleaks.toml" + TEMPLATES_SUFFIX),
+)
+
+_JINJA_STATEMENT = re.compile(r"^\s*\{%-?.*-?%\}\s*$")
+
+
+def _extends_default_rules(text: str) -> bool:
+    """Whether `[extend] useDefault` is true.
+
+    Jinja statement lines are dropped so the template copy parses as the TOML it
+    renders into; the answers gate allowlist entries, never `[extend]`.
+    """
+    body = "\n".join(line for line in text.splitlines() if not _JINJA_STATEMENT.match(line))
+    return (tomllib.loads(body).get("extend") or {}).get("useDefault") is True
+
+
+@pytest.mark.parametrize("path", GITLEAKS_CONFIGS, ids=lambda p: p.parent.name)
+def test_gitleaks_extends_the_default_rules(path):
+    """Without `[extend] useDefault` gitleaks loads only the rules in the file,
+    and it declares none: every secret scan then greens on any tree."""
+    assert path.is_file(), f"{path} is missing — this gate read nothing"
+    assert _extends_default_rules(path.read_text(encoding="utf-8")), (
+        f"{path}: [extend] useDefault is not true — secret detection is disabled"
+    )
+
+
+def test_a_gitleaks_config_without_extend_is_reported():
+    """The negative case: the helper must reject the disarmed file."""
+    assert not _extends_default_rules('title = "x"\n[[allowlists]]\ndescription = "y"\n')
+
+
+# --------------------------------------------------------------------------
 # The library pin — one value, three places
 # --------------------------------------------------------------------------
 
 
 def test_lib_ref_is_inherited_by_the_validated_fixture():
-    """The fixture must NOT answer lib_ref. render-validate clones the library at
-    whatever lib_ref the fixture resolves to; by leaving it unanswered the render
-    inherits copier.yml's default, so the pin it exercises IS the released one by
-    construction — no second literal that could advertise a tag never exercised."""
+    """The fixture does not answer lib_ref, so the render inherits copier.yml's
+    default and validate-rendered-cluster exercises the released pin by construction."""
     fixture = yaml.safe_load((REPO_ROOT / "tests" / "answers-weisssrv-shaped.yml").read_text())
     assert "lib_ref" not in fixture, (
         "answers-weisssrv-shaped.yml should inherit lib_ref from copier.yml's "
@@ -701,20 +1149,10 @@ def test_lib_ref_is_inherited_by_the_validated_fixture():
 def test_this_repository_applies_its_own_lib_pin_gate():
     """The gate the template ships must hold on the template's own pipeline.
 
-    `.gitlab-ci.yml` declares `variables.WEISSSRV_LIB_REF` as the single source
-    and its comment says `scripts/check-lib-pins.py` fails the pipeline on drift.
-    No job runs the checker here, so this is what makes the claim true: the
-    vendored checker over this repository's own includes, plus the tie between
-    that variable and `copier.yml`'s `lib_ref` default — the value
-    `render-validate` actually clones, and the one a generated cluster inherits.
+    No job runs the checker here, so this runs the vendored checker over this
+    repository's includes and ties WEISSSRV_LIB_REF to copier.yml's lib_ref.
     """
-    import importlib.util
-
-    script = REPO_ROOT / "scripts" / "check-lib-pins.py"
-    spec = importlib.util.spec_from_file_location("check_lib_pins", script)
-    assert spec and spec.loader
-    checker = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(checker)
+    checker = load_script("check-lib-pins.py")
 
     ci_file = REPO_ROOT / ".gitlab-ci.yml"
     variables = checker.load_ci(ci_file).get("variables") or {}
@@ -723,7 +1161,7 @@ def test_this_repository_applies_its_own_lib_pin_gate():
     assert problems == [], "\n".join(problems)
     assert variables.get("WEISSSRV_LIB_REF") == QUESTIONS["lib_ref"]["default"], (
         "variables.WEISSSRV_LIB_REF and copier.yml's lib_ref default disagree — "
-        "render-validate clones the latter, so the includes would be gated "
+        "validate-rendered-cluster clones the latter, so the includes would be gated "
         "against a library this repository never exercises"
     )
 
@@ -731,20 +1169,10 @@ def test_this_repository_applies_its_own_lib_pin_gate():
 def test_copier_pin_is_the_same_in_both_places_this_pipeline_installs_it():
     """`variables.COPIER_VERSION` and the `pip_packages:` literal must agree.
 
-    GitLab resolves `include: inputs:` at pipeline-creation time, before job
-    variables exist, so the python-tests entry cannot read the variable and
-    repeats the pin — the same constraint `include: ref:` has, and the same
-    silent failure: the pytest suite would render under one copier and
-    render-validate under another, and the disagreement surfaces as a render
-    difference nobody can reproduce.
+    Includes resolve before job variables exist, so the python-tests entry
+    repeats the pin; a disagreement renders the two jobs under different copiers.
     """
-    import importlib.util
-
-    script = REPO_ROOT / "scripts" / "check-lib-pins.py"
-    spec = importlib.util.spec_from_file_location("check_lib_pins", script)
-    assert spec and spec.loader
-    checker = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(checker)
+    checker = load_script("check-lib-pins.py")
 
     ci = checker.load_ci(REPO_ROOT / ".gitlab-ci.yml")
     pinned = (ci.get("variables") or {})["COPIER_VERSION"]
@@ -764,12 +1192,23 @@ def test_copier_pin_is_the_same_in_both_places_this_pipeline_installs_it():
 
 def test_lib_ref_validator_takes_release_tags_only():
     """The include contract forbids a branch pin: a branch deleted after merge
-    takes every include, module source and collection install with it."""
+    takes every include with it. A tag below the default is refused too: the
+    playbooks are written against that release's role contracts."""
     assert not _validator_message("lib_ref", lib_ref=QUESTIONS["lib_ref"]["default"])
     for rejected in ("main", "chore/some-branch", "0.6.0", "v0.6", "v0.6.0-rc1"):
         assert _validator_message("lib_ref", lib_ref=rejected), (
             f"lib_ref accepted {rejected!r}, which is not a release tag"
         )
+    floor = tuple(int(part) for part in QUESTIONS["lib_ref"]["default"][1:].split("."))
+    older = (
+        f"v{floor[0]}.{floor[1]}.{floor[2] - 1}"
+        if floor[2]
+        else f"v{floor[0]}.{floor[1] - 1}.0"
+    )
+    assert _validator_message("lib_ref", lib_ref=older), (
+        f"lib_ref accepted {older!r}, which is older than the pinned default"
+    )
+    assert not _validator_message("lib_ref", lib_ref=f"v{floor[0]}.{floor[1] + 1}.0")
 
 
 _TAG_LITERAL = re.compile(r"\bv\d+\.\d+\.\d+\b")
@@ -778,18 +1217,16 @@ _TAG_LITERAL = re.compile(r"\bv\d+\.\d+\.\d+\b")
 def _is_historical(path: Path, line: str) -> bool:
     """Lines that record what a PAST release pinned, not what to pin now.
 
-    Two shapes: a row of docs/VERSIONING.md's template-release/library-release
-    table, and the `_commit:` marker in a `.copier-answers.yml` example. Both
-    name superseded tags on purpose.
-
-    Table rows are exempt only in VERSIONING.md — exempting every `|` line would
-    also exempt README.md's answer table, where the `lib_ref` default is exactly
-    the literal this test exists to keep current.
+    A docs/VERSIONING.md pair row naming a released tag, or a `_commit:` marker
+    in an answers example. The `main` row names the live pin, so it stays in scope.
     """
     stripped = line.strip()
     if stripped.startswith("_commit:"):
         return True
-    return stripped.startswith("|") and path.name == "VERSIONING.md"
+    if not stripped.startswith("|") or path.name != "VERSIONING.md":
+        return False
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    return len(cells) > 1 and "main" not in cells[0] and bool(_TAG_LITERAL.search(cells[0]))
 
 
 def test_docs_quote_only_the_current_library_tag():
@@ -811,20 +1248,118 @@ def test_docs_quote_only_the_current_library_tag():
     )
 
 
-def test_every_template_release_has_a_validated_pair_row():
-    """The pair table is the only record of which library release a template
-    release was rendered against, and nothing at tag time writes the row — so a
-    release cut without relabelling the `main` row leaves the pair unrecorded."""
-    tags = subprocess.run(
+def test_only_released_pair_rows_are_exempt_from_the_stale_tag_scan():
+    """Mutation case: the `main` row and the other tables stay in scope, so a
+    bump that misses the pin it records reports."""
+    versioning = Path("docs/VERSIONING.md")
+    assert _is_historical(versioning, "| `v0.8.0` | weisssrv-lib `v0.13.0` |")
+    assert not _is_historical(versioning, "| `main` (unreleased) | weisssrv-lib `v0.1.0` |")
+    assert not _is_historical(versioning, "| `feat:` | MINOR, pins `v0.1.0` |")
+    assert not _is_historical(Path("README.md"), "| `v0.8.0` | weisssrv-lib `v0.13.0` |")
+
+
+def _tags() -> list[str]:
+    """Release tags in this checkout, newest last. Empty on a shallow clone."""
+    listed = subprocess.run(
         ["git", "tag", "-l", "v*"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
-    if tags.returncode != 0 or not tags.stdout.strip():
-        pytest.skip("no tags in this checkout (shallow clone)")
+    if listed.returncode != 0:
+        return []
 
+    def key(tag: str) -> tuple:
+        return tuple(int(part) if part.isdigit() else 0 for part in tag.lstrip("v").split("."))
+
+    return sorted(listed.stdout.split(), key=key)
+
+
+def _questions_at(ref: str) -> dict | None:
+    """copier.yml's questions at `ref`, or None when the checkout cannot show it."""
+    shown = subprocess.run(
+        ["git", "show", f"{ref}:copier.yml"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if shown.returncode != 0 or not shown.stdout.strip():
+        return None
+    doc = yaml.safe_load(shown.stdout) or {}
+    return {name: value for name, value in doc.items() if not name.startswith("_")}
+
+
+def breaking_answer_changes(old: dict, new: dict) -> dict[str, str]:
+    """question -> why a generated repo cannot take this update unattended.
+
+    A recorded answer is replayed on every `copier update`: a dropped name binds
+    nothing, and a moved enumerated default renders a branch nobody chose.
+    """
+    changes: dict[str, str] = {}
+    for name, before in old.items():
+        if name not in new:
+            changes[name] = "removed or renamed: the recorded answer binds nothing"
+            continue
+        after = new[name]
+        if not (isinstance(before, dict) and isinstance(after, dict)):
+            continue
+        enumerated = before.get("type") == "bool" or before.get("choices")
+        if enumerated and before.get("default") != after.get("default"):
+            changes[name] = (
+                f"default moved from {before.get('default')!r} to {after.get('default')!r}: "
+                "a new cluster renders the other branch"
+            )
+    return changes
+
+
+def test_a_breaking_answer_schema_change_is_recorded():
+    """docs/VERSIONING.md calls the answer schema public API, and nothing holds a
+    rename to that claim: an operator's `copier update` is where it surfaces."""
+    tags = _tags()
+    if not tags:
+        if os.environ.get("CI"):
+            pytest.fail("no tags in this checkout, so the answer schema went unchecked")
+        pytest.skip("no tags in this checkout (shallow clone)")
+    released = _questions_at(tags[-1])
+    if released is None:
+        pytest.skip(f"{tags[-1]}:copier.yml is not in this checkout")
+
+    changes = breaking_answer_changes(released, QUESTIONS)
+    versioning = (REPO_ROOT / "docs" / "VERSIONING.md").read_text(encoding="utf-8")
+    undocumented = {
+        name: why for name, why in changes.items() if f"`{name}`" not in versioning
+    }
+    assert not undocumented, (
+        f"copier.yml changed the answer schema since {tags[-1]} without naming the "
+        "question in docs/VERSIONING.md:\n  "
+        + "\n  ".join(f"{name}: {why}" for name, why in sorted(undocumented.items()))
+    )
+
+
+def test_an_undocumented_question_rename_is_caught():
+    """Mutation case: a rename and a flipped boolean default both report."""
+    changes = breaking_answer_changes(
+        {"cluster_name": {"type": "str"}, "gpu": {"type": "bool", "default": True}},
+        {"cluster_label": {"type": "str"}, "gpu": {"type": "bool", "default": False}},
+    )
+    assert set(changes) == {"cluster_name", "gpu"}
+    assert "binds nothing" in changes["cluster_name"]
+    assert "renders the other branch" in changes["gpu"]
+
+
+def _version(tag: str) -> tuple[int, ...]:
+    """A `vMAJOR.MINOR.PATCH` tag as a sortable tuple."""
+    return tuple(int(part) for part in tag.lstrip("v").split(".") if part.isdigit())
+
+
+def test_every_template_release_has_a_validated_pair_row():
+    """Every released template tag has a validated-pair row in docs/VERSIONING.md.
+
+    The table is the only record of the library release a tag was rendered
+    against, and nothing at tag time writes the row. The newest tag is exempt.
+    """
     table = (REPO_ROOT / "docs" / "VERSIONING.md").read_text(encoding="utf-8")
     rows = {
         cell.strip().strip("`")
@@ -832,19 +1367,37 @@ def test_every_template_release_has_a_validated_pair_row():
         if line.strip().startswith("|")
         for cell in [line.split("|")[1]]
     }
-    missing = [tag for tag in tags.stdout.split() if tag not in rows]
+    assert any(row.startswith("main") for row in rows), (
+        "docs/VERSIONING.md has no `main` row — the newest tag's exemption rests "
+        "on that row being its pair"
+    )
+
+    tags = subprocess.run(
+        ["git", "tag", "-l", "v*"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tags.returncode == 0, (
+        "git could not list tags, so this gate verified nothing: " + tags.stderr.strip()
+    )
+    if not tags.stdout.strip():
+        if os.environ.get("CI"):
+            pytest.fail("no tags in this checkout, so the validated-pair table went unchecked")
+        pytest.skip("no tags in this checkout (shallow clone)")
+
+    released = sorted(tags.stdout.split(), key=_version)
+    missing = [tag for tag in released[:-1] if tag not in rows]
     assert not missing, (
         "docs/VERSIONING.md's validated-pair table has no row for: "
         + ", ".join(missing)
     )
 
 
-# One accept and one reject per validator that no other test exercises, plus the
-# two SEMANTIC rules (a domain that equals the internal one; root as the admin
-# user) whose absence is invisible in a render: both produce a repository that
-# lints clean and is wrong the first time it is deployed.
-#
-# `context` supplies only the answers the validator itself reads.
+# One accept and one reject per ARM of every validator no other test exercises.
+# `context` supplies only the answers the validator reads; the optional fifth
+# element is a substring the rejection message must contain.
 VALIDATOR_CASES = [
     ("cluster_name", "homelab", None, {}),
     ("cluster_name", "Homelab", "uppercase is not a DNS label", {}),
@@ -856,13 +1409,34 @@ VALIDATOR_CASES = [
     ("external_domain", "example.com", None, {"internal_domain": "lan.example.com"}),
     (
         "external_domain",
-        "lan.example.com",
-        "identical to internal_domain — one certificate and ingress pair for two zones",
+        "EXAMPLE.com",
+        "uppercase is not a DNS label",
         {"internal_domain": "lan.example.com"},
+        "must be a lowercase fully-qualified domain",
+    ),
+    (
+        "external_domain",
+        "lan.example.com",
+        "one zone answered twice: both wildcard Certificates claim the same "
+        "identifiers and both halves of every split-horizon route match the same host",
+        {"internal_domain": "lan.example.com"},
+        "must differ from internal_domain",
     ),
     ("admin_user", "ops", None, {}),
-    ("admin_user", "root", "SSH hardening disables root login, locking Ansible out", {}),
-    ("admin_user", "0ps", "a POSIX username may not start with a digit", {}),
+    (
+        "admin_user",
+        "root",
+        "SSH hardening disables root login, locking Ansible out",
+        {},
+        "must not be root",
+    ),
+    (
+        "admin_user",
+        "0ps",
+        "a POSIX username may not start with a digit",
+        {},
+        "must be a valid POSIX username",
+    ),
     ("admin_email", "ops@example.com", None, {}),
     ("admin_email", "ops@example", "no TLD", {}),
     ("alert_email", "pager@example.com", None, {}),
@@ -870,6 +1444,18 @@ VALIDATOR_CASES = [
     ("timezone", "UTC", None, {}),
     ("timezone", "Europe/Berlin", None, {}),
     ("timezone", "PST", "not an IANA name", {}),
+    ("license_holder", "Ada Lovelace", None, {"license": "mit"}),
+    (
+        "license_holder",
+        "   ",
+        "an unnamed copyright holder",
+        {"license": "mit"},
+        "license_holder is required",
+    ),
+    ("license_holder", "", None, {"license": "none"}),
+    ("license_year", "2026", None, {"license": "mit"}),
+    ("license_year", "26", "a two-digit year", {"license": "mit"}, "four-digit year"),
+    ("license_year", "", None, {"license": "none"}),
     ("git_host", "git.example.com", None, {}),
     ("git_host", "https://git.example.com", "a scheme is not a hostname", {}),
     ("git_namespace", "homelab/infra", None, {}),
@@ -893,20 +1479,81 @@ VALIDATOR_CASES = [
         "only modern and legacy are allowed values",
         {"internal_domain": "lan.example.com"},
     ),
+    ("k3s_image_gc_high_threshold", 70, None, {}),
+    ("k3s_image_gc_high_threshold", 79, None, {}),
+    (
+        "k3s_image_gc_high_threshold",
+        50,
+        "at the 50% low watermark the kubelet garbage-collects on every pull",
+        {},
+        "must be at least 55",
+    ),
+    (
+        "k3s_image_gc_high_threshold",
+        80,
+        "from 80 up the DiskUsageWarning inhibit mutes KubeletImageGCIneffective",
+        {},
+        "must be at most 79",
+    ),
+    ("compose_app_guests", [], None, {}),
+    (
+        "compose_app_guests",
+        [{"host": "10.0.0.56", "label": "nextcloud", "compose_dir": "/opt/nc"}],
+        None,
+        {},
+    ),
+    (
+        "compose_app_guests",
+        [{"host": "10.0.0.56", "label": "nextcloud"}],
+        "compose_dir is what the collector cds into; without it the section is empty",
+        {},
+        "needs host, label and compose_dir",
+    ),
+    (
+        "compose_app_guests",
+        [{"host": "10.0.0.56", "label": "NextCloud", "compose_dir": "/opt/nc"}],
+        "the label becomes a report section name and a run_section label",
+        {},
+        "must be a lowercase slug",
+    ),
+    (
+        "compose_app_guests",
+        [{"host": "10.0.0.56", "label": "nc", "compose_dir": "/opt/$nc"}],
+        "the value is interpolated into the collector's remote `sh -c` strings, "
+        "where the inner shell expands it",
+        {},
+        "must not contain a quote, $ or a backtick",
+    ),
+    (
+        "compose_app_guests",
+        [{"host": "10.0.0.56", "label": "nc", "compose_dir": "/opt/my nc"}],
+        "the collector interpolates each value unquoted into a remote word, so a "
+        "space makes it two",
+        {},
+        "must not contain a space",
+    ),
 ]
 
 
 @pytest.mark.parametrize(
-    "name,answer,why,context",
+    "case",
     VALIDATOR_CASES,
     ids=[f"{c[0]}-{c[1]}" for c in VALIDATOR_CASES],
 )
-def test_validator_accepts_and_rejects(name, answer, why, context):
+def test_validator_accepts_and_rejects(case):
+    """A case may carry a fifth element: a substring the message must contain,
+    which is how a validator with several arms proves it took the right one."""
+    name, answer, why, context = case[:4]
+    expected = case[4] if len(case) > 4 else None
     message = _validator_message(name, **{name: answer}, **context)
     if why is None:
         assert not message, f"{name}={answer!r} was rejected: {message}"
     else:
         assert message, f"{name}={answer!r} was accepted — {why}"
+        if expected:
+            assert expected in message, (
+                f"{name}={answer!r} was rejected by the wrong arm: {message}"
+            )
 
 
 # Validators with a test of their own above, which the table deliberately does
@@ -914,7 +1561,7 @@ def test_validator_accepts_and_rejects(name, answer, why, context):
 # second accept/reject pair.
 DEDICATED_VALIDATOR_TESTS = {
     "lan_cidr": "test_pod_cidr_must_not_overlap_the_lan",
-    "lan_prefix": "test_address_answers_* (every case renders it)",
+    "lan_prefix": "test_lan_prefix_must_sit_inside_the_lan",
     "lan_gateway": "test_address_answers_*",
     "k3s_api_vip": "test_address_answers_*",
     "metallb_public_vip": "test_address_answers_*",
@@ -928,8 +1575,8 @@ DEDICATED_VALIDATOR_TESTS = {
     "storage_backend": "test_unimplemented_backend_choices_fail_at_copy_time",
     "dns_backend": "test_unimplemented_backend_choices_fail_at_copy_time",
     "onepassword_vault": "test_onepassword_vault_must_be_one_uri_segment",
-    "nas_host": "test_service_fqdns_must_sit_under_the_internal_domain",
-    "smtp_host": "test_service_fqdns_must_sit_under_the_internal_domain",
+    "nas_host": "test_service_fqdns_* and test_nas_host_rejects_a_label_*",
+    "smtp_host": "test_service_fqdns_* and test_service_short_names_must_not_collide",
     "node_exporter_job_regex": "test_node_exporter_job_regex_validator_requires_the_shipped_jobs",
     "tailnet_dns_suffix": "test_tailnet_dns_suffix_*",
     "lib_ref": "test_lib_ref_validator_takes_release_tags_only",
@@ -938,8 +1585,7 @@ DEDICATED_VALIDATOR_TESTS = {
 
 def test_every_validator_is_exercised():
     """A validator no test exercises is one a regression could widen to accept
-    everything with the suite still green — which is how the address family came
-    to be the only part of the schema under test."""
+    everything with the suite still green."""
     declared = {
         name
         for name, question in QUESTIONS.items()
@@ -953,3 +1599,53 @@ def test_every_validator_is_exercised():
         "these names are listed as covered but declare no validator: "
         + ", ".join(sorted(covered - declared))
     )
+
+
+# Asked free-text answers that deliberately take anything, with the reason no
+# validator can narrow them. An entry here needs a reason, not convenience.
+UNVALIDATED_FREE_TEXT: dict[str, str] = {}
+
+
+def _unvalidated_free_text(questions: dict, exempt: dict[str, str]) -> list[str]:
+    """Asked `type: str` questions with no `choices:` and no `validator:`."""
+    return sorted(
+        name
+        for name, question in questions.items()
+        if isinstance(question, dict)
+        and question.get("when") is not False
+        and question.get("type") == "str"
+        and not question.get("choices")
+        and "validator" not in question
+        and name not in exempt
+    )
+
+
+def test_every_asked_free_text_answer_is_validated():
+    """A `type: str` question with no `choices:` takes whatever is typed, and
+    `--data` mode does not even prompt. Without a validator a mistyped domain,
+    address or username renders a cluster that looks configured."""
+    considered = [
+        name
+        for name, question in QUESTIONS.items()
+        if isinstance(question, dict)
+        and question.get("when") is not False
+        and question.get("type") == "str"
+        and not question.get("choices")
+    ]
+    assert len(considered) > 20, (
+        f"only {len(considered)} free-text questions found — the shape of copier.yml "
+        "moved and this gate is checking almost nothing"
+    )
+    missing = _unvalidated_free_text(QUESTIONS, UNVALIDATED_FREE_TEXT)
+    assert not missing, (
+        "these asked free-text answers declare no validator: " + ", ".join(missing)
+    )
+
+
+def test_the_free_text_validator_gate_notices_a_dropped_validator():
+    """Mutation proof for the gate above: the real question set with one
+    validator removed must be reported."""
+    name = "internal_domain"
+    mutated = {**QUESTIONS, name: {k: v for k, v in QUESTIONS[name].items() if k != "validator"}}
+    assert _unvalidated_free_text(mutated, UNVALIDATED_FREE_TEXT) == [name]
+    assert _unvalidated_free_text(mutated, {name: "exempt in this call only"}) == []

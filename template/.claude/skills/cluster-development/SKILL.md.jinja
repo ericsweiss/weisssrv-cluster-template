@@ -1,3 +1,8 @@
+{#- SECRETS SEAM: partials/secrets.jinja is the one home for the reference
+    syntax, so an unimplemented backend fails this render instead of telling
+    the operator to consult "the secrets backend". -#}
+{%- import "partials/secrets.jinja" as secrets with context -%}
+{%- import "partials/links.jinja" as links with context -%}
 ---
 name: cluster-development
 description: >-
@@ -18,13 +23,34 @@ Infrastructure as code for one Proxmox + ZFS + k3s cluster, generated from
 weisssrv-cluster-template. This skill is the operating map: it encodes the
 workflow and the invariants, and points at the documents that hold everything
 else. It does not restate them — open the file it names. Paths are
-repository-relative.
+repository-relative, except the `references/` pages below, which are relative to
+this skill's own directory.
+
+## Reference files
+
+Open the one the decision tree names rather than reading them all.
+
+| File | Covers |
+|---|---|
+| `references/add-k8s-app.md` | the application checklist, alert rules, storage, scheduling, SSO |
+| `references/add-vm-app.md` | Proxmox guest mechanics: inventory, zvols, firewall, deploy path |
+| `references/debugging.md` | symptom to entry point, and the local gates that reproduce a CI failure |
+| `references/maintenance-upgrades.md` | the version-bump and library-pin flows, patching and reboots |
+| `references/cluster-access.md` | kubeconfig, secret references, SSH, the local toolchain |
+
+## Template first
+
+This repository is one cluster, not the product. Site data stays here:
+inventory values, addresses, the application estate, this cluster's documents.
+Anything generic goes upstream first and arrives here as a pin bump or a
+`copier update` — a generic change landed only here is drift that the next
+update has to fight.
 
 `README.md` is the top-level fact source, `docs/RUNBOOKS.md` holds this
 cluster's day-two procedures, `docs/ci-pipeline.md` describes the pipeline, and
 `task --list` owns the command set. Never cite a `task` name you have not seen
-in `task --list` — the documentation is gated against it, and inventing one is
-the failure mode this skill exists to prevent.
+in `task --list`: nothing checks it for you, and inventing one is the failure
+mode this skill exists to prevent.
 
 ## Invariants
 
@@ -33,8 +59,10 @@ Violating one of these breaks production or fails review.
 - **Never push to the default branch.** Every change ships as a branch plus a
   merge request, including one-line fixes. Flux and the deploy jobs act on the
   default branch, so a direct push is an unreviewed deploy.
+- **Keep feature branches local until the merge request is ready, and confirm
+  before pushing.** Do not open a merge request unprompted.
 - **No secrets in git.** Host tooling references
-  {% if secrets_backend == 'onepassword' %}`op://{{ onepassword_vault }}/<item>/<field>`{% else %}the secrets backend{% endif %};
+  `{{ secrets.secret_ref('<item>', '<field>') }}`;
   workloads read a Secret produced by an `ExternalSecret`. A new credential is
   added to the vault and documented, never inlined.
 - **Flux owns all of `kubernetes/`.** No `kubectl apply -k` and no `helm upgrade`
@@ -53,11 +81,29 @@ Violating one of these breaks production or fails review.
   address `weisssrv.infra.<role>` by FQCN at the ref pinned in
   `ansible/requirements.yml`. A role needing a change is changed in the library
   and pulled in by bumping that ref — not copied in here.
+- **Never edit a vendored library copy in place.** `scripts/vendored-manifest.yml`
+  lists every file copied from the library, and its `forked:` entries are the
+  only ones allowed to differ — each with a reason and the library blob it was
+  last reconciled against. Refreshing a copy is `task lib:sync`, then copy and
+  review the diff. An edit in place reds the byte-identity gate, the next
+  refresh reverts it, and `copier update` carries it forward as an undeclared
+  fork. Fix the bug in the library instead and bump `lib_ref`.
 - **Never automate ZFS pool creation or destruction.** Ansible sets properties,
   creates datasets and zvols, and mounts them. Pools are manual.
 - **Every service is observed.** A change that adds a service is incomplete
   without logs, metrics, a down-or-stale alert, and a probe if users reach it
   directly.
+- **Comments describe the current state, briefly, in the present tense.** Three
+  content lines per block is the ceiling. A block guarding a trap that causes an
+  outage may open `CRITICAL:` and run to eight; that marker is for outages, not
+  for emphasis or a long file header. No dates, no merge-request numbers, no
+  "used to", no prior values. Longer rationale goes in the nearest `README.md`
+  or in `docs/RUNBOOKS.md`, not above the code.
+- **The skill rides along with the change.** A change that alters a workflow, a
+  gate, an invariant or a canonical-doc pointer updates `SKILL.md` and the
+  matching `references/` file in the same merge request. CI checks only the
+  backticked repository paths this skill cites (`scripts/check-skill-refs.py`);
+  nothing validates its task names or its prose.
 - **No AI attribution** anywhere: commits, code, comments, documentation, merge
   request text.
 
@@ -65,14 +111,23 @@ Violating one of these breaks production or fails review.
 
 | Changing | Read first | Then |
 |---|---|---|
-| A Kubernetes application | the closest existing directory under `kubernetes/apps/` | mirror its shape: namespace, workload, storage, ExternalSecret, certificate, ingress route, NetworkPolicy, autoscaling policy |
-| A host or guest | `ansible/inventories/prod/` and the [role's README in the library](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) | inventory first, playbook second; per-host facts go inline on the host entry in `hosts.yml` (there is no `host_vars/` unless you create one) |
+| A Kubernetes application | `references/add-k8s-app.md`, then the closest existing directory under `kubernetes/apps/` | mirror its shape: namespace, workload, storage, ExternalSecret, certificate, ingress route, NetworkPolicy, autoscaling policy |
+| A host or guest | `references/add-vm-app.md`, `ansible/inventories/prod/` and the [role's README in the library]({{ links.lib_tree() }}{{ lib_ref }}/ansible_collections/weisssrv/infra/roles) | inventory first, playbook second; per-host facts go inline on the host entry in `hosts.yml` (there is no `host_vars/` unless you create one) |
 | Storage: pools, datasets, exports | `ansible/inventories/prod/group_vars/nas.yml` | declare only what exists — Ansible never creates or destroys a pool; a NEW or empty pool goes through `docs/RUNBOOKS.md` § Storage bootstrap first; per-guest zvols are `vm_additional_disks` in `hosts.yml` |
 | Terraform state (DNS, tailnet, SSO) | the module directory and its README | plan, review, apply; SSO objects are a supervised apply |
-| A version pin or an upgrade | `docs/RUNBOOKS.md` § Upgrades | `task maintenance:check-versions`, then bump, `task flux:sync-versions`, commit both files |
-| An incident | `docs/RUNBOOKS.md` § Where to look first, then the service's dashboard and logs | `task flux:status`, `task infra:verify`, `task k3s:status` |
-| Cluster access or a credential | `docs/RUNBOOKS.md` § Rotating a secret | `task flux:rotate-secret -- <ns>/<name>`, or re-run the task that injects it host-side |
-| A platform (role / CI / Terraform-module) change | [weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib) | it changes upstream and this repo bumps `lib_ref`; never vendor a role here |
+| A version pin or an upgrade | `references/maintenance-upgrades.md`, `docs/RUNBOOKS.md` § Upgrades | `task maintenance:check-versions`, then bump, `task flux:sync-versions`, commit both files |
+| An incident | `references/debugging.md`, `docs/RUNBOOKS.md` § Where to look first, then the service's dashboard and logs | `task flux:status`, `task infra:verify`, `task k3s:status` |
+| Cluster access or a credential | `references/cluster-access.md`, `docs/RUNBOOKS.md` § Rotating a secret | `task flux:rotate-secret -- <ns>/<name>`, or re-run the task that injects it host-side |
+| An alert or a dashboard | `references/add-k8s-app.md` § Alert rules, `kubernetes/infrastructure/observability/README.md` | an app's rules are a standalone `PrometheusRule` in that app's directory, not an addition to the platform map; every rule carries a `runbook_url` anchoring a heading that exists in `docs/RUNBOOKS.md`; validate with `task lint:prometheus-config` |
+| A platform (role / CI / Terraform-module) change | [weisssrv-lib]({{ links.lib_home() }}) | it changes upstream and this repo bumps `lib_ref`; never vendor a role here |
+
+### Where the generic half of a change goes
+
+| The change | Lands in |
+|---|---|
+| Site data: inventory values, the app estate, this cluster's docs | here |
+| A role, a CI job template, a Terraform module, a vendored gate | weisssrv-lib, then bump `lib_ref` here |
+| Repository shape: directory layout, a gate every cluster wants, a Taskfile pattern | weisssrv-cluster-template, then `copier update` |
 
 ## Pre-merge gates
 
@@ -98,20 +153,38 @@ Run from the repository root:
   reason. `task lint` runs it.
 - `task flux:sync-versions` — whenever a version pin changed; commit both files.
 - `task hosts:sync` — whenever `hosts.yml` changed; commit the generated file.
-- `task lint:prometheus-config` — whenever alert or recording rules changed. It
-  is not part of `task lint`.
+- `task lint:prometheus-config` — whenever alert or recording rules changed.
+  `task lint` runs it, and it needs `promtool` and `amtool` on PATH; its
+  preconditions name a missing tool rather than skipping.
 - `task infra:check -- --limit <host>` — dry-run before deploying an Ansible
   change to a live host.
+- `pre-commit install` once per clone wires the local backstop that mirrors the
+  tool-light CI jobs. The hook set is `.pre-commit-config.yaml`.
+
+The Taskfile is an `includes:` tree: `Taskfile.yml` holds the top-level tasks and
+one file per namespace lives under `taskfiles/<ns>.yml`. Task names are
+unchanged, so `flux:lint` is the task `lint:` in `taskfiles/flux.yml`, and a
+cross-namespace call carries a leading colon (`:flux:sync-versions`).
 
 ## Review and merge
 
 - Merge request pipelines run the path-filtered lint, validate, test and
   security gates. They do not deploy.
+- **Commit subjects are Conventional Commits** — `type(scope): summary`, with
+  `feat|fix|chore|docs|refactor|ci|test` as the types in use. Nothing enforces
+  it; the history is the contract.
+- **Run the review loop to convergence before raising the merge request**:
+  self-review, then the AI reviewer and any requested reviewer, address every
+  valid finding, and repeat until none remain.
 - Resolve every valid review finding and re-run the gates before merging. Fold
   any available version bumps into the same revision rather than opening a
   separate one.
 - Merge request descriptions state what was tested, in the past tense — not a
   checklist of intentions.
+- **Serialize merges.** Merging a second change while the first one's deploy
+  pipeline is still running cancels that deploy, and a manual deploy against a
+  target whose CI job is in flight races it. Wait, then reconcile the pipeline
+  against the live state.
 - After merge: Flux reconciles `kubernetes/` within about a minute
   (`task flux:reconcile` forces it) and the deploy jobs run the Ansible side.
   Verify with `task flux:status`, `task infra:verify`, `task k3s:status`.
@@ -119,10 +192,10 @@ Run from the repository root:
 ## Upstream
 
 The platform this cluster is assembled from lives in
-**[weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib)**: the Ansible
+**[weisssrv-lib]({{ links.lib_home() }})**: the Ansible
 collection, the CI templates, the Terraform modules and the helper scripts, all
 pinned at `{{ lib_ref }}`. The generator is
-**[weisssrv-cluster-template](https://git.ericsweiss.com/eric/weisssrv-cluster-template)**;
+**weisssrv-cluster-template**;
 `.copier-answers.yml` records what this cluster was generated from, and
 `copier update` pulls in template improvements. A fix that would benefit any
 cluster belongs upstream, not here.

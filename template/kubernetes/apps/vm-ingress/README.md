@@ -44,6 +44,19 @@ namespace, copy the ServersTransport there too.
 Backend TLS *version* policy is the backend's responsibility — the
 ServersTransport CRD exposes no `minVersion` for backend connections.
 
+## Certificates in this namespace
+
+cert-manager writes the Secret into the Certificate's own namespace, and Traefik
+reads Secrets only from the IngressRoute's namespace. So this namespace needs
+its own copy of the wildcard even though `infrastructure/configs` already issues
+one. `certificate.yaml` is that copy, and it is not reconciled until you add it
+to `kustomization.yaml` alongside your first route.
+
+Every copy fires its own ACME order. Stagger `renewBefore` against the other
+copies, using the anchor in
+`infrastructure/configs/wildcard-certificates.yaml` as the reference, or they
+all renew in the same window and burn the duplicate-certificate rate limit.
+
 ## Adding a route
 
 Copy `example-route.yaml`, edit the four things that vary (name, backend IP,
@@ -57,8 +70,12 @@ Choose the exposure per route:
 | Exposure | Middlewares | TLS secret |
 |---|---|---|
 | Internal only | `lan-tailscale-only` + `hsts-header` | internal wildcard |
-| Public | `hsts-header` (+ `external-dns` target annotation) | external wildcard |
-| Public, SSO-gated | `authentik-auth` + `hsts-header` | external wildcard |
+| Public | `hsts-header` + `security-headers` (+ `external-dns` target annotation) | external wildcard |
+| Public, SSO-gated | `authentik-auth` + `hsts-header` + `security-headers` | external wildcard |
+
+`security-headers` sets `contentTypeNosniff`, `frameDeny` and
+`referrerPolicy: strict-origin-when-cross-origin`. A backend that must be framed
+needs its own middleware with `customFrameOptionsValue: SAMEORIGIN` instead.
 
 Anything reachable from the internet that is not itself an identity provider
 should carry an auth middleware.
@@ -75,3 +92,10 @@ should carry an auth middleware.
 - **A backend that is legitimately powered off much of the time** (an on-demand
   desktop) will fire `EndpointDown` forever. Give it a purpose-built alert gated
   on the guest's power state instead of relying on the generic probe rule.
+
+## Disable
+
+Remove the `vm-ingress` entry from the parent kustomization. Flux prunes the
+namespace and every route in it, so each hostname fronted here stops resolving
+to the cluster ingress — re-point those names at their guests directly, or drop
+the records, in the same change.

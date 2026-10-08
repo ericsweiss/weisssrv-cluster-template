@@ -1,66 +1,25 @@
 """Every file vendored from weisssrv-lib must still be byte-identical to it.
 
-Nothing else notices when a vendored copy drifts: the fix the library shipped is
-simply absent, and the next refresh silently reverts whatever was edited here.
-
-**The copy relationship is recorded in this repository's own manifest** —
-`scripts/vendored-manifest.yml`, read by the library's
-`scripts/check-vendored-copies.py` engine (the library knows nothing about its
-consumers; its `scripts/vendorable-paths.yml` offer list only bounds what a
-manifest may name). This module drives that engine rather than keeping a second
-list: a file the library stops shipping reaches this gate at the next pin bump,
-and a file copied in without a manifest entry is caught by the twin smoke test
-below. It covers more than `scripts/` — the lint profiles at the repository
-root and the secret-detection ruleset under `.gitlab/` are copies too — and it
-distinguishes vendored copies from declared forks, asserting a fork still
-differs AND that the library side has not moved since it was last reconciled.
-
-The library checkout comes from `$WEISSSRV_LIB_PATH` (what the CI job's
-`setup_command` clones), else the `.weisssrv-lib/` checkout `task lib:sync`
-creates, else a sibling `../weisssrv-lib`. There is no skip-when-missing path:
-an unavailable checkout fails, because a gate that quietly disables itself is
-not a gate. Blobs are read at the ref `.gitlab-ci.yml` pins, falling back to the
-checkout's working tree when that ref is not in it yet — which is what a local
-checkout tracking the library's `main` looks like before the next tag is cut.
+Copies and declared forks are listed in scripts/vendored-manifest.yml and checked
+by the library's check-vendored-copies.py engine; contract: docs/ci-pipeline.md.
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
 import yaml
+from conftest import GATE_RELPATH, REPO, SCRIPTS, _lib_root, lib_file
 
-REPO = Path(__file__).resolve().parent.parent
-SCRIPTS = REPO / "scripts"
 MANIFEST = SCRIPTS / "vendored-manifest.yml"
-GATE_RELPATH = "scripts/check-vendored-copies.py"
-# Where `task lib:sync` puts the checkout (Taskfile.yml's LIB_DIR).
-LOCAL_CHECKOUT = ".weisssrv-lib"
 
 # Config files carry site data, not library code, so a same-named one is not a
 # vendored copy.
 _SITE_DATA_SUFFIXES = {".yml", ".yaml", ".env", ".conf", ".toml", ".json"}
-
-
-def _lib_root() -> Path:
-    candidates = []
-    explicit = os.environ.get("WEISSSRV_LIB_PATH")
-    if explicit:
-        candidates.append(Path(explicit))
-    candidates += [REPO / LOCAL_CHECKOUT, REPO.parent / "weisssrv-lib"]
-    for candidate in candidates:
-        if (candidate / GATE_RELPATH).is_file():
-            return candidate
-    raise AssertionError(
-        f"no weisssrv-lib checkout with {GATE_RELPATH} found — run `task lib:sync` "
-        f"(it clones one into {LOCAL_CHECKOUT}/ at the pinned ref) or set "
-        "$WEISSSRV_LIB_PATH. This gate never skips: an ungated vendored copy is "
-        "exactly the drift it exists to catch."
-    )
 
 
 class _CILoader(yaml.SafeLoader):
@@ -88,6 +47,22 @@ def _ref_available(lib: Path, ref: str) -> bool:
     )
 
 
+def _lib_offer(lib: Path, ref: str) -> set[str]:
+    """The library's offer list at `ref`, or its working tree when the checkout
+    has no such ref. A path absent from the offer is not yet registerable."""
+    relpath = "scripts/vendorable-paths.yml"
+    if _ref_available(lib, ref):
+        blob = subprocess.run(
+            ["git", "-C", str(lib), "show", f"{ref}:{relpath}"],
+            capture_output=True,
+            text=True,
+        )
+        raw = blob.stdout if blob.returncode == 0 else ""
+    else:
+        raw = (lib / relpath).read_text() if (lib / relpath).is_file() else ""
+    return set((yaml.safe_load(raw) or {}).get("vendorable") or [])
+
+
 def _run_gate(*extra: str) -> subprocess.CompletedProcess:
     lib = _lib_root()
     argv = [
@@ -104,6 +79,26 @@ def _run_gate(*extra: str) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True)
 
 
+def registered_consumer_paths() -> list[str]:
+    """Repo-relative paths registered as byte-identical copies (kind vendored).
+
+    Empty with no library checkout: the never-skip assertion belongs to the gate
+    tests below, not to a caller's collection time.
+    """
+    try:
+        _lib_root()
+    except AssertionError:
+        return []
+    result = _run_gate("--list")
+    if result.returncode != 0:
+        return []
+    return [
+        parts[1]
+        for parts in (line.split("\t") for line in result.stdout.splitlines())
+        if len(parts) >= 3 and parts[0] == "vendored"
+    ]
+
+
 @pytest.fixture(scope="module")
 def registered() -> list[tuple[str, str, str]]:
     """(kind, consumer_path, lib_path) for every entry the manifest lists."""
@@ -118,27 +113,23 @@ def registered() -> list[tuple[str, str, str]]:
     return rows
 
 
-def test_lib_checkout_carries_the_pinned_ref() -> None:
+@pytest.fixture(scope="session", autouse=True)
+def announce_the_comparison_ref() -> None:
     """Drift reported against a ref the copies never came from misleads whoever
-    re-vendors, so the fallback is announced rather than assumed."""
+    re-vendors, so the fallback is announced rather than assumed. A fixture, not
+    a test: it asserts nothing and would otherwise count as a passing check."""
     lib = _lib_root()
     ref = _pinned_ref()
     if not _ref_available(lib, ref):
-        pytest.skip(
+        warnings.warn(
             f"{lib} has no {ref} (fetch its tags, or `task lib:sync`); byte-identity "
-            "was compared against the checkout's working tree"
+            "is compared against the checkout's working tree",
+            stacklevel=1,
         )
 
 
 def test_registered_copies_are_reconciled(registered) -> None:
-    """The gate itself: every vendored copy identical, every fork still a fork
-    and still reconciled against the library blob it was forked from.
-
-    Compared at the PINNED ref, never at whatever the checkout happens to have.
-    Copies that match a newer working tree while the pin names an older tag are
-    a real inconsistency — the pipeline installs the pin — so that state fails
-    here and is resolved by bumping the pin, not by relaxing the comparison.
-    """
+    """Every vendored copy is identical and every fork reconciled, at the pinned ref."""
     ref = _pinned_ref()
     at_pin = _ref_available(_lib_root(), ref)
     result = _run_gate(*(["--ref", ref] if at_pin else []))
@@ -179,15 +170,16 @@ def test_every_registered_copy_exists_here(registered) -> None:
 
 
 def test_every_library_twin_is_registered(registered) -> None:
-    """Local smoke test: a script sharing a name with a library script must be
-    covered by the manifest.
+    """A script sharing a name with an OFFERED library script is covered.
 
-    The library cannot notice a file this repository added; without this,
-    copying a library script in by hand and never registering it leaves it
-    ungated — the exact failure the gate exists to prevent.
+    The offer list is read at the pinned ref, so a path only the library's working
+    tree has does not red this repository.
     """
     lib = _lib_root()
-    lib_names = {p.name for p in (lib / "scripts").iterdir() if p.is_file()}
+    lib_names = {
+        Path(path).name for path in _lib_offer(lib, _pinned_ref()) if path.startswith("scripts/")
+    }
+    assert lib_names, "the library offers no scripts at the pinned ref"
     covered = {Path(path).name for _kind, path, _lib in registered}
     undeclared = sorted(
         p.name
@@ -201,4 +193,98 @@ def test_every_library_twin_is_registered(registered) -> None:
         "scripts with a weisssrv-lib twin that scripts/vendored-manifest.yml does not "
         f"cover: {undeclared} — add them there, or rename them so they are not "
         "mistaken for copies."
+    )
+
+
+# The local integration matrix hand-copies the library's privileged DinD daemon
+# rather than taking it from an include input, so nothing else holds the two
+# equal across a library bump.
+INTEGRATION_JOBS = REPO / ".gitlab" / "ci" / "integration-jobs.yml"
+DOCKER_BUILD_RELPATH = "ci/build/docker-build.yml"
+
+
+def _lib_file(relpath: str) -> str:
+    """A library file's text at the pinned ref."""
+    return lib_file(relpath, _pinned_ref())
+
+
+@pytest.mark.skipif(
+    not INTEGRATION_JOBS.is_file(),
+    reason="this repository ships no .gitlab/ci/integration-jobs.yml",
+)
+def test_the_dind_service_matches_the_library_input_default() -> None:
+    """The integration matrix runs the same digest-pinned daemon as the library.
+
+    It is the one privileged component of the job, and a stale copy keeps running
+    the old build after the library bumps it.
+    """
+    text = _lib_file(DOCKER_BUILD_RELPATH)
+    # A CI template file is two documents: the `spec.inputs` header, then the jobs.
+    header = next(
+        (
+            doc
+            for doc in yaml.load_all(text, Loader=_CILoader)
+            if isinstance(doc, dict) and "spec" in doc
+        ),
+        {},
+    )
+    inputs = ((header.get("spec") or {}).get("inputs")) or {}
+    default = (inputs.get("dind_service") or {}).get("default")
+    assert default, f"{DOCKER_BUILD_RELPATH} no longer declares a dind_service default"
+
+    jobs = yaml.load(INTEGRATION_JOBS.read_text(), Loader=_CILoader) or {}
+    names = {
+        service["name"] if isinstance(service, dict) else service
+        for job in jobs.values()
+        if isinstance(job, dict)
+        for service in (job.get("services") or [])
+    }
+    dind = {str(name) for name in names if "dind" in str(name)}
+    assert dind, f"no dind service found in {INTEGRATION_JOBS.relative_to(REPO)}"
+    assert dind == {default}, (
+        f"{INTEGRATION_JOBS.relative_to(REPO)} runs {sorted(dind)} but the library's "
+        f"dind_service default at {_pinned_ref()} is {default!r} — they are one pin."
+    )
+
+    # The daemon's bridge MTU, held to the same default: 1500 black-holes large
+    # TLS frames inside the job pod, which reads as a flaky registry or git fetch.
+    mtu = (inputs.get("dind_mtu") or {}).get("default")
+    assert mtu, f"{DOCKER_BUILD_RELPATH} no longer declares a dind_mtu default"
+    commands = [
+        str(argument)
+        for job in jobs.values()
+        if isinstance(job, dict)
+        for service in (job.get("services") or [])
+        if isinstance(service, dict) and "dind" in str(service.get("name"))
+        for argument in (service.get("command") or [])
+    ]
+    assert f"--mtu={mtu}" in commands, (
+        f"{INTEGRATION_JOBS.relative_to(REPO)} passes the dind daemon {commands}, "
+        f"missing --mtu={mtu} — the library's dind_mtu default at {_pinned_ref()}."
+    )
+
+
+# The collection tree the shared molecule scaffolding is offered from. No
+# directory walk reaches ansible/molecule/, so its copies need their own check.
+MOLECULE_SHARED = "ansible_collections/weisssrv/infra/molecule-shared"
+
+
+def test_every_shared_molecule_twin_is_registered(registered) -> None:
+    """A copy of the collection's molecule-shared/ YAML scaffolding is in the manifest."""
+    offered = _lib_offer(_lib_root(), _pinned_ref())
+    local = REPO / "ansible" / "molecule"
+    if not local.is_dir():
+        return
+    covered = {path for _kind, path, _lib in registered}
+    undeclared = sorted(
+        str(p.relative_to(REPO))
+        for p in local.rglob("*.yml")
+        if p.is_file()
+        and f"{MOLECULE_SHARED}/{p.relative_to(local)}" in offered
+        and str(p.relative_to(REPO)) not in covered
+    )
+    assert not undeclared, (
+        "copies of the collection's molecule-shared/ files that "
+        f"scripts/vendored-manifest.yml does not cover: {undeclared} — register "
+        "each one as vendored or forked."
     )

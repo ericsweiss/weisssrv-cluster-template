@@ -24,12 +24,44 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
       ports:
         - protocol: TCP
           port: 9300
 
 ---
-# PostgreSQL: reachable only from authentik pods and the dump CronJob.
+# Worker: no HTTP surface, but observability scrapes its metrics port (9300) via
+# the authentik-worker PodMonitor. The server rule above selects
+# component=server only, so the worker needs its own allow.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker-metrics
+  namespace: authentik
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: authentik
+      app.kubernetes.io/component: worker
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9300
+
+---
+# PostgreSQL: 5432 only from authentik pods and the dump CronJob; observability
+# scrapes the postgres_exporter sidecar on 9187 (release.yaml postgresql.metrics).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -53,6 +85,16 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9187
 
 ---
 # Dump CronJob egress: PostgreSQL only (DNS comes from the shared component).
@@ -80,14 +122,9 @@ spec:
           port: 5432
 
 ---
-# Server + worker egress: PostgreSQL, the kube-apiserver (the worker drives the
-# Kubernetes integration / embedded outpost), and the SMTP relay for password
-# resets and notifications. Cluster DNS and public HTTPS (blueprints, GeoIP) come
-# from the shared components in kustomization.yaml.
-#
-# The apiserver rule allowlists the SERVER NODE range, not the in-cluster API
-# VIP: kube-proxy DNATs the VIP before NetworkPolicy evaluation, so a rule on the
-# VIP never matches the packet that is actually sent.
+# Server + worker egress: PostgreSQL, the kube-apiserver and the SMTP relay.
+# The apiserver rule allowlists the server node range, not the in-cluster API
+# VIP, because kube-proxy DNATs the VIP before NetworkPolicy evaluation.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

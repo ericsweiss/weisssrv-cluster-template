@@ -27,10 +27,6 @@
   hosts: k3s_servers
   become: true
   serial: 1
-  vars:
-    # A server OTHER than the one being upgraded; falls back to the first when
-    # it is the only one. Templated lazily, so it tracks each host.
-    k3s_delegate_server: "{{ (groups['k3s_servers'] | difference([inventory_hostname]) | first) | default(groups['k3s_servers'][0]) }}"
   tasks:
     - name: Display the node being updated
       ansible.builtin.debug:
@@ -113,8 +109,6 @@
   hosts: k3s_agents
   become: true
   serial: 1
-  vars:
-    k3s_delegate_server: "{{ (groups['k3s_servers'] | difference([inventory_hostname]) | first) | default(groups['k3s_servers'][0]) }}"
   tasks:
     - name: Display the node being updated
       ansible.builtin.debug:
@@ -148,7 +142,22 @@
             # with it rather than the cluster token.
             K3S_TOKEN: "{{ k3s_agent_token }}"
           changed_when: true
+          # no_log censors the whole result, so the failure is reported by the
+          # assert below instead - it names the host, version and rc.
           no_log: true
+          failed_when: false
+          register: k3s_agent_install
+
+        - name: Verify the staged k3s agent installer succeeded
+          ansible.builtin.assert:
+            that:
+              - (k3s_agent_install.rc | default(1)) == 0
+            fail_msg: >-
+              /root/k3s-install.sh agent failed on {{ inventory_hostname }} for
+              k3s {{ k3s_version }} (rc={{ k3s_agent_install.rc | default('?') }}).
+              Re-run it by hand on the node to see the output; it is censored
+              here because K3S_TOKEN is in the task environment.
+          when: not (k3s_agent_install.skipped | default(false))
 
         # Guards against an earlier bad upgrade (or a future bug) having
         # installed server mode here.
@@ -164,7 +173,6 @@
             enabled: false
             daemon_reload: true
           when: k3s_server_service.stat.exists
-          failed_when: false
 
         - name: Restart the k3s agent
           ansible.builtin.systemd:
@@ -182,16 +190,20 @@
           delegate_to: "{{ k3s_delegate_server }}"
 
         - name: Wait for pods on the node to stabilize
-          # Skip terminal batch pods (never-GC'd Job/CI pods) but still count
-          # Pending/CrashLoop/Evicted and Running-but-not-ready. A phase-only
-          # field selector would do the opposite on both counts.
+          # Mirrors list_unhealthy_pods in scripts/maintenance-lib.sh so this gate
+          # and post-maintenance-verify.sh agree. Inlined because the task
+          # delegates to a k3s server, which has no copy of the repo.
           ansible.builtin.shell: |
             set -o pipefail
             k3s kubectl get pods --all-namespaces \
               --field-selector spec.nodeName={{ inventory_hostname }} \
               --no-headers 2>/dev/null \
-            | awk '
+            | awk -v runner_ns='{{ maintenance_ci_runner_namespaces | default([]) | join(" ") }}' \
+                  -v runner_prefix='{{ maintenance_ci_executor_pod_prefix | default("runner-") }}' '
+                BEGIN { n = split(runner_ns, ns, " "); for (i = 1; i <= n; i++) runner[ns[i]] = 1 }
                 $4 == "Completed" || $4 == "Succeeded" || $4 == "Error" || $4 == "Failed" { next }
+                # Runner JOB pods are pipeline state, not cluster health.
+                ($1 in runner) && index($2, runner_prefix) == 1 { next }
                 { split($3, a, "/"); if ($4 != "Running" || a[1] != a[2]) print }' \
             | wc -l
           args:
@@ -229,33 +241,49 @@
       ansible.builtin.debug:
         msg: "{{ final_nodes.stdout_lines }}"
 
+    # No `|| true`: pipefail must still catch a kubectl failure, and awk on the
+    # STATUS column reports an empty list when every node is Ready.
     - name: Check for NotReady nodes
       ansible.builtin.shell: |
         set -o pipefail
-        k3s kubectl get nodes --no-headers | grep -v " Ready" | awk '{print $1}' || true
+        k3s kubectl get nodes --no-headers | awk '$2 !~ /^Ready/ {print $1}'
       args:
         executable: /bin/bash
       changed_when: false
       register: not_ready_nodes
 
-    - name: Warn about NotReady nodes
-      ansible.builtin.debug:
-        msg: "WARNING: nodes not ready: {{ not_ready_nodes.stdout }}"
-      when: not_ready_nodes.stdout != ""
+    - name: Assert every node is Ready after the upgrade
+      ansible.builtin.assert:
+        that:
+          - not_ready_nodes.stdout == ""
+        fail_msg: "nodes not ready: {{ not_ready_nodes.stdout }}"
+        quiet: true
 
     - name: Check for unhealthy pods
+      # Mirrors list_unhealthy_pods, like the stabilization wait above. The
+      # retries give a just-upgraded node a settle window so the assert below
+      # fails only on a pod that stays unhealthy.
       ansible.builtin.shell: |
         set -o pipefail
         k3s kubectl get pods --all-namespaces --no-headers 2>/dev/null \
-        | awk '
+        | awk -v runner_ns='{{ maintenance_ci_runner_namespaces | default([]) | join(" ") }}' \
+              -v runner_prefix='{{ maintenance_ci_executor_pod_prefix | default("runner-") }}' '
+            BEGIN { n = split(runner_ns, ns, " "); for (i = 1; i <= n; i++) runner[ns[i]] = 1 }
             $4 == "Completed" || $4 == "Succeeded" || $4 == "Error" || $4 == "Failed" { next }
+            # Runner JOB pods are pipeline state, not cluster health.
+            ($1 in runner) && index($2, runner_prefix) == 1 { next }
             { split($3, a, "/"); if ($4 != "Running" || a[1] != a[2]) print $1" "$2 }'
       args:
         executable: /bin/bash
       changed_when: false
       register: unhealthy_pods
+      retries: 6
+      delay: 10
+      until: unhealthy_pods.stdout == ""
 
-    - name: Warn about unhealthy pods
-      ansible.builtin.debug:
-        msg: "WARNING: unhealthy pods: {{ unhealthy_pods.stdout_lines }}"
-      when: unhealthy_pods.stdout != ""
+    - name: Assert no pod is left unhealthy after the upgrade
+      ansible.builtin.assert:
+        that:
+          - unhealthy_pods.stdout == ""
+        fail_msg: "unhealthy pods: {{ unhealthy_pods.stdout_lines }}"
+        quiet: true

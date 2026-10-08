@@ -1,13 +1,19 @@
 ---
-{%- set nas_name = nas_host.split('.')[0] %}
-{%- set smtp_name = smtp_host.split('.')[0] %}
-{%- set resolvers = upstream_dns_servers.split() %}
+{%- from "partials/roster.jinja" import nas_name, smtp_name, resolvers,
+    dns_names with context %}
 # The resolvers: unbound (recursive, DoT upstream) behind AdGuard Home
 # (filtering, rewrites, the LAN-facing :53). Their addresses come from the
 # upstream_dns_servers answer, so this file and hosts.yml cannot drift apart.
 
 # systemd 257+ needs nesting inside an unprivileged container.
 proxmox_lxc_nesting: true
+
+# The SAME from=-restricted key base deploys, not the plain SSH_PUBLIC_KEY the
+# role defaults to, so the two managers agree; the ternary short-circuits when
+# SSH_PUBLIC_KEY is unset (skip, not error).
+proxmox_lxc_ssh_public_keys: >-
+  {% raw %}{{ ssh_authorized_keys | join("\n")
+     if lookup('ansible.builtin.env', 'SSH_PUBLIC_KEY', default='') else '' }}{% endraw %}
 
 # Resolver hosts answer their own queries: base points resolv.conf at 127.0.0.1
 # and falls back to the bootstrap resolvers only until AdGuard is up.
@@ -29,7 +35,7 @@ adguard_home_admin_password: >-
 # where role defaults are out of scope.
 adguard_home_install_path: /opt/AdGuardHome
 
-adguard_home_http_port: 3000     # UI + DoH behind the ingress, which terminates TLS
+adguard_home_http_port: 3000     # UI + DoH over plain HTTP; AdGuard serves TLS on :443
 adguard_home_dns_port: 53
 adguard_home_dot_port: 853
 adguard_home_doq_port: 853
@@ -71,10 +77,12 @@ _dns_service_rewrites:
     answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
   - domain: "connect.{% raw %}{{ internal_domain }}{% endraw %}"
     answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
-  # The identity provider. Every SSO-gated UI redirects here, and Grafana's
-  # OIDC endpoints are this name — without the rewrite the login loop dead-ends
-  # on NXDOMAIN and nobody can sign in to anything.
+  # The identity provider, and the one documented exception to the rule above:
+  # the OIDC issuer is always the EXTERNAL name, so both spellings answer on the
+  # LAN and server-side OIDC discovery skips the WAN hairpin.
   - domain: "auth.{% raw %}{{ internal_domain }}{% endraw %}"
+    answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
+  - domain: "auth.{% raw %}{{ external_domain }}{% endraw %}"
     answer: "{% raw %}{{ metallb_internal_vip }}{% endraw %}"
 
 adguard_home_rewrites: >-
@@ -84,21 +92,25 @@ adguard_home_rewrites: >-
      | dict2items(key_name='domain', value_name='answer')
      + _dns_service_rewrites }}{% endraw %}
 
+# Exempt from the per-client-IP limiter, which DROPS the excess and leaves the
+# client waiting out its resolver timeout. Built from the roster, so a host
+# addition or a renumber cannot leave one limited; sorted for idempotence.
+adguard_home_ratelimit_whitelist: >-
+  {% raw %}{{ _dns_addressed_hosts | map(attribute='ansible_host')
+     | unique | sort | list }}{% endraw %}
+
 # Filtering allowlist entries and PTR records, e.g.
 #   - '@@||example.com^'
 #   - '||<host-ip-in-reverse-octet-order>.in-addr.arpa^$dnsrewrite=NOERROR;PTR;{{ nas_host }}.'
 adguard_home_user_rules: []
 
 # --- Certificates -----------------------------------------------------------
-# acme.sh with a DNS-01 challenge issues the wildcard on the primary resolver
-# and pushes it to each target over SSH with a dedicated, from=-pinned key.
-#
-# `acme_certs_enabled` is set PER HOST (on dns-01 in hosts.yml), not here — a
-# second resolver running it would issue its own wildcard against the same rate
-# limit and push it to everyone else. The role never runs `--issue`: the FIRST
-# wildcard is one manual command it prints when no certificate exists yet
-# (docs/RUNBOOKS.md § Certificates); renewals from then on are automatic.
+# acme.sh + DNS-01 issues the wildcard on the primary only and pushes it over
+# SSH. The first issuance is manual - docs/RUNBOOKS.md Certificates.
 acme_certs_domain: {{ internal_domain }}
+# The ACME CA, which the role already pins to Let's Encrypt. Any name acme.sh
+# accepts, or a CA directory URL.
+# acme_certs_ca_server: letsencrypt
 acme_certs_email: "{% raw %}{{ admin_email }}{% endraw %}"
 acme_certs_ssh_private_key: >-
   {% raw %}{{ lookup('ansible.builtin.env', 'ACME_SSH_PRIVATE_KEY')
@@ -109,32 +121,19 @@ acme_certs_ssh_public_key: >-
 # Without this the distribution key is usable from any source address.
 acme_certs_key_from: {{ resolvers[0] }}
 
-# The AUTHORITY side of the push: the local user whose ~/.ssh holds the
-# distribution private key, and the path the renewal hook reads it from. Written
-# out even though they match the role defaults, because postflight.yml probes
-# this channel and a play sees inventory, never a role's defaults. `ssh_user` on
-# each target below is the login user ON THE TARGET, a different thing.
+# The authority side of the push, written out although they match the role
+# defaults: postflight.yml probes this channel and a play sees inventory only.
 acme_certs_ssh_user: root
 acme_certs_ssh_key_path: /root/.ssh/id_ed25519_certs
 
-# Hosts that receive the wildcard cert — the NAS for NFS-over-TLS, the relay for
-# SMTP submission, every replica resolver for DoT. host_key pins the target's
-# SSH host key: the push carries private-key material, so the channel runs with
-# StrictHostKeyChecking=yes and never accept-new.
-#
-# The pins ship EMPTY because the guests do not exist at first render; an
-# unpinned entry is filtered out of acme_certs_distribution_targets below rather
-# than aborting the play. `task certs:show-host-keys` prints paste-ready values,
-# and `task infra:verify` fails while any target is still unpinned.
-# docs/RUNBOOKS.md § Certificates.
-#
-# The replica addresses come from the upstream_dns_servers answer; the relay and
-# the NAS are read out of the inventory, so re-addressing either host in
-# hosts.yml cannot leave a stale target here.
+# Cert-distribution targets: the NAS for NFS-over-TLS, the relay for SMTP, the
+# replica resolvers for DoT. Host-key pins ship EMPTY and an unpinned entry is
+# filtered out below; `task certs:show-host-keys` prints them.
 _acme_certs_targets:
 {%- for addr in resolvers[1:] %}
-  - host: dns-{{ '%02d' | format(loop.index + 1) }}
-    ip: {{ addr }}
+{%- set replica = dns_names[loop.index] %}
+  - host: {{ replica }}
+    ip: "{% raw %}{{ hostvars['{% endraw %}{{ replica }}{% raw %}'].ansible_host }}{% endraw %}"
     ssh_user: {{ admin_user }}
     host_key: ""
 {%- endfor %}
@@ -153,18 +152,16 @@ acme_certs_distribution_targets: >-
 
 # --- Config replication -----------------------------------------------------
 {%- if resolvers | length > 1 %}
-# dns-01 -> dns-02, over the ingress so the hop is TLS. Enabled on the primary
-# only (adguard_sync_enabled in hosts.yml), and the role takes ONE replica — a
-# third resolver needs its own sync instance. TLS config is deliberately NOT
-# synced: certs are host-local and reconciled per host by adguard_home.
+# Primary -> first replica over each resolver's own HTTPS listener, enabled on
+# the primary only. The role takes ONE replica; TLS config is not synced.
 {%- else %}
-# Inert with a single resolver: adguard_sync_enabled is set to false on the
-# primary in hosts.yml, so the role runs as a no-op. These values are kept
-# self-consistent so that adding a second resolver (a second
-# upstream_dns_servers address) is the only change needed.
+# Inert with a single resolver: adguard_sync_enabled is false on the primary and
+# both URLs resolve to it. Add a second upstream_dns_servers address to change that.
 {%- endif %}
-adguard_sync_origin: "https://dns-01.{% raw %}{{ internal_domain }}{% endraw %}"
-adguard_sync_replica: "https://dns-{{ '%02d' | format(2 if resolvers | length > 1 else 1) }}.{% raw %}{{ internal_domain }}{% endraw %}"
+adguard_sync_origin: "https://{% raw %}{{ groups['dns_primary'][0] }}.{{ internal_domain }}{% endraw %}"
+adguard_sync_replica: >-
+  {% raw %}https://{{ (groups['dns'] | difference(groups['dns_primary']) | first)
+     | default(groups['dns_primary'][0]) }}.{{ internal_domain }}{% endraw %}
 adguard_sync_admin_user: "{% raw %}{{ adguard_home_admin_user }}{% endraw %}"
 adguard_sync_admin_password: "{% raw %}{{ adguard_home_admin_password }}{% endraw %}"
 adguard_sync_features:

@@ -1,0 +1,18 @@
+---
+# authentik-worker metrics. A PodMonitor because the chart ships a Service for
+# the server only; the worker pod declares its own `metrics` port (9300).
+# Scrape allow: networkpolicy.yaml `allow-worker-metrics`.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: authentik-worker
+  namespace: authentik
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: authentik
+      app.kubernetes.io/component: worker
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 60s
+      path: /metrics

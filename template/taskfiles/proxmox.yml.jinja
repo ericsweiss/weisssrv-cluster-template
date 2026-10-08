@@ -1,0 +1,59 @@
+# https://taskfile.dev
+# Proxmox cluster operations: guest autostart, HA rules and storage replication.
+version: '3'
+
+{% raw -%}
+tasks:
+  configure-autostart:
+    desc: Apply autostart and boot order to existing guests (one-time)
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible-playbook -i {{.INVENTORY}} playbooks/proxmox-enable-autostart.yml {{.CLI_ARGS}}
+
+  ha:
+    desc: Configure Proxmox HA rules, resources and storage replication
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible-playbook -i {{.INVENTORY}} playbooks/proxmox-ha.yml {{.CLI_ARGS}}
+
+  ha-check:
+    desc: Check mode — show what proxmox:ha would change
+    dir: "{{.ANSIBLE_DIR}}"
+    cmds:
+      - ansible-playbook -i {{.INVENTORY}} playbooks/proxmox-ha.yml --check --diff {{.CLI_ARGS}}
+
+  ha-status:
+    desc: Show HA manager state, resources and replication across the cluster
+    cmds:
+      - |
+        set -eo pipefail
+        if [ -z "$PVE_HOSTS" ]; then
+          echo "ERROR: PVE_HOSTS is empty — fill in the inventory and run: task hosts:sync"
+          exit 1
+        fi
+        # Bare hostnames (no user@) so ssh-config resolves the login user.
+        # shellcheck disable=SC2086
+        HOST=$(scripts/find-reachable-host.sh $PVE_HOSTS) || {
+          echo "ERROR: cannot reach any Proxmox host"
+          exit 1
+        }
+        echo "Connected via $HOST"
+        echo "=== HA manager status ==="
+        ssh -o BatchMode=yes "$HOST" "sudo ha-manager status" 2>/dev/null || echo "(no HA manager status)"
+        echo "=== HA resources ==="
+        ssh -o BatchMode=yes "$HOST" "sudo ha-manager config" 2>/dev/null | grep -E '^(ct|vm):' || echo "(none configured)"
+        echo "=== HA rules ==="
+        ssh -o BatchMode=yes "$HOST" "sudo ha-manager rules list" 2>/dev/null || echo "(none, or Proxmox < 9)"
+        echo "=== Replication jobs ==="
+        ssh -o BatchMode=yes "$HOST" "sudo pvesr list" 2>/dev/null || echo "(none configured)"
+      - |
+        # Replication STATUS only exists on the source nodes, so ask each host.
+        for host in $PVE_HOSTS; do
+          echo "--- $host ---"
+          if ssh -o ConnectTimeout=2 -o BatchMode=yes "$host" "true" 2>/dev/null; then
+            ssh -o BatchMode=yes "$host" "sudo pvesr status" 2>/dev/null || echo "(no replication status)"
+          else
+            echo "(unreachable)"
+          fi
+        done
+{%- endraw %}

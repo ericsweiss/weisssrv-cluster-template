@@ -1,10 +1,7 @@
 ---
-# Coordinated node reboots. The maintenance playbooks only TOUCH the sentinel
-# file; each node then reboots ITSELF under a cluster-wide lock.
-#
-# Why this instead of the playbook draining nodes: when the playbook runs from
-# an in-cluster CI executor pod, draining the node hosting that pod evicts the
-# playbook and deadlocks the job.
+# Coordinated node reboots: the maintenance playbooks only touch the sentinel
+# file and each node reboots itself under a cluster-wide lock. A playbook that
+# drained nodes would evict its own in-cluster CI executor pod and deadlock.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -13,6 +10,9 @@ metadata:
 spec:
   interval: 30m
   releaseName: kured
+  # Revert out-of-band edits; the repo rule lives in traefik/release.yaml.
+  driftDetection:
+    mode: enabled
   chart:
     spec:
       chart: kured
@@ -38,12 +38,9 @@ spec:
       period: "5m"
       # One node at a time — this is what keeps the etcd quorum safe.
       concurrency: 1
-      # NON-EXPIRING lock. kured's TTL is a pure time-based steal with no health
-      # check on the previous holder, so a finite TTL would let a second server
-      # reboot while the first is still down — exactly the 2-of-3-members-down
-      # outcome concurrency:1 exists to prevent. Cost: a kured pod that dies
-      # holding the lock blocks reboots until an operator clears the annotation
-      # (`kubectl -n kube-system annotate ds/kured weave.works/kured-node-lock-`).
+      # Non-expiring lock: a time-based steal has no health check on the holder,
+      # so it could reboot a second server while the first is still down.
+      # Clearing a stuck lock: docs/RUNBOOKS.md, coordinated reboots.
       lockTtl: "0"
       # Never force: on drain failure leave the sentinel set and retry next
       # period rather than hard-killing pods.
@@ -54,8 +51,8 @@ spec:
       rebootSentinel: "/var/run/reboot-required"
       rebootCommand: "/bin/systemctl reboot"
       annotateNodes: true
-      # Never reboot a node out from under a running CI job pod. Harmless if no
-      # pod carries the label.
+      # Never reboot a node out from under an INFRASTRUCTURE-tier CI job pod;
+      # shared-tier jobs are not blocked. Harmless if no pod carries the label.
       blockingPodSelector:
         - ${cluster_node_label_domain}/runner-class=infrastructure
     # Reboot-orchestration metrics, so a stuck or blocked reboot cycle is
