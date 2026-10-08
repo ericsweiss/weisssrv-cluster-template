@@ -98,6 +98,31 @@ def test_a_kustomization_with_no_content_keys_fails(tmp_path):
     assert "renders nothing" in result.stderr
 
 
+def test_a_transformer_only_kustomization_fails(tmp_path):
+    """CRITICAL: `kustomize build` emits nothing for a kustomization that only
+    transforms, so Flux prunes every object it applied while the gate sees keys."""
+    root = _tree(tmp_path)
+    app = root / "app-00"
+    (app / "configmap.yaml").unlink()
+    (app / "patch.yaml").write_text(
+        yaml.safe_dump({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "example"}})
+    )
+    _write(
+        app,
+        {
+            **_KUSTOMIZATION,
+            "resources": [],
+            "patches": [{"path": "patch.yaml"}],
+            "images": [{"name": "nginx", "newTag": "1.0"}],
+            "commonLabels": {"app": "demo"},
+        },
+    )
+    result = _run(root)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "renders nothing" in result.stderr
+    assert "only transformers" in result.stderr
+
+
 def test_a_patches_only_component_passes(tmp_path):
     """A Component legally carries patches and no resources, so the prune arm
     must not fire on one."""

@@ -38,4 +38,8 @@
     - name: Apply tailscale role
       ansible.builtin.include_role:
         name: weisssrv.infra.tailscale
+      # all.yml demands an auth key for a node that still has to join; the
+      # container never joins (no TAILSCALE_AUTH_KEY), so that guard is off here.
+      vars:
+        tailscale_require_authkey: false
 {%- endif %}

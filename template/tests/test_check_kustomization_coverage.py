@@ -103,6 +103,27 @@ def test_an_emptied_kustomization_is_reported(tree: Path) -> None:
     assert gate.main([str(tree)]) == 1
 
 
+def test_a_transformer_only_kustomization_is_reported(tree: Path) -> None:
+    """CRITICAL: a kustomization that only transforms builds empty, so Flux
+    prunes every object it applied even though the file carries keys."""
+    write(tree.parent, "kubernetes/apps/demo/patch.yaml", "kind: Deployment\n")
+    write(
+        tree.parent,
+        "kubernetes/apps/demo/kustomization.yaml",
+        "resources: []\n"
+        "patches:\n"
+        "  - path: patch.yaml\n"
+        "images:\n"
+        "  - name: nginx\n"
+        "    newTag: '1.0'\n"
+        "commonLabels:\n"
+        "  app: demo\n",
+    )
+    problems = gate.contentless(tree)
+    assert any("only transformers" in p for p in problems), problems
+    assert gate.main([str(tree)]) == 1
+
+
 def test_a_component_carrying_only_patches_is_not_contentless(tree: Path) -> None:
     """A Component legally names no resources, so `patches` alone is content."""
     write(tree.parent, "kubernetes/apps/demo/patch.yaml", "kind: Deployment\n")

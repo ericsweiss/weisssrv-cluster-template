@@ -148,6 +148,38 @@ def test_a_domain_literal_is_reported(repo: Path) -> None:
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
+def test_a_domain_literal_in_a_yml_manifest_is_reported(repo: Path) -> None:
+    """Flux reconciles both suffixes, so a walk that reads only .yaml leaves a
+    manifest unscanned."""
+    write(repo, "kubernetes/apps/demo/route.yml", """\
+        apiVersion: traefik.io/v1alpha1
+        kind: IngressRoute
+        spec:
+          routes:
+            - match: Host(`app.example.lan`)
+        """)
+    assert any("route.yml" in v for v in run(repo))
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_stage_declared_in_a_yml_file_is_still_derived(repo: Path) -> None:
+    """The cluster directory is walked under both suffixes too, or the tree a
+    .yml stage names is scanned by nothing."""
+    write(
+        repo,
+        f"{gate.CLUSTER_DIR}/infrastructure-metrics-server.yml",
+        stage("infrastructure-metrics-server", "kubernetes/infrastructure/metrics-server"),
+    )
+    write(repo, "kubernetes/infrastructure/metrics-server/release.yaml", """\
+        apiVersion: v1
+        kind: ConfigMap
+        data:
+          host: metrics.example.lan
+        """)
+    assert "kubernetes/infrastructure/metrics-server" in gate.substituted_trees(repo)
+    assert any("metrics-server/release.yaml" in v for v in run(repo))
+
+
 def test_a_yaml_comment_is_not_content(repo: Path) -> None:
     write(repo, "kubernetes/apps/demo/cm.yaml", """\
         # app.example.lan is the internal name.

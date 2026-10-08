@@ -937,27 +937,47 @@ def test_address_answers_accept_addresses_outside_the_bands(name, answer):
     assert not message, f"{name} rejected {answer}, which collides with nothing: {message}"
 
 
+def _lan_prefix_message(lan_cidr: str, prefix: str) -> str:
+    return _validator_message(
+        "lan_prefix",
+        lan_prefix=prefix,
+        lan_cidr=lan_cidr,
+        lan_address_range=_computed("lan_address_range", lan_cidr=lan_cidr),
+        reserved_address_bands=_computed("reserved_address_bands"),
+    )
+
+
 @pytest.mark.parametrize(
     "lan_cidr,prefix,rejected",
     [
         ("192.168.0.0/24", "192.168.0", False),
         ("172.20.0.0/16", "172.20.9", False),    # any third octet of a /16
+        ("192.168.0.0/26", "192.168.0", False),  # ends at .63, clear of the roster
         ("192.168.0.0/24", "192.168.1", True),   # the neighbouring /24
         ("192.168.0.0/24", "10.0.0", True),
         ("192.168.0.0/24", "192.168.0.", True),  # shape
+        ("192.168.0.0/28", "192.168.0", True),   # ends at .15, under the roster
+        ("192.168.0.0/27", "192.168.0", True),   # ends at .31, under the roster
     ],
 )
 def test_lan_prefix_must_sit_inside_the_lan(lan_cidr, prefix, rejected):
     """lan_prefix composes every host, guest and scrape target in the starter
     roster, so a prefix outside lan_cidr puts the whole inventory off the network
     the firewall sets and the NFS export allowlist are derived from."""
-    message = _validator_message(
-        "lan_prefix",
-        lan_prefix=prefix,
-        lan_cidr=lan_cidr,
-        lan_address_range=_computed("lan_address_range", lan_cidr=lan_cidr),
-    )
+    message = _lan_prefix_message(lan_cidr, prefix)
     assert bool(message) is rejected, f"{prefix} in {lan_cidr}: {message or 'accepted'}"
+
+
+def test_a_lan_too_narrow_for_the_roster_is_rejected_by_its_top_address():
+    """The `.1` address fits every prefix length, so checking it alone accepts a
+    LAN that the roster's own k3s agent band already overruns."""
+    bands = _computed("reserved_address_bands")
+    top = max(hi for _lo, hi, _name in bands)
+    message = _lan_prefix_message("192.168.0.0/28", "192.168.0")
+    assert f"192.168.0.{top}" in message, (
+        f"the message does not name the address the roster reaches: {message}"
+    )
+    assert "192.168.0.0/28" in message, f"the message does not name the prefix: {message}"
 
 
 @pytest.mark.parametrize(

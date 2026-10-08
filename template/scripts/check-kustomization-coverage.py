@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Assert every manifest beside a kustomization.yaml is named by it, and that
-every kustomization.yaml names something: an unlisted file ships nothing, an
+every kustomization.yaml renders objects: an unlisted file ships nothing, an
 emptied list prunes. Exit 0 clean, 1 a finding, 2 cannot inspect its subject.
 """
 
@@ -37,9 +37,29 @@ _PATH_LIST_KEYS = (
 _GENERATOR_KEYS = ("configMapGenerator", "secretGenerator")
 _GENERATOR_FILE_KEYS = ("files", "envs", "env")
 
-# Any key through which a kustomization or a Component contributes to the render.
-# A document carrying none of them renders nothing.
-_CONTENT_KEYS = (*_PATH_LIST_KEYS, *_GENERATOR_KEYS, "helmCharts", "images", "labels")
+# Fields that put objects INTO the render. A kustomization carrying none of them
+# builds empty however many transformers it lists.
+_RESOURCE_KEYS = (
+    "resources",
+    "bases",
+    "components",
+    "generators",
+    *_GENERATOR_KEYS,
+    "helmCharts",
+)
+
+# Any key through which a Component contributes to the render. A Component only
+# reshapes what its parent lists, so a transformer alone is content there.
+_CONTENT_KEYS = (
+    *_PATH_LIST_KEYS,
+    *_GENERATOR_KEYS,
+    "helmCharts",
+    "images",
+    "labels",
+    "commonLabels",
+    "commonAnnotations",
+    "replicas",
+)
 
 # "kubernetes/<path>": reason — a manifest deliberately not reconciled. Each one
 # is applied by hand, and the file's own header says when.
@@ -147,7 +167,7 @@ def unlisted_siblings(root: Path) -> list[str]:
 
 
 def contentless(root: Path) -> list[str]:
-    """Kustomizations that contribute nothing to the render.
+    """Kustomizations that contribute no objects to the render.
 
     CRITICAL: the Flux Kustomizations prune, so an emptied list does not ship
     less — it deletes every object that file applied.
@@ -155,12 +175,19 @@ def contentless(root: Path) -> list[str]:
     findings = []
     for kustomization in sorted(root.rglob(KUSTOMIZATION)):
         doc = _load(kustomization)
-        if any(doc.get(key) for key in _CONTENT_KEYS):
+        component = doc.get("kind") == "Component"
+        keys = _CONTENT_KEYS if component else _RESOURCE_KEYS
+        if any(doc.get(key) for key in keys):
             continue
-        subject = "Component" if doc.get("kind") == "Component" else "kustomization.yaml"
+        subject = "Component" if component else "kustomization.yaml"
+        detail = (
+            "lists only transformers"
+            if any(doc.get(key) for key in _CONTENT_KEYS)
+            else "names no resources"
+        )
         findings.append(
-            f"{kustomization.relative_to(root.parent).as_posix()}: the {subject} names "
-            "no resources, so it renders nothing and Flux prunes what it applied"
+            f"{kustomization.relative_to(root.parent).as_posix()}: the {subject} "
+            f"{detail}, so it renders nothing and Flux prunes what it applied"
         )
     return findings
 
@@ -199,7 +226,7 @@ def main(argv=None) -> int:
             print(f"  {problem}", file=sys.stderr)
         return 1
     print(
-        f"Every manifest is listed and every kustomization names something "
+        f"Every manifest is listed and every kustomization renders objects "
         f"({count} kustomization.yaml walked under {root})."
     )
     return 0

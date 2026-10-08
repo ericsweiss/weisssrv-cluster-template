@@ -26,6 +26,8 @@ EXTRA_TREES = ("kubernetes/components",)
 
 # Non-YAML generator sources kustomize renders into a substituted manifest.
 GENERATOR_SUFFIXES = (".json", ".py", ".toml", ".tpl")
+# Both YAML spellings: Flux reconciles a .yml manifest exactly like a .yaml one.
+MANIFEST_SUFFIXES = (".yaml", ".yml")
 
 CLUSTER_CONFIG = "kubernetes/infrastructure/sources/cluster-config.yaml"
 ANSIBLE_ALL = "ansible/inventories/prod/group_vars/all.yml"
@@ -102,6 +104,12 @@ REQUIRED_KEYS = (
 )
 
 
+def manifests(base: Path, *, recurse: bool = True) -> list[Path]:
+    """The YAML manifests in a directory, under either suffix."""
+    walk = base.rglob("*") if recurse else base.iterdir()
+    return sorted(p for p in walk if p.is_file() and p.suffix in MANIFEST_SUFFIXES)
+
+
 class Vacuous(Exception):
     """The gate could not inspect its subject — exit 2, never a silent pass."""
 
@@ -129,7 +137,7 @@ def substituted_trees(root: Path) -> tuple[str, ...]:
     if not cluster.is_dir():
         raise Vacuous(f"{CLUSTER_DIR} not found — cannot derive the substituted trees")
     derived: set[str] = set()
-    for path in sorted(cluster.glob("*.yaml")):
+    for path in manifests(cluster, recurse=False):
         for doc in _read_yaml(path, path.relative_to(root).as_posix(), multi=True):
             if not isinstance(doc, dict) or doc.get("kind") != "Kustomization":
                 continue
@@ -280,7 +288,7 @@ def check_literals(root: Path, config: dict, trees: tuple[str, ...]) -> list[str
             violations += scan_text(
                 rel, path.read_text(encoding="utf-8"), domains, {**addresses, **values}
             )
-        for path in sorted(base.rglob("*.yaml")):
+        for path in manifests(base):
             rel = path.relative_to(root).as_posix()
             # cluster-config is where the values are declared, so it is the one
             # manifest that spells them literally.

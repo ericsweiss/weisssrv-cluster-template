@@ -159,26 +159,6 @@ lan_address_range:
     {%- set _size = 2 ** (32 - (lan_cidr.split('/')[1] | int)) -%}
     [{{ _n - (_n % _size) }}, {{ _n - (_n % _size) + _size - 1 }}]
 
-lan_prefix:
-  type: str
-  help: >-
-    First three octets of the LAN, used to compose host addresses in the
-    inventory. Defaults to the network part of lan_cidr; override only if the
-    LAN is not a /24.
-  default: "{{ lan_cidr.split('/')[0].rsplit('.', 1)[0] }}"
-  validator: >-
-    {% if not (lan_prefix | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){2}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
-    lan_prefix must be three octets with no trailing dot, e.g. 192.168.0
-    {% else %}
-    {% set _a = (lan_prefix ~ '.1').split('.') | map('int') | list %}
-    {% set _v = _a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3] %}
-    {% if _v < lan_address_range[0] or _v > lan_address_range[1] %}
-    lan_prefix must sit inside lan_cidr ({{ lan_cidr }}) — every host, guest and
-    scrape target in the starter roster is composed from it, so a prefix outside
-    the LAN puts the whole inventory off the network the firewall sets allow.
-    {% endif %}
-    {% endif %}
-
 reserved_address_bands:
   type: yaml
   help: computed — not asked
@@ -210,6 +190,35 @@ reserved_address_note:
     {%- set _ = _free.append('.' ~ _ns.next ~ '+') -%}
     Pick one outside {{ _taken | join(', ') }}; the starter scheme leaves
     {{ _free | join(', ') }} free, and hosts.yml's header lists the whole layout.
+
+lan_prefix:
+  type: str
+  help: >-
+    First three octets of the LAN, used to compose host addresses in the
+    inventory. Defaults to the network part of lan_cidr; override only if the
+    LAN is not a /24.
+  default: "{{ lan_cidr.split('/')[0].rsplit('.', 1)[0] }}"
+  validator: >-
+    {% if not (lan_prefix | regex_search('^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){2}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$')) %}
+    lan_prefix must be three octets with no trailing dot, e.g. 192.168.0
+    {% else %}
+    {% set _a = (lan_prefix ~ '.1').split('.') | map('int') | list %}
+    {% set _v = _a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3] %}
+    {% set _ns = namespace(top=0) %}
+    {% for _lo, _hi, _name in reserved_address_bands %}
+    {% if _hi > _ns.top %}{% set _ns.top = _hi %}{% endif %}
+    {% endfor %}
+    {% if _v < lan_address_range[0] or _v > lan_address_range[1] %}
+    lan_prefix must sit inside lan_cidr ({{ lan_cidr }}) — every host, guest and
+    scrape target in the starter roster is composed from it, so a prefix outside
+    the LAN puts the whole inventory off the network the firewall sets allow.
+    {% elif _v - 1 + _ns.top > lan_address_range[1] %}
+    lan_cidr ({{ lan_cidr }}) is too narrow for the starter roster: composed from
+    lan_prefix {{ lan_prefix }} it reaches {{ lan_prefix }}.{{ _ns.top }}, which is
+    outside the LAN, so the k3s agents would be created off the network. Answer a
+    wider lan_cidr.
+    {% endif %}
+    {% endif %}
 
 # RULE: a validator may only compare an answer against answers declared above
 # it; a forward reference is undefined interactively. The gateway-vs-VIP
