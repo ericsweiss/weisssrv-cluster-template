@@ -1,7 +1,7 @@
 ---
 # CI for the template itself. Generic jobs come from the shared library, and
 # every job is tag-less and non-root safe so it lands on the shared runner.
-# `render-validate` is the gate that matters; see docs/VERSIONING.md.
+# `validate-rendered-cluster` is the gate that matters; see docs/VERSIONING.md.
 stages:
   - lint
   - test
@@ -47,7 +47,7 @@ variables:
 
 include:
   # Only genuine YAML: files under template/ that carry the .jinja suffix are
-  # Jinja sources, not documents. The render-validate job below yamllints the
+  # Jinja sources, not documents. validate-rendered-cluster below yamllints the
   # rendered tree, which is where template/ actually gets covered.
   - project: eric/weisssrv-lib
     ref: v0.18.0
@@ -134,6 +134,7 @@ include:
     ref: v0.18.0
     file: /ci/lint/docs-link-check.yml
     inputs:
+      job_name: lint-docs-links
       tags: []
       changes:
         - "docs/**/*"
@@ -192,7 +193,7 @@ include:
           optional: true
         - job: python-tests
           optional: true
-        - job: render-validate
+        - job: validate-rendered-cluster
           optional: true
 
   # Cuts this template's tag from the commits merged to main - the tag a
@@ -204,7 +205,7 @@ include:
     inputs:
       tags: []
 
-render-validate:
+validate-rendered-cluster:
   stage: test
   image: python:3.13
   tags: []

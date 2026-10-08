@@ -15,6 +15,7 @@ vendored:
     consumer: ansible/molecule/tasks/prepare-base.yml
   - scripts/check-backup-artifact-apps.py
   - scripts/check-cluster-invariants.py
+  - scripts/check-ci-include-job-names.py
   - scripts/check-comment-length.py
   - scripts/check-dashboards.py
   - scripts/check-default-deny-coverage.py

@@ -43,7 +43,7 @@ First time only, in this order. Each phase leaves a working state.
    defaults in `group_vars/all.yml`. Then `task hosts:sync`,
    `task flux:sync-versions` and `task flux:sync-host-log-staleness`,
    committing the generated files. All three are drift-gated by `task lint`
-   and the CI repo-sync job, so skipping one reds step 4. An LXC
+   and the CI check-generated-files job, so skipping one reds step 4. An LXC
    application host must also be listed under `lxc_containers`: the maintenance
    reboot play asserts it determined an installed kernel, and an LXC has no
    kernel package of its own.

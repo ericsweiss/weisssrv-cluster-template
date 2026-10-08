@@ -575,7 +575,7 @@ generated. LogQL cannot group by label and alert on absence, so per-host
 coverage is one rule per host, derived from the `alloy_host` play by
 `scripts/generate-host-log-staleness.py`. Run
 `task flux:sync-host-log-staleness` after any inventory change and commit the
-result: `task lint` (`lint:repo-sync`) and the CI `repo-sync` job fail until you
+result: `task lint` (`lint:repo-sync`) and the CI `check-generated-files` job fail until you
 do, including on a freshly generated repository.
 
 What the generator emits per host:

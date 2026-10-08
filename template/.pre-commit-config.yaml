@@ -27,8 +27,8 @@ repos:
           ansible/molecule/tasks/container-warmup\.yml |
           ansible/molecule/tasks/prepare-apt-disable\.yml |
           ansible/molecule/tasks/prepare-base\.yml | lint/yamllint-relaxed\.yml | scripts/(
-          check-backup-artifact-apps\.py | check-cluster-invariants\.py |
-          check-comment-length\.py | check-dashboards\.py |
+          check-backup-artifact-apps\.py | check-ci-include-job-names\.py |
+          check-cluster-invariants\.py | check-comment-length\.py | check-dashboards\.py |
           check-default-deny-coverage\.py | check-deploy-coverage\.sh | check-doc-links\.py
           | check-helm-repo-parity\.py | check-hpa-vpa-invariant\.py | check-lib-pins\.py |
           check-netpol-except-parity\.py | check-nfs-tls\.py | check-pvc-storageclass\.py |

@@ -365,6 +365,7 @@ include:
     ref: {{ lib_ref }}
     file: /ci/lint/docs-link-check.yml
     inputs:
+      job_name: lint-docs-links
       tags: ["{{ runner_tag }}"]
       changes:
         - "**/*.md"
@@ -620,8 +621,8 @@ flux-version-pin:
 
 # Three files here are OUTPUTS, not sources, and nothing else compares them
 # against what generates them, so a stale copy ships green. Regenerate and diff.
-# What each arm covers: docs/ci-pipeline.md § repo-sync.
-repo-sync:
+# What each arm covers: docs/ci-pipeline.md § check-generated-files.
+check-generated-files:
   extends: .pyyaml-gate
   script:
     - |
@@ -759,7 +760,7 @@ kustomization-coverage:
 
 # A scenario directory with no `parallel:matrix` entry never runs, and reads as
 # green because nothing executed it. Mirrors `task lint:integration-matrix`.
-integration-matrix-coverage:
+check-integration-matrix:
   extends: .pyyaml-gate
   script:
     - python3 scripts/check-integration-matrix-coverage.py
@@ -896,7 +897,7 @@ deploy-coverage:
 # Credential-free preflight over the deploy jobs: every `ansible-playbook` call
 # names a playbook that exists and every `--tags` selection reaches a task. A tag
 # matching nothing makes a deploy job a green no-op.
-deploy-preflight:
+check-deploy-playbooks:
   stage: validate
   needs: []
   # The FULL python image: ansible-galaxy installs weisssrv.infra from a git+ URL.
@@ -936,7 +937,7 @@ deploy-preflight:
 # The collection's roles assert their required inputs. An opt-in role invoked
 # with its flag set nowhere, and an asserted input with no default and no
 # assignment, fail on every host the role touches. Mirrors `task lint:role-inputs`.
-role-inputs:
+check-role-inputs:
   stage: lint
   needs: []
   # The FULL python image: ansible-galaxy installs weisssrv.infra from a git+ URL.
@@ -995,7 +996,7 @@ validation-gate:
       optional: true
     - job: flux-lint
       optional: true
-    - job: docs-link-check
+    - job: lint-docs-links
       optional: true
     - job: terraform-fmt
       optional: true
@@ -1005,11 +1006,11 @@ validation-gate:
       optional: true
     - job: version-coverage
       optional: true
-    - job: repo-sync
+    - job: check-generated-files
       optional: true
     - job: deploy-coverage
       optional: true
-    - job: deploy-preflight
+    - job: check-deploy-playbooks
       optional: true
     - job: netpol-parity
       optional: true
@@ -1023,9 +1024,9 @@ validation-gate:
       optional: true
     - job: flux-version-pin
       optional: true
-    - job: integration-matrix-coverage
+    - job: check-integration-matrix
       optional: true
-    - job: role-inputs
+    - job: check-role-inputs
       optional: true
     # Expands to one need per matrix instance, well under GitLab's 50-need cap.
     - job: integration-tests
@@ -1458,17 +1459,17 @@ unifi-drift-plan:
         - "terraform/unifi/**/*"
 {% endif %}
 # ==============================================================================
-# VERIFY STAGE — read-only, runs after the deploy stage whatever it did.
+# VERIFY STAGE — verification only, runs after the deploy stage whatever it did.
 # ==============================================================================
 
 # The postflight play: SSH reachability, disk headroom and service state on every
-# managed host. It changes nothing, so a failure means the deploy left the fleet
-# in a state the assertions reject.
+# managed host. Its only write is one adguardhome-sync run, so a failure means the
+# deploy left the fleet in a state the assertions reject.
 deploy-verify:
   stage: verify
   # Relative to the whole pipeline: a main pipeline red at lint still runs this,
-  # verifying hosts nothing was deployed to. Read-only, so that is one more
-  # failure surface on an already-red pipeline rather than a risk.
+  # verifying hosts nothing was deployed to. It deploys nothing, so that is one
+  # more failure surface on an already-red pipeline rather than a risk.
   when: always
   extends: .deploy-base
   script:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -40,6 +41,28 @@ def _lib_root() -> Path:
         "$WEISSSRV_LIB_PATH. This gate never skips: an ungated vendored copy is "
         "exactly the drift it exists to catch."
     )
+
+
+def lib_file(relpath: str, ref: str) -> str:
+    """A library file's text at `ref`, or from the checkout's working tree when
+    that ref is not available locally. Shared by the suites that read a library
+    include's input defaults at the pin."""
+    lib = _lib_root()
+    at_ref = subprocess.run(
+        ["git", "-C", str(lib), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+        capture_output=True,
+        check=False,
+    )
+    if at_ref.returncode != 0:
+        return (lib / relpath).read_text(encoding="utf-8")
+    blob = subprocess.run(
+        ["git", "-C", str(lib), "show", f"{ref}:{relpath}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert blob.returncode == 0, f"{relpath} is absent at {ref}:\n{blob.stderr}"
+    return blob.stdout
 
 
 def load_script(name: str | Path):

@@ -180,6 +180,36 @@ def test_a_row_naming_two_scripts_yields_both():
     assert md_tables.table_names(table, "## Heading") == {"a.py", "b.sh"}
 
 
+SITE_DATA_HEADING = "## Site data"
+
+
+def undeclared_baselines() -> set[str]:
+    """`.txt` files under template/scripts/ the README's Site data table omits.
+
+    validate_render's orphan scan admits site data either by suffix or by a row
+    naming it, and `.txt` is outside its suffix allowlist.
+    """
+    declared = md_tables.table_names(
+        README.read_text(encoding="utf-8"), SITE_DATA_HEADING, (".txt",)
+    )
+    shipped = {path.name for path in RENDERED_SCRIPTS.glob("*.txt") if path.is_file()}
+    return shipped - declared
+
+
+def test_every_shipped_baseline_file_is_declared_as_site_data():
+    """An undeclared one reads as an orphan and reds validate-rendered-cluster."""
+    assert undeclared_baselines() == set()
+
+
+def test_an_undeclared_baseline_file_is_caught():
+    """Mutation case: the gate must name a baseline no row declares."""
+    declared = md_tables.table_names(
+        README.read_text(encoding="utf-8"), SITE_DATA_HEADING, (".txt",)
+    )
+    assert {"invented-expected-skipped.txt"} - declared == {"invented-expected-skipped.txt"}
+    assert declared
+
+
 # --------------------------------------------------------------------------
 # Every Python gate is either a registered library copy or template-owned
 # --------------------------------------------------------------------------

@@ -10,10 +10,10 @@ Two pipelines are involved and they are easy to confuse:
 The generated pipeline is documented from the operator's side in the rendered
 repository at `docs/ci-pipeline.md`.
 
-## The gate that matters: `render-validate`
+## The gate that matters: `validate-rendered-cluster`
 
 Structural tests can only prove that files exist and match each other. The
-`render-validate` job proves the output is *usable*. It renders the template
+`validate-rendered-cluster` job proves the output is *usable*. It renders the template
 **twice** — once from `tests/answers-weisssrv-shaped.yml` and once from
 `tests/answers-unlike.yml` — and runs the validator over each, because a value
 hard-coded from the reference cluster renders byte-identically to a correct
@@ -66,7 +66,7 @@ manifests nobody edited, and the template change that caused it went green.
 
 The alert rules and the Alertmanager config live inside a HelmRelease's
 `.spec.values`, where `kubeconform` cannot reach them, so that last arm needs
-`promtool` and `amtool`. `render-validate` fetches both, pinned and
+`promtool` and `amtool`. `validate-rendered-cluster` fetches both, pinned and
 sha256-verified like `kubeconform`, `kustomize` and `terraform`; a local run
 without them skips that arm and says so.
 
@@ -153,7 +153,7 @@ then printed as a warning and the checks still run.
 ## Pipeline policy
 
 MR refs set `auto_cancel.on_new_commit: interruptible`, so a new push cancels
-the previous pipeline's interruptible jobs instead of letting `render-validate`,
+the previous pipeline's interruptible jobs instead of letting `validate-rendered-cluster`,
 the heaviest job, pile up on the quota-capped shared runner. GitLab's project
 default, `conservative`, stops cancelling as soon as any non-interruptible job
 has started, which leaves them running.
@@ -162,7 +162,7 @@ has started, which leaves them running.
 `release` cuts the tag every generated cluster's `copier update` resolves to,
 and a cancelled one leaves that tag uncut behind a green pipeline.
 
-`render-validate` retries `runner_system_failure` and `scheduler_failure`: it
+`validate-rendered-cluster` retries `runner_system_failure` and `scheduler_failure`: it
 requests the largest limits in the pipeline and is the first job refused at
 pod-creation time when several pipelines overlap, which arrives as a system
 failure rather than a test failure.
@@ -199,7 +199,7 @@ optional modules forced on, and the same answers with one of them on. Without
 the modules-on render, every file those answers gate would be outside the scan,
 because the only render that carries them is the one whose values are the
 needles. The mixed render takes the arms a conditional coupling two modules has,
-which neither an all-on nor an all-off render reaches; `render-validate` puts
+which neither an all-on nor an all-off render reaches; `validate-rendered-cluster` puts
 the same set through the toolchain with `--data`, and
 `test_ci_validates_the_same_mixed_module_set_the_suite_renders` holds the two
 together.
@@ -231,10 +231,10 @@ include that drifts from `variables.WEISSSRV_LIB_REF`.
 
 `include:` is resolved before job variables exist, so each entry repeats the tag
 as a literal rather than reading `variables.WEISSSRV_LIB_REF`. The ref
-`render-validate` actually clones is `copier.yml`'s `lib_ref` default, so the
+`validate-rendered-cluster` actually clones is `copier.yml`'s `lib_ref` default, so the
 gate, the render and the generated `requirements.yml` cannot disagree.
 
-`render-validate` clones the library with `CI_JOB_TOKEN`, so the job does not
+`validate-rendered-cluster` clones the library with `CI_JOB_TOKEN`, so the job does not
 depend on anonymous access — the library project must list this project on its
 CI/CD job-token allowlist if it is not public. It also sets `USER` and
 `LOGNAME`: the runner pod's uid has no passwd entry, and ansible resolves the
@@ -245,7 +245,7 @@ playbook.
 
 `release` is the LAST stage of this repository's own pipeline, and the
 `semantic-release` job sets no `needs:` — stage ordering is what gates a tag on
-every job above it, `render-validate` included. Merging to `main` reads the
+every job above it, `validate-rendered-cluster` included. Merging to `main` reads the
 conventional commits since the last tag, cuts `vMAJOR.MINOR.PATCH`, and creates
 the GitLab Release with generated notes in one Releases-API call; nothing
 releasable means no tag and a green pipeline.

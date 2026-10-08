@@ -1458,7 +1458,7 @@ spec:
             rules:
               # Disabled upstream. for: 15m rides out a transient receiver
               # timeout; the inner `> 0` keeps a healthy gossip peer from flooring min().
-              # Taken from kube-prometheus-stack 92.0.0
+              # Taken from kube-prometheus-stack 92.1.0
               - alert: AlertmanagerClusterFailedToSendAlerts
                 expr: >-
                   min by (namespace, service, integration) (

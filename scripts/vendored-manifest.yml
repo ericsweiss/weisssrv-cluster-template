@@ -35,6 +35,9 @@ vendored:
     consumer: template/scripts/check-backup-artifact-apps.py
   - lib: scripts/check-cluster-invariants.py
     consumer: template/scripts/check-cluster-invariants.py
+  # Imports ci_yaml.py from its own directory, registered below.
+  - lib: scripts/check-ci-include-job-names.py
+    consumer: template/scripts/check-ci-include-job-names.py
   - lib: scripts/check-comment-length.py
     consumer: template/scripts/check-comment-length.py
   - lib: scripts/check-dashboards.py

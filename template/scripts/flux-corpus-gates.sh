@@ -96,7 +96,11 @@ if ! grep -qE '^kind:' "$CORPUS"; then
 fi
 
 echo "=== Checking HPA/VPA invariant ==="
+# --allow-unjudged-vpa-caps: a chart renders most of these targets, so the
+# corpus carries no limit to compare the cap against. validate-helm-values.py
+# judges those caps against the chart-rendered limits.
 python3 scripts/check-hpa-vpa-invariant.py --require-chart-native-vpas \
+  --allow-unjudged-vpa-caps \
   --policy-config scripts/autoscaling-policy.yaml < "$CORPUS" || record $? check-hpa-vpa-invariant.py
 echo "=== Checking scrape/NetworkPolicy invariant ==="
 python3 scripts/check-scrape-netpol.py < "$CORPUS" || record $? check-scrape-netpol.py

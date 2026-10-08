@@ -460,7 +460,7 @@ def test_every_question_is_named_in_an_operator_doc():
 FIXTURES = ("answers-weisssrv-shaped.yml", "answers-unlike.yml")
 
 # lib_ref is deliberately left unanswered: copier.yml's default is the single
-# source of the library pin, and inheriting it makes render-validate exercise
+# source of the library pin, and inheriting it makes validate-rendered-cluster exercise
 # exactly the released tag — so there is no second literal to keep in step.
 INHERITED = {"lib_ref"}
 
@@ -1118,7 +1118,7 @@ def test_a_gitleaks_config_without_extend_is_reported():
 
 def test_lib_ref_is_inherited_by_the_validated_fixture():
     """The fixture does not answer lib_ref, so the render inherits copier.yml's
-    default and render-validate exercises the released pin by construction."""
+    default and validate-rendered-cluster exercises the released pin by construction."""
     fixture = yaml.safe_load((REPO_ROOT / "tests" / "answers-weisssrv-shaped.yml").read_text())
     assert "lib_ref" not in fixture, (
         "answers-weisssrv-shaped.yml should inherit lib_ref from copier.yml's "
@@ -1141,7 +1141,7 @@ def test_this_repository_applies_its_own_lib_pin_gate():
     assert problems == [], "\n".join(problems)
     assert variables.get("WEISSSRV_LIB_REF") == QUESTIONS["lib_ref"]["default"], (
         "variables.WEISSSRV_LIB_REF and copier.yml's lib_ref default disagree — "
-        "render-validate clones the latter, so the includes would be gated "
+        "validate-rendered-cluster clones the latter, so the includes would be gated "
         "against a library this repository never exercises"
     )
 

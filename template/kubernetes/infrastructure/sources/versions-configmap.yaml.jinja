@@ -23,15 +23,15 @@ data:
   helm_chart_versions_cert_manager: v1.21.2
   helm_chart_versions_external_dns: 1.23.0
   helm_chart_versions_external_secrets: 2.12.0
-  helm_chart_versions_kube_prometheus_stack: 92.0.0
+  helm_chart_versions_kube_prometheus_stack: 92.1.0
   helm_chart_versions_kured: 6.1.0
-  helm_chart_versions_loki: 18.13.8
+  helm_chart_versions_loki: 18.14.0
   helm_chart_versions_metallb: 0.15.3
 {%- if gpu == 'nvidia' %}
   helm_chart_versions_nvidia_device_plugin: 0.20.1
 {%- endif %}
   helm_chart_versions_onepassword_connect: 2.4.2
-  helm_chart_versions_prometheus_blackbox_exporter: 11.19.1
+  helm_chart_versions_prometheus_blackbox_exporter: 11.20.0
   helm_chart_versions_prometheus_operator_crds: 32.0.1
   helm_chart_versions_reloader: 2.2.18
 {%- if vpn_tailscale %}
@@ -48,7 +48,7 @@ data:
   postgresql_version: 18.6-trixie
   registry_cache_version: 3.1.2
 {%- if vpn_tailscale %}
-  tailscale_version: 1.102.5
+  tailscale_version: 1.104.1
 {%- endif %}
 kind: ConfigMap
 metadata:

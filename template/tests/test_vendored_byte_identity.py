@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import GATE_RELPATH, REPO, SCRIPTS, _lib_root
+from conftest import GATE_RELPATH, REPO, SCRIPTS, _lib_root, lib_file
 
 MANIFEST = SCRIPTS / "vendored-manifest.yml"
 
@@ -204,19 +204,8 @@ DOCKER_BUILD_RELPATH = "ci/build/docker-build.yml"
 
 
 def _lib_file(relpath: str) -> str:
-    """A library file's text at the pinned ref, or from the checkout's working
-    tree when that ref is not available locally."""
-    lib = _lib_root()
-    ref = _pinned_ref()
-    if _ref_available(lib, ref):
-        blob = subprocess.run(
-            ["git", "-C", str(lib), "show", f"{ref}:{relpath}"],
-            capture_output=True,
-            text=True,
-        )
-        assert blob.returncode == 0, f"{relpath} is absent at {ref}:\n{blob.stderr}"
-        return blob.stdout
-    return (lib / relpath).read_text()
+    """A library file's text at the pinned ref."""
+    return lib_file(relpath, _pinned_ref())
 
 
 @pytest.mark.skipif(

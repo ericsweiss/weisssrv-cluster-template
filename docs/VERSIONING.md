@@ -60,7 +60,7 @@ section — read it before running `copier update`.
 
 `lib_ref` is an answer, so a generated cluster can pin any library tag it likes —
 but exactly **one** pair per template release is ever proved to work, and that is
-the pair `tests/answers-weisssrv-shaped.yml` holds. `render-validate` renders the
+the pair `tests/answers-weisssrv-shaped.yml` holds. `validate-rendered-cluster` renders the
 template with that fixture and runs the real toolchain over the output against a
 checkout of the library at that ref, so the fixture is the record of what was
 tested, not a preference.
@@ -188,7 +188,7 @@ copier question is a breaking change even when the diff is one word.
 No releasable commit means no release (exit 0), so re-running on an
 already-released commit is a no-op. The `release` stage is declared **last** and
 the job sets no `needs:`, so a tag is only ever cut from a commit where
-`render-validate` — both fixtures, the real toolchain — went green.
+`validate-rendered-cluster` — both fixtures, the real toolchain — went green.
 
 ## Vendored copies
 

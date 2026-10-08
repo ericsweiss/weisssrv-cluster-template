@@ -54,12 +54,13 @@
       # Required: a digest-bearing image name must still answer at the `docker`
       # host DOCKER_HOST points at.
       alias: docker
-      # --mtu: the daemon's bridge inside a pod must not exceed the pod interface
-      # MTU (1420 on flannel over WireGuard or VXLAN); 1500 black-holes large TLS
-      # frames and surfaces as connection resets on fetches from the containers.
+      # The pod interface MTU is 1420 (flannel over WireGuard); a 1500 bridge
+      # black-holes large TLS frames. --mtu covers the default bridge, the
+      # default-network-opt covers the user-defined networks molecule creates.
       command:
         - "--insecure-registry={{ registry_cache }}"
         - "--mtu=1420"
+        - "--default-network-opt=bridge=com.docker.network.driver.mtu=1420"
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""

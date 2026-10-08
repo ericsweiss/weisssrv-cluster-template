@@ -488,6 +488,87 @@ def test_an_unoffered_library_twin_in_the_render_is_not_reported(tmp_path, capsy
         validate_render.check_rendered_vendored(render, lib_path=lib)
 
 
+_ORPHAN_README = """\
+# scripts/
+
+## Local helpers
+
+| Script | Used by |
+|---|---|
+| `collect-state.sh` | an operator |
+
+## Site data
+
+| File | Read by | Notes |
+|---|---|---|
+| `version-registry.py` | `check-versions.py` | Which upstreams to watch |
+| `kubeconform-expected-skipped.txt` | `kubeconform-skipped.py` | Kinds allowed no schema |
+| `hosts-env-map.yml` | `generate-hosts-env.py` | Inventory group to variable |
+"""
+
+
+def _orphan_scan(tmp_path: Path, readme: str) -> list[str]:
+    """The orphan arm over a scripts/ directory holding one of each shape."""
+    lib_scripts = tmp_path / "lib" / "scripts"
+    lib_scripts.mkdir(parents=True)
+    (lib_scripts / "kubeconform-skipped.py").write_text("")
+    scripts = tmp_path / "render" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "README.md").write_text(readme, encoding="utf-8")
+    for name in (
+        "collect-state.sh",
+        "kubeconform-skipped.py",
+        "kubeconform-expected-skipped.txt",
+        "version-registry.py",
+        "hosts-env-map.yml",
+    ):
+        (scripts / name).write_text("")
+    return validate_render._orphaned_scripts(
+        scripts,
+        lib_scripts,
+        local=validate_render.render_local_scripts(scripts),
+        site_data=validate_render.render_site_data(scripts),
+    )
+
+
+def test_the_orphan_scan_accepts_site_data_the_readme_table_names(tmp_path):
+    """A baseline a vendored tool reads has no library twin and is not a helper,
+    so the Site data table is the only thing that can declare it."""
+    assert _orphan_scan(tmp_path, _ORPHAN_README) == []
+
+
+def test_the_orphan_scan_reports_an_undeclared_baseline(tmp_path):
+    """Mutation case: drop the .txt row and the file reads as an orphan, which is
+    how an undeclared data file reaches a generated cluster."""
+    without = _ORPHAN_README.replace(
+        "| `kubeconform-expected-skipped.txt` | `kubeconform-skipped.py` | Kinds allowed no schema |\n",
+        "",
+    )
+    problems = _orphan_scan(tmp_path, without)
+    assert len(problems) == 1
+    assert "kubeconform-expected-skipped.txt" in problems[0]
+    assert "not declared local" in problems[0]
+
+
+def test_the_site_data_table_is_read_by_name_not_by_suffix(tmp_path):
+    """`.yml` site data passes on its suffix alone, so only the named suffixes
+    may come out of the table — a row's suffix is not what admits the file."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "README.md").write_text(_ORPHAN_README, encoding="utf-8")
+    assert validate_render.render_site_data(scripts) == {
+        "version-registry.py",
+        "kubeconform-expected-skipped.txt",
+    }
+
+
+def test_the_site_data_list_needs_the_rendered_readme(tmp_path):
+    """Treating a missing README as "nothing declared" would turn every data file
+    into an orphan and bury the real finding."""
+    with pytest.raises(validate_render.Failure, match="site-data list"):
+        validate_render.render_site_data(tmp_path)
+
+
 def test_the_render_vendored_gate_needs_a_library_checkout(tmp_path):
     """Skipping on a missing checkout would leave the render's copies ungated."""
     with pytest.raises(validate_render.Failure, match="--lib-path is required"):

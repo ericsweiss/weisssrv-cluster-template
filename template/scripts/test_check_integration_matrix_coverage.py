@@ -66,9 +66,9 @@ def _with(args: list[str], flag: str, value: str) -> list[str]:
 
 
 def test_this_repository_passes_on_the_real_matrix():
-    """The invocation `task lint` and repo-policy-checks make: this repository's
-    own included job file and integration tree are the subject, and a fixture
-    cannot catch a rename in either of them."""
+    """The invocation `task lint` and check-integration-matrix make: this
+    repository's own included job file and integration tree are the subject, and
+    a fixture cannot catch a rename in either of them."""
     res = _run(["--ci-file", ".gitlab/ci/integration-jobs.yml"])
     assert res.returncode == 0, f"stdout:\n{res.stdout}\nstderr:\n{res.stderr}"
 

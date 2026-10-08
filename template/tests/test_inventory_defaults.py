@@ -49,7 +49,7 @@ _ANSWER_DRIVEN = {
     "tailscale_enabled",
 }
 
-# Opt-in role flags the render-validate role-opt-ins check requires the
+# Opt-in role flags the validate-rendered-cluster role-opt-ins check requires the
 # inventory to spell out: a role invoked unconditionally whose flag is set
 # nowhere skips every task and still reports success.
 _REQUIRED_BY_OPT_IN_GATE = {

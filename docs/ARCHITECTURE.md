@@ -161,8 +161,9 @@ whole stage down rather than applying a blank hostname. The repo-side gate below
 exists to catch it before merge, not as the only catch.
 
 `cluster-versions` is generated from `group_vars/all.yml` by
-`task flux:sync-versions` and drift-gated by the generated pipeline's `repo-sync`
-job (and by `task lint:repo-sync` locally), which regenerates it and diffs — so a
+`task flux:sync-versions` and drift-gated by the generated pipeline's
+`check-generated-files` job (and by `task lint:repo-sync` locally), which
+regenerates it and diffs — so a
 version can only change in one place. Without that gate the stale case is
 silent: this file is what `flux-lint` substitutes *from*, so it renders and
 passes on the old value, while `maintenance:check-versions` reads `all.yml` and

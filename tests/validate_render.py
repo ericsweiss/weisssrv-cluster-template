@@ -597,6 +597,10 @@ def check_cluster_gates(render: Path, **_kw) -> None:
 _SITE_DATA_SUFFIXES = {".yml", ".yaml", ".env", ".conf", ".toml"}
 
 _LOCAL_HELPERS_HEADING = "## Local helpers"
+_SITE_DATA_HEADING = "## Site data"
+# Site-data suffixes the allowlist above does not cover, so the table has to
+# name the file: a .py registry, a .txt baseline.
+_NAMED_DATA_SUFFIXES = (".py", ".txt")
 
 
 def render_local_scripts(scripts: Path) -> set[str]:
@@ -616,6 +620,20 @@ def render_local_scripts(scripts: Path) -> set[str]:
         )
     local.update(p.name for p in scripts.glob("test_*.py"))
     return local
+
+
+def render_site_data(scripts: Path) -> set[str]:
+    """Configuration a vendored tool reads, from its own scripts/README.md.
+
+    The README's "Site data" table is the declaration. An empty table only makes
+    the orphan scan stricter, so it is not a finding of its own.
+    """
+    readme = scripts / "README.md"
+    if not readme.is_file():
+        raise Failure(f"{readme} does not exist — the site-data list cannot be read")
+    return md_tables.table_names(
+        readme.read_text(encoding="utf-8"), _SITE_DATA_HEADING, _NAMED_DATA_SUFFIXES
+    )
 
 
 def _orphaned_scripts(
@@ -670,7 +688,7 @@ def check_vendored(
         # Scripts a generated cluster owns: they read its inventory and its
         # cluster-config, so they have no library twin.
         local=render_local_scripts(render / "scripts"),
-        site_data={"version-registry.py"},
+        site_data=render_site_data(render / "scripts"),
     )
     if self_checks:
         own_scripts = render_cluster.REPO_ROOT / "scripts"
@@ -953,7 +971,7 @@ def _pinned_lib_ref() -> str:
     """The library ref every lib-reading gate here has as its subject.
 
     The fixtures inherit lib_ref from copier.yml's default (the single source),
-    so that default is the ref render-validate clones.
+    so that default is the ref validate-rendered-cluster clones.
     """
     root = render_cluster.REPO_ROOT
     return yaml.safe_load((root / "copier.yml").read_text())["lib_ref"]["default"]
@@ -1029,7 +1047,7 @@ def _assert_one_lib_ref() -> list[str]:
         return [
             "this template's own .gitlab-ci.yml pins library ref(s) "
             f"{sorted(refs)} but copier.yml's lib_ref default is {expected} — "
-            "render-validate clones only the latter, so "
+            "validate-rendered-cluster clones only the latter, so "
             "the vendored-script comparison below would run against a ref the "
             "repository's own copies were never taken from"
         ]

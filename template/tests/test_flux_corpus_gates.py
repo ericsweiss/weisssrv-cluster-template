@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -146,6 +147,109 @@ def test_an_empty_corpus_is_an_operator_error(tmp_path: Path) -> None:
     )
     assert result.returncode == 2, f"{result.stdout}{result.stderr}"
     assert "holds no Kubernetes object" in result.stderr
+
+
+_HPA_VPA_GATE = "check-hpa-vpa-invariant.py"
+
+# A VPA capping memory on a target the corpus renders no limit for: the shape
+# every chart-rendered workload has here, and the one the gate will not judge.
+CORPUS_WITH_AN_UNJUDGED_CAP = """\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: demo
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: example/app:1
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: app
+  namespace: demo
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: app
+  updatePolicy:
+    updateMode: "Off"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: app
+        maxAllowed:
+          memory: 1Gi
+"""
+
+
+def _hpa_vpa_flags() -> list[str]:
+    """The flags the wrapper passes the HPA/VPA gate, read from the script.
+
+    Read rather than restated, so a flag dropped from the wrapper fails the
+    cases below instead of only changing what they exercise.
+    """
+    text = GATES.read_text(encoding="utf-8").replace("\\\n", " ")
+    marker = f"python3 scripts/{_HPA_VPA_GATE}"
+    assert marker in text, f"the wrapper no longer runs {_HPA_VPA_GATE}"
+    call = text.split(marker, 1)[1].split("||", 1)[0]
+    return [word for word in call.split() if word.startswith("--") or word.endswith(".yaml")]
+
+
+def _pointed_at(flags: list[str], policy: Path) -> list[str]:
+    """The same flags against a policy declaring no chart-native target, so only
+    the cap arm can decide the exit code."""
+    swapped = list(flags)
+    assert "--policy-config" in swapped, "the wrapper passes the gate no --policy-config"
+    swapped[swapped.index("--policy-config") + 1] = str(policy)
+    return swapped
+
+
+def _run_hpa_vpa(flags: list[str], corpus: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(REPO / "scripts" / _HPA_VPA_GATE), *flags],
+        cwd=REPO,
+        input=corpus,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.fixture
+def minimal_policy(tmp_path: Path) -> Path:
+    path = tmp_path / "policy.yaml"
+    path.write_text("chart_native_hpa_targets: []\n")
+    return path
+
+
+def test_the_wrapper_excuses_a_cap_the_corpus_cannot_judge(minimal_policy: Path) -> None:
+    """A chart renders most VPA targets here, so the corpus carries no limit to
+    compare their cap against. validate-helm-values.py judges those against the
+    chart-rendered limits, so the corpus wrapper must not red on them."""
+    result = _run_hpa_vpa(
+        _pointed_at(_hpa_vpa_flags(), minimal_policy), CORPUS_WITH_AN_UNJUDGED_CAP
+    )
+    assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    assert "NOT JUDGED" in result.stderr, (
+        "the gate judged the cap after all, so this case no longer covers the "
+        "acknowledgement the wrapper passes"
+    )
+
+
+def test_an_unjudged_cap_reds_without_the_acknowledgement(minimal_policy: Path) -> None:
+    """Mutation case: the flag is what excuses the cap, so the gate still has a
+    finding for a caller that does not pass it."""
+    flags = [
+        flag
+        for flag in _pointed_at(_hpa_vpa_flags(), minimal_policy)
+        if flag != "--allow-unjudged-vpa-caps"
+    ]
+    result = _run_hpa_vpa(flags, CORPUS_WITH_AN_UNJUDGED_CAP)
+    assert result.returncode == 1, f"{result.stdout}{result.stderr}"
 
 
 def _caller_paths(name: str) -> list[Path]:

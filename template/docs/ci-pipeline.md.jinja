@@ -20,8 +20,8 @@ sources are unaffected — they fetch over https from `{{ lib_url }}`.
 
 | Stage | Jobs | Source |
 |---|---|---|
-| `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `docs-link-check`, `comment-length`, `flux-lint`, `version-check` (library); `version-coverage`, `version-checksums`, `repo-sync`, `deploy-coverage`, `netpol-parity`, `kustomization-coverage`, `cluster-literals`, `prometheus-config-lint`, `terraform-tflint`, `integration-matrix-coverage`, `flux-version-pin`, `role-inputs` (this repo) | mixed |
-| `validate` | `terraform-validate` (library); `deploy-preflight`, `terraform-plan`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan`{% if use_unifi %}, `unifi-drift-plan`{% endif %} (this repo) | mixed |
+| `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `lint-docs-links`, `comment-length`, `flux-lint`, `version-check` (library); `version-coverage`, `version-checksums`, `check-generated-files`, `deploy-coverage`, `netpol-parity`, `kustomization-coverage`, `cluster-literals`, `prometheus-config-lint`, `terraform-tflint`, `check-integration-matrix`, `flux-version-pin`, `check-role-inputs` (this repo) | mixed |
+| `validate` | `terraform-validate` (library); `check-deploy-playbooks`, `terraform-plan`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan`{% if use_unifi %}, `unifi-drift-plan`{% endif %} (this repo) | mixed |
 | `test` | `python-tests` (the cluster invariants in `tests/`, the suites beside the scripts in `scripts/`, the library-pin gate and the vendored-copy gate); `integration-tests` (the multi-role molecule stacks, `.gitlab/ci/integration-jobs.yml`) | mixed |
 | `security` | `secret_detection` | library |
 | `ai-review` | `pr-agent-review` | library |
@@ -211,7 +211,7 @@ CI-only edit.
 
 `scripts/check-integration-matrix-coverage.py` is the gate that keeps the two in
 step. A scenario directory with no matrix entry never runs and reads as green,
-because nothing executed it. It runs as `integration-matrix-coverage` in `lint`
+because nothing executed it. It runs as `check-integration-matrix` in `lint`
 and as `task lint:integration-matrix` locally.
 
 #### A scenario container dies at prepare: "Too many open files"
@@ -235,11 +235,11 @@ ssh <k3s-node> cat /proc/sys/fs/inotify/max_user_instances
 128 means the drop-in is missing or was never applied; `task k3s:deploy`
 re-asserts it.
 
-### docs-link-check
+### lint-docs-links
 
 `scripts/check-doc-links.py` resolves every relative `.md` link in the docs, so
 a renamed or deleted page fails here rather than in a reader's browser. It runs
-as `docs-link-check` in `lint` and as `task lint:doc-links` locally.
+as `lint-docs-links` in `lint` and as `task lint:doc-links` locally.
 
 `CHECK_DOC_LINKS_PATHS=1` turns on a second arm: a backticked token whose first
 segment is a real repository directory is resolved as a repository path.
@@ -258,7 +258,7 @@ carries the scan scope and the vendored copies the gate skips, because their
 comments belong to the library. It blocks, so a long block is trimmed or moved
 into a doc before the merge. `task lint:comment-length` is the same check.
 
-### role-inputs
+### check-role-inputs
 
 `scripts/check-role-inputs.py` reads the installed collection's roles against
 this inventory. It catches an opt-in role invoked with its flag set nowhere, and
@@ -285,7 +285,7 @@ and leaves its paired checksum untouched, which every offline gate passes and
 `task k3s:deploy` then fails on. The job needs network egress, so
 `task lint` leaves it out and `task lint:version-checksums` runs it on demand.
 
-### repo-sync
+### check-generated-files
 
 Three files in this repository are generated, and this job regenerates each into
 a temporary directory and diffs it against what is committed: `scripts/hosts.env`
@@ -322,7 +322,7 @@ Before `task flux:bootstrap` there is no `gotk-components.yaml`, and the gate
 checks the two files that do exist. `task lint:flux-version-pin` is the same
 check locally.
 
-### deploy-preflight
+### check-deploy-playbooks
 
 `scripts/deploy-preflight.py` walks every job extending `.deploy-base` or
 `.maintenance-base`, checks that each `ansible-playbook` call names a playbook
@@ -356,7 +356,7 @@ verification run after a failed deploy rather than being skipped with it.
 `when: always` is pipeline-wide, though. On a `main` pipeline that fails at lint
 while matching a deploy job's `changes:`, `validation-gate` blocks the deploys
 and `deploy-verify` still runs, verifying a deployment that was never
-attempted. It is read-only, so nothing breaks, but it is a second failure
+attempted. It deploys nothing, so nothing breaks, but it is a second failure
 surface on an already-red pipeline.
 
 ## Secret detection

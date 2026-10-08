@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import REPO, load_script
+from conftest import REPO, lib_file, load_script
 
 SCRIPT = REPO / "scripts" / "check-lib-pins.py"
 CI_FILE = REPO / ".gitlab-ci.yml"
@@ -240,3 +240,98 @@ def test_a_stale_molecule_image_tag_is_reported(tmp_path: Path) -> None:
     )
     found = _molecule_image_tags(tmp_path, tmp_path / "absent.md")
     assert [tag for _path, tag in found] == ["v0.0.1"]
+
+
+# The lint job installs ansible-lint from the include's input; requirements.txt
+# is the local copy of that one pin.
+_ANSIBLE_LINT_INCLUDE = "ci/lint/ansible-lint.yml"
+REQUIREMENTS = REPO / "requirements.txt"
+# GitLab's custom tags are not YAML, so a plain safe_load cannot read a template.
+_CILoader = check_lib_pins.ci_yaml.NullTagCILoader
+
+
+def _lib_input_default(relpath: str, name: str) -> str:
+    """An include template's `spec.inputs.<name>.default` at the pinned ref."""
+    header = next(
+        (
+            doc
+            for doc in yaml.load_all(lib_file(relpath, _want_ref()), Loader=_CILoader)
+            if isinstance(doc, dict) and "spec" in doc
+        ),
+        {},
+    )
+    inputs = ((header.get("spec") or {}).get("inputs")) or {}
+    default = (inputs.get(name) or {}).get("default")
+    assert default, f"{relpath} declares no {name} default at the pinned ref"
+    return str(default)
+
+
+def _ansible_lint_job_version() -> str:
+    """The ansible-lint the CI job installs: the include's own
+    `ansible_lint_version` input, else the library template's default."""
+    includes = [
+        entry
+        for entry in check_lib_pins.load_ci(CI_FILE).get("include") or []
+        if isinstance(entry, dict)
+        and str(entry.get("file", "")).lstrip("/") == _ANSIBLE_LINT_INCLUDE
+    ]
+    assert includes, f".gitlab-ci.yml no longer includes /{_ANSIBLE_LINT_INCLUDE}"
+    passed = {
+        str((entry.get("inputs") or {})["ansible_lint_version"])
+        for entry in includes
+        if (entry.get("inputs") or {}).get("ansible_lint_version") is not None
+    }
+    assert len(passed) <= 1, (
+        f"the ansible-lint includes pass conflicting versions: {sorted(passed)}"
+    )
+    if passed:
+        return passed.pop()
+    return _lib_input_default(_ANSIBLE_LINT_INCLUDE, "ansible_lint_version")
+
+
+def ansible_lint_drift(requirements_text: str, job_version: str) -> list[str]:
+    """The local ansible-lint pin when it disagrees with the CI job's."""
+    match = re.search(r"^ansible-lint==([^\s#]+)", requirements_text, re.MULTILINE)
+    assert match, "requirements.txt no longer pins `ansible-lint==`"
+    local = match.group(1)
+    if local == job_version:
+        return []
+    return [
+        f"requirements.txt pins ansible-lint=={local} but the CI job installs "
+        f"{job_version}"
+    ]
+
+
+def test_the_ansible_lint_pin_matches_the_library_input_default() -> None:
+    """`task ansible:lint` and the CI job run one ansible-lint version.
+
+    The include passes no `ansible_lint_version`, so CI takes the library
+    template's default and a drifted local pin applies a different rule set.
+    """
+    stale = ansible_lint_drift(
+        REQUIREMENTS.read_text(encoding="utf-8"), _ansible_lint_job_version()
+    )
+    assert not stale, (
+        "\n  ".join(stale)
+        + "\n  They are one pin — bump requirements.txt, or pass "
+        "ansible_lint_version on the include."
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("ansible-lint==26.8.0\n", []),
+        (
+            "ansible-lint==26.7.0\n",
+            [
+                "requirements.txt pins ansible-lint==26.7.0 but the CI job "
+                "installs 26.8.0"
+            ],
+        ),
+    ],
+    ids=["matching", "drifted"],
+)
+def test_a_drifted_ansible_lint_pin_is_reported(text, expected) -> None:
+    """Mutation case: the comparison fires on a stale local pin, and only then."""
+    assert ansible_lint_drift(text, "26.8.0") == expected

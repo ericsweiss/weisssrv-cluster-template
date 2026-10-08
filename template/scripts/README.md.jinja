@@ -36,12 +36,13 @@ the diff.
 | `validate-helm-values.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — `helm template` over the value-heavy releases |
 | `check-deploy-coverage.sh` | the CI deploy-coverage job — every changed playbook/inventory path reaches a deploy job |
 | `check-lib-pins.py` | `task lint:lib-pins` and `tests/test_lib_pins.py` — every library pin is a literal equal to `variables.WEISSSRV_LIB_REF` |
+| `check-ci-include-job-names.py` | `task lint:ci-policy` and `tests/test_ci_include_job_names.py` — every `needs: optional: true` resolves to a job some include creates, because GitLab ignores one that names nothing |
 | `ci_yaml.py` | `check-lib-pins.py`, `check-deploy-coverage.sh` and `deploy-preflight.py` — the CI-reading loader that tolerates GitLab's custom tags |
 | `ci_playbook_invocations.py` | `deploy-preflight.py` — the playbook invocations a pipeline's `script:` blocks run |
 | `gate_common.py` | the six corpus gates above, imported from this directory — shared manifest walking and reporting |
 | `inventory_tree.py` | `generate-hosts-env.py` — the inventory group tree one of the two read |
 | `check-cluster-invariants.py` | `task lint:cluster-invariants` — duplicate `vmid`/`ansible_host`, a host on a VIP or outside `cluster_lan_cidr`, and an alert rule pinning an address no host holds |
-| `check-role-inputs.py` | `task lint:role-inputs` and the CI role-inputs job — an opt-in collection role invoked with its flag set nowhere, and an asserted role input with no default and no assignment |
+| `check-role-inputs.py` | `task lint:role-inputs` and the CI check-role-inputs job — an opt-in collection role invoked with its flag set nowhere, and an asserted role input with no default and no assignment |
 | `ci-fetch-tools.py` | the CI jobs that need `jq`, `kustomize`, `kubeconform`, `shellcheck`, `promtool`, `amtool` or `terraform` before any library checkout exists — pinned downloads verified by sha256 into `$CI_PROJECT_DIR/.bin` |
 | `check-comment-length.py` | `task lint:comment-length` and the CI comment-length job — a comment block over three content lines, or eight when it opens `CRITICAL:` |
 | `cluster-config-value.sh` | `collect-state.sh`, `deploy-verify.sh` and `diagnose-network-issues.sh` — one key out of `cluster-config.yaml`, the source for the domains and VIPs `hosts.env` cannot carry. The resolver is a `python3` heredoc, so it needs PyYAML |
@@ -60,7 +61,7 @@ the diff.
 | `check-helm-repo-parity.py` | `task lint:helm-repo-parity` — the `HelmRepository` URL Flux pulls from, the helm-values release list and the version registry's `helm_repo` are one URL |
 | `check-dashboards.py` | `task lint:dashboards` and `tests/validate_render.py` — every Grafana dashboard parses, carries no `${DS_*}` import placeholder, uses a provisioned datasource uid and is named by its `configMapGenerator` |
 | `extract-prometheus-config.py`, `lint-prometheus-config.sh` | `task lint:prometheus-config` — the promtool alert unit tests it runs live in `tests/prometheus-rules/`, one `*.test.yaml` per rule area. The callers set `RULE_TESTS_DIR` (that directory), `RULES_DIR` (`kubernetes/apps`, the per-app `PrometheusRule` CRs) and `REQUIRE_RELEASE_RULES=1` (fail if the kube-prometheus-stack release stops declaring inline rule groups); `REQUIRE_RULES_DIR` stays unset because there is no shared rules tree |
-| `check-doc-links.py` | `task lint:doc-links`, the CI docs-link-check job |
+| `check-doc-links.py` | `task lint:doc-links`, the CI lint-docs-links job |
 | `check-taskfile.sh` | `task lint:taskfile-smoke` — catches dangling script references |
 | `resolve-tool.sh` | the Taskfile, to find `ansible-lint` and `molecule` outside `PATH` |
 | `molecule-retry.sh` | the CI integration-tests job — `molecule test` with an in-job destroy and a jittered retry |
@@ -137,9 +138,9 @@ Not vendored at the pinned ref — this repository owns them.
 | `check-deploy-host-coverage.py` | `task lint:coverage-checks` and `scripts/test_check_deploy_host_coverage.py` — every host a role's plays declare is reached by some CI deploy job, so no host sits un-converged with nothing reporting it |
 | `check-ansible-service-names.py` | `task lint:coverage-checks` and `scripts/test_check_ansible_service_names.py` — a service/systemd task names a real unit, not a role FQCN, which ansible-lint cannot see because it checks module arguments |
 | `diagnose-network-issues.sh` | an operator, by hand, from a workstation with SSH to every node, plus `scripts/test_diagnose_network_issues.py` — per-host link, bond, bridge and NIC-error sections, each SSH bounded by a wall-clock `timeout` |
-| `generate-host-log-staleness.py` | `task flux:sync-host-log-staleness`, and `--check` in `task lint:repo-sync` + the CI repo-sync job — one `absent_over_time` alert per `alloy_host` host |
-| `deploy-preflight.py` | `task lint:deploy-preflight` and the CI deploy-preflight job — every deploy job's playbook exists, every `--tags` selection reaches at least one task, and every call matches at least one host under its own `--limit` |
-| `check-integration-matrix-coverage.py` | `task lint:integration-matrix` and the CI integration-matrix-coverage job — every integration-test directory has a CI matrix entry |
+| `generate-host-log-staleness.py` | `task flux:sync-host-log-staleness`, and `--check` in `task lint:repo-sync` + the CI check-generated-files job — one `absent_over_time` alert per `alloy_host` host |
+| `deploy-preflight.py` | `task lint:deploy-preflight` and the CI check-deploy-playbooks job — every deploy job's playbook exists, every `--tags` selection reaches at least one task, and every call matches at least one host under its own `--limit` |
+| `check-integration-matrix-coverage.py` | `task lint:integration-matrix` and the CI check-integration-matrix job — every integration-test directory has a CI matrix entry |
 | `check-upstream-rule-mirror.py` | `task lint:upstream-rule-mirror` — every in-tree replacement for a rule `defaultRules.disabled` turns off names the chart version it was taken at, and that version matches the `helm_chart_versions` pin |
 | `collect-state.sh` | `task collect-state` — a redacted snapshot of every host into `CLUSTER_STATUS.txt`, headed with a tri-state verdict |
 | `taskfile_tree.py` | `scripts/test_taskfile_tree.py` — flattens the `Taskfile.yml` `includes:` tree into one `{name: definition}` map with `- task:` references fully qualified, so a suite that walks task names sees the namespace files too |

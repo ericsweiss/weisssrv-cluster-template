@@ -165,7 +165,7 @@ alloy_host_version: "1.20.1-1"    # apt package version, not the chart version
 {%- if vpn_tailscale %}
 # apt package pin, read from a tasks-only maintenance play where the role
 # default is out of scope. Not helm_chart_versions.tailscale_operator.
-tailscale_version: "1.102.5"
+tailscale_version: "1.104.1"
 {%- endif %}
 
 # Debian cloud image every VM is built from, a DATED directory rather than
@@ -203,10 +203,10 @@ helm_chart_versions:
   # Owns the monitoring.coreos.com CRDs; bump in lockstep with
   # kube_prometheus_stack so the CRDs match the operator.
   prometheus_operator_crds: "32.0.1"
-  kube_prometheus_stack: "92.0.0"
-  loki: "18.13.8"
+  kube_prometheus_stack: "92.1.0"
+  loki: "18.14.0"
   alloy: "1.13.0"
-  prometheus_blackbox_exporter: "11.19.1"
+  prometheus_blackbox_exporter: "11.20.0"
   onepassword_connect: "2.4.2"
   vpa: "5.1.0"
   kured: "6.1.0"

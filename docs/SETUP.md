@@ -155,7 +155,7 @@ task flux:sync-host-log-staleness  # inventory alloy_host hosts → kubernetes/.
 ```
 
 All three outputs are drift-gated, locally by `task lint:repo-sync` (part of
-`task lint`) and in CI by the `repo-sync` job: each regenerates the file from its
+`task lint`) and in CI by the `check-generated-files` job: each regenerates the file from its
 source and diffs, so a hand-edited or stale output fails. Never hand-edit any of
 them.
 
@@ -245,7 +245,7 @@ green play.
 ```bash
 task lib:sync      # clone weisssrv-lib at the pinned ref into .weisssrv-lib/
 task lint          # yamllint, shellcheck, ruff, doc-links, taskfile-smoke,
-                   # lib-pins, version-coverage, repo-sync, netpol-parity,
+                   # lib-pins, version-coverage, check-generated-files, netpol-parity,
                    # invariants, ansible-lint, terraform fmt-check + validate,
                    # flux:lint
 task ansible:ping  # every host in the inventory answers

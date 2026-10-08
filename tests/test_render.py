@@ -1878,7 +1878,7 @@ def test_ci_doc_lists_every_validator_check():
     )
 
 
-# The answer sets the fixtures above render, by the basename render-validate
+# The answer sets the fixtures above render, by the basename validate-rendered-cluster
 # names with --answers.
 RENDER_FIXTURE_ANSWERS = {
     render_cluster.ANSWERS.name: "rendered",
@@ -1887,9 +1887,9 @@ RENDER_FIXTURE_ANSWERS = {
 
 
 def _render_validate_lines() -> list[tuple[str, list[str]]]:
-    """One entry per `validate_render.py` line in the render-validate job:
+    """One entry per `validate_render.py` line in the validate-rendered-cluster job:
     (the answers basename it renders, the line's tokens)."""
-    job = _load_ci(REPO_ROOT / ".gitlab-ci.yml")["render-validate"]
+    job = _load_ci(REPO_ROOT / ".gitlab-ci.yml")["validate-rendered-cluster"]
     lines = []
     for command in job["script"]:
         if "tests/validate_render.py" not in command:
@@ -1908,22 +1908,22 @@ def test_every_render_fixture_reaches_the_real_toolchain():
     kustomize, kubeconform and the library checkout, and it takes ONE answer set
     per invocation — so a fixture CI stops naming is left to this suite alone."""
     lines = _render_validate_lines()
-    assert lines, "render-validate runs no validate_render.py invocation"
+    assert lines, "validate-rendered-cluster runs no validate_render.py invocation"
     validated = {answers for answers, _ in lines}
     assert validated == set(RENDER_FIXTURE_ANSWERS), (
-        "the answer sets render-validate validates and the ones the fixtures render "
+        "the answer sets validate-rendered-cluster validates and the ones the fixtures render "
         f"differ:\n  CI:       {sorted(validated)}\n  fixtures: "
         f"{sorted(RENDER_FIXTURE_ANSWERS)}"
     )
     unguarded = [answers for answers, tokens in lines if "--lib-path" not in tokens]
     assert not unguarded, (
-        "these render-validate lines pass no --lib-path, so every library-reading "
+        "these validate-rendered-cluster lines pass no --lib-path, so every library-reading "
         "check reports a skip instead of a result: " + ", ".join(unguarded)
     )
 
 
 def test_ci_validates_the_same_mixed_module_set_the_suite_renders():
-    """One render-validate line must carry the mixed optional-module overrides,
+    """One validate-rendered-cluster line must carry the mixed optional-module overrides,
     and carry MODULES_MIXED exactly, so the toolchain and this suite cannot
     cover different arms."""
     overridden = []
@@ -1938,12 +1938,12 @@ def test_ci_validates_the_same_mixed_module_set_the_suite_renders():
         if data:
             overridden.append((answers, data))
     assert len(overridden) == 1, (
-        "render-validate must pass --data on exactly one validate_render.py line; "
+        "validate-rendered-cluster must pass --data on exactly one validate_render.py line; "
         f"it passes it on {len(overridden)}"
     )
     answers, data = overridden[0]
     assert data == MODULES_MIXED, (
-        f"the mixed render-validate line ({answers}) overrides {data}, not the "
+        f"the mixed validate-rendered-cluster line ({answers}) overrides {data}, not the "
         f"MODULES_MIXED set this suite renders: {MODULES_MIXED}"
     )
 
@@ -1957,7 +1957,7 @@ def test_the_render_independent_checks_run_on_exactly_one_invocation():
         if "--self-checks" in tokens
     ]
     assert len(carriers) == 1, (
-        "render-validate must pass --self-checks on exactly one validate_render.py "
+        "validate-rendered-cluster must pass --self-checks on exactly one validate_render.py "
         f"line; it passes it on {len(carriers)}"
     )
     answers, tokens = carriers[0]
@@ -2701,7 +2701,7 @@ def test_ci_doc_stages_table_names_every_local_job(cluster):
 
 
 def test_ansible_version_variable_matches_the_deploy_base_input(cluster):
-    """`variables.ANSIBLE_VERSION` is what deploy-preflight pip-installs and the
+    """`variables.ANSIBLE_VERSION` is what check-deploy-playbooks pip-installs and the
     `ansible_version` include input is what .deploy-base does. Includes resolve
     before job variables exist, so the input repeats the literal.
     """
@@ -2715,7 +2715,7 @@ def test_ansible_version_variable_matches_the_deploy_base_input(cluster):
     ]
     assert inputs, "no include passes an ansible_version input — the pair this gate holds is gone"
     assert all(str(value) == str(declared) for value in inputs), (
-        f"ANSIBLE_VERSION is {declared!r} but an include pins {inputs!r}; deploy-preflight "
+        f"ANSIBLE_VERSION is {declared!r} but an include pins {inputs!r}; check-deploy-playbooks "
         "and .deploy-base would install different Ansibles"
     )
 
