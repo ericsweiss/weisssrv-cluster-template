@@ -974,17 +974,17 @@ lib_ref:
     proxmox-ha play, for one, leaves the cluster-wide HA reconcile `run_once`
     to the role; an older role runs it from every node at once, writing /etc/pve
     concurrently.
-  default: "v0.18.0"
+  default: "v0.18.1"
   validator: >-
     {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
     lib_ref must be a release TAG of the form vX.Y.Z (e.g. v1.2.3). A branch is
     never a valid pin: the generated repo's scripts/check-lib-pins.py enforces
     the same shape on every `include:` entry, so a branch answered here fails
     the very first pipeline.
-    {% elif (lib_ref[1:].split('.') | map('int') | list) < [0, 18, 0] %}
-    lib_ref must be v0.18.0 or newer. The generated playbooks are written
-    against that release's role contracts, and an older pin takes the role
-    defaults silently rather than failing.
+    {% elif (lib_ref[1:].split('.') | map('int') | list) < [0, 18, 1] %}
+    lib_ref must be v0.18.1 or newer. The generated playbooks are written
+    against that release's role contracts: an older pin takes the role defaults
+    silently, and on v0.18.0 the proxmox_ha replication read fails the play.
     {% endif %}
 
 lib_project:

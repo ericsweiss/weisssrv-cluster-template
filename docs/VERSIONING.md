@@ -80,7 +80,8 @@ after a `lib_ref` bump, or generate with `--vcs-ref HEAD` to take `main`.
 | `v0.6.0` | weisssrv-lib `v0.9.5` |
 | `v0.7.0` | weisssrv-lib `v0.9.8` |
 | `v0.8.0` | weisssrv-lib `v0.13.0` |
-| `main` (unreleased) | weisssrv-lib `v0.18.0` |
+| `v0.9.0` | weisssrv-lib `v0.18.0` |
+| `main` (unreleased) | weisssrv-lib `v0.18.1` |
 
 Rules that keep the table meaningful:
 
