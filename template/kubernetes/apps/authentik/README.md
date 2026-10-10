@@ -58,6 +58,14 @@ Restore one:
 gunzip -c <file> | psql -h authentik-postgresql -U authentik authentik
 ```
 
+Nothing to create for the metrics sidecar: the chart's `postgres_exporter`
+connects as the `postgres` superuser, which the subchart's own initdb creates
+with the `postgresql-admin-password` field the ExternalSecret declares. Rotating
+that field needs a matching `ALTER ROLE postgres PASSWORD …`, or the exporter
+stops reporting `pg_up 1`. Re-pointing it at the `authentik` role would
+duplicate the chart's own `DATA_SOURCE_*` and leave the HelmRelease in
+`StateError`.
+
 ## Before first login
 
 Nothing can sign in to anything until this is done, and Grafana ships SSO-only,
