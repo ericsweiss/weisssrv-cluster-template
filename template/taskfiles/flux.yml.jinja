@@ -476,5 +476,9 @@ tasks:
         # extra_validation. It also builds each cluster root into the corpus,
         # skipping one whose flux-system/ `flux bootstrap` has not written yet.
         bash scripts/flux-corpus-gates.sh "$RENDER_ALL" "{{.VERSIONS_CM}}" || FAILED=1
+
+        # Chart-rendered, so the corpus above cannot see it: each Grafana
+        # k8s-sidecar must run the METHOD its position requires.
+        python3 scripts/check-grafana-sidecar-init.py || FAILED=1
         exit $FAILED
 {%- endraw %}

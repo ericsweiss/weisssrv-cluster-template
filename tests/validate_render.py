@@ -594,6 +594,29 @@ def check_cluster_gates(render: Path, **_kw) -> None:
     print(f"  cluster gates ok ({_CORPUS_GATE_WRAPPER} + 3 over {len(corpus)} builds)")
 
 
+def check_flux_lint(render: Path, **_kw) -> None:
+    """The generated cluster's own first gate command passes on arrival.
+
+    `cluster-gates` calls the corpus wrapper with no versions ConfigMap, which
+    skips its HelmRelease-values arm; this runs the task the operator runs, so a
+    chart-rendered limit against a VPA cap fails here instead of on first use.
+    """
+    _need("task")
+    # Named rather than left to the Taskfile's own precondition: the values arm
+    # is the whole reason this check exists, and it is the arm helm renders.
+    _need("helm")
+    result = _run(["task", "flux:lint"], cwd=render)
+    if result.returncode:
+        # Whole output, untrimmed: the task reports each gate where it runs, so
+        # the finding can sit a hundred per-release summaries above the last line.
+        raise Failure(
+            f"task flux:lint exited {result.returncode} on a fresh render:\n"
+            + result.stdout
+            + result.stderr
+        )
+    print("  flux:lint ok (the render passes its own first gate command)")
+
+
 _SITE_DATA_SUFFIXES = {".yml", ".yaml", ".env", ".conf", ".toml"}
 
 _LOCAL_HELPERS_HEADING = "## Local helpers"
@@ -1571,6 +1594,7 @@ CHECKS = (
     ("terraform", check_terraform, frozenset()),
     ("flux", check_flux, frozenset()),
     ("cluster-gates", check_cluster_gates, frozenset()),
+    ("flux-lint", check_flux_lint, frozenset()),
     ("ci-policy", check_ci_policy, frozenset()),
     ("include-contract", check_include_contract, frozenset({"lib"})),
     ("inventory-addresses", check_inventory_addresses, frozenset()),
@@ -1592,7 +1616,7 @@ CHECK_NAMES = tuple(name for name, _, _ in CHECKS)
 # to this map, so a new rendered subtree cannot arrive silently unchecked.
 RENDERED_AREAS = {
     "ansible": "ansible, role-opt-ins, role-inputs, inventory-addresses, yamllint",
-    "kubernetes": "flux, cluster-gates, versions-configmap, yamllint",
+    "kubernetes": "flux, cluster-gates, flux-lint, versions-configmap, yamllint",
     "terraform": "terraform, terraform-validate, shellcheck",
     "scripts": "shellcheck, vendored, rendered-vendored, version-coverage, yamllint",
     "lint": "yamllint, which lints with the render's own profiles from this directory",

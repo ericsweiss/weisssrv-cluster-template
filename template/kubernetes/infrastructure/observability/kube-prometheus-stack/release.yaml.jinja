@@ -270,6 +270,10 @@ spec:
           uid: prometheus
           skipReload: true
           initDatasources: true
+          # The init container inherits this. The chart default WATCH never
+          # exits, so the pod hangs in PodInitializing and the Helm upgrade
+          # times out; init mode must list once and exit.
+          watchMethod: LIST
           resource: configmap
           extraMounts:
             - name: sidecar-kube-api-access
