@@ -243,9 +243,8 @@ follows the same rules.
 - **Wrap prose at about 100 columns.** Tables, code blocks and URLs are exempt.
 - **Commands are repository-root-relative** unless the document says otherwise,
   because that is the form the `task` wrappers and CI present.
-- **A superseded document keeps its filename** and gains a status banner under
-  its H1. It is never silently deleted: older merge requests and runbooks link
-  to it.
+- **A document describes the current state only.** One that stops doing so is
+  deleted, with any still-current fact moved to the document that owns it.
 - Every relative `.md` link is checked in CI, so a rename that breaks a
   cross-link fails the pipeline.
 
