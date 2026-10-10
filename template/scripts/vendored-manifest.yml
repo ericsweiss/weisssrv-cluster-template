@@ -63,16 +63,15 @@ vendored:
   - lint/yamllint-relaxed.yml
   - scripts/validate-helm-values.py
   - scripts/version-bump-mr.py
-  # A script the library's working tree has but the pinned ref does not joins
-  # this list at the next bump; registering it now reds the byte-identity gate.
-  # The library's scripts/vendorable-paths.yml at the pin is the offer list.
+  # Only a path the library's scripts/vendorable-paths.yml offers at the pinned
+  # ref may be registered here; anything else reds the byte-identity gate.
 
 # The lint profiles. No directory walk reaches these, and their drift is the
 # quiet kind: the library tightens a rule, this repository never absorbs it, and
 # the local lint keeps passing on the old profile.
 forked:
-  # Cluster-owned gates the library now offers under the same names. Each keeps
-  # its own CLI and its own test suite, so it is held to the library by
+  # Cluster-owned gates that share a name with a library gate. Each keeps its
+  # own CLI and its own test suite, so it is held to the library by
   # reconciled_sha256 rather than by byte-identity.
   - lib: scripts/check-flux-version-pin.py
     consumer: scripts/check-flux-version-pin.py
