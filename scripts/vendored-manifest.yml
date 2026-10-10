@@ -119,8 +119,6 @@ vendored:
     consumer: template/scripts/shell-lib.sh
   - lib: scripts/supervised-apply-guard.sh
     consumer: template/scripts/supervised-apply-guard.sh
-  # flux-child-kustomizations.py is still a template-local program; adopting the
-  # library's needs its tab output read at every call site.
   - lib: scripts/validate-helm-values.py
     consumer: template/scripts/validate-helm-values.py
   - lib: scripts/version-bump-mr.py
@@ -164,8 +162,8 @@ forked:
       from the YAML hooks, and the library's local check-taskfile hook is
       dropped because this repository ships no Taskfile.
     reconciled_sha256: f7e2dff0acee6c4787e1d89311fa72e5d089b13681ed9cd94e8b92bdcada519c
-  # Template-owned gates the library now offers under the same names. Each
-  # keeps its own CLI and its own test suite, so it is held to the library by
+  # Template-owned gates that share a name with a library gate. Each keeps its
+  # own CLI and its own test suite, so it is held to the library by
   # reconciled_sha256 rather than by byte-identity.
   - lib: scripts/check-flux-version-pin.py
     consumer: template/scripts/check-flux-version-pin.py

@@ -102,10 +102,6 @@ NOT_ROLE_VARS: set[tuple[str, str]] = {
     ("group_vars/k3s.yml", "k3s_delegate_server"),
 }
 
-# Variables staged ahead of the collection release that reads them: inert until
-# the pin moves. Each entry expires at that bump, enforced below.
-PRESTAGED: set[tuple[str, str]] = set()
-
 needs_inventory = pytest.mark.skipif(
     not (INVENTORY / "group_vars").is_dir() or not REQUIREMENTS.is_file(),
     reason="no ansible/inventories/prod or requirements.yml",
@@ -400,33 +396,12 @@ def test_no_inventory_variable_is_unknown_to_the_pinned_collection(prefixed):
     role's `| default(...)` guard takes the default and nothing fails."""
     known = collection_mentions({key for _file, key in prefixed})
     unknown = sorted(
-        pair
-        for pair in prefixed
-        if pair[1] not in known and pair not in NOT_ROLE_VARS and pair not in PRESTAGED
+        pair for pair in prefixed if pair[1] not in known and pair not in NOT_ROLE_VARS
     )
     assert not unknown, (
         f"inventory variables the pinned collection never reads: {unknown} — fix "
-        "the spelling, add the pair to NOT_ROLE_VARS if the prefix is a collision, "
-        "or stage it in PRESTAGED until the bump that ships it lands in "
-        "ansible/requirements.yml."
-    )
-
-
-@needs_inventory
-def test_prestaged_entries_are_still_inert(prefixed):
-    """An entry expires with the collection bump that ships its variable, and
-    with the inventory line it stages."""
-    known = collection_mentions({key for _file, key in PRESTAGED})
-    landed = sorted(pair for pair in PRESTAGED if pair[1] in known)
-    assert not landed, (
-        f"the pinned collection now reads these: {landed} — drop them from "
-        "PRESTAGED; the list is a staging window, not configuration."
-    )
-    # Intersected with what this render declares: an answer can turn a whole
-    # group_vars file off, and that is not a stale entry.
-    gone = sorted((PRESTAGED & _declared(INVENTORY)) - set(prefixed))
-    assert not gone, (
-        f"these PRESTAGED entries no longer carry a role prefix: {gone} — drop them."
+        "the spelling, or add the pair to NOT_ROLE_VARS if the prefix is a "
+        "collision."
     )
 
 

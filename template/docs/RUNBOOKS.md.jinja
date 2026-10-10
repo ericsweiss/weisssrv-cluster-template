@@ -404,11 +404,10 @@ version bump in the other direction plus the same task.
 
 Bumping `lib_ref` upgrades the Ansible collection, the CI templates and the
 Terraform modules together — three pin surfaces, one answer. Read the library's
-release notes first ([weisssrv-lib]({{ links.lib_home() }}),
-and `ansible_collections/weisssrv/infra/MIGRATING.md` for role variable renames
-and newly asserted inputs), then change the ref in every place it is written:
-each `ref:` in `.gitlab-ci.yml`, the `version:` in `ansible/requirements.yml`,
-the `?ref=` on each Terraform module source, and `LIB_REF` in `Taskfile.yml`.
+release notes first ([weisssrv-lib]({{ links.lib_home() }})), then change the
+ref in every place it is written: each `ref:` in `.gitlab-ci.yml`, the
+`version:` in `ansible/requirements.yml`, the `?ref=` on each Terraform module
+source, and `LIB_REF` in `Taskfile.yml`.
 
 ```bash
 task ansible:install-collections    # re-installs the collection at the new ref
@@ -1518,7 +1517,6 @@ upstream:
 |---|---|
 | Role variables and behaviour | [`ansible_collections/weisssrv/infra/roles/<role>/README.md`]({{ lib_tree }}{{ lib_ref }}/ansible_collections/weisssrv/infra/roles) in weisssrv-lib |
 | The collection's inventory-wide variable table | [collection README]({{ lib_blob }}{{ lib_ref }}/ansible_collections/weisssrv/infra/README.md) |
-| Role breaking changes across refs | [MIGRATING.md]({{ lib_blob }}{{ lib_ref }}/ansible_collections/weisssrv/infra/MIGRATING.md) |
 | CI template inputs | [docs/INCLUDE-CONTRACT.md]({{ lib_blob }}{{ lib_ref }}/docs/INCLUDE-CONTRACT.md) |
 | What a `lib_ref` bump can break | [docs/VERSIONING.md]({{ lib_blob }}{{ lib_ref }}/docs/VERSIONING.md) |
 | The generator, its answers and its own docs | [weisssrv-cluster-template](https://github.com/ericsweiss/weisssrv-cluster-template) |

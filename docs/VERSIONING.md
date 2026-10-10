@@ -99,51 +99,34 @@ Two consequences worth stating outright:
 
 While the template is **0.x**, a breaking change bumps MINOR rather than cutting
 1.0.0 (semver's pre-1.0 allowance, and the release job's `major_on_zero` input
-stays `false`). The release notes still lead with a **Breaking changes**
+stays `false`). The release notes lead with a **Breaking changes**
 section — read it before running `copier update`.
 
-## Which library release a template release was validated against
+## Which library release the template is validated against
 
 `lib_ref` is an answer, so a generated cluster can pin any library tag it likes —
-but exactly **one** pair per template release is ever proved to work, and that is
-the pair `tests/answers-weisssrv-shaped.yml` holds. `validate-rendered-cluster` renders the
-template with that fixture and runs the real toolchain over the output against a
-checkout of the library at that ref, so the fixture is the record of what was
-tested, not a preference.
+but exactly **one** pair is ever proved to work: the `lib_ref` default in
+`copier.yml`, currently weisssrv-lib `v0.18.1`. `validate-rendered-cluster`
+renders the template with the answer fixtures — which do not answer `lib_ref`,
+so they inherit that default — and runs the real toolchain over the output
+against a checkout of the library at that ref.
+
+That default is the single source, and three places have to agree with it: the
+fixtures inherit it, this repository's own `include:` refs repeat it as literals
+(`include:` is resolved before job variables exist), and
+`tests/validate_render.py`'s `_assert_one_lib_ref` fails any disagreement. They
+move together, in one MR. `docs/CI.md` § Library pin carries the rest of the
+gate detail.
 
 An unpinned `copier copy` resolves to the template's **latest release tag**, so
 when `main` carries a newer `lib_ref` than the newest tag does, the documented
 quickstart generates a cluster on the older library. Cut a template release
 after a `lib_ref` bump, or generate with `--vcs-ref HEAD` to take `main`.
 
-| Template release | Rendered and validated against |
-|---|---|
-| `v0.1.0` | weisssrv-lib `v0.2.0` |
-| `v0.2.0` | weisssrv-lib `v0.5.2` |
-| `v0.3.0` | weisssrv-lib `v0.6.2` |
-| `v0.4.0` | weisssrv-lib `v0.7.4` |
-| `v0.5.0` | weisssrv-lib `v0.8.0` |
-| `v0.6.0` | weisssrv-lib `v0.9.5` |
-| `v0.7.0` | weisssrv-lib `v0.9.8` |
-| `v0.8.0` | weisssrv-lib `v0.13.0` |
-| `v0.9.0` | weisssrv-lib `v0.18.0` |
-| `main` (unreleased) | weisssrv-lib `v0.18.1` |
-
-Rules that keep the table meaningful:
-
-- The `lib_ref` **default** in `copier.yml` and this repository's own `include:`
-  refs move together, in one MR — the answer fixtures do not answer `lib_ref`
-  at all, so they inherit that default and there is nothing to bump there. They
-  are compared by the test suite, so a partial bump fails rather than shipping a
-  default the pipeline never rendered against.
-- Add the row in that same MR, labelled `main` until the tag exists, then
-  relabel it when the release is cut. The release notes are generated from
-  commit subjects and carry no pin, so this table is the only place the pair is
-  written down.
-- **Other pairs are untested, not unsupported.** A cluster on an older template
-  release answering a newer `lib_ref` is a combination nothing here exercised; the
-  library's own [VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md)
-  is what says whether that bump is allowed to break it.
+**Other pairs are untested, not unsupported.** A cluster answering some other
+`lib_ref` is a combination nothing here exercised; the library's own
+[VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md)
+is what says whether that pin is allowed to break it.
 
 ## How a consumer pins a version
 
@@ -279,45 +262,15 @@ A vendored gate that imports a sibling module needs that module vendored with
 it. Register the pair in both manifests, or the gate ships without the module
 it imports and exits 2 naming the missing file.
 
-### Pending at the next library bump
-
-Each entry is deleted by the pin bump that satisfies it.
-
-- `template/scripts/check-scrape-wiring.py`: the library's port-granularity
-  companion to `check-scrape-netpol.py`. It reads one namespace's directory, so
-  a generated cluster needs the corpus-shaped arm first; vendor it once the
-  library ships that, alongside `tests/test_check_scrape_wiring.py`.
-- Three gates under `template/scripts/` are registered as declared `forked:`
-  entries rather than copies, so `reconciled_sha256` forces a review when the
-  library side moves. Adopting the library file means, for each, rewriting its
-  call sites and its shipped test suite:
-  - `check-flux-version-pin.py` takes `--root` and `--components`, where the
-    library's takes `--repo-root`, `--ci-file`, `--versions-configmap`,
-    `--gotk-glob`, `--components` and `--runbook`. The flags are passed from
-    `template/.pre-commit-config.yaml`, `template/.gitlab-ci.yml.jinja` and
-    `template/taskfiles/lint.yml.jinja`.
-  - `check-secret-rotation-coverage.py` hard-codes `DOC` and
-    `DECLARED_MANUAL`, where the library's requires `--doc` and accepts
-    `--declared-manual`. Adapting means passing `--doc docs/RUNBOOKS.md` from
-    `template/tests/test_check_secret_rotation_coverage.py` and the same three
-    callers.
-  - `flux-child-kustomizations.py` prints a bare `spec.path` for `--paths`,
-    globs `*.yaml` only, and exposes `child_kustomizations()`. The library's
-    excludes `flux-system`, globs `*.yml` too, tolerates an unreadable file,
-    prints `name<TAB>spec.path`, exits 1 on a path-less Kustomization unless
-    `--allow-missing-paths`, and exposes `child_kustomization_paths()` /
-    `_order()`. Adopting it means reading the tab form in
-    `template/scripts/deploy-verify.sh` (`while IFS=$'\t' read -r _KSNAME
-    SRCPATH`), piping `KS_PATHS` through `cut -f2` in
-    `template/taskfiles/flux.yml.jinja`, and rewriting
-    `template/tests/test_flux_child_kustomizations.py` against
-    `child_kustomization_paths` / `_order` and the tab output.
-- `check-netpol-except-parity.py` leaves a `${cluster_*}` ipBlock CIDR
-  unevaluated, and this template spells 15 of them across 8 manifests, so the
-  fence arm examines no rule whose only peer is one. Closing it needs the
-  library gate to read a manifest corpus on stdin, the way the other corpus
-  gates do. `template/scripts/flux-corpus-gates.sh` then runs it over the
-  substituted corpus, where every placeholder has a value.
+Three gates under `template/scripts/` share a name with a library gate and are
+template-owned forks rather than copies: `check-flux-version-pin.py`,
+`check-secret-rotation-coverage.py` and `flux-child-kustomizations.py`. Each
+takes its own flags and prints its own output shape, so its call sites in
+`template/.pre-commit-config.yaml`, `template/.gitlab-ci.yml.jinja`,
+`template/taskfiles/`, `template/scripts/deploy-verify.sh` and the shipped test
+suites read the template's CLI. Each is a declared `forked:` entry carrying the
+difference in its `reason:`, held to the library by `reconciled_sha256` so a
+library-side change forces a review.
 
 ## Related
 

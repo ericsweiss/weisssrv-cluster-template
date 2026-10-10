@@ -78,10 +78,9 @@ under review. `task lib:sync` clones the library at the pinned ref into
 
 [`vendored-manifest.yml`](vendored-manifest.yml) is the machine-checked
 inventory and owns the contract: which copies are byte-identical to the
-library's at the pinned ref, which are declared forks, and which join the list
-at the next library bump. Its header states it in full. It covers more
-than this directory: the lint profiles at the repository root and
-`.gitlab/secret-detection-ruleset.toml` are listed there too.
+library's at the pinned ref, and which are declared forks. Its header states it
+in full. It covers more than this directory: the lint profiles at the repository
+root and `.gitlab/secret-detection-ruleset.toml` are listed there too.
 `tests/test_vendored_byte_identity.py` enforces it in `task lint` and the CI
 `python-tests` job.
 
