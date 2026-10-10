@@ -235,12 +235,11 @@ task ansible:install-collections   # ansible-galaxy, from ansible/requirements.y
 Re-run it whenever `lib_ref` changes.
 
 That is also where the inventory you just wrote is *documented*: each role's
-`README.md` in the collection defines the variables it takes, the collection
-README lists the inventory-wide ones every role aliases, and `MIGRATING.md` is
-the map of what a `lib_ref` bump renames or newly asserts. Read it before a
-bump, not after — a variable this collection renamed does not raise
-`AnsibleUndefinedVariable`, it quietly falls back to the role's default on a
-green play.
+`README.md` in the collection defines the variables it takes and the collection
+README lists the inventory-wide ones every role aliases. A role variable the
+inventory spells wrong does not raise `AnsibleUndefinedVariable` — the role
+reads it through a `| default(...)` guard, so it quietly takes the role's own
+default on a green play.
 
 ```bash
 task lib:sync      # clone weisssrv-lib at the pinned ref into .weisssrv-lib/

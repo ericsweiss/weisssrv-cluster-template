@@ -442,8 +442,8 @@ The role-side half of every seam is contracted in the library's
 which variables exist so an alternative can be selected without a fork, which
 roles *are* a backend (and so get a sibling role family instead of a flag), and
 the rules a contributed alternative follows — role-prefixed variables, a default
-that reproduces today's behaviour byte-for-byte, molecule coverage, a MIGRATING
-entry only when a consumer must act. Three worked cases, cluster side:
+that reproduces today's behaviour byte-for-byte, molecule coverage. Three worked
+cases, cluster side:
 
 | Wanted instead | Library side | This template's side |
 |---|---|---|
@@ -612,7 +612,6 @@ restating it:
 |---|---|
 | Role variables and behaviour | [`ansible_collections/weisssrv/infra/roles/<role>/README.md`](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) |
 | The inventory-wide variables roles alias (the "Use" table) | [collection README](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/README.md) |
-| Role breaking changes across refs | [MIGRATING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/MIGRATING.md) |
 | CI template inputs | [docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md) |
 | What a `lib_ref` bump can break | [docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md) |
 | The upstream of the vendored `scripts/` copies | [docs/SCRIPTS.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/SCRIPTS.md) |

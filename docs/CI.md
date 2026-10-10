@@ -286,9 +286,9 @@ run.
 
 ## Deferred by design
 
-Gaps against the reference cluster that a review has raised and this repository
-deliberately does not close. Each is a live decision, not a backlog entry — if
-you reopen one, change this list in the same MR.
+Gaps against the reference cluster this repository deliberately does not close.
+Each is a live decision, not a backlog entry — if you reopen one, change this
+list in the same MR.
 
 - **Deploy-job `rules:` are written out per job.** The reference cluster factors
   the shared preamble into a hidden `.skip-schedule-web` fragment; the generated

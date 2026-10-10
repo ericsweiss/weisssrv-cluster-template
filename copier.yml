@@ -970,10 +970,7 @@ lib_ref:
     merge takes every include, module source and collection install with it.
     Never answer a tag OLDER than the default below: the generated playbooks are
     written against the role contracts of the release the template pins, and an
-    older pin takes the role defaults silently rather than failing. The
-    proxmox-ha play, for one, leaves the cluster-wide HA reconcile `run_once`
-    to the role; an older role runs it from every node at once, writing /etc/pve
-    concurrently.
+    older pin takes the role defaults silently rather than failing.
   default: "v0.18.1"
   validator: >-
     {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
@@ -984,7 +981,7 @@ lib_ref:
     {% elif (lib_ref[1:].split('.') | map('int') | list) < [0, 18, 1] %}
     lib_ref must be v0.18.1 or newer. The generated playbooks are written
     against that release's role contracts: an older pin takes the role defaults
-    silently, and on v0.18.0 the proxmox_ha replication read fails the play.
+    silently rather than failing.
     {% endif %}
 
 lib_project:
