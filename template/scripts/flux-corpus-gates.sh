@@ -102,6 +102,12 @@ echo "=== Checking HPA/VPA invariant ==="
 python3 scripts/check-hpa-vpa-invariant.py --require-chart-native-vpas \
   --allow-unjudged-vpa-caps \
   --policy-config scripts/autoscaling-policy.yaml < "$CORPUS" || record $? check-hpa-vpa-invariant.py
+# The corpus, not the tree: every ipBlock CIDR is a ${cluster_*} placeholder on
+# disk, which the fence arms skip, so the LAN-escape check examines nothing
+# there. `task lint:netpol-parity` keeps the tree arm, which covers flux-system/.
+echo "=== Checking NetworkPolicy LAN fence over real CIDRs ==="
+python3 scripts/check-netpol-except-parity.py --config scripts/netpol-except.yaml \
+  --corpus "$CORPUS" || record $? check-netpol-except-parity.py
 echo "=== Checking scrape/NetworkPolicy invariant ==="
 python3 scripts/check-scrape-netpol.py < "$CORPUS" || record $? check-scrape-netpol.py
 echo "=== Checking ingress default-deny coverage ==="

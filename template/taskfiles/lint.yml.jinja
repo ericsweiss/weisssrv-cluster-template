@@ -158,9 +158,9 @@ tasks:
 
   netpol-parity:
     desc: Assert every NetworkPolicy reserved-CIDR except-list matches the canonical set
-    # Reads the manifests on disk, not the rendered corpus, so it also covers
-    # kubernetes/clusters/*/flux-system/ — which no Kustomization builds and
-    # flux:lint therefore never sees. Mirrors the CI netpol-parity job.
+    # The tree on disk, so it also covers kubernetes/clusters/*/flux-system/,
+    # which no Kustomization builds. The placeholder CIDRs it cannot judge are
+    # judged by the corpus arm in flux:lint. Mirrors the CI netpol-parity job.
     preconditions:
       - *needs_pyyaml
     cmds:

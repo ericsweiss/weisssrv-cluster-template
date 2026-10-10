@@ -31,7 +31,7 @@ the diff.
 | `check-secretstore-scope.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every ClusterSecretStore declares `conditions` and admits its consumers |
 | `check-default-deny-coverage.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every namespace that owns a workload carries an ingress default-deny (see below) |
 | `check-pvc-storageclass.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every claim pins a `storageClassName` |
-| `check-netpol-except-parity.py` | `task lint:netpol-parity`, the CI netpol-parity job — public-egress except-lists match a canonical reserved-CIDR set |
+| `check-netpol-except-parity.py` | `scripts/flux-corpus-gates.sh` over the substituted corpus, where the fence arms see real CIDRs, plus `task lint:netpol-parity` and the CI netpol-parity job over the tree on disk — public-egress except-lists match a canonical reserved-CIDR set and no egress rule reaches a fenced range whole |
 | `check-nfs-tls.py` | `scripts/flux-corpus-gates.sh`, so both `task flux:lint` and the CI flux-lint job run it — every NFS `PersistentVolume` mounts `xprtsec=tls` and names its server by hostname. `--allow-empty`, because a cluster with no NFS storage ships no such PV |
 | `validate-helm-values.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — `helm template` over the value-heavy releases |
 | `check-deploy-coverage.sh` | the CI deploy-coverage job — every changed playbook/inventory path reaches a deploy job |

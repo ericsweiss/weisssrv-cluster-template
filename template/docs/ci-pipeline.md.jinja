@@ -98,6 +98,7 @@ rendered corpus, each covering a class kubeconform structurally cannot see:
 |---|---|
 | `check-hpa-vpa-invariant.py` | an HPA and a CPU-controlling VPA target one workload; a container declares a CPU limit; a container sets `requests.memory == limits.memory` under a memory-controlling VPA |
 | `check-scrape-netpol.py` | a scraped namespace's NetworkPolicies do not admit Prometheus (the symptom is a bare `TargetDown`) |
+| `check-netpol-except-parity.py` | an egress rule reaches the LAN, Tailscale or the metadata address in full, or a `/0` peer's `except:` list is not a canonical reserved-CIDR set. Over the corpus, where every `ipBlock` CIDR is substituted |
 | `check-default-deny-coverage.py` | a namespace owns a workload but carries no namespace-wide ingress default-deny (or one defeated by an allow-everything rule beside it) |
 | `check-secretstore-scope.py` | a `ClusterSecretStore` has no `spec.conditions`, or a consumer namespace those conditions do not admit |
 | `check-pvc-storageclass.py` | a claim omits `storageClassName`, which the DefaultStorageClass admission plugin rewrites at create time with no diff in git |
@@ -110,22 +111,17 @@ updater preserves it. Deliberate exceptions go in
 `scripts/autoscaling-policy.yaml` under `cpu_limit_allowlist`,
 `memory_ratio_allowlist` and `vpa_cap_allowlist`, each with a rationale.
 
-`vpa_cap_allowlist` ships with one entry, the `Off`-tier authentik PostgreSQL
-VPA. An `Off` VPA only records a recommendation an operator applies by hand, so
-its `maxAllowed.memory` is the headroom that recommendation may grow into and
-sits above the chart's hand-set limits on purpose. Lowering the cap to silence
-the gate would cap the recommendation instead.
-
-`netpol-parity` has a `lint` job of its own because it reads the manifests on
-disk rather than the corpus, so it also covers `kubernetes/clusters/*/flux-system/`,
-and it compares every public-egress `except:` list against the canonical
-reserved-CIDR sets. Deliberate exceptions live in `scripts/netpol-except.yaml`
-with their reason.
+The LAN fence is judged twice, because neither view sees the whole of it. Over
+the corpus the CIDRs are substituted, so the fence arms compare real addresses;
+the `netpol-parity` `lint` job reads the manifests on disk, where every
+`ipBlock` CIDR is still a `${cluster_*}` placeholder the arms skip, and covers
+`kubernetes/clusters/*/flux-system/`, which no Kustomization builds. Deliberate
+exceptions live in `scripts/netpol-except.yaml` with their reason.
 
 That list is not written twice. `extra_validation` calls
 `scripts/flux-corpus-gates.sh`, and so does `task flux:lint`, so the two cannot
 drift: add a gate to that script and both sides pick it up.
-`task lint:netpol-parity` covers the disk-reading one, and `task lint` runs
+`task lint:netpol-parity` covers the disk-reading arm, and `task lint` runs
 both.
 
 Both sides then run one gate the wrapper cannot hold:
