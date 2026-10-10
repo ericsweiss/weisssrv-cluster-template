@@ -24,10 +24,12 @@ exclude:
   - scripts/check-default-deny-coverage.py
   - scripts/check-deploy-coverage.sh
   - scripts/check-doc-links.py
+  - scripts/check-ephemeral-storage-cap.py
   - scripts/check-helm-repo-parity.py
   - scripts/check-guest-endpoint-parity.py
   - scripts/check-flux-version-pin.py
   - scripts/check-hpa-vpa-invariant.py
+  - scripts/check-kubectl-version-pin.py
   - scripts/check-lib-pins.py
   - scripts/check-netpol-except-parity.py
   - scripts/check-nfs-tls.py

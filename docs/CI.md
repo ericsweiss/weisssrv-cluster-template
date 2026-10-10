@@ -54,13 +54,15 @@ instead of in someone's homelab.
 The render suite proves the generated pipeline wires these gates. This check
 runs them, over the manifests the template ships. The rendered
 `scripts/flux-corpus-gates.sh` runs the corpus arms, the same wrapper
-`task flux:lint` calls: `check-hpa-vpa-invariant`, `check-scrape-netpol`,
-`check-default-deny-coverage`, `check-secretstore-scope` and
-`check-pvc-storageclass` over the rendered corpus, plus
-`check-backup-artifact-apps` over the inventory and the alert rules. Its
-HelmRelease-values arm needs the network, so the validator calls the wrapper
-without a versions ConfigMap and that arm is skipped. The validator then runs
-`check-netpol-except-parity` over `kubernetes/` on disk and
+`task flux:lint` calls: `check-hpa-vpa-invariant`,
+`check-netpol-except-parity`, `check-scrape-netpol`,
+`check-default-deny-coverage`, `check-secretstore-scope`,
+`check-pvc-storageclass` and `check-ephemeral-storage-cap` over the rendered
+corpus, plus `check-backup-artifact-apps` over the inventory and the alert
+rules. Its HelmRelease-values arm needs the network, so the validator calls the
+wrapper without a versions ConfigMap and that arm is skipped. The validator then
+runs `check-netpol-except-parity` again over `kubernetes/` on disk, where the
+`${cluster_*}` CIDRs are unsubstituted and the flux-system tree is in scope, and
 `lint-prometheus-config.sh` over the alert rules and the Alertmanager config.
 Without this check, a generated cluster's first pipeline can be red on
 manifests nobody edited, and the template change that caused it went green.

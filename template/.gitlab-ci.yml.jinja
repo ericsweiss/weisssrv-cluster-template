@@ -620,6 +620,25 @@ flux-version-pin:
       changes: *flux_version_pin_paths
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
+# kubectl supports +/-1 minor against the apiserver; outside that window its
+# output is unspecified, and scripts/deploy-verify.sh reads it to gate a deploy.
+# Mirrors `task lint:kubectl-version-pin`.
+kubectl-version-pin:
+  extends: .lint-gate
+  script:
+    - python3 scripts/check-kubectl-version-pin.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &kubectl_version_pin_paths
+        - "{{ versions_cm }}"
+        - "scripts/check-kubectl-version-pin.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *kubectl_version_pin_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
 # Three files here are OUTPUTS, not sources, and nothing else compares them
 # against what generates them, so a stale copy ships green. Regenerate and diff.
 # What each arm covers: docs/ci-pipeline.md § check-generated-files.

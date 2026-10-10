@@ -39,10 +39,12 @@ spec:
 
 GATE_HEADERS = (
     "Checking HPA/VPA invariant",
+    "Checking NetworkPolicy LAN fence over real CIDRs",
     "Checking scrape/NetworkPolicy invariant",
     "Checking ingress default-deny coverage",
     "Checking ClusterSecretStore scoping",
     "Checking PVC storageClassName",
+    "Checking sized emptyDir vs ephemeral-storage limits",
     "Checking NFS PersistentVolume TLS",
     "Checking backup-artifact apps against their alert arms",
 )

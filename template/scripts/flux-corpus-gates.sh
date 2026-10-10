@@ -116,6 +116,10 @@ echo "=== Checking ClusterSecretStore scoping ==="
 python3 scripts/check-secretstore-scope.py < "$CORPUS" || record $? check-secretstore-scope.py
 echo "=== Checking PVC storageClassName ==="
 python3 scripts/check-pvc-storageclass.py < "$CORPUS" || record $? check-pvc-storageclass.py
+# A sized emptyDir outside its container's ephemeral-storage limit is evicted
+# before the volume it sized ever fills.
+echo "=== Checking sized emptyDir vs ephemeral-storage limits ==="
+python3 scripts/check-ephemeral-storage-cap.py < "$CORPUS" || record $? check-ephemeral-storage-cap.py
 # --allow-empty: a cluster with no NFS storage ships no such PV. The cert domain
 # only names the certificate in the IP-server message.
 echo "=== Checking NFS PersistentVolume TLS ==="

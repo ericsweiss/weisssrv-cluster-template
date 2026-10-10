@@ -48,10 +48,14 @@ vendored:
     consumer: template/scripts/check-deploy-coverage.sh
   - lib: scripts/check-doc-links.py
     consumer: template/scripts/check-doc-links.py
+  - lib: scripts/check-ephemeral-storage-cap.py
+    consumer: template/scripts/check-ephemeral-storage-cap.py
   - lib: scripts/check-helm-repo-parity.py
     consumer: template/scripts/check-helm-repo-parity.py
   - lib: scripts/check-hpa-vpa-invariant.py
     consumer: template/scripts/check-hpa-vpa-invariant.py
+  - lib: scripts/check-kubectl-version-pin.py
+    consumer: template/scripts/check-kubectl-version-pin.py
   - lib: scripts/check-lib-pins.py
     consumer: template/scripts/check-lib-pins.py
   - lib: scripts/check-netpol-except-parity.py
