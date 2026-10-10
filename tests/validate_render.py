@@ -597,14 +597,16 @@ def check_cluster_gates(render: Path, **_kw) -> None:
 def check_flux_lint(render: Path, **_kw) -> None:
     """The generated cluster's own first gate command passes on arrival.
 
-    `cluster-gates` calls the corpus wrapper with no versions ConfigMap, which
-    skips its HelmRelease-values arm; this runs the task the operator runs, so a
-    chart-rendered limit against a VPA cap fails here instead of on first use.
+    `cluster-gates` skips the HelmRelease-values arm (no versions ConfigMap),
+    so a chart-rendered limit against a VPA cap fails here, not on first use.
     """
     _need("task")
     # Named rather than left to the Taskfile's own precondition: the values arm
     # is the whole reason this check exists, and it is the arm helm renders.
     _need("helm")
+    # flux's `envsubst --strict` is the substitution authority the task renders
+    # through, so a missing CLI fails by name instead of mid-render.
+    _need("flux")
     result = _run(["task", "flux:lint"], cwd=render)
     if result.returncode:
         # Whole output, untrimmed: the task reports each gate where it runs, so

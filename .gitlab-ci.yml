@@ -230,6 +230,11 @@ validate-rendered-cluster:
     # sha256-verified in before_script like every other fetched binary.
     TASK_VERSION: "3.53.1"
     TASK_SHA256: "a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7"
+    # flux is outside that set too, and `task flux:lint` pipes every build
+    # through `flux envsubst --strict`. The pin matches the generated
+    # cluster-verify job and flux_version in the rendered versions ConfigMap.
+    FLUX_VERSION: "2.9.0"
+    FLUX_SHA256: "7aa9779fc7ec6d030e609dab7dbed8c6fc9e3a7f4670834ad02369268aaf341f"
   before_script:
     - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
     - mkdir -p "$CI_PROJECT_DIR/.bin"
@@ -254,9 +259,9 @@ validate-rendered-cluster:
         "$LIB_CHECKOUT"
     - |
       set -eo pipefail
-      # helm and task: the flux-lint check runs the render's own `task
-      # flux:lint`, whose HelmRelease-values arm renders every chart. helm's pin
-      # comes from the library's flux-lint include, never a second spelling.
+      # The flux-lint check runs the render's own `task flux:lint`: task runs
+      # it, helm renders its values arm, flux is its substitution authority.
+      # helm's pin comes from the library include, never a second spelling.
       HELM_PINS=$(python3 - "$LIB_CHECKOUT/ci/validate/flux-lint.yml" <<'PY'
       import sys, yaml
       inputs = next(yaml.safe_load_all(open(sys.argv[1])))["spec"]["inputs"]
@@ -270,8 +275,11 @@ validate-rendered-cluster:
       curl -fsSL -o task.tar.gz "https://github.com/go-task/task/releases/download/v${TASK_VERSION}/task_linux_amd64.tar.gz"
       echo "${TASK_SHA256}  task.tar.gz" | sha256sum -c -
       tar xzf task.tar.gz -C "$CI_PROJECT_DIR/.bin" task
-      rm -f helm.tar.gz task.tar.gz
-      helm version --short && task --version
+      curl -fsSL -o flux.tar.gz "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_amd64.tar.gz"
+      echo "${FLUX_SHA256}  flux.tar.gz" | sha256sum -c -
+      tar xzf flux.tar.gz -C "$CI_PROJECT_DIR/.bin" flux
+      rm -f helm.tar.gz task.tar.gz flux.tar.gz
+      helm version --short && task --version && flux --version
   script:
     # BOTH fixtures — see tests/answers-unlike.yml for why the contrast render
     # is not optional. --self-checks rides on this line alone: its arms read no

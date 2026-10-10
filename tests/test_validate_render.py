@@ -714,17 +714,18 @@ def test_the_flux_lint_check_is_registered_without_a_library_checkout():
 
 
 def test_the_validator_job_provisions_the_tools_flux_lint_needs():
-    """`task` and `helm` are outside scripts/ci-fetch-tools.py's set, so without
-    this the check fails in CI on a missing binary rather than on a render."""
+    """`task`, `helm` and `flux` are outside scripts/ci-fetch-tools.py's set, so
+    without this the check fails in CI on a missing binary, not on a render."""
     ci_file = Path(__file__).resolve().parent.parent / ".gitlab-ci.yml"
     job = validate_render.render_cluster.load_ci(ci_file)["validate-rendered-cluster"]
     before = "\n".join(str(step) for step in job["before_script"])
-    for tool in ("helm", "task"):
+    tools = ("helm", "task", "flux")
+    for tool in tools:
         assert f"{tool}.tar.gz" in before, (
             f"validate-rendered-cluster installs no {tool}, which the flux-lint "
             "check requires"
         )
-    assert before.count("sha256sum -c -") >= 2, (
+    assert before.count("sha256sum -c -") >= len(tools), (
         "a fetched binary is installed without verifying its pinned sha256"
     )
 
