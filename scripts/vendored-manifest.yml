@@ -93,14 +93,14 @@ vendored:
     consumer: template/scripts/deploy-verify-lib.sh
   - lib: scripts/extract-prometheus-config.py
     consumer: template/scripts/extract-prometheus-config.py
-  - lib: scripts/flux-env.sh
-    consumer: template/scripts/flux-env.sh
-  - lib: scripts/flux-secret-consumers.py
-    consumer: template/scripts/flux-secret-consumers.py
   - lib: scripts/find-reachable-host.sh
     consumer: template/scripts/find-reachable-host.sh
+  - lib: scripts/flux-env.sh
+    consumer: template/scripts/flux-env.sh
   - lib: scripts/flux-render.sh
     consumer: template/scripts/flux-render.sh
+  - lib: scripts/flux-secret-consumers.py
+    consumer: template/scripts/flux-secret-consumers.py
   - lib: scripts/gate_common.py
     consumer: template/scripts/gate_common.py
   - lib: scripts/generate-hosts-env.py

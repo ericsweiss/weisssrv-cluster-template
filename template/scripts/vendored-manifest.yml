@@ -46,8 +46,8 @@ vendored:
   - scripts/extract-prometheus-config.py
   - scripts/find-reachable-host.sh
   - scripts/flux-env.sh
-  - scripts/flux-secret-consumers.py
   - scripts/flux-render.sh
+  - scripts/flux-secret-consumers.py
   - scripts/gate_common.py
   - scripts/generate-hosts-env.py
   - scripts/generate-versions-configmap.py
