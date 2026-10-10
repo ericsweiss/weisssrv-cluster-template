@@ -228,7 +228,7 @@ TEMPLATE_OWNED = {
     "template/scripts/check-skill-refs.py",
     "template/scripts/check-tenant-wiring.py.jinja",
     "template/scripts/check-role-default-flips.py",
-    "template/scripts/check-unmanaged-secrets.py",
+    "template/scripts/check-unmanaged-secrets.py.jinja",
     "template/scripts/check-tenant-traefik-isolation.py.jinja",
     "template/scripts/check-upstream-rule-mirror.py",
     "template/scripts/deploy-preflight.py",
