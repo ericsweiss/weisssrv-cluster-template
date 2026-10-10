@@ -63,7 +63,9 @@ rules. Its HelmRelease-values arm needs the network, so the validator calls the
 wrapper without a versions ConfigMap and that arm is skipped. The validator then
 runs `check-netpol-except-parity` again over `kubernetes/` on disk, where the
 `${cluster_*}` CIDRs are unsubstituted and the flux-system tree is in scope, and
-`lint-prometheus-config.sh` over the alert rules and the Alertmanager config.
+`lint-prometheus-config.sh` over the alert rules and the Alertmanager config,
+then `check-alertmanager-behaviour.py` over what that config actually routes
+and inhibits.
 Without this check, a generated cluster's first pipeline can be red on
 manifests nobody edited, and the template change that caused it went green.
 

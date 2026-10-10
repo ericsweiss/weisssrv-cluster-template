@@ -523,6 +523,23 @@ def _prometheus_config(render: Path) -> str | None:
     )
     if result.returncode:
         return f"lint-prometheus-config.sh:\n{result.stdout}{result.stderr}"
+    # Behaviour, not syntax: amtool check-config above accepts a route reorder
+    # that silences Watchdog and a one-sided alertname rename that unbinds an
+    # inhibit pair, so the generated cluster's own second arm runs here too.
+    behaviour = _run(
+        [
+            sys.executable,
+            "scripts/check-alertmanager-behaviour.py",
+            "--config",
+            "scripts/alertmanager-behaviour.yaml",
+            "--extract-arg=--rules-dir",
+            "--extract-arg=kubernetes/apps",
+            "--extract-arg=--require-release-rules",
+        ],
+        cwd=render,
+    )
+    if behaviour.returncode:
+        return f"check-alertmanager-behaviour.py:\n{behaviour.stdout}{behaviour.stderr}"
     return None
 
 
@@ -591,7 +608,7 @@ def check_cluster_gates(render: Path, **_kw) -> None:
 
     if failures:
         raise Failure("\n".join(failures))
-    print(f"  cluster gates ok ({_CORPUS_GATE_WRAPPER} + 3 over {len(corpus)} builds)")
+    print(f"  cluster gates ok ({_CORPUS_GATE_WRAPPER} + 4 over {len(corpus)} builds)")
 
 
 def check_flux_lint(render: Path, **_kw) -> None:
