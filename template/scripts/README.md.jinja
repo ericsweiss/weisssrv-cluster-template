@@ -58,6 +58,7 @@ the diff.
 | `taskfile_tree.py` | `scripts/test_taskfile_tree.py` — flattens the `Taskfile.yml` `includes:` tree into one `{name: definition}` map with `- task:` references fully qualified, so a suite that walks task names sees the namespace files too |
 | `check-ephemeral-storage-cap.py` | `scripts/flux-corpus-gates.sh`, so both `task flux:lint` and the CI flux-lint job run it — a container whose `ephemeral-storage` limit is below the sized emptyDirs it mounts, which the kubelet evicts before the volume it sized ever fills |
 | `check-kubectl-version-pin.py` | `task lint:kubectl-version-pin` and the CI kubectl-version-pin job — the CI kubectl pin is within Kubernetes' supported one-minor skew of `k3s_version` |
+| `check-alertmanager-behaviour.py` | `task lint:prometheus-config` and the CI prometheus-config-lint job (first shard) — resolves every declared route case with `amtool` and holds each inhibit pair bound, which `amtool check-config` cannot see. Site data: `scripts/alertmanager-behaviour.yaml` |
 | `check-backup-artifact-apps.py` | `scripts/flux-corpus-gates.sh`, so both `task flux:lint` and the CI flux-lint job run it — pairs `nas_storage_backup_artifact_apps` (group_vars/nas.yml) against the `BackupArtifactStale` arms in the kube-prometheus-stack release |
 | `generate-versions-configmap.py` | `task flux:sync-versions` and its CI drift gate |
 | `generate-hosts-env.py` | `task hosts:sync` and its CI drift gate |
@@ -161,6 +162,7 @@ Not vendored at the pinned ref — this repository owns them.
 | `helm-values-releases.yaml` | `validate-helm-values.py` | Which HelmReleases are worth a `helm template` round-trip |
 | `deploy-coverage.conf` | `check-deploy-coverage.sh` | Playbooks deliberately not wired to a deploy job, each with a rationale |
 | `netpol-except.yaml` | `check-netpol-except-parity.py` | Egress rules that deliberately carry no peers, each with a rationale |
+| `alertmanager-behaviour.yaml` | `check-alertmanager-behaviour.py` | The receiver each labelled alert must reach, the alertnames the chart ships rather than this repository, and the escalation pairs |
 | `comment-length.yaml` | `check-comment-length.py` | Scan scope, and the vendored copies the gate skips because their comments are the library's |
 | `kubeconform-expected-skipped.txt` | `kubeconform-skipped.py` | apiVersion/Kind pairs allowed to validate against no schema. Ships empty: the pinned CRD catalog covers every kind here, so a skip is a new CRD or a failed catalog fetch |
 | `vendored-manifest.yml` | the library's `check-vendored-copies.py`, via `tests/test_vendored_byte_identity.py` | Which files here (and at the repo root) are library copies, and which are declared forks |

@@ -404,4 +404,11 @@ tasks:
       REQUIRE_RELEASE_RULES: "1"
     cmds:
       - bash scripts/lint-prometheus-config.sh
+      # Syntax vs behaviour: check-config proves the file parses, this proves
+      # where each alert actually lands and that the inhibit pairs still bind.
+      - >-
+        python3 scripts/check-alertmanager-behaviour.py
+        --config scripts/alertmanager-behaviour.yaml
+        --extract-arg=--rules-dir --extract-arg=kubernetes/apps
+        --extract-arg=--require-release-rules
 {%- endraw %}

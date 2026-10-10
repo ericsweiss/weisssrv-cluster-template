@@ -13,6 +13,7 @@ vendored:
     consumer: ansible/molecule/tasks/prepare-apt-disable.yml
   - lib: ansible_collections/weisssrv/infra/molecule-shared/tasks/prepare-base.yml
     consumer: ansible/molecule/tasks/prepare-base.yml
+  - scripts/check-alertmanager-behaviour.py
   - scripts/check-backup-artifact-apps.py
   - scripts/check-cluster-invariants.py
   - scripts/check-ci-include-job-names.py

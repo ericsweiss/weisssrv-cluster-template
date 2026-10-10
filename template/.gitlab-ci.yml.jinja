@@ -881,6 +881,16 @@ prometheus-config-lint:
       done
       echo "shard ${CI_NODE_INDEX}/${CI_NODE_TOTAL}: ${copied} of ${index} unit-test file(s)"
       RULE_TESTS_DIR="$shard" bash scripts/lint-prometheus-config.sh
+    - |
+      # Behavioural half of the gate, first shard only: amtool check-config
+      # accepts a route reorder that silences Watchdog and a one-sided alertname
+      # rename that unbinds an inhibit pair. Pairs with `task lint:prometheus-config`.
+      if [ "${CI_NODE_INDEX:-1}" = "1" ]; then
+        python3 scripts/check-alertmanager-behaviour.py \
+          --config scripts/alertmanager-behaviour.yaml \
+          --extract-arg=--rules-dir --extract-arg=kubernetes/apps \
+          --extract-arg=--require-release-rules
+      fi
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
@@ -889,6 +899,8 @@ prometheus-config-lint:
         - "kubernetes/infrastructure/observability/kube-prometheus-stack/**/*"
         - "kubernetes/apps/**/prometheusrule.yaml"
         - "tests/prometheus-rules/**/*"
+        - "scripts/alertmanager-behaviour.yaml"
+        - "scripts/check-alertmanager-behaviour.py"
         - "scripts/extract-prometheus-config.py"
         - "scripts/lint-prometheus-config.sh"
         - ".gitlab-ci.yml"

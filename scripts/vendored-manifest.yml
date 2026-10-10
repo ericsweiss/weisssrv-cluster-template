@@ -31,6 +31,8 @@ vendored:
     consumer: template/ansible/molecule/tasks/prepare-apt-disable.yml
   - lib: ansible_collections/weisssrv/infra/molecule-shared/tasks/prepare-base.yml
     consumer: template/ansible/molecule/tasks/prepare-base.yml
+  - lib: scripts/check-alertmanager-behaviour.py
+    consumer: template/scripts/check-alertmanager-behaviour.py
   - lib: scripts/check-backup-artifact-apps.py
     consumer: template/scripts/check-backup-artifact-apps.py
   - lib: scripts/check-cluster-invariants.py

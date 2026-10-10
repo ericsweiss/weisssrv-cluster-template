@@ -1,0 +1,51 @@
+---
+# Site data for scripts/check-alertmanager-behaviour.py (--config). The route
+# cases, the synthetic alertnames and the upstream alert inventory are all
+# cluster-specific, so the vendored gate cannot carry them.
+
+# One case per receiver the config should reach. `amtool config routes test`
+# prints every match in tree order and only the first delivers, so `receiver`
+# is compared against the first line.
+route_cases:
+  # Watchdog carries severity=none and MUST beat the severity=none null route.
+  - receiver: watchdog-heartbeat
+    labels: [alertname=Watchdog, severity=none]
+  - receiver: "null"
+    labels: [alertname=InfoInhibitor, severity=none]
+  - receiver: email-and-chat
+    labels: [alertname=ZFSPoolNotOnline, severity=critical]
+  - receiver: chat-default
+    labels: [alertname=DiskUsageWarning, severity=warning]
+  # severity=info has its own child route ahead of the root, carrying repeat_interval 24h.
+  - receiver: chat-default
+    labels: [alertname=NodeOutageStormControl, severity=info]
+  - receiver: chat-default
+    labels: [alertname=SomeUnlabelledAlert]
+
+# Route-case alertnames that deliberately name no rule. Only the fall-through
+# case, whose point is that an alert matching no child route still reaches the
+# root receiver.
+synthetic_route_alerts:
+  - SomeUnlabelledAlert
+
+# Alerts shipped by the kube-prometheus-stack chart's own rule groups. Every
+# alertname in an inhibit rule must resolve to a rule this repository ships or
+# to an entry here; verify a new entry against the chart, as a typo is inert.
+upstream_alerts:
+  - AlertmanagerFailedToSendAlerts
+  - InfoInhibitor
+  - KubeAggregatedAPIDown
+  - KubeContainerWaiting
+  - KubeDaemonSetMisScheduled
+  - KubeDaemonSetRolloutStuck
+  - KubeDeploymentReplicasMismatch
+  - KubePodNotReady
+  - KubeStatefulSetReplicasMismatch
+  - NodeSystemSaturation
+  - Watchdog
+
+# Label keys the inhibit rule for every escalation pair must share, so one
+# host's critical does not silence another host's warning. The four suffix
+# pairs here are all textfile-collector series, which carry instance.
+escalation_equal:
+  - instance

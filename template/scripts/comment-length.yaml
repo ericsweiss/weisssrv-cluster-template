@@ -16,6 +16,7 @@ exclude:
   - ansible/molecule/tasks/prepare-base.yml
   - lint/yamllint-relaxed.yml
   - ruff.toml
+  - scripts/check-alertmanager-behaviour.py
   - scripts/check-backup-artifact-apps.py
   - scripts/check-cluster-invariants.py
   - scripts/check-ci-include-job-names.py
