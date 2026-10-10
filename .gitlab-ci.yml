@@ -232,6 +232,9 @@ validate-rendered-cluster:
   before_script:
     - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
     - mkdir -p "$CI_PROJECT_DIR/.bin"
+    # The render's `task flux:lint` renders through GNU envsubst ahead of the
+    # strict flux pass; gettext-base is the Debian package that ships it.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends gettext-base >/dev/null
     - |
       pip install --user --quiet \
         "copier==${COPIER_VERSION}" \
