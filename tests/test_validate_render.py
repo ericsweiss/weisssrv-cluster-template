@@ -728,9 +728,12 @@ def test_the_validator_job_provisions_the_tools_flux_lint_needs():
     assert before.count("sha256sum -c -") >= len(tools), (
         "a fetched binary is installed without verifying its pinned sha256"
     )
-    assert "gettext-base" in before, (
-        "validate-rendered-cluster installs no envsubst, which the render's "
+    assert "gettext-base.deb" in before and "dpkg-deb -x" in before, (
+        "validate-rendered-cluster unpacks no envsubst, which the render's "
         "flux:lint precondition requires"
+    )
+    assert before.count("sha256sum -c -") >= len(tools) + 1, (
+        "the gettext-base package is unpacked without verifying its pinned sha256"
     )
 
 

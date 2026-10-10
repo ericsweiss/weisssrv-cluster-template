@@ -229,12 +229,19 @@ validate-rendered-cluster:
     # sha256-verified in before_script like every other fetched binary.
     TASK_VERSION: "3.53.1"
     TASK_SHA256: "a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7"
+    # The render's `task flux:lint` renders through GNU envsubst; the runner is
+    # not root, so the trixie gettext-base package is unpacked next to the
+    # fetched binaries instead of installed.
+    GETTEXT_BASE_VERSION: "0.23.1-2"
+    GETTEXT_BASE_SHA256: "1a3dfadd661520ff01d379fd89cd0d49972a5a775d490609f1712134ee3d62ca"
   before_script:
-    - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
-    - mkdir -p "$CI_PROJECT_DIR/.bin"
-    # The render's `task flux:lint` renders through GNU envsubst ahead of the
-    # strict flux pass; gettext-base is the Debian package that ships it.
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends gettext-base >/dev/null
+    - export PATH="$CI_PROJECT_DIR/.bin:$CI_PROJECT_DIR/.deb/usr/bin:$(python -m site --user-base)/bin:$PATH"
+    - mkdir -p "$CI_PROJECT_DIR/.bin" "$CI_PROJECT_DIR/.deb"
+    - |
+      curl -fsSL -o gettext-base.deb "https://deb.debian.org/debian/pool/main/g/gettext/gettext-base_${GETTEXT_BASE_VERSION}_amd64.deb"
+      echo "${GETTEXT_BASE_SHA256}  gettext-base.deb" | sha256sum -c -
+      dpkg-deb -x gettext-base.deb "$CI_PROJECT_DIR/.deb"
+      envsubst --version | head -1
     - |
       pip install --user --quiet \
         "copier==${COPIER_VERSION}" \
