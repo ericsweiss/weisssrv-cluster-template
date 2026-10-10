@@ -649,6 +649,87 @@ def test_the_substitution_arm_fails_a_render_without_the_versions_configmap(tmp_
 
 
 # --------------------------------------------------------------------------
+# flux-lint: the render's own first gate command
+# --------------------------------------------------------------------------
+
+
+def _stub_flux_lint(monkeypatch, returncode: int, stdout: str = "", stderr: str = ""):
+    """`task flux:lint` with a fixed verdict, and the argv it was called with."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(validate_render, "_need", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(
+        validate_render,
+        "_run",
+        lambda cmd, **_kw: calls.append(cmd)
+        or subprocess.CompletedProcess(cmd, returncode, stdout, stderr),
+    )
+    return calls
+
+
+def test_the_flux_lint_check_runs_the_rendered_task(monkeypatch, tmp_path, capsys):
+    """The subject is the operator's own command, not a reimplementation of it."""
+    calls = _stub_flux_lint(monkeypatch, 0)
+    validate_render.check_flux_lint(tmp_path)
+    assert calls == [["task", "flux:lint"]]
+    assert "flux:lint ok" in capsys.readouterr().out
+
+
+def test_the_flux_lint_check_fails_on_a_red_task(monkeypatch, tmp_path):
+    """Mutation case: the VPA-cap arm that reds a fresh render's first command."""
+    _stub_flux_lint(
+        monkeypatch,
+        1,
+        "ERROR [authentik]: a VPA caps memory at or above the chart-rendered limit\n",
+    )
+    with pytest.raises(validate_render.Failure) as failure:
+        validate_render.check_flux_lint(tmp_path)
+    assert "exited 1" in str(failure.value)
+    assert "ERROR [authentik]" in str(failure.value)
+
+
+def test_the_flux_lint_failure_keeps_the_whole_output(monkeypatch, tmp_path):
+    """The task reports each gate where it runs, so the finding can sit a hundred
+    per-release summaries above the last line; a tail would cut it off."""
+    lines = [f"line {n}" for n in range(200)]
+    _stub_flux_lint(monkeypatch, 1, "\n".join(lines) + "\n", "stderr line\n")
+    with pytest.raises(validate_render.Failure) as failure:
+        validate_render.check_flux_lint(tmp_path)
+    message = str(failure.value)
+    assert "line 0" in message and "line 199" in message
+    assert "stderr line" in message
+
+
+def test_the_flux_lint_check_needs_its_tools_rather_than_skipping(monkeypatch, tmp_path):
+    """Its whole subject is the helm-rendered arm, so a missing binary is a
+    failure by name: a skip would certify a check that never ran."""
+    monkeypatch.setattr(validate_render.shutil, "which", lambda _tool: None)
+    with pytest.raises(validate_render.Failure, match="task is not on PATH"):
+        validate_render.check_flux_lint(tmp_path)
+
+
+def test_the_flux_lint_check_is_registered_without_a_library_checkout():
+    """It reads the render only, so --lib-path must not gate it."""
+    registry = {name: needs for name, _fn, needs in validate_render.CHECKS}
+    assert registry.get("flux-lint") == frozenset()
+
+
+def test_the_validator_job_provisions_the_tools_flux_lint_needs():
+    """`task` and `helm` are outside scripts/ci-fetch-tools.py's set, so without
+    this the check fails in CI on a missing binary rather than on a render."""
+    ci_file = Path(__file__).resolve().parent.parent / ".gitlab-ci.yml"
+    job = validate_render.render_cluster.load_ci(ci_file)["validate-rendered-cluster"]
+    before = "\n".join(str(step) for step in job["before_script"])
+    for tool in ("helm", "task"):
+        assert f"{tool}.tar.gz" in before, (
+            f"validate-rendered-cluster installs no {tool}, which the flux-lint "
+            "check requires"
+        )
+    assert before.count("sha256sum -c -") >= 2, (
+        "a fetched binary is installed without verifying its pinned sha256"
+    )
+
+
+# --------------------------------------------------------------------------
 # main()'s accounting: a gate's verdict has to reach the exit code
 # --------------------------------------------------------------------------
 

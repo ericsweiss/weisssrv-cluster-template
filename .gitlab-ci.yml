@@ -225,6 +225,11 @@ validate-rendered-cluster:
     # no passwd entry, so `--syntax-check` dies without them.
     USER: gitlab-runner
     LOGNAME: gitlab-runner
+    # go-task is outside scripts/ci-fetch-tools.py's set, and the flux-lint
+    # check runs the render's own `task flux:lint`, so it is pinned here and
+    # sha256-verified in before_script like every other fetched binary.
+    TASK_VERSION: "3.53.1"
+    TASK_SHA256: "a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7"
   before_script:
     - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
     - mkdir -p "$CI_PROJECT_DIR/.bin"
@@ -247,6 +252,26 @@ validate-rendered-cluster:
       git clone --depth 1 --branch "$LIB_REF" \
         "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" \
         "$LIB_CHECKOUT"
+    - |
+      set -eo pipefail
+      # helm and task: the flux-lint check runs the render's own `task
+      # flux:lint`, whose HelmRelease-values arm renders every chart. helm's pin
+      # comes from the library's flux-lint include, never a second spelling.
+      HELM_PINS=$(python3 - "$LIB_CHECKOUT/ci/validate/flux-lint.yml" <<'PY'
+      import sys, yaml
+      inputs = next(yaml.safe_load_all(open(sys.argv[1])))["spec"]["inputs"]
+      print(inputs["helm_version"]["default"], inputs["helm_sha256"]["default"])
+      PY
+      )
+      read -r HELM_VERSION HELM_SHA256 <<<"$HELM_PINS"
+      curl -fsSL -o helm.tar.gz "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+      echo "${HELM_SHA256}  helm.tar.gz" | sha256sum -c -
+      tar xzf helm.tar.gz -C "$CI_PROJECT_DIR/.bin" --strip-components=1 linux-amd64/helm
+      curl -fsSL -o task.tar.gz "https://github.com/go-task/task/releases/download/v${TASK_VERSION}/task_linux_amd64.tar.gz"
+      echo "${TASK_SHA256}  task.tar.gz" | sha256sum -c -
+      tar xzf task.tar.gz -C "$CI_PROJECT_DIR/.bin" task
+      rm -f helm.tar.gz task.tar.gz
+      helm version --short && task --version
   script:
     # BOTH fixtures — see tests/answers-unlike.yml for why the contrast render
     # is not optional. --self-checks rides on this line alone: its arms read no

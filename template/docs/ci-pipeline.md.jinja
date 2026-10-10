@@ -105,8 +105,14 @@ The last two arms run only with `--require-chart-native-vpas`, which
 `scripts/flux-corpus-gates.sh` passes over the full corpus. A CPU limit buys
 only CFS throttling, and a 1:1 memory ratio never gains headroom because the VPA
 updater preserves it. Deliberate exceptions go in
-`scripts/autoscaling-policy.yaml` under `cpu_limit_allowlist` and
-`memory_ratio_allowlist`, each with a rationale.
+`scripts/autoscaling-policy.yaml` under `cpu_limit_allowlist`,
+`memory_ratio_allowlist` and `vpa_cap_allowlist`, each with a rationale.
+
+`vpa_cap_allowlist` ships with one entry, the `Off`-tier authentik PostgreSQL
+VPA. An `Off` VPA only records a recommendation an operator applies by hand, so
+its `maxAllowed.memory` is the headroom that recommendation may grow into and
+sits above the chart's hand-set limits on purpose. Lowering the cap to silence
+the gate would cap the recommendation instead.
 
 `netpol-parity` has a `lint` job of its own because it reads the manifests on
 disk rather than the corpus, so it also covers `kubernetes/clusters/*/flux-system/`,

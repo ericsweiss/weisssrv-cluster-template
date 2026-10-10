@@ -28,6 +28,7 @@ substitution in the shaped fixture and is only visible in a second, unlike one.
 | `terraform` | `terraform fmt -check -recursive` over the rendered `terraform/`, plus the tailnet policy still parses. Most of those files are Jinja templates, so this is what catches a template bug that lands as invalid HCL | `terraform` |
 | `flux` | for every Kustomization under `kubernetes/clusters/<name>/`: `kustomize build` the target path, assert every `${placeholder}` is a key of one of the two postBuild ConfigMaps, substitute, `kubeconform`. Mirrors `ci/validate/flux-lint.yml`, through the generated repo's own `scripts/flux-env.sh`. A path that builds to nothing, and a kind kubeconform validated against no schema outside `validate_render.EXPECTED_SKIPPED`, both fail: either would otherwise pass as a validated render | `kustomize`, `kubeconform` |
 | `cluster-gates` | the invariant gates the generated pipeline wires actually pass on the manifests the template ships | `kustomize` |
+| `flux-lint` | `task flux:lint` — the generated cluster's own first gate command — exits 0 on the fresh render. It is the only arm here that runs the corpus wrapper's HelmRelease-values validation, so a VPA cap above a chart-rendered container limit fails the template instead of the new cluster | `task`, `helm`, and everything `flux` and `cluster-gates` need |
 | `ci-policy` | the generated pipeline pins a `default: image:`, sets `default: interruptible: true` with the `workflow.auto_cancel` split (`interruptible` globally, `none` on `main`), and leaves every deploy/gate/plan job uninterruptible. All three are defaults a job inherits by saying nothing, so no rendered job fails when they go missing | — |
 | `include-contract` | every library `include:` in the rendered pipeline and in this repository's own resolves against the checkout: no undeclared `inputs:` key, every default-less input passed, and each job's resolved `stage:` declared. All three fail pipeline creation, which is otherwise first seen on the ref bump | `--lib-path` |
 | `inventory-addresses` | cluster-config declares the LAN CIDR and all three VIPs, so the render's own address invariants assert instead of skipping | — |
@@ -74,6 +75,22 @@ A clean `check-scrape-netpol` proves the namespace admits observability, not
 that the scrape lands: the allow policy's own `podSelector` and port go
 unchecked. A `TargetDown` that survives a green pipeline is the signal to read
 the live policy's targeting.
+
+### flux-lint
+
+`cluster-gates` runs the corpus wrapper without a versions ConfigMap, which the
+wrapper reads as "skip the HelmRelease-values validation". That arm is where a
+VPA `maxAllowed.memory` meets the limit the chart actually renders, and it is
+the arm that failed on a fresh render while every check above was green. This
+check closes that by running `task flux:lint` itself — the first command the
+generated cluster's own README hands the operator — in the render.
+
+It needs `task` and `helm` on PATH and neither is fetched by
+`scripts/ci-fetch-tools.py`, so `validate-rendered-cluster` installs both in its
+`before_script`: `helm` at the version and sha256 the library's
+`ci/validate/flux-lint.yml` pins, read out of the `--lib-path` checkout, so this
+gate and every generated cluster's own pipeline render with the same binary.
+There is no silent skip: a missing tool fails the check by name.
 
 ### inventory-addresses
 
@@ -128,9 +145,9 @@ render the last commit, silently testing something other than the diff under
 review.
 
 Requirements: `copier>=9.15`, `pytest`, `pyyaml` for the pytest suite; plus
-`yamllint`, `shellcheck`, `terraform`, `kustomize`, `kubeconform` and
-`ansible-playbook` for the validator. Any missing tool is reported by name. `--skip` takes any of
-`yamllint,shellcheck,terraform,flux,cluster-gates,ci-policy,include-contract,inventory-addresses,version-coverage,versions-configmap,vendored,rendered-vendored,role-opt-ins,role-inputs,terraform-validate,ansible`
+`yamllint`, `shellcheck`, `terraform`, `kustomize`, `kubeconform`,
+`ansible-playbook`, `promtool`, `amtool`, `helm` and `task` for the validator. Any missing tool is reported by name. `--skip` takes any of
+`yamllint,shellcheck,terraform,flux,cluster-gates,flux-lint,ci-policy,include-contract,inventory-addresses,version-coverage,versions-configmap,vendored,rendered-vendored,role-opt-ins,role-inputs,terraform-validate,ansible`
 — the same names `validate_render.py --help` prints, and the same order the
 table above lists them in. `test_ci_doc_lists_every_validator_check` holds the
 three together, so a check added to the registry without a row here fails the suite;
