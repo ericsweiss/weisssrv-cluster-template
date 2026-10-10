@@ -823,9 +823,19 @@ prometheus-config-lint:
     # ships no shared rules tree for it to require.
     RULES_DIR: "kubernetes/apps"
     REQUIRE_RELEASE_RULES: "1"
+  # The fetched binaries, keyed on the fetcher that pins them. It re-hashes each
+  # one against its version stamp every run, so a mutated cache is re-fetched
+  # rather than trusted.
+  cache:
+    key:
+      prefix: prom-tools
+      files:
+        - scripts/ci-fetch-tools.py
+    paths:
+      - .bin
   before_script:
     # The binaries come from the vendored fetcher, whose pins and sha256s are
-    # the library's. Each run downloads and verifies them afresh.
+    # the library's; the cache above spares all four shards the download.
     - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
     - pip install --user --quiet "pyyaml==$PYYAML_VERSION"
     - python3 scripts/ci-fetch-tools.py promtool amtool
