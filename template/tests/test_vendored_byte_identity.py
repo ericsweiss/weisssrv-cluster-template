@@ -239,10 +239,9 @@ def test_the_dind_service_matches_the_library_input_default() -> None:
         f"dind_service default at {pinned_lib_ref()} is {default!r} — they are one pin."
     )
 
-    # The daemon's bridge MTU, held to the same default: 1500 black-holes large
-    # TLS frames inside the job pod, which reads as a flaky registry or git fetch.
-    # Both flags are needed: --mtu covers the default bridge, the
-    # default-network-opt the user-defined networks molecule creates.
+    # The daemon's bridge MTU, held to the same default: --mtu covers the default
+    # bridge, the default-network-opt the user-defined networks molecule creates.
+    # 1500 black-holes large TLS frames and reads as a flaky registry or fetch.
     mtu = (inputs.get("dind_mtu") or {}).get("default")
     assert mtu, f"{DOCKER_BUILD_RELPATH} no longer declares a dind_mtu default"
     commands = [
