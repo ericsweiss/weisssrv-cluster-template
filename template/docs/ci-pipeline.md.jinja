@@ -336,6 +336,28 @@ Before `task flux:bootstrap` there is no `gotk-components.yaml`, and the gate
 checks the two files that do exist. `task lint:flux-version-pin` is the same
 check locally.
 
+### prometheus-config-lint
+
+`scripts/lint-prometheus-config.sh` runs `promtool check rules`, the alert unit
+tests under `tests/prometheus-rules/`, and `amtool check-config`. Sharded four
+ways, because promtool re-evaluates the whole rule corpus once per
+`evaluation_interval` per test file.
+
+`amtool check-config` only proves the file parses. The first shard also runs
+`scripts/check-alertmanager-behaviour.py`, which resolves each route case in
+`scripts/alertmanager-behaviour.yaml` with `amtool config routes test` and
+compares the receiver actually reached, then holds every inhibit rule to an
+alertname that still exists.
+
+That gate also pairs each `severity=warning` alert with the
+`severity=critical` alert whose name is its own plus `Prolonged` or
+`Critical`, and requires an inhibit rule between the two: without one a
+sustained failure pages at both severities for as long as it lasts. The rule
+must carry `equal: [instance]` so one host's critical does not silence
+another host's warning. A pair that shares no name stem is declared under
+`escalation_pairs`, and one that delivers both severities on purpose under
+`escalation_exceptions`.
+
 ### kubectl-version-pin
 
 kubectl supports one minor version either side of the apiserver; outside that
