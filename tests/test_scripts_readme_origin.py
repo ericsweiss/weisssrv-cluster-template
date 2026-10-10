@@ -222,6 +222,7 @@ TEMPLATE_OWNED = {
     "template/scripts/check-cluster-literals.py.jinja",
     "template/scripts/check-collection-pin-trigger.py",
     "template/scripts/check-deploy-host-coverage.py",
+    "template/scripts/check-grafana-sidecar-init.py",
     "template/scripts/check-guest-endpoint-parity.py",
     "template/scripts/check-integration-matrix-coverage.py",
     "template/scripts/check-kustomization-coverage.py",

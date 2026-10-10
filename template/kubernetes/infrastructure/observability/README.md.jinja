@@ -273,8 +273,16 @@ provisioner rescans on its own interval). **Datasources are not**: Grafana reads
 those files only at startup, and the Prometheus datasource itself arrives as a
 sidecar-discovered ConfigMap — so `sidecar.datasources.initDatasources: true`
 runs the sidecar as an init container as well, guaranteeing the files exist
-before Grafana boots. Keep `skipReload` and `initDatasources` together; the
-chart documents them as a pair.
+before Grafana boots.
+
+Those two travel with a third: `watchMethod: LIST`. The init container inherits
+the datasource sidecar's `watchMethod`, and the chart default `WATCH` never
+returns, so an init container in that mode leaves the pod in `PodInitializing`
+until the Helm upgrade times out. Treat `skipReload`, `initDatasources` and
+`watchMethod: LIST` as one unit — change one and the other two have to move with
+it. `scripts/check-grafana-sidecar-init.py` renders the chart and fails any
+`*-sc-*` container whose `METHOD` does not match its position, so the
+combination cannot regress silently.
 
 ## Grafana RBAC and alert routing
 

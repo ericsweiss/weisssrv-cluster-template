@@ -336,7 +336,7 @@ include:
       # With a baseline set, a kind skipped outside it fails the job rather than
       # degrading the run to core kinds in silence.
       expected_skipped_file: "scripts/kubeconform-expected-skipped.txt"
-      extra_validation: 'bash scripts/flux-corpus-gates.sh "$RENDER_ALL" "{{ versions_cm }}" || FAILED=1'
+      extra_validation: 'bash scripts/flux-corpus-gates.sh "$RENDER_ALL" "{{ versions_cm }}" || FAILED=1; python3 scripts/check-grafana-sidecar-init.py || FAILED=1'
       changes:
         - "kubernetes/**/*"
         - "ansible/inventories/prod/group_vars/all.yml"
@@ -356,6 +356,7 @@ include:
         - "scripts/flux-env.sh"
         - "scripts/kubeconform-skipped.py"
         - "scripts/kubeconform-expected-skipped.txt"
+        - "scripts/check-grafana-sidecar-init.py"
         - ".gitlab-ci.yml"
 
   # Doc-link rot: the checker is vendored (scripts/check-doc-links.py) and

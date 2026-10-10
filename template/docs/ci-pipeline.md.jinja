@@ -120,6 +120,14 @@ drift: add a gate to that script and both sides pick it up.
 `task lint:netpol-parity` covers the disk-reading one, and `task lint` runs
 both.
 
+Both sides then run one gate the wrapper cannot hold:
+`scripts/check-grafana-sidecar-init.py`. Its subject is chart-rendered rather
+than in the kustomize corpus — it `helm template`s kube-prometheus-stack and
+fails any `*-sc-*` container whose `METHOD` does not match its position, `LIST`
+in an init container and `WATCH` in a long-running one. An init container left
+in the chart's default `WATCH` never exits, so the Grafana pod sits in
+`PodInitializing` until the Helm upgrade times out.
+
 `scripts/flux-render.sh` is the library's copy, vendored unmodified (the
 vendored-copy gate below checks it byte-for-byte). The multi-ConfigMap handling
 lives in the local wrapper `scripts/flux-env.sh`, which is what both CI and
