@@ -3,6 +3,10 @@
 # Cluster identity, addressing and backend names for Flux postBuild substitution;
 # every stage after sources substitutes from this and cluster-versions. Keys are a
 # contract: StrictPostBuildSubstitutions fails the reconcile on an unknown one.
+
+# The set is a deliberate SUPERSET of the reference cluster's: the rosters, probe
+# gates and backend names below exist because a generated cluster is configured
+# by answer rather than by hand. kubernetes/README.md tabulates every key.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -22,6 +26,9 @@ data:
   cluster_node_label_domain: "{{ internal_domain }}"
 
   cluster_lan_cidr: "{{ lan_cidr }}"
+  # Default gateway on the LAN, mirroring the `lan_gateway` inventory variable.
+  # A probe or an allowlist naming the router reads this, never a literal.
+  cluster_lan_gateway: "{{ lan_gateway }}"
   cluster_pod_cidr: "{{ k3s_pod_cidr }}"
   cluster_service_cidr: "{{ k3s_service_cidr }}"
 
