@@ -43,6 +43,7 @@ vendored:
   - scripts/extract-prometheus-config.py
   - scripts/find-reachable-host.sh
   - scripts/flux-env.sh
+  - scripts/flux-secret-consumers.py
   - scripts/flux-render.sh
   - scripts/gate_common.py
   - scripts/generate-hosts-env.py
@@ -57,6 +58,7 @@ vendored:
   - scripts/semantic-release.py
   - scripts/shell-lib.sh
   - scripts/supervised-apply-guard.sh
+  - scripts/taskfile_tree.py
   # pre-commit, the yaml-lint job and `task lint` all point at this profile.
   # Kept at lint/, never as a repo-root `.yamllint`: ansible-lint discovers one
   # there and replaces its own yaml rule.
@@ -79,6 +81,13 @@ forked:
       Takes --root and --components where the library's takes --repo-root,
       --ci-file, --versions-configmap, --gotk-glob and --runbook.
     reconciled_sha256: 5353b33732feddc81d617138783f5fc65f09b13efc35a2f0dc0b878932e9d51c
+  - lib: scripts/check-guest-endpoint-parity.py
+    consumer: scripts/check-guest-endpoint-parity.py
+    reason: >-
+      Walks a fixed manifest tree and inventory directory, where the library's
+      takes --inventory, --manifest-tree and --scoped-group and additionally
+      requires an export to admit a scoped group whole.
+    reconciled_sha256: a7ab41e5de5ec07feb2a240b103b7ab24a96074da95e9e366cce0c03afd941c5
   - lib: scripts/check-secret-rotation-coverage.py
     consumer: scripts/check-secret-rotation-coverage.py
     reason: >-

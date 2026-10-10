@@ -33,7 +33,7 @@ variables:
   LIB_PROJECT: "eric/weisssrv-lib"
   # Single source for the library pin. `include:` cannot read it, so each entry
   # repeats the tag; scripts/check-lib-pins.py fails drift. `--fix` rewrites.
-  WEISSSRV_LIB_REF: "v0.18.1"
+  WEISSSRV_LIB_REF: "v0.19.0"
   # Library checkout the python-tests job clones into and tests/test_render.py
   # reads for the ruleset parity gate, which fails rather than skips in CI.
   WEISSSRV_LIB_PATH: "$CI_PROJECT_DIR/.tmp/weisssrv-lib"
@@ -50,7 +50,7 @@ include:
   # Jinja sources, not documents. validate-rendered-cluster below yamllints the
   # rendered tree, which is where template/ actually gets covered.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: []
@@ -65,7 +65,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/lint/python-lint.yml
     inputs:
       tags: []
@@ -85,7 +85,7 @@ include:
   # The one .sh.jinja source is covered by the render check in
   # tests/validate_render.py, which shellchecks the generated scripts.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: []
@@ -99,7 +99,7 @@ include:
   # ones included: the gate reads a `.jinja` source as the file it renders into.
   # No config file, so PyYAML is not installed.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/lint/comment-length.yml
     inputs:
       tags: []
@@ -108,7 +108,7 @@ include:
   # copier.yml schema checks + the full render invariants. Everything in the
   # repository feeds the render, hence the catch-all `changes`.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/test/python-tests.yml
     inputs:
       tags: []
@@ -130,7 +130,7 @@ include:
   # Self-application: the template ships this gate into every generated cluster,
   # and its own docs carry the same relative cross-links.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/lint/docs-link-check.yml
     inputs:
       job_name: lint-docs-links
@@ -144,7 +144,7 @@ include:
   # Pin drift in the SHIPPED defaults, checked inside a render of this template.
   # Soft-fail: rc 1 means updates are available.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/maintenance/version-check.yml
     inputs:
       tags: []
@@ -167,7 +167,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/security/secret-detection.yml
     inputs:
       tags: []
@@ -177,7 +177,7 @@ include:
       cpu_selector: "esweiss.com/cpu=modern"
 
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []
@@ -199,7 +199,7 @@ include:
   # generated cluster's `copier update` resolves to. `release` is declared last
   # above, so stage order gates it on every job here. Policy: docs/VERSIONING.md.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/release/semantic-release.yml
     inputs:
       tags: []
@@ -229,11 +229,6 @@ validate-rendered-cluster:
     # sha256-verified in before_script like every other fetched binary.
     TASK_VERSION: "3.53.1"
     TASK_SHA256: "a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7"
-    # flux is outside that set too, and `task flux:lint` pipes every build
-    # through `flux envsubst --strict`. The pin matches the generated
-    # cluster-verify job and flux_version in the rendered versions ConfigMap.
-    FLUX_VERSION: "2.9.0"
-    FLUX_SHA256: "7aa9779fc7ec6d030e609dab7dbed8c6fc9e3a7f4670834ad02369268aaf341f"
   before_script:
     - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
     - mkdir -p "$CI_PROJECT_DIR/.bin"
@@ -260,14 +255,15 @@ validate-rendered-cluster:
       set -eo pipefail
       # The flux-lint check runs the render's own `task flux:lint`: task runs
       # it, helm renders its values arm, flux is its substitution authority.
-      # helm's pin comes from the library include, never a second spelling.
-      HELM_PINS=$(python3 - "$LIB_CHECKOUT/ci/validate/flux-lint.yml" <<'PY'
+      # Both pins come from the library include, never a second spelling.
+      LINT_PINS=$(python3 - "$LIB_CHECKOUT/ci/validate/flux-lint.yml" <<'PY'
       import sys, yaml
       inputs = next(yaml.safe_load_all(open(sys.argv[1])))["spec"]["inputs"]
-      print(inputs["helm_version"]["default"], inputs["helm_sha256"]["default"])
+      print(*(inputs[key]["default"] for key in (
+          "helm_version", "helm_sha256", "flux_version", "flux_sha256")))
       PY
       )
-      read -r HELM_VERSION HELM_SHA256 <<<"$HELM_PINS"
+      read -r HELM_VERSION HELM_SHA256 FLUX_VERSION FLUX_SHA256 <<<"$LINT_PINS"
       curl -fsSL -o helm.tar.gz "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
       echo "${HELM_SHA256}  helm.tar.gz" | sha256sum -c -
       tar xzf helm.tar.gz -C "$CI_PROJECT_DIR/.bin" --strip-components=1 linux-amd64/helm

@@ -38,11 +38,13 @@ repos:
           ci_playbook_invocations\.py |
           ci_yaml\.py | cluster-config-value\.sh | collect-state-lib\.sh |
           deploy-verify-lib\.sh | extract-prometheus-config\.py | find-reachable-host\.sh |
-          flux-env\.sh | flux-render\.sh | gate_common\.py | generate-hosts-env\.py |
+          flux-env\.sh | flux-render\.sh | flux-secret-consumers\.py | gate_common\.py |
+          generate-hosts-env\.py |
           generate-versions-configmap\.py | inventory_tree\.py | kubeconform-skipped\.py |
           lint-prometheus-config\.sh | maintenance-run-with-verify\.sh | molecule-retry\.sh
           | resolve-tool\.sh | sanitize-junit-expected-failures\.py | semantic-release\.py |
-          shell-lib\.sh | supervised-apply-guard\.sh | validate-helm-values\.py |
+          shell-lib\.sh | supervised-apply-guard\.sh | taskfile_tree\.py |
+          validate-helm-values\.py |
           version-bump-mr\.py ) )$
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]

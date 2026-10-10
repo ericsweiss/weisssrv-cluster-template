@@ -438,7 +438,9 @@ def _vpa_cap_scan(
                 limit = parse_quantity(limit_raw)
                 if limit is None or limit <= 0:
                     continue
-                if cap > limit * (1 + 1e-9):
+                # An Off policy applies no recommendation, so the kubelet never
+                # sees the cap and neither arm can fire.
+                if not off and cap > limit * (1 + 1e-9):
                     out.append(
                         f"  {vpakey}: maxAllowed.memory {cap_raw} is above the {limit_raw} "
                         f"limit of container {container!r} in {tns}/{tkind}/{tname} — a "

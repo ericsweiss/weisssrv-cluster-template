@@ -29,9 +29,21 @@ except ImportError:
     raise SystemExit(2) from None
 
 CLUSTER_STORE_KIND = "ClusterSecretStore"
+_SELECTOR_KEYS = {"matchLabels", "matchExpressions"}
 _EXPRESSION_KEYS = {"key", "operator", "values"}
 _SET_OPERATORS = {"In", "NotIn"}
 _EXISTENCE_OPERATORS = {"Exists", "DoesNotExist"}
+
+
+def _unmodelled_selector_keys(selector: object) -> set:
+    """Selector keys outside the labelSelector schema.
+
+    The CRD prunes them, so a `matchLabel:` typo reaches the apiserver as the
+    EMPTY selector — which admits every namespace.
+    """
+    if not isinstance(selector, dict):
+        return set()
+    return set(selector) - _SELECTOR_KEYS
 
 
 def _selector_matches(selector: object, labels: dict) -> bool:
@@ -41,6 +53,8 @@ def _selector_matches(selector: object, labels: dict) -> bool:
     namespace ESO itself refuses, leaving the Secret stale while the gate passes.
     """
     if not isinstance(selector, dict):
+        return False
+    if _unmodelled_selector_keys(selector):
         return False
     match_labels = selector.get("matchLabels")
     if match_labels is not None and not isinstance(match_labels, dict):
@@ -170,6 +184,9 @@ def main(argv: list[str] | None = None) -> int:
     # (store, pattern, error) for every namespaceRegexes entry that will not
     # compile: an operator error, not a scoping finding.
     bad_patterns: list[tuple[str, str, re.error]] = []
+    # Stores whose conditions carry a selector this gate does not model; their
+    # consumer admissions say nothing, so they are reported once and skipped.
+    unmodelled_stores: set[str] = set()
 
     for name, conditions in sorted(stores.items()):
         if not conditions:
@@ -181,6 +198,17 @@ def main(argv: list[str] | None = None) -> int:
             )
             continue
         for index, condition in enumerate(conditions):
+            selector = condition.get("namespaceSelector") if isinstance(condition, dict) else None
+            unmodelled = _unmodelled_selector_keys(selector)
+            if unmodelled:
+                unmodelled_stores.add(name)
+                violations.append(
+                    f"  ClusterSecretStore {name}: spec.conditions[{index}].namespaceSelector "
+                    f"carries unmodelled key(s) {', '.join(sorted(unmodelled))} — the CRD prunes "
+                    f"them, so the apiserver keeps the EMPTY selector, which admits every "
+                    f"namespace. Spell the terms as matchLabels / matchExpressions."
+                )
+                continue
             store_bad: list[tuple[str, re.error]] = []
             universal = _condition_is_universal(condition, store_bad)
             bad_patterns += [(name, pattern, exc) for pattern, exc in store_bad]
@@ -208,6 +236,17 @@ def main(argv: list[str] | None = None) -> int:
             # terms, which matches EVERY namespace - the widest fan-out there is.
             single = spec.get("namespaceSelector")
             selectors = [] if single is None else [single]
+        unmodelled = set().union(*(
+            [_unmodelled_selector_keys(sel) for sel in selectors] or [set()]
+        ))
+        if unmodelled:
+            violations.append(
+                f"  ClusterExternalSecret {meta.get('name', '?')}: a namespace selector "
+                f"carries unmodelled key(s) {', '.join(sorted(unmodelled))} — the CRD prunes "
+                f"them, so the apiserver keeps the EMPTY selector and the fan-out reaches "
+                f"EVERY namespace. Spell the terms as matchLabels / matchExpressions."
+            )
+            continue
         targets = {
             ns for ns, labels in ns_labels.items()
             if any(_selector_matches(sel, labels) for sel in selectors)
@@ -233,6 +272,8 @@ def main(argv: list[str] | None = None) -> int:
         conditions = stores[store] or []
         if not conditions:
             continue  # already reported as unscoped above
+        if store in unmodelled_stores:
+            continue  # already reported as unmodelled above
         labels = ns_labels.get(namespace, {})
         store_bad = []
         admitted = any(

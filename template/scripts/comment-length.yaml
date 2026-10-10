@@ -25,6 +25,7 @@ exclude:
   - scripts/check-deploy-coverage.sh
   - scripts/check-doc-links.py
   - scripts/check-helm-repo-parity.py
+  - scripts/check-guest-endpoint-parity.py
   - scripts/check-flux-version-pin.py
   - scripts/check-hpa-vpa-invariant.py
   - scripts/check-lib-pins.py
@@ -48,6 +49,7 @@ exclude:
   - scripts/find-reachable-host.sh
   - scripts/flux-child-kustomizations.py
   - scripts/flux-env.sh
+  - scripts/flux-secret-consumers.py
   - scripts/flux-render.sh
   - scripts/gate_common.py
   - scripts/generate-hosts-env.py
@@ -62,5 +64,6 @@ exclude:
   - scripts/semantic-release.py
   - scripts/shell-lib.sh
   - scripts/supervised-apply-guard.sh
+  - scripts/taskfile_tree.py
   - scripts/validate-helm-values.py
   - scripts/version-bump-mr.py

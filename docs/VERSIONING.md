@@ -106,7 +106,7 @@ section — read it before running `copier update`.
 
 `lib_ref` is an answer, so a generated cluster can pin any library tag it likes —
 but exactly **one** pair is ever proved to work: the `lib_ref` default in
-`copier.yml`, currently weisssrv-lib `v0.18.1`. `validate-rendered-cluster`
+`copier.yml`, currently weisssrv-lib `v0.19.0`. `validate-rendered-cluster`
 renders the template with the answer fixtures — which do not answer `lib_ref`,
 so they inherit that default — and runs the real toolchain over the output
 against a checkout of the library at that ref.
@@ -247,7 +247,7 @@ than copies, so they are not listed.
 
 Absence from the manifest means template-local, not drift. Many gates under
 `template/scripts/` are written here and have no library counterpart, among
-them `check-guest-endpoint-parity.py`, `check-tenant-wiring.py` and
+them `check-cluster-literals.py`, `check-tenant-wiring.py` and
 `deploy-verify.sh`. The validator's orphan scan holds that line: a script with
 no library twin has to be declared in the render's own `scripts/README.md`
 under "Local helpers".
@@ -262,9 +262,10 @@ A vendored gate that imports a sibling module needs that module vendored with
 it. Register the pair in both manifests, or the gate ships without the module
 it imports and exits 2 naming the missing file.
 
-Three gates under `template/scripts/` share a name with a library gate and are
+Four gates under `template/scripts/` share a name with a library gate and are
 template-owned forks rather than copies: `check-flux-version-pin.py`,
-`check-secret-rotation-coverage.py` and `flux-child-kustomizations.py`. Each
+`check-guest-endpoint-parity.py`, `check-secret-rotation-coverage.py` and
+`flux-child-kustomizations.py`. Each
 takes its own flags and prints its own output shape, so its call sites in
 `template/.pre-commit-config.yaml`, `template/.gitlab-ci.yml.jinja`,
 `template/taskfiles/`, `template/scripts/deploy-verify.sh` and the shipped test

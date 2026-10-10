@@ -241,6 +241,8 @@ def test_the_dind_service_matches_the_library_input_default() -> None:
 
     # The daemon's bridge MTU, held to the same default: 1500 black-holes large
     # TLS frames inside the job pod, which reads as a flaky registry or git fetch.
+    # Both flags are needed: --mtu covers the default bridge, the
+    # default-network-opt the user-defined networks molecule creates.
     mtu = (inputs.get("dind_mtu") or {}).get("default")
     assert mtu, f"{DOCKER_BUILD_RELPATH} no longer declares a dind_mtu default"
     commands = [
@@ -251,10 +253,14 @@ def test_the_dind_service_matches_the_library_input_default() -> None:
         if isinstance(service, dict) and "dind" in str(service.get("name"))
         for argument in (service.get("command") or [])
     ]
-    assert f"--mtu={mtu}" in commands, (
-        f"{INTEGRATION_JOBS.relative_to(REPO)} passes the dind daemon {commands}, "
-        f"missing --mtu={mtu} — the library's dind_mtu default at {pinned_lib_ref()}."
-    )
+    for flag in (
+        f"--mtu={mtu}",
+        f"--default-network-opt=bridge=com.docker.network.driver.mtu={mtu}",
+    ):
+        assert flag in commands, (
+            f"{INTEGRATION_JOBS.relative_to(REPO)} passes the dind daemon {commands}, "
+            f"missing {flag} — the library's dind_mtu default at {pinned_lib_ref()}."
+        )
 
 
 # The collection tree the shared molecule scaffolding is offered from. No

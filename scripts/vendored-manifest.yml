@@ -89,6 +89,8 @@ vendored:
     consumer: template/scripts/extract-prometheus-config.py
   - lib: scripts/flux-env.sh
     consumer: template/scripts/flux-env.sh
+  - lib: scripts/flux-secret-consumers.py
+    consumer: template/scripts/flux-secret-consumers.py
   - lib: scripts/find-reachable-host.sh
     consumer: template/scripts/find-reachable-host.sh
   - lib: scripts/flux-render.sh
@@ -119,6 +121,8 @@ vendored:
     consumer: template/scripts/shell-lib.sh
   - lib: scripts/supervised-apply-guard.sh
     consumer: template/scripts/supervised-apply-guard.sh
+  - lib: scripts/taskfile_tree.py
+    consumer: template/scripts/taskfile_tree.py
   - lib: scripts/validate-helm-values.py
     consumer: template/scripts/validate-helm-values.py
   - lib: scripts/version-bump-mr.py
@@ -171,6 +175,13 @@ forked:
       Takes --root and --components where the library's takes --repo-root,
       --ci-file, --versions-configmap, --gotk-glob and --runbook.
     reconciled_sha256: 5353b33732feddc81d617138783f5fc65f09b13efc35a2f0dc0b878932e9d51c
+  - lib: scripts/check-guest-endpoint-parity.py
+    consumer: template/scripts/check-guest-endpoint-parity.py
+    reason: >-
+      Walks a fixed manifest tree and inventory directory, where the library's
+      takes --inventory, --manifest-tree and --scoped-group and additionally
+      requires an export to admit a scoped group whole.
+    reconciled_sha256: a7ab41e5de5ec07feb2a240b103b7ab24a96074da95e9e366cce0c03afd941c5
   - lib: scripts/check-secret-rotation-coverage.py
     consumer: template/scripts/check-secret-rotation-coverage.py
     reason: >-

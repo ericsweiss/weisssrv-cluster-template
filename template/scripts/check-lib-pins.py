@@ -335,10 +335,10 @@ def _repo_name(url: str) -> str:
 def _names_project(value: str, project: str) -> bool:
     """Whether a collection `name:`/`source:` installs `project`.
 
-    The include path resolves instance-locally, so a mirror or a fork on
-    another host matches on repository name rather than as a substring.
+    Matched on repository NAME, so a mirror on another host counts; never as a
+    substring, so a fork merely containing the project path is not the library.
     """
-    return project in value or _repo_name(value) == _repo_name(project)
+    return _repo_name(value) == _repo_name(project)
 
 
 def _collection_entries(text: str) -> list[dict[str, tuple[int, str]]]:

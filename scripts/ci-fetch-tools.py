@@ -43,6 +43,10 @@ class Tool:
 # linux-amd64 pins. Every sha256 is computed from the asset itself and
 # cross-checked against the project's published checksums; shellcheck
 # publishes none. `{version}` renders from the effective version.
+
+# This table is the one place a tool bump lands: every ci/ template and example
+# workflow installing the same tool another way is held equal to it by
+# tests/test_pin_parity.py.
 TOOLS: dict[str, Tool] = {
     "amtool": Tool(
         version="0.34.1",
@@ -126,13 +130,18 @@ def download(url: str, target: Path) -> None:
         raise FetchError("failed to download %s: %s" % (url, exc)) from exc
 
 
-def verify(path: Path, expected: str, label: str) -> None:
-    """Raises unless `path` hashes to `expected`."""
-    digest = hashlib.sha256()
+def digest(path: Path) -> str:
+    """The sha256 of `path`, hex, read in chunks so a large asset fits."""
+    found = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    found = digest.hexdigest()
+            found.update(chunk)
+    return found.hexdigest()
+
+
+def verify(path: Path, expected: str, label: str) -> None:
+    """Raises unless `path` hashes to `expected`."""
+    found = digest(path)
     if found != expected.strip().lower():
         raise FetchError(
             "sha256 mismatch for %s: pinned %s, downloaded %s"
@@ -191,11 +200,42 @@ def extract(archive: Path, tool: Tool, target: Path) -> None:
         raise FetchError("cannot read %s: %s" % (archive.name, exc)) from exc
 
 
+def stamp_path(directory: Path, name: str) -> Path:
+    """Where the installed version and checksum are recorded."""
+    return directory / ("%s.version" % name)
+
+
+def stamp_text(tool: Tool, installed: str) -> str:
+    """What the stamp beside an installed tool holds.
+
+    The installed binary's own digest joins the archive's, so the bytes on disk
+    are part of what the stamp claims.
+    """
+    return "%s %s %s\n" % (tool.version, tool.sha256.strip().lower(), installed)
+
+
+def is_installed(name: str, tool: Tool, directory: Path) -> bool:
+    """Whether the pinned tool is already there, bytes included.
+
+    The binary is re-hashed against its stamp, so a cached, pre-seeded,
+    truncated or differently-versioned one is re-fetched rather than trusted.
+    """
+    binary = directory / name
+    if not binary.exists():
+        return False
+    try:
+        return stamp_path(directory, name).read_text() == stamp_text(
+            tool, digest(binary)
+        )
+    except OSError:
+        return False
+
+
 def install_tool(name: str, tool: Tool, directory: Path, force: bool = False) -> str:
     """Install one tool into `directory`, and return the line to print."""
     destination = directory / name
-    if destination.exists() and not force:
-        return "%s: present" % name
+    if is_installed(name, tool, directory) and not force:
+        return "%s %s: present" % (name, tool.version)
     url = tool.url.format(version=tool.version)
     staging = Path(tempfile.mkdtemp(dir=directory, prefix=".fetch-"))
     try:
@@ -207,7 +247,11 @@ def install_tool(name: str, tool: Tool, directory: Path, force: bool = False) ->
             binary = staging / name
             extract(asset, tool, binary)
         binary.chmod(BINARY_MODE)
+        installed = digest(binary)
+        # The stamp lands after the binary, so an interrupted install reads as
+        # absent and re-fetches rather than as the pinned version.
         os.replace(binary, destination)
+        stamp_path(directory, name).write_text(stamp_text(tool, installed))
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return "%s %s -> %s" % (name, tool.version, destination)

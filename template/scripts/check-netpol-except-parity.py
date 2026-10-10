@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Assert no fenced pod has unrestricted egress.
 
-Checks /0 except-list parity, containment of a whole fence range, and peer-less
-egress rules. Site data comes from --config; contract: docs/SCRIPTS.md.
+Checks /0 except-list parity, fence containment and allow-everything rules, over
+the tree as written or a rendered --corpus. Contract: docs/SCRIPTS.md.
 """
 from __future__ import annotations
 
 import argparse
 import ipaddress
+import json
 import sys
 from pathlib import Path
 
@@ -67,6 +68,10 @@ LAN_FENCE = [
 ]
 
 CANONICAL = {"reserved-full": RESERVED_FULL, "lan-fence": LAN_FENCE}
+
+# The constraints a NetworkPolicyPeer can carry. A peer with none of them is the
+# empty peer, which matches every destination.
+PEER_KEYS = ("ipBlock", "podSelector", "namespaceSelector")
 
 # The ranges no egress rule may reach IN FULL. LAN_FENCE is the v4 half — exactly
 # what every canonical list fences off; the v6 entries are its analogue, so an
@@ -143,15 +148,15 @@ def has_egress(spec) -> bool:
     return "Egress" in policy_types(spec)
 
 
-def _nets(cidrs):
+def _nets(cidrs, rendered=False):
     """Parse cidrs, returning (parsed, unparseable).
 
-    A `${name}` substitution placeholder is neither: the consumer substitutes
-    it before the API sees the manifest, so the gate leaves it unevaluated.
+    A `${name}` placeholder is skipped in an unrendered tree, which the consumer
+    substitutes before the API sees it, and reported in a rendered corpus.
     """
     parsed, bad = [], []
     for cidr in cidrs:
-        if isinstance(cidr, str) and "${" in cidr:
+        if not rendered and isinstance(cidr, str) and "${" in cidr:
             continue
         try:
             parsed.append(ipaddress.ip_network(cidr, strict=False))
@@ -160,7 +165,7 @@ def _nets(cidrs):
     return parsed, bad
 
 
-def unfenced_reach(blocks, policy=None):
+def unfenced_reach(blocks, policy=None, rendered=False):
     """The fence ranges an egress rule can still reach; [] when properly fenced.
 
     `blocks` is [(cidr, [except, ...]), ...] and an except narrows only its own
@@ -169,8 +174,8 @@ def unfenced_reach(blocks, policy=None):
     policy = policy or Policy()
     allowed = []
     for cidr, excepts in blocks:
-        net, _bad = _nets([cidr])
-        cuts, _bad_cuts = _nets(excepts)
+        net, _bad = _nets([cidr], rendered)
+        cuts, _bad_cuts = _nets(excepts, rendered)
         allowed.extend(exclude_nets(net, cuts))
     # Collapse before the fence check: a fenced range assembled from smaller
     # peers (two /17s covering a fenced /16) must not slip past a per-block
@@ -263,6 +268,24 @@ def malformed_rules(doc):
                 )
 
 
+def peerless_egress(rule):
+    """Why an egress rule allows EVERY destination, or None.
+
+    A rule with no `to:` carries no peers; a peer mapping with none of
+    ipBlock/podSelector/namespaceSelector is the empty peer, read the same way.
+    """
+    peers = rule.get("to")
+    if not peers:
+        return "has no `to:` peers"
+    for index, peer in enumerate(peers if isinstance(peers, list) else []):
+        if isinstance(peer, dict) and not any(peer.get(k) is not None for k in PEER_KEYS):
+            return (
+                f"has an EMPTY `to:` peer [{index}] — no ipBlock, podSelector "
+                f"or namespaceSelector"
+            )
+    return None
+
+
 def classify(except_list, policy=None):
     """Return the canonical list name this matches, or None."""
     policy = policy or Policy()
@@ -270,6 +293,150 @@ def classify(except_list, policy=None):
         if except_list == canonical:
             return label
     return None
+
+
+def _json_manifest_docs(payload):
+    """The Kubernetes documents in a parsed JSON file, or None if it holds none.
+
+    A JSON file under a manifest tree is as likely to be a Grafana dashboard,
+    so the shape decides whether this gate owns the file at all.
+    """
+    docs = payload if isinstance(payload, list) else [payload]
+    if docs and all(
+        isinstance(doc, dict) and "apiVersion" in doc and "kind" in doc
+        for doc in docs
+    ):
+        return docs
+    return None
+
+
+def looks_like_json_manifest(path):
+    """Whether an UNPARSEABLE JSON file was meant to be a manifest.
+
+    Its text is all that is left to go on, and a dashboard that lost a comma
+    must not read as the NetworkPolicy corpus failing to load.
+    """
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return True
+    return '"apiVersion"' in text and '"kind"' in text
+
+
+def load_manifest(path):
+    """Documents in one manifest file, or raise an OSError / parse error.
+
+    A `.json` manifest holds one document, or a top-level list of them; a YAML
+    stream carries several. A JSON file of another shape yields nothing.
+    """
+    path = Path(path)
+    # The handle, not the text: PyYAML names the stream in its mark, so the
+    # parse error points at the file instead of at "<unicode string>".
+    with path.open() as fh:
+        if path.suffix == ".json":
+            return _json_manifest_docs(json.load(fh)) or []
+        return list(yaml.safe_load_all(fh))
+
+
+def scan_docs(docs, source, policy=None, rendered=False):
+    """Return (violations, policies_scanned, errors) for one document stream.
+
+    `source` prefixes every message. `rendered` says the placeholders are
+    already substituted, so a leftover `${...}` CIDR is an operator error.
+    """
+    policy = policy or Policy()
+    violations = []
+    errors = []
+    scanned = sum(
+        1 for doc in docs if isinstance(doc, dict) and doc.get("kind") == "NetworkPolicy"
+    )
+    for doc in docs:
+        for message in malformed_rules(doc):
+            errors.append(f"{source}: {message}")
+        # (a) A rule allowing every destination leaves no ipBlock behind for the
+        # per-peer arms to inspect.
+        for key, index, rule in iter_egress_rules(doc):
+            reason = peerless_egress(rule)
+            if reason:
+                if key not in policy.unrestricted_ok:
+                    violations.append(
+                        f"{source}: NetworkPolicy {key} egress rule "
+                        f"[{index}] {reason} — that allows "
+                        f"egress to EVERY destination, LAN included, "
+                        f"which is strictly more open than a /0 ipBlock "
+                        f"with no except-list. Add peers, or declare the "
+                        f"exemption under `unrestricted_egress_ok` in the "
+                        f"--config file, with its reason."
+                    )
+                continue
+            # (b) The peers may still reach a whole fenced range without any
+            # single one of them being a /0.
+            blocks = []
+            for peer in rule.get("to") or []:
+                block = peer.get("ipBlock") if isinstance(peer, dict) else None
+                if isinstance(block, dict):
+                    blocks.append((block.get("cidr"), list(block.get("except") or [])))
+            cidrs = [cidr for cidr, _ in blocks]
+            # Suppressed when the per-peer arm already names this rule, to keep
+            # one message per defect.
+            all_default = cidrs and all(zero_prefix(c) for c in cidrs)
+            per_peer_reports = all_default and any(
+                classify(exc, policy) is None for _, exc in blocks
+            )
+            reachable = (
+                [] if per_peer_reports else unfenced_reach(blocks, policy, rendered)
+            )
+            if reachable and key not in policy.unrestricted_ok:
+                violations.append(
+                    f"{source}: NetworkPolicy {key} egress rule [{index}] "
+                    f"reaches all of {', '.join(reachable)} via {cidrs}. "
+                    f"A fenced range reached in full is a LAN escape "
+                    f"however it is spelled — one narrower block or a /0 "
+                    f"split into halves — so fence it with the canonical "
+                    f"lan-fence (or reserved-full) except-list, or narrow "
+                    f"the peer to the addresses actually needed."
+                )
+        for name, direction, cidr, except_list in iter_ip_blocks(doc):
+            _parsed, bad = _nets([cidr] + list(except_list), rendered)
+            for value in bad:
+                errors.append(
+                    f"{source}: NetworkPolicy {name} ({direction} ipBlock) has an "
+                    f"unparseable CIDR {value!r} — the API would reject this "
+                    f"policy, so it says nothing about the fence."
+                )
+            # The canonical lists are the egress /0 contract; an ingress peer or
+            # a narrower egress block keeps whatever it excludes.
+            if direction != "egress" or not zero_prefix(cidr):
+                continue
+            if not except_list:
+                violations.append(
+                    f"{source}: NetworkPolicy {name} has an EGRESS "
+                    f"ipBlock {cidr} with no except-list — that is "
+                    f"unrestricted egress to the LAN, loopback and "
+                    f"cloud-metadata ranges. Add the canonical "
+                    f"lan-fence (or reserved-full) list."
+                )
+                continue
+            if classify(except_list, policy):
+                continue
+            violations.append(
+                f"{source}: NetworkPolicy {name} (egress ipBlock {cidr}) "
+                f"has a non-canonical except-list: {except_list}"
+            )
+    return violations, scanned, errors
+
+
+def scan_corpus(stream, policy=None, source="<corpus>"):
+    """Scan an already-substituted multi-document stream.
+
+    The placeholder skip is off here, so the fence arms judge real CIDRs — in an
+    unrendered tree they see `${...}` and examine nothing.
+    """
+    try:
+        docs = list(yaml.safe_load_all(stream))
+    except yaml.YAMLError as e:
+        return [], 0, [f"{source}: unparseable YAML: {e}"]
+    return scan_docs(docs, source, policy, rendered=True)
 
 
 def scan_paths(paths, policy=None):
@@ -285,102 +452,36 @@ def scan_paths(paths, policy=None):
     for root in paths:
         root = Path(root)
         if root.is_dir():
-            files = sorted(p for ext in ("*.yaml", "*.yml") for p in root.rglob(ext))
+            files = [
+                (p, True)
+                for p in sorted(
+                    p for ext in ("*.yaml", "*.yml", "*.json") for p in root.rglob(ext)
+                )
+            ]
         elif root.is_file():
-            files = [root]
+            files = [(root, False)]
         else:
             errors.append(f"{root}: no such file or directory")
             continue
-        for path in files:
+        for path, discovered in files:
             try:
-                # The handle, not the text: PyYAML names the stream in its mark,
-                # so the parse error points at the file instead of at
-                # "<unicode string>".
-                with path.open() as fh:
-                    docs = list(yaml.safe_load_all(fh))
+                docs = load_manifest(path)
             except OSError as e:
                 errors.append(f"{path}: unreadable: {e}")
+                continue
+            except json.JSONDecodeError as e:
+                # A file this gate was POINTED at is its subject whatever it
+                # holds; one it merely walked onto has to look like a manifest.
+                if not discovered or looks_like_json_manifest(path):
+                    errors.append(f"{path}: unparseable JSON: {e}")
                 continue
             except yaml.YAMLError as e:
                 errors.append(f"{path}: unparseable YAML: {e}")
                 continue
-            scanned += sum(
-                1
-                for doc in docs
-                if isinstance(doc, dict) and doc.get("kind") == "NetworkPolicy"
-            )
-            for doc in docs:
-                for message in malformed_rules(doc):
-                    errors.append(f"{path}: {message}")
-                # (a) A peer-less egress rule allows egress to everything, and
-                # leaves no ipBlock behind for the per-peer arms to inspect.
-                for key, index, rule in iter_egress_rules(doc):
-                    if not rule.get("to"):
-                        if key not in policy.unrestricted_ok:
-                            violations.append(
-                                f"{path}: NetworkPolicy {key} egress rule "
-                                f"[{index}] has no `to:` peers — that allows "
-                                f"egress to EVERY destination, LAN included, "
-                                f"which is strictly more open than a /0 ipBlock "
-                                f"with no except-list. Add peers, or declare the "
-                                f"exemption under `unrestricted_egress_ok` in the "
-                                f"--config file, with its reason."
-                            )
-                        continue
-                    # (b) The peers may still reach a whole fenced range
-                    # without any single one of them being a /0.
-                    blocks = []
-                    for peer in rule.get("to") or []:
-                        block = peer.get("ipBlock") if isinstance(peer, dict) else None
-                        if isinstance(block, dict):
-                            blocks.append(
-                                (block.get("cidr"), list(block.get("except") or []))
-                            )
-                    cidrs = [cidr for cidr, _ in blocks]
-                    # Suppressed when the per-peer arm already names this rule,
-                    # to keep one message per defect.
-                    all_default = cidrs and all(zero_prefix(c) for c in cidrs)
-                    per_peer_reports = all_default and any(
-                        classify(exc, policy) is None for _, exc in blocks
-                    )
-                    reachable = [] if per_peer_reports else unfenced_reach(blocks, policy)
-                    if reachable and key not in policy.unrestricted_ok:
-                        violations.append(
-                            f"{path}: NetworkPolicy {key} egress rule [{index}] "
-                            f"reaches all of {', '.join(reachable)} via {cidrs}. "
-                            f"A fenced range reached in full is a LAN escape "
-                            f"however it is spelled — one narrower block or a /0 "
-                            f"split into halves — so fence it with the canonical "
-                            f"lan-fence (or reserved-full) except-list, or narrow "
-                            f"the peer to the addresses actually needed."
-                        )
-                for name, direction, cidr, except_list in iter_ip_blocks(doc):
-                    _parsed, bad = _nets([cidr] + list(except_list))
-                    for value in bad:
-                        errors.append(
-                            f"{path}: NetworkPolicy {name} ({direction} ipBlock) has an "
-                            f"unparseable CIDR {value!r} — the API would reject this "
-                            f"policy, so it says nothing about the fence."
-                        )
-                    # The canonical lists are the egress /0 contract; an ingress
-                    # peer or a narrower egress block keeps whatever it excludes.
-                    if direction != "egress" or not zero_prefix(cidr):
-                        continue
-                    if not except_list:
-                        violations.append(
-                            f"{path}: NetworkPolicy {name} has an EGRESS "
-                            f"ipBlock {cidr} with no except-list — that is "
-                            f"unrestricted egress to the LAN, loopback and "
-                            f"cloud-metadata ranges. Add the canonical "
-                            f"lan-fence (or reserved-full) list."
-                        )
-                        continue
-                    if classify(except_list, policy):
-                        continue
-                    violations.append(
-                        f"{path}: NetworkPolicy {name} (egress ipBlock {cidr}) "
-                        f"has a non-canonical except-list: {except_list}"
-                    )
+            doc_violations, doc_scanned, doc_errors = scan_docs(docs, path, policy)
+            violations += doc_violations
+            scanned += doc_scanned
+            errors += doc_errors
     return violations, scanned, errors
 
 
@@ -395,6 +496,12 @@ def main(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--config", help="consumer policy data (see module docstring)")
+    parser.add_argument(
+        "--corpus",
+        metavar="FILE",
+        help="rendered multi-document stream to scan instead of the default tree "
+             "('-' for stdin); its placeholders are already substituted",
+    )
     parser.add_argument("paths", nargs="*", help="files or directories to scan")
     args = parser.parse_args(argv)
 
@@ -408,8 +515,24 @@ def main(argv=None):
             detail = getattr(exc, "strerror", None) or exc
             print(f"ERROR: --config {args.config}: {detail}", file=sys.stderr)
             return 2
-    paths = args.paths or [REPO / "kubernetes"]
+    # A corpus replaces the default tree, not an explicit path list: a consumer
+    # pipes its substituted render in and the fence arms judge real CIDRs.
+    paths = args.paths or ([] if args.corpus else [REPO / "kubernetes"])
     violations, scanned, errors = scan_paths(paths, policy)
+    if args.corpus:
+        try:
+            if args.corpus == "-":
+                corpus = scan_corpus(sys.stdin, policy, "<stdin>")
+            else:
+                with open(args.corpus) as fh:
+                    corpus = scan_corpus(fh, policy, args.corpus)
+        except OSError as exc:
+            detail = getattr(exc, "strerror", None) or exc
+            print(f"ERROR: --corpus {args.corpus}: {detail}", file=sys.stderr)
+            return 2
+        violations += corpus[0]
+        scanned += corpus[1]
+        errors += corpus[2]
     if errors:
         print("ERROR: the manifest corpus could not be read:", file=sys.stderr)
         for e in errors:
@@ -424,9 +547,10 @@ def main(argv=None):
     if not scanned:
         # A renamed or moved manifest subtree would otherwise leave the LAN-fence
         # gate green with nothing behind it.
+        inspected = [str(p) for p in paths] + ([args.corpus] if args.corpus else [])
         print(
             "ERROR: scanned 0 NetworkPolicy manifests under "
-            f"{', '.join(str(p) for p in paths)} — a gate that inspects nothing "
+            f"{', '.join(inspected)} — a gate that inspects nothing "
             "is not a gate. Point it at the manifests, or drop the job.",
             file=sys.stderr,
         )

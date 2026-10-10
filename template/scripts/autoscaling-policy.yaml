@@ -15,11 +15,7 @@ cpu_limit_allowlist: {}
 
 # "namespace/VerticalPodAutoscaler/name": reason — VPAs exempt from the memory
 # cap rule (cap == limit under a limit-controlling policy).
-vpa_cap_allowlist:
-  authentik/VerticalPodAutoscaler/authentik-postgresql: >-
-    Off tier: recommendations only, applied by hand in release.yaml. The cap is
-    the headroom a growing recommendation may reach, so it sits above today's
-    hand-set limits by design (docs/ci-pipeline.md § flux-lint).
+vpa_cap_allowlist: {}
 
 # "namespace/Kind/name": reason — workloads permitted requests.memory ==
 # limits.memory under a memory-controlling VPA. The updater preserves that
