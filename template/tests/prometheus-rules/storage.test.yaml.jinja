@@ -44,3 +44,217 @@ tests:
               job: node-exporter
               instance: '10.42.1.7:9100'
               mountpoint: /
+
+  # SMARTDeviceUnhealthy: min_over_time rides through standby gaps, so one
+  # FAILED sample keeps the alert firing for the rest of the window.
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_device_smart_healthy{device="sda", instance="192.0.2.11:9101"}'
+        values: '1+0x4 0 1+0x19'
+    alert_rule_test:
+      # Before the FAILED sample at 20m, and inside the 15m hold after it.
+      - eval_time: 15m
+        alertname: SMARTDeviceUnhealthy
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: SMARTDeviceUnhealthy
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: SMARTDeviceUnhealthy
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              device: sda
+              instance: '192.0.2.11:9101'
+
+  # A drive healthy for the whole window never trips it.
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_device_smart_healthy{device="sda", instance="192.0.2.11:9101"}'
+        values: '1+0x24'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: SMARTDeviceUnhealthy
+        exp_alerts: []
+
+  # SMARTReallocatedSectorsGrowing: a standing historical count is silent and
+  # only growth inside the window fires, so the 24h max-min is load-bearing.
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_reallocated_sector_count{device="sdb", instance="192.0.2.11:9101"}'
+        values: '8+0x24'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: SMARTReallocatedSectorsGrowing
+        exp_alerts: []
+
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_reallocated_sector_count{device="sdb", instance="192.0.2.11:9101"}'
+        values: '8+0x12 9+0x12'
+    alert_rule_test:
+      # The step lands at 65m; the 5m hold has not elapsed at 65m.
+      - eval_time: 60m
+        alertname: SMARTReallocatedSectorsGrowing
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: SMARTReallocatedSectorsGrowing
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: SMARTReallocatedSectorsGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              device: sdb
+              instance: '192.0.2.11:9101'
+
+  # SMARTPendingSectors: max_over_time, the mirror image — one non-zero sample
+  # in the window is enough, because pending sectors do not un-happen.
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_current_pending_sector_count{device="sdd", instance="192.0.2.11:9101"}'
+        values: '0+0x4 8 0+0x19'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: SMARTPendingSectors
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: SMARTPendingSectors
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: SMARTPendingSectors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              device: sdd
+              instance: '192.0.2.11:9101'
+
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_current_pending_sector_count{device="sdd", instance="192.0.2.11:9101"}'
+        values: '0+0x24'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: SMARTPendingSectors
+        exp_alerts: []
+
+  # SMARTOfflineUncorrectable and SMARTMediaErrors share that shape on the
+  # other two attribute sets.
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_offline_uncorrectable_count{device="sdc", instance="192.0.2.12:9101"}'
+        values: '0+0x4 2 0+0x19'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: SMARTOfflineUncorrectable
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: SMARTOfflineUncorrectable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              device: sdc
+              instance: '192.0.2.12:9101'
+
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_offline_uncorrectable_count{device="sdc", instance="192.0.2.12:9101"}'
+        values: '0+0x24'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: SMARTOfflineUncorrectable
+        exp_alerts: []
+
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_media_errors_count{device="nvme0", instance="192.0.2.12:9101"}'
+        values: '0+0x4 1 0+0x19'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: SMARTMediaErrors
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: SMARTMediaErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              device: nvme0
+              instance: '192.0.2.12:9101'
+
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_media_errors_count{device="nvme0", instance="192.0.2.12:9101"}'
+        values: '0+0x24'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: SMARTMediaErrors
+        exp_alerts: []
+
+  # SMARTCollectorStale, arm 1: a sentinel that stopped refreshing.
+  - interval: 1m
+    input_series:
+      - series: 'smartmon_collector_last_success_seconds{instance="192.0.2.11:9101"}'
+        values: '-2000+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SMARTCollectorStale
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: SMARTCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: '192.0.2.11:9101'
+
+  # Arm 2: a sentinel tracking time() is healthy.
+  - interval: 1m
+    input_series:
+      - series: 'smartmon_collector_last_success_seconds{instance="192.0.2.11:9101"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SMARTCollectorStale
+        exp_alerts: []
+
+  # Arm 3: absent() makes an undeployed collector loud rather than silent.
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SMARTCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+
+  # Arm 4: a fresh sentinel with success 0 on a host that did list devices is
+  # the failed-scan or unparsed-device state.
+  - interval: 1m
+    input_series:
+      - series: 'smartmon_collector_last_success_seconds{instance="192.0.2.11:9101"}'
+        values: '0+60x20'
+      - series: 'smartmon_collector_success{instance="192.0.2.11:9101"}'
+        values: '1+0x2 0+0x18'
+      - series: 'smartmon_collector_devices_scanned{instance="192.0.2.11:9101"}'
+        values: '4+0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SMARTCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: '192.0.2.11:9101'
+
+  # Arm 5: a host that lists no device has no SMART metric to lose, so the
+  # devices_scanned guard keeps its success 0 quiet.
+  - interval: 1m
+    input_series:
+      - series: 'smartmon_collector_last_success_seconds{instance="192.0.2.12:9101"}'
+        values: '0+60x20'
+      - series: 'smartmon_collector_success{instance="192.0.2.12:9101"}'
+        values: '0+0x20'
+      - series: 'smartmon_collector_devices_scanned{instance="192.0.2.12:9101"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SMARTCollectorStale
+        exp_alerts: []
