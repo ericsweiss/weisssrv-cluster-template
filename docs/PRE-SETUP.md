@@ -675,11 +675,13 @@ placeholders before schema validation; `kustomize` and `kubeconform` are the
 other two halves of that gate. `helm` is the fourth: `flux:lint` renders the
 value-heavy HelmReleases with `helm template` to validate them against each
 chart's schema, so it also wants network access the first time (`helm repo
-add`/`update`). `ansible-lint` and `yamllint` are the lint stage's
-first two steps, and `ruff` is `lint:ruff` — the same check the CI python-lint
-job runs over `scripts/` and `tests/`. `tflint` is `terraform:tflint`, which
-catches the deprecated syntax and unused declarations `terraform validate` lets
-through.
+add`/`update`). The `flux` CLI is the fifth: `flux:lint` pipes every build
+through `flux envsubst --strict`, which is the authority on the `${...}` forms
+Flux resolves at reconcile time. `ansible-lint` and `yamllint` are the lint
+stage's first two steps, and `ruff` is `lint:ruff` — the same check the CI
+python-lint job runs over `scripts/` and `tests/`. `tflint` is
+`terraform:tflint`, which catches the deprecated syntax and unused declarations
+`terraform validate` lets through.
 
 `curl` is how `task flux:install-cli` fetches the pinned flux release. macOS
 ships it; a minimal Debian image does not.

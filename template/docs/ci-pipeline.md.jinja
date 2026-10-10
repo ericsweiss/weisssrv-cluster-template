@@ -82,7 +82,9 @@ catalog genuinely lacks, with the reason.
 
 A placeholder that resolves to nothing is the failure this catches before
 merge. In the cluster, strict substitution fails the Kustomization's reconcile
-instead of applying a blank hostname.
+instead of applying a blank hostname. `task flux:lint` runs that same pass
+locally through `flux envsubst --strict`, so the flux CLI is one of its
+prerequisites: GNU envsubst accepts forms Flux's Go substituter rejects.
 
 `require_cluster_root` ships **false**, because
 `kubernetes/clusters/{{ cluster_name }}/flux-system/` does not exist until

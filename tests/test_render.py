@@ -1292,6 +1292,37 @@ def test_task_lint_mirrors_the_ci_lint_stage(cluster):
     )
 
 
+def test_flux_lint_renders_through_fluxs_strict_envsubst(cluster):
+    """`task flux:lint` must run each build through `flux envsubst --strict`.
+
+    GNU envsubst accepts forms Flux's Go envsubst rejects (`${conf%/*}`), so a
+    gate without it passes a commit whose Kustomization fails its post-build.
+    """
+    tasks = _taskfile_tree(cluster.path)
+    lint = tasks.get("flux:lint") or {}
+    script = "\n".join(str(step) for step in lint.get("cmds") or [])
+    assert script, "the rendered flux:lint has no cmds — this gate read nothing"
+    assert "flux envsubst --strict" in script, (
+        "the rendered flux:lint never runs Flux's strict substitution, so only "
+        "the cheap pre-substitution scans stand between a bad placeholder and "
+        "a BuildFailed Kustomization on main"
+    )
+    strict = script.index("flux envsubst --strict")
+    gnu = script.index('envsubst "$FLUX_ENVSUBST_VARS"')
+    assert strict < gnu, (
+        "the strict pass runs after the GNU render, so a form Flux rejects is "
+        "reported only once kubeconform has already validated the output"
+    )
+    preconditions = [
+        str(entry.get("sh") if isinstance(entry, dict) else entry)
+        for entry in lint.get("preconditions") or []
+    ]
+    assert "command -v flux" in preconditions, (
+        "flux:lint runs `flux envsubst --strict` with no `command -v flux` "
+        f"precondition, so a missing CLI fails mid-render: {preconditions}"
+    )
+
+
 def test_netpol_except_parity_is_gated(cluster):
     """The LAN fence has its own job: the checker reads the manifests on disk
     (so it also covers kubernetes/clusters/*/flux-system/, which no Kustomization

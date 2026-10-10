@@ -351,6 +351,8 @@ tasks:
         msg: "kubeconform not installed (brew install kubeconform)"
       - sh: command -v envsubst
         msg: "envsubst not installed (brew install gettext)"
+      - sh: command -v flux
+        msg: "flux CLI not installed. Run: task flux:install-cli (its envsubst --strict is the substitution authority)"
       - sh: command -v helm
         msg: "helm not installed (brew install helm — schema-validates the value-heavy HelmReleases)"
       - sh: python3 -c "import yaml" 2>/dev/null
@@ -446,6 +448,14 @@ tasks:
             echo "ERROR: $SRCPATH references keys that are present but EMPTY in {{.VERSIONS_CM}} or the cluster-config ConfigMap:"
             echo "$EMPTY" | sed 's/^/  - /'
             echo "  Give each one a value, or drop the key and the reference together."
+            FAILED=1
+            continue
+          fi
+          # Flux's own envsubst in strict mode is the authority: every form it
+          # reads as a variable, bash modifiers included, must resolve, or the
+          # Kustomization's post-build fails in-cluster and nothing reconciles.
+          if ! STRICT_ERR=$(printf '%s\n' "$RAW" | flux envsubst --strict 2>&1 >/dev/null); then
+            echo "ERROR: $SRCPATH fails Flux's strict substitution: $STRICT_ERR"
             FAILED=1
             continue
           fi
