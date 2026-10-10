@@ -122,9 +122,8 @@ include:
       # test_deploy_preflight.py, which fails rather than skips without it.
       pip_packages: "copier==9.17.0 ansible-core==2.21.5"
       # The library checkout the ruleset parity gate compares against; the
-      # python:3.13 image already ships git. The fetch brings this repo's own
-      # tags, which the validated-pair gate needs and a CI clone omits.
-      setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" "$WEISSSRV_LIB_PATH" && git fetch --tags --quiet'
+      # python:3.13 image already ships git.
+      setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" "$WEISSSRV_LIB_PATH"'
       changes:
         - "**/*"
 

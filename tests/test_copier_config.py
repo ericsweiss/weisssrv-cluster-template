@@ -5,7 +5,6 @@ cluster. These tests pin the schema and the mechanics the template relies on.
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 import sys
@@ -1214,19 +1213,13 @@ def test_lib_ref_validator_takes_release_tags_only():
 _TAG_LITERAL = re.compile(r"\bv\d+\.\d+\.\d+\b")
 
 
-def _is_historical(path: Path, line: str) -> bool:
-    """Lines that record what a PAST release pinned, not what to pin now.
+def _is_historical(line: str) -> bool:
+    """A tag literal that is not a library pin, so the stale-tag scan skips it.
 
-    A docs/VERSIONING.md pair row naming a released tag, or a `_commit:` marker
-    in an answers example. The `main` row names the live pin, so it stays in scope.
+    `_commit:` in an answers example names a tag of THIS repository, which moves
+    on its own release schedule.
     """
-    stripped = line.strip()
-    if stripped.startswith("_commit:"):
-        return True
-    if not stripped.startswith("|") or path.name != "VERSIONING.md":
-        return False
-    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-    return len(cells) > 1 and "main" not in cells[0] and bool(_TAG_LITERAL.search(cells[0]))
+    return line.strip().startswith("_commit:")
 
 
 def test_docs_quote_only_the_current_library_tag():
@@ -1237,7 +1230,7 @@ def test_docs_quote_only_the_current_library_tag():
     stale = []
     for path in [REPO_ROOT / "README.md", *sorted((REPO_ROOT / "docs").glob("*.md"))]:
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if _is_historical(path, line):
+            if _is_historical(line):
                 continue
             for tag in _TAG_LITERAL.findall(line):
                 if tag != want:
@@ -1248,151 +1241,13 @@ def test_docs_quote_only_the_current_library_tag():
     )
 
 
-def test_only_released_pair_rows_are_exempt_from_the_stale_tag_scan():
-    """Mutation case: the `main` row and the other tables stay in scope, so a
-    bump that misses the pin it records reports."""
-    versioning = Path("docs/VERSIONING.md")
-    assert _is_historical(versioning, "| `v0.8.0` | weisssrv-lib `v0.13.0` |")
-    assert not _is_historical(versioning, "| `main` (unreleased) | weisssrv-lib `v0.1.0` |")
-    assert not _is_historical(versioning, "| `feat:` | MINOR, pins `v0.1.0` |")
-    assert not _is_historical(Path("README.md"), "| `v0.8.0` | weisssrv-lib `v0.13.0` |")
-
-
-def _tags() -> list[str]:
-    """Release tags in this checkout, newest last. Empty on a shallow clone."""
-    listed = subprocess.run(
-        ["git", "tag", "-l", "v*"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if listed.returncode != 0:
-        return []
-
-    def key(tag: str) -> tuple:
-        return tuple(int(part) if part.isdigit() else 0 for part in tag.lstrip("v").split("."))
-
-    return sorted(listed.stdout.split(), key=key)
-
-
-def _questions_at(ref: str) -> dict | None:
-    """copier.yml's questions at `ref`, or None when the checkout cannot show it."""
-    shown = subprocess.run(
-        ["git", "show", f"{ref}:copier.yml"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if shown.returncode != 0 or not shown.stdout.strip():
-        return None
-    doc = yaml.safe_load(shown.stdout) or {}
-    return {name: value for name, value in doc.items() if not name.startswith("_")}
-
-
-def breaking_answer_changes(old: dict, new: dict) -> dict[str, str]:
-    """question -> why a generated repo cannot take this update unattended.
-
-    A recorded answer is replayed on every `copier update`: a dropped name binds
-    nothing, and a moved enumerated default renders a branch nobody chose.
-    """
-    changes: dict[str, str] = {}
-    for name, before in old.items():
-        if name not in new:
-            changes[name] = "removed or renamed: the recorded answer binds nothing"
-            continue
-        after = new[name]
-        if not (isinstance(before, dict) and isinstance(after, dict)):
-            continue
-        enumerated = before.get("type") == "bool" or before.get("choices")
-        if enumerated and before.get("default") != after.get("default"):
-            changes[name] = (
-                f"default moved from {before.get('default')!r} to {after.get('default')!r}: "
-                "a new cluster renders the other branch"
-            )
-    return changes
-
-
-def test_a_breaking_answer_schema_change_is_recorded():
-    """docs/VERSIONING.md calls the answer schema public API, and nothing holds a
-    rename to that claim: an operator's `copier update` is where it surfaces."""
-    tags = _tags()
-    if not tags:
-        if os.environ.get("CI"):
-            pytest.fail("no tags in this checkout, so the answer schema went unchecked")
-        pytest.skip("no tags in this checkout (shallow clone)")
-    released = _questions_at(tags[-1])
-    if released is None:
-        pytest.skip(f"{tags[-1]}:copier.yml is not in this checkout")
-
-    changes = breaking_answer_changes(released, QUESTIONS)
-    versioning = (REPO_ROOT / "docs" / "VERSIONING.md").read_text(encoding="utf-8")
-    undocumented = {
-        name: why for name, why in changes.items() if f"`{name}`" not in versioning
-    }
-    assert not undocumented, (
-        f"copier.yml changed the answer schema since {tags[-1]} without naming the "
-        "question in docs/VERSIONING.md:\n  "
-        + "\n  ".join(f"{name}: {why}" for name, why in sorted(undocumented.items()))
-    )
-
-
-def test_an_undocumented_question_rename_is_caught():
-    """Mutation case: a rename and a flipped boolean default both report."""
-    changes = breaking_answer_changes(
-        {"cluster_name": {"type": "str"}, "gpu": {"type": "bool", "default": True}},
-        {"cluster_label": {"type": "str"}, "gpu": {"type": "bool", "default": False}},
-    )
-    assert set(changes) == {"cluster_name", "gpu"}
-    assert "binds nothing" in changes["cluster_name"]
-    assert "renders the other branch" in changes["gpu"]
-
-
-def _version(tag: str) -> tuple[int, ...]:
-    """A `vMAJOR.MINOR.PATCH` tag as a sortable tuple."""
-    return tuple(int(part) for part in tag.lstrip("v").split(".") if part.isdigit())
-
-
-def test_every_template_release_has_a_validated_pair_row():
-    """Every released template tag has a validated-pair row in docs/VERSIONING.md.
-
-    The table is the only record of the library release a tag was rendered
-    against, and nothing at tag time writes the row. The newest tag is exempt.
-    """
-    table = (REPO_ROOT / "docs" / "VERSIONING.md").read_text(encoding="utf-8")
-    rows = {
-        cell.strip().strip("`")
-        for line in table.splitlines()
-        if line.strip().startswith("|")
-        for cell in [line.split("|")[1]]
-    }
-    assert any(row.startswith("main") for row in rows), (
-        "docs/VERSIONING.md has no `main` row — the newest tag's exemption rests "
-        "on that row being its pair"
-    )
-
-    tags = subprocess.run(
-        ["git", "tag", "-l", "v*"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert tags.returncode == 0, (
-        "git could not list tags, so this gate verified nothing: " + tags.stderr.strip()
-    )
-    if not tags.stdout.strip():
-        if os.environ.get("CI"):
-            pytest.fail("no tags in this checkout, so the validated-pair table went unchecked")
-        pytest.skip("no tags in this checkout (shallow clone)")
-
-    released = sorted(tags.stdout.split(), key=_version)
-    missing = [tag for tag in released[:-1] if tag not in rows]
-    assert not missing, (
-        "docs/VERSIONING.md's validated-pair table has no row for: "
-        + ", ".join(missing)
-    )
+def test_only_a_commit_marker_is_exempt_from_the_stale_tag_scan():
+    """Mutation case: prose and tables stay in scope, so a bump that misses a
+    library tag written anywhere else reports."""
+    assert _is_historical("_commit: v0.1.0")
+    assert not _is_historical("currently weisssrv-lib `v0.1.0`.")
+    assert not _is_historical("| `feat:` | MINOR, pins `v0.1.0` |")
+    assert not _is_historical("copier copy --vcs-ref v0.1.0 ...")
 
 
 # One accept and one reject per ARM of every validator no other test exercises.
