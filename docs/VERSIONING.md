@@ -23,6 +23,52 @@ repository has to live with**, which is two distinct surfaces:
 Everything else — comments, the wording of `help:` text, the docs in this
 repository — is not API.
 
+## The `cluster-config` key set
+
+`template/kubernetes/infrastructure/sources/cluster-config.yaml.jinja` is part
+of that second surface. kustomize-controller runs with
+`StrictPostBuildSubstitutions`, so every `${cluster_*}` a manifest spells has to
+be a key the ConfigMap declares — renaming or dropping one is MAJOR, and
+`template/tests/test_check_cluster_literals.py` holds the declared set to a
+recorded list in both directions so neither happens by accident. The rendered
+table in `template/kubernetes/README.md.jinja` is the per-key reference.
+
+The set is a deliberate **superset** of the reference cluster's: a generated
+cluster is configured by answer, where the reference cluster hand-writes the
+same values into its manifests and inventory. `cluster_api_vip` is the name both
+spell; `cluster_k3s_api_vip` is this template's alias for it, read by
+`template/taskfiles/k3s.yml.jinja`, not a rename.
+
+| Key only this template carries | Why a generated cluster needs it |
+|---|---|
+| `cluster_name` | Names the `clusters/<name>/` directory and the external-dns owner ID, which the reference cluster spells literally |
+| `cluster_k3s_api_vip` | Reserved alias of `cluster_api_vip`, so a manifest written with the `k3s_` segment resolves instead of substituting empty |
+| `cluster_apiserver_egress_cidr` | Pod egress to `:6443` must name node addresses, not the VIP kube-proxy DNATs; the starter roster is inventory data, so the key widens to the LAN |
+| `cluster_etcd_endpoints` | `kubeEtcd` scrape roster, generated from the starter inventory's servers |
+| `cluster_node_exporter_host_addresses` | EndpointSlice roster for the host node-exporters (`:9101`), generated the same way |
+| `cluster_zfs_exporter_addresses` | Same roster for `zfs_exporter` (`:9134`), emitted only for the ZFS storage backend |
+| `cluster_unbound_exporter_addresses` | Same roster for `unbound_exporter` (`:9167`), one entry per resolver |
+| `cluster_offsite_backup_probe_metric`, `cluster_archive_backup_probe_metric`, `cluster_vzdump_probe_metric`, `cluster_backup_artifact_probe_metric` | A backup tier a generated cluster has not enabled yet points its alert's `absent()` arm at `up` (the per-app dump tier ships armed); the reference cluster runs every tier, so its rules name each metric outright |
+| `cluster_issuer` | The ClusterIssuer name several manifests reference, so a cluster can carry its own |
+| `cluster_secret_store` | SECRETS seam — the ClusterSecretStore name comes from the backend answer |
+| `cluster_secrets_provider_namespace`, `cluster_secrets_provider_deployment` | Same seam: the provider Deployment `SecretsProviderDown` watches |
+| `cluster_secrets_vault` | The vault answer every ExternalSecret resolves against |
+| `cluster_git_host` | Forge seam — the host `cluster_runbook_base_url` and the registry paths are built from |
+
+Four of the reference cluster's keys are deliberately absent. Each needs the
+feature that reads it before the key means anything, and a key nothing announces
+or allowlists is drift of its own:
+
+| Key not carried | What carrying it takes |
+|---|---|
+| `cluster_home_cidr`, `cluster_home_admin_cidr` | A client VLAN and its admin block are site topology; the answers describe one flat LAN. Adding them is a question pair plus the `lan-tailscale-only` / `lan-tailscale-strict` allowlist entries that read them |
+| `cluster_syslog_vip` | The generated cluster ships no syslog receiver, so the key would name a VIP nothing announces — and `check-cluster-literals.py`'s VIP arm rejects a VIP with no inventory mirror. It arrives with the receiver app, a `syslog_vip` answer and its own MetalLB `/32` pool |
+| `cluster_wg_easy_vip` | Same shape: `vpn_tailscale` is the only VPN module, so no generated manifest announces a WireGuard endpoint |
+
+A manifest ported in either direction brings its keys with it. Port into this
+template and the key becomes an answer or a generated value; port out of it and
+the receiving cluster declares the key by hand.
+
 ## MAJOR / MINOR / PATCH
 
 | Level | Meaning for this template |

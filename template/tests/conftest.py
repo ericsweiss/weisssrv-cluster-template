@@ -166,6 +166,7 @@ CONFIGMAP_INVENTORY_MIRROR = {
     "cluster_k3s_api_vip": ("all.yml", "k3s_api_vip"),
     "cluster_metallb_public_vip": ("all.yml", "metallb_public_vip"),
     "cluster_metallb_internal_vip": ("all.yml", "metallb_internal_vip"),
+    "cluster_lan_gateway": ("all.yml", "lan_gateway"),
 }
 
 OBSERVABILITY = REPO / "kubernetes" / "infrastructure" / "observability"

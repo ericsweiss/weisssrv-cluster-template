@@ -22,6 +22,7 @@ SAMPLES = {
     "cluster_external_domain": "example.test",
     "cluster_node_label_domain": "example.lan",
     "cluster_lan_cidr": "10.9.0.0/24",
+    "cluster_lan_gateway": "10.9.0.1",
     "cluster_pod_cidr": "10.244.0.0/16",
     "cluster_service_cidr": "10.245.0.0/16",
     "cluster_tailnet_cidr": "100.64.0.0/10",
@@ -32,6 +33,60 @@ SAMPLES = {
     "cluster_timezone": "Atlantic/Reykjavik",
     "cluster_upstream_dns_servers": "10.9.0.150 10.9.0.160",
 }
+
+
+# Every key cluster-config declares unconditionally. The ConfigMap is the
+# substitution contract, so a key added or dropped there is recorded here too;
+# the upstream template's VERSIONING.md carries the same list.
+DECLARED_KEYS = frozenset(
+    {
+        "cluster_name",
+        "cluster_internal_domain",
+        "cluster_external_domain",
+        "cluster_node_label_domain",
+        "cluster_lan_cidr",
+        "cluster_lan_gateway",
+        "cluster_pod_cidr",
+        "cluster_service_cidr",
+        "cluster_api_vip",
+        "cluster_k3s_api_vip",
+        "cluster_apiserver_egress_cidr",
+        "cluster_etcd_endpoints",
+        "cluster_node_exporter_host_addresses",
+        "cluster_unbound_exporter_addresses",
+        "cluster_offsite_backup_probe_metric",
+        "cluster_archive_backup_probe_metric",
+        "cluster_vzdump_probe_metric",
+        "cluster_backup_artifact_probe_metric",
+        "cluster_metallb_public_vip",
+        "cluster_metallb_internal_vip",
+        "cluster_issuer",
+        "cluster_acme_email",
+        "cluster_secret_store",
+        "cluster_secrets_provider_namespace",
+        "cluster_secrets_provider_deployment",
+        "cluster_git_host",
+        "cluster_runbook_base_url",
+        "cluster_nas_host",
+        "cluster_smtp_host",
+        "cluster_alert_email",
+        "cluster_node_exporter_job_regex",
+        "cluster_timezone",
+    }
+)
+
+# Keys an answer gates. Absent is correct when that module is off; a key in
+# neither set is unrecorded, which is how a seam drifts.
+OPTIONAL_KEYS = frozenset(
+    {
+        "cluster_zfs_exporter_addresses",  # storage_backend: zfs
+        "cluster_secrets_vault",  # secrets_backend: onepassword
+        "cluster_tailnet_cidr",  # vpn_tailscale
+        "cluster_tailnet_dns_suffix",  # vpn_tailscale
+        "cluster_upstream_dns_servers",  # vpn_tailscale
+        "cluster_ddns_records",  # dns_backend: cloudflare
+    }
+)
 
 
 def config_values() -> dict[str, str]:
@@ -492,6 +547,28 @@ def test_an_unparseable_gate_input_is_vacuous_not_a_traceback(repo: Path, target
     with pytest.raises(gate.Vacuous):
         run(repo)
     assert gate.main(["--repo-root", str(repo)]) == 2
+
+
+def test_the_configmap_declares_the_recorded_key_set() -> None:
+    """The declared keys are the contract every manifest substitutes from, so a
+    key arriving or leaving is a deliberate change, never a silent one."""
+    declared = set(gate.load_config(REPO))
+    unrecorded = sorted(declared - DECLARED_KEYS - OPTIONAL_KEYS)
+    assert not unrecorded, (
+        f"cluster-config declares {unrecorded}, which this suite does not record — "
+        "add each to DECLARED_KEYS (or OPTIONAL_KEYS when an answer gates it)"
+    )
+    gone = sorted(DECLARED_KEYS - declared)
+    assert not gone, (
+        f"cluster-config no longer declares {gone} — every manifest substituting "
+        "one fails its stage's reconcile under StrictPostBuildSubstitutions"
+    )
+
+
+def test_every_key_the_gate_checks_is_recorded() -> None:
+    """A gate key outside the recorded set would be checked against a ConfigMap
+    the suite believes does not declare it."""
+    assert gate.REQUIRED_KEYS <= (DECLARED_KEYS | OPTIONAL_KEYS)
 
 
 def test_the_live_tree_is_placeholder_only() -> None:
