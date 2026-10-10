@@ -176,6 +176,11 @@ textfile collector emits for **every** host with a pool rather than only the
 storage node. That collector follows `node_exporter_host_proxmox`, which
 `group_vars/proxmox.yml` sets true, so the rules work on a fresh cluster.
 
+The same opt-in installs the smartmon collector, and the six `SMART*` rules in
+`platform.storage` read its `smartmon_*` series — the drive-level precursors a
+pool alert sees only after corruption. They are ungated: SMART is per-device,
+not per-filesystem, so they hold whatever the storage backend is.
+
 ## Blackbox probe targets
 
 `exporters/blackbox-exporter.yaml` ships a starter target list: only endpoints

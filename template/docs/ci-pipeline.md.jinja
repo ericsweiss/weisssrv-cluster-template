@@ -166,6 +166,7 @@ read one:
 | `tests/test_lib_pins.py` | a library pin drifts from `variables.WEISSSRV_LIB_REF` — the collection `version:`, a Terraform `?ref=`, or the Taskfile's `LIB_REF` |
 | `tests/test_local_gate_floors.py` | a local `task lint` gate that mirrors a CI include drops its linted-nothing floor, so it passes on a target list that matches nothing |
 | `tests/test_namespace_psa.py` | a Namespace this repo declares carries no Pod Security Admission labels, which admits at `privileged` |
+| `tests/test_playbook_extra_var_bools.py` | a `when:` reads an `-e` extra var without ending its filter chain in `\| bool`, which ansible-core refuses because the value arrives as a string |
 | `tests/test_prometheus_rule_coverage.py` | an alert rule has no promtool unit test and no declared exemption, or an exemption names an alert that is gone or now tested |
 | `tests/test_repo_hygiene.py` | a file the ignore rules exclude is tracked anyway |
 | `tests/test_runbook_coverage.py` | an alert's `runbook_url` points at a document, or an anchor, that does not name it |
