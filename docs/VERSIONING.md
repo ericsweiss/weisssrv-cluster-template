@@ -265,13 +265,13 @@ it imports and exits 2 naming the missing file.
 Four gates under `template/scripts/` share a name with a library gate and are
 template-owned forks rather than copies: `check-flux-version-pin.py`,
 `check-guest-endpoint-parity.py`, `check-secret-rotation-coverage.py` and
-`flux-child-kustomizations.py`. Each
-takes its own flags and prints its own output shape, so its call sites in
-`template/.pre-commit-config.yaml`, `template/.gitlab-ci.yml.jinja`,
-`template/taskfiles/`, `template/scripts/deploy-verify.sh` and the shipped test
-suites read the template's CLI. Each is a declared `forked:` entry carrying the
-difference in its `reason:`, held to the library by `reconciled_sha256` so a
-library-side change forces a review.
+`flux-child-kustomizations.py`. Each takes its own flags and prints its own
+output shape, so its call sites in `template/.pre-commit-config.yaml`,
+`template/.gitlab-ci.yml.jinja`, `template/taskfiles/`,
+`template/scripts/deploy-verify.sh` and the shipped test suites read the
+template's CLI. Each is a declared `forked:` entry carrying the difference in
+its `reason:`, held to the library by `reconciled_sha256` so a library-side
+change forces a review.
 
 ## Related
 

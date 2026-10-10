@@ -85,16 +85,16 @@ the live policy's targeting.
 
 `cluster-gates` runs the corpus wrapper without a versions ConfigMap, which the
 wrapper reads as "skip the HelmRelease-values validation". That arm is where a
-VPA `maxAllowed.memory` meets the limit the chart actually renders, and it is
-the arm that failed on a fresh render while every check above was green. This
-check closes that by running `task flux:lint` itself — the first command the
-generated cluster's own README hands the operator — in the render.
+VPA `maxAllowed.memory` meets the limit the chart actually renders, so a
+mismatch there is invisible to every check above it. This check closes that by
+running `task flux:lint` itself — the first command the generated cluster's own
+README hands the operator — in the render.
 
-It needs `task` and `helm` on PATH and neither is fetched by
-`scripts/ci-fetch-tools.py`, so `validate-rendered-cluster` installs both in its
-`before_script`: `helm` at the version and sha256 the library's
+It needs `task`, `helm` and `flux` on PATH and none of the three is fetched by
+`scripts/ci-fetch-tools.py`, so `validate-rendered-cluster` installs them in
+its `before_script`: `helm` and `flux` at the versions and sha256s the library's
 `ci/validate/flux-lint.yml` pins, read out of the `--lib-path` checkout, so this
-gate and every generated cluster's own pipeline render with the same binary.
+gate and every generated cluster's own pipeline render with the same binaries.
 There is no silent skip: a missing tool fails the check by name.
 
 ### inventory-addresses
@@ -151,7 +151,8 @@ review.
 
 Requirements: `copier>=9.15`, `pytest`, `pyyaml` for the pytest suite; plus
 `yamllint`, `shellcheck`, `terraform`, `kustomize`, `kubeconform`,
-`ansible-playbook`, `promtool`, `amtool`, `helm` and `task` for the validator. Any missing tool is reported by name. `--skip` takes any of
+`ansible-playbook`, `promtool`, `amtool`, `helm`, `flux` and `task` for the
+validator. Any missing tool is reported by name. `--skip` takes any of
 `yamllint,shellcheck,terraform,flux,cluster-gates,flux-lint,ci-policy,include-contract,inventory-addresses,version-coverage,versions-configmap,vendored,rendered-vendored,role-opt-ins,role-inputs,terraform-validate,ansible`
 — the same names `validate_render.py --help` prints, and the same order the
 table above lists them in. `test_ci_doc_lists_every_validator_check` holds the
