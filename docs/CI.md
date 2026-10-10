@@ -66,6 +66,7 @@ runs `check-netpol-except-parity` again over `kubernetes/` on disk, where the
 `lint-prometheus-config.sh` over the alert rules and the Alertmanager config,
 then `check-alertmanager-behaviour.py` over what that config actually routes
 and inhibits.
+
 Without this check, a generated cluster's first pipeline can be red on
 manifests nobody edited, and the template change that caused it went green.
 
