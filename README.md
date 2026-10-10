@@ -257,6 +257,7 @@ python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
 ruff check scripts tests template/tests template/scripts template/kubernetes
 shellcheck template/scripts/*.sh
 python3 scripts/check-doc-links.py
+python3 scripts/check-comment-length.py .
 yamllint -c lint/yamllint-relaxed.yml copier.yml tests/ lint/ .gitlab-ci.yml scripts/vendored-manifest.yml
 ```
 
