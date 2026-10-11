@@ -65,6 +65,14 @@
 {%- set secret_gate_var = secrets.secret_gate_var -%}
 {%- set gate_var = secret_gate_var() -%}
 ---
+# The library release every pin below reads. `include:` resolves before
+# `variables:` exists, so a declared input is what reaches a `ref:`.
+# Bump with `scripts/check-lib-pins.py --bump vX.Y.Z`; docs/ci-pipeline.md.
+spec:
+  inputs:
+    lib_ref:
+      default: {{ lib_ref }}
+---
 # CI for the {{ cluster_name }} cluster. Generic lint / validate / security /
 # review jobs come from {{ lib_project }} at a pinned ref; only the deploy jobs
 # and the wiring below are local. Prerequisites: docs/ci-pipeline.md.
@@ -119,10 +127,8 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 variables:
-  # Single source for the library pin. `include:` cannot read it, so every entry
-  # below repeats the tag literally and scripts/check-lib-pins.py fails a drifted
-  # or branch pin. Bump here, then `scripts/check-lib-pins.py --fix`.
-  WEISSSRV_LIB_REF: "{{ lib_ref }}"
+  # The declared ref, for the job scripts that interpolate it at run time.
+  WEISSSRV_LIB_REF: $[[ inputs.lib_ref ]]
   # The project half of the same pin, so the gate checks the includes this
   # cluster actually resolves (a fork or mirror answers lib_project).
   LIB_PROJECT: "{{ lib_project }}"
@@ -168,7 +174,7 @@ include:
   - local: .gitlab/ci/integration-jobs.yml
 
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -191,7 +197,7 @@ include:
   # collections_path is empty: this repo ships no in-repo collection, so the
   # only search path is the galaxy install of weisssrv.infra from requirements.yml.
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/lint/ansible-lint.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -211,7 +217,7 @@ include:
   # and field names are the include's own defaults (K3s Kubeconfig / kubeconfig),
   # and the stored value is base64.
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/deploy/kubectl-setup.yml
     inputs:
       op_vault: "{{ secret_vault() }}"
@@ -222,7 +228,7 @@ include:
       kubectl_sha256: "65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8"
 
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -236,7 +242,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/lint/python-lint.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -261,7 +267,7 @@ include:
   # gate. `changes:` must name every file they read — docs/ci-pipeline.md.
   # test_vendored_byte_identity.py reads the library from the clone below.
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/test/python-tests.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -302,7 +308,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/validate/terraform.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -317,7 +323,7 @@ include:
   # wrapper that adds the second ConfigMap this cluster substitutes from;
   # flux-render.sh parses one file — docs/ci-pipeline.md § flux-lint.
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/validate/flux-lint.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -346,6 +352,7 @@ include:
         - "scripts/helm-values-releases.yaml"
         - "scripts/check-hpa-vpa-invariant.py"
         - "scripts/check-scrape-netpol.py"
+        - "scripts/check-scrape-wiring.py"
         - "scripts/check-default-deny-coverage.py"
         - "scripts/check-secretstore-scope.py"
         - "scripts/check-pvc-storageclass.py"
@@ -357,6 +364,7 @@ include:
         - "scripts/validate-helm-values.py"
         - "scripts/flux-corpus-gates.sh"
         - "scripts/flux-env.sh"
+        - "scripts/flux-lint.sh"
         - "scripts/kubeconform-skipped.py"
         - "scripts/kubeconform-expected-skipped.txt"
         - "scripts/check-grafana-sidecar-init.py"
@@ -366,7 +374,7 @@ include:
   # `task lint:doc-links` runs it locally; this is the gate that makes it
   # mandatory rather than a habit.
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/lint/docs-link-check.yml
     inputs:
       job_name: lint-docs-links
@@ -380,7 +388,7 @@ include:
   # scripts/comment-length.yaml carries the scan scope and the vendored copies
   # the gate skips, because their comments are the library's.
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/lint/comment-length.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -392,7 +400,7 @@ include:
   # .gitlab/secret-detection-ruleset.toml keep the secret references and sha256
   # pins green. Amend .gitleaks.toml rather than disabling the gate.
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/security/secret-detection.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -402,7 +410,7 @@ include:
   # 1Password CLI and no root. The gate means a pipeline without them simply has
   # no AI review rather than a red job.
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/review/pr-agent.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -422,7 +430,7 @@ include:
   # token and no schedule. The -s guard is why the report is checked: a checker
   # that dies mid-run leaves an EMPTY artifact that reads as "nothing available".
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/maintenance/version-check.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -444,7 +452,7 @@ include:
   # check_command is the non-interactive twin of
   # `task maintenance:update-all-versions` — docs/ci-pipeline.md § Version bumps.
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/maintenance/version-bump-bot.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -480,25 +488,25 @@ include:
 {%- if enable_semantic_release %}
 
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/release/semantic-release.yml
     inputs:
       tags: ["{{ runner_tag }}"]
 {%- endif %}
 
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/templates/dep-cache.yml
 
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/templates/install-1password.yml
 
   # `.deploy-base` — the toolchain every Ansible deploy job extends: op CLI,
   # pinned Ansible, ansible.cfg, the deploy SSH key, a keyscan of hosts.env and
   # the collection install. The secrets_backend seam: docs/ci-pipeline.md.
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/deploy/deploy-base.yml
     inputs:
       tags: ["{{ runner_tag }}"]
@@ -506,7 +514,7 @@ include:
       ansible_version: "14.4.0"
 
   - project: {{ lib_project }}
-    ref: {{ lib_ref }}
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/templates/terraform-http-backend.yml
     inputs:
       # ${CI_API_V4_URL} tracks the instance the pipeline runs on; TF_HTTP_PASSWORD

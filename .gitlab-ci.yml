@@ -1,4 +1,12 @@
 ---
+# The library release every pin below reads. `include:` resolves before
+# `variables:` exists, so a declared input is what reaches a `ref:`.
+# Bump with `scripts/check-lib-pins.py --bump vX.Y.Z`; docs/CI.md § Library pin.
+spec:
+  inputs:
+    lib_ref:
+      default: v0.20.0
+---
 # CI for the template itself. Generic jobs come from the shared library, and
 # every job is tag-less and non-root safe so it lands on the shared runner.
 # `validate-rendered-cluster` is the gate that matters; see docs/VERSIONING.md.
@@ -31,9 +39,8 @@ workflow:
 
 variables:
   LIB_PROJECT: "eric/weisssrv-lib"
-  # Single source for the library pin. `include:` cannot read it, so each entry
-  # repeats the tag; scripts/check-lib-pins.py fails drift. `--fix` rewrites.
-  WEISSSRV_LIB_REF: "v0.19.0"
+  # The declared ref, for the job scripts that interpolate it at run time.
+  WEISSSRV_LIB_REF: $[[ inputs.lib_ref ]]
   # Library checkout the python-tests job clones into and tests/test_render.py
   # reads for the ruleset parity gate, which fails rather than skips in CI.
   WEISSSRV_LIB_PATH: "$CI_PROJECT_DIR/.tmp/weisssrv-lib"
@@ -50,7 +57,7 @@ include:
   # Jinja sources, not documents. validate-rendered-cluster below yamllints the
   # rendered tree, which is where template/ actually gets covered.
   - project: eric/weisssrv-lib
-    ref: v0.19.0
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: []
@@ -65,7 +72,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.19.0
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/lint/python-lint.yml
     inputs:
       tags: []
@@ -85,7 +92,7 @@ include:
   # The one .sh.jinja source is covered by the render check in
   # tests/validate_render.py, which shellchecks the generated scripts.
   - project: eric/weisssrv-lib
-    ref: v0.19.0
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: []
@@ -99,7 +106,7 @@ include:
   # ones included: the gate reads a `.jinja` source as the file it renders into.
   # No config file, so PyYAML is not installed.
   - project: eric/weisssrv-lib
-    ref: v0.19.0
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/lint/comment-length.yml
     inputs:
       tags: []
@@ -108,7 +115,7 @@ include:
   # copier.yml schema checks + the full render invariants. Everything in the
   # repository feeds the render, hence the catch-all `changes`.
   - project: eric/weisssrv-lib
-    ref: v0.19.0
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/test/python-tests.yml
     inputs:
       tags: []
@@ -130,7 +137,7 @@ include:
   # Self-application: the template ships this gate into every generated cluster,
   # and its own docs carry the same relative cross-links.
   - project: eric/weisssrv-lib
-    ref: v0.19.0
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/lint/docs-link-check.yml
     inputs:
       job_name: lint-docs-links
@@ -144,7 +151,7 @@ include:
   # Pin drift in the SHIPPED defaults, checked inside a render of this template.
   # Soft-fail: rc 1 means updates are available.
   - project: eric/weisssrv-lib
-    ref: v0.19.0
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/maintenance/version-check.yml
     inputs:
       tags: []
@@ -167,7 +174,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.19.0
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/security/secret-detection.yml
     inputs:
       tags: []
@@ -177,7 +184,7 @@ include:
       cpu_selector: "esweiss.com/cpu=modern"
 
   - project: eric/weisssrv-lib
-    ref: v0.19.0
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []
@@ -199,7 +206,7 @@ include:
   # generated cluster's `copier update` resolves to. `release` is declared last
   # above, so stage order gates it on every job here. Policy: docs/VERSIONING.md.
   - project: eric/weisssrv-lib
-    ref: v0.19.0
+    ref: $[[ inputs.lib_ref ]]
     file: /ci/release/semantic-release.yml
     inputs:
       tags: []

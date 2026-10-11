@@ -1149,19 +1149,21 @@ def test_this_repository_applies_its_own_lib_pin_gate():
     """The gate the template ships must hold on the template's own pipeline.
 
     No job runs the checker here, so this runs the vendored checker over this
-    repository's includes and ties WEISSSRV_LIB_REF to copier.yml's lib_ref.
+    repository's includes and ties the declared `lib_ref` input to copier.yml's.
     """
     checker = load_script("check-lib-pins.py")
 
     ci_file = REPO_ROOT / ".gitlab-ci.yml"
     variables = checker.load_ci(ci_file).get("variables") or {}
     project = variables.get("LIB_PROJECT") or checker.LIB_PROJECT
-    problems = checker.check(ci_file, project)
+    declared = checker.declared_ref(ci_file.read_text(encoding="utf-8"))
+    problems = checker.check(ci_file, project) + checker.check_sites(ci_file, declared)
     assert problems == [], "\n".join(problems)
-    assert variables.get("WEISSSRV_LIB_REF") == QUESTIONS["lib_ref"]["default"], (
-        "variables.WEISSSRV_LIB_REF and copier.yml's lib_ref default disagree — "
-        "validate-rendered-cluster clones the latter, so the includes would be gated "
-        "against a library this repository never exercises"
+    assert declared == QUESTIONS["lib_ref"]["default"], (
+        f"spec.inputs.lib_ref.default is {declared} and copier.yml's lib_ref default is "
+        f"{QUESTIONS['lib_ref']['default']} — validate-rendered-cluster clones the "
+        "latter, so the includes would be gated against a library this repository "
+        "never exercises"
     )
 
 

@@ -251,23 +251,33 @@ Run these before opening a merge request. This is the canonical list;
 
 ```bash
 python3 -m pytest tests -q                      # copier.yml schema + render invariants
-python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib
+python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib --self-checks
 python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
   --answers tests/answers-unlike.yml
+python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
+  --answers tests/answers-unlike.yml \
+  --data vpn_tailscale=true --data gpu=none --data use_unifi=false
 ruff check scripts tests template/tests template/scripts template/kubernetes
-shellcheck template/scripts/*.sh
+shellcheck --severity=warning --exclude=SC1091,SC2034 template/scripts/*.sh
 python3 scripts/check-doc-links.py
 python3 scripts/check-comment-length.py .
 yamllint -c lint/yamllint-relaxed.yml copier.yml tests/ lint/ .gitlab-ci.yml scripts/vendored-manifest.yml
 ```
 
-That is the CI lint and test stages, in the order the pipeline runs them.
-`template/` itself is linted through the rendered tree, not directly. A change
-that skips the ruff, shellcheck or link lines can still go red in the pipeline
-on a file the tests never open.
+That is every gate the CI lint and test stages run, with the shellcheck
+severity and exclusions the CI include passes — a bare `shellcheck` run reds on
+info-level findings the pipeline never sees. `template/` itself is linted
+through the rendered tree, not directly. A change that skips the ruff,
+shellcheck or link lines can still go red in the pipeline on a file the tests
+never open.
 
-Both fixtures, always, and `--lib-path` on both. `pytest tests` also runs
-`scripts/check-lib-pins.py` over this repository's own `include:` refs.
+Three renders, always, and `--lib-path` on all of them: both fixtures, plus the
+contrast fixture with one optional module moved, which is the only way to reach
+an arm that couples two of them. `--self-checks` rides on one invocation — its
+arms read no render, so they cover this repository's own library includes and
+vendored copies. `pytest tests` also runs `scripts/check-lib-pins.py` over this
+repository's own pipeline, where one declared `lib_ref` input feeds every
+`include: ref:`; `scripts/check-lib-pins.py --bump vX.Y.Z` moves it.
 
 [docs/CI.md](docs/CI.md) owns the rest: § The gate that matters for why the
 shaped render alone proves nothing, and § Running the tests locally for the
@@ -291,7 +301,8 @@ passes `--skip`.
 - Ansible roles are never vendored here. If a role needs a change, it changes in
   weisssrv-lib and the template bumps `lib_ref`.
 - Every library tag written literally in this repository's docs is the `lib_ref`
-  default in `copier.yml`. Bump them together; the test suite compares them.
+  default in `copier.yml`, which is also what this repository's own pipeline
+  declares. Bump them together; the test suite compares them.
 - A `task <name>` in any document must be a task the generated `Taskfile.yml`
   defines — the render tests resolve every reference against it.
 

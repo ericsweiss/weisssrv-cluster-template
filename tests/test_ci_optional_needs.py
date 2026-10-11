@@ -34,6 +34,15 @@ def _lib_checkout() -> Path | None:
     return None
 
 
+# An include naming a file outside both checkouts hides the jobs AND the needs
+# inside it, so the gate stops until the blind spot is declared with a reason.
+UNREADABLE_INCLUDES = {
+    "Jobs/Secret-Detection.gitlab-ci.yml": (
+        "GitLab's managed scanner template, a file in neither checkout"
+    )
+}
+
+
 def _run(*extra: str, repo_root: Path = REPO) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(GATE), "--repo-root", str(repo_root), *extra],
@@ -61,7 +70,10 @@ def test_every_optional_need_in_this_pipeline_resolves() -> None:
                 "silently skip; set WEISSSRV_LIB_PATH in the python-tests job"
             )
         pytest.skip("no weisssrv-lib checkout to resolve the library includes")
-    result = _run("--lib-path", str(lib), "--require-optional-needs")
+    extra = ["--lib-path", str(lib), "--require-optional-needs"]
+    for pattern, reason in UNREADABLE_INCLUDES.items():
+        extra += ["--allow-unreadable-include", f"{pattern}={reason}"]
+    result = _run(*extra)
     assert result.returncode == 0, f"{result.stdout}{result.stderr}"
 
 

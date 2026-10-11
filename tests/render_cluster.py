@@ -44,6 +44,26 @@ def load_ci(path: Path) -> dict:
     docs = [d for d in yaml.load_all(path.read_text(), Loader=CILoader) if isinstance(d, dict)]
     return docs[-1] if docs else {}
 
+
+def declared_lib_ref(path: Path) -> str | None:
+    """A pipeline's one declared library ref: `spec.inputs.lib_ref.default`.
+
+    `variables.WEISSSRV_LIB_REF` is NOT it — that holds the truthy
+    interpolation, so a caller reading it compares against any checkout.
+    """
+    if not path.is_file():
+        return None
+    header = next(
+        (
+            doc
+            for doc in yaml.load_all(path.read_text(), Loader=CILoader)
+            if isinstance(doc, dict) and "spec" in doc
+        ),
+        {},
+    )
+    entry = ((header.get("spec") or {}).get("inputs") or {}).get("lib_ref") or {}
+    return entry.get("default")
+
 # `.tmp` carries this pipeline's two weisssrv-lib clones, so copying it would
 # duplicate hundreds of megabytes into every render.
 _IGNORED = shutil.ignore_patterns(

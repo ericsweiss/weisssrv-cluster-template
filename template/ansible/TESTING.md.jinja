@@ -24,16 +24,15 @@ pip install -r ../requirements.txt   # molecule + molecule-plugins[docker], pinn
 docker info                          # Docker must be running
 ```
 
-The scenarios pull the published `molecule-test` image from
-`registry.{{ git_host }}/{{ lib_project }}`, at the ref this repository pins.
-That is the same image CI uses. weisssrv-lib and its `molecule-test` and
-`molecule-ci` images must exist on that registry under that path. The
-pipeline's `include: project:` entries already impose the same requirement.
-Override the image a scenario runs:
-
-```bash
-export MOLECULE_TEST_IMAGE=registry.{{ git_host }}/{{ lib_project }}/molecule-test:{{ lib_ref }}
-```
+Each platform reads the bare `image: "${MOLECULE_TEST_IMAGE}"`, and the
+Taskfile exports it from the one declared ref
+(`scripts/check-lib-pins.py --print`), so a local run and a pipeline run pull
+the same `molecule-test` image from `registry.{{ git_host }}/{{ lib_project }}`.
+weisssrv-lib and its `molecule-test` and `molecule-ci` images must exist on that
+registry under that path; the pipeline's `include: project:` entries already
+impose the same requirement. Run the scenarios through `task ansible:test*`:
+a bare `molecule test` resolves an empty image unless you export the variable
+yourself.
 
 The collection itself is installed by molecule's `galaxy` dependency step from
 `ansible/requirements.yml`, so a scenario always exercises the pinned tag rather

@@ -15,6 +15,14 @@ GATE = SCRIPTS / "check-ci-include-job-names.py"
 # arrives through `template:`, which is a file in neither checkout.
 EXTRA_JOBS = {"secret_detection": "GitLab's managed Secret-Detection.gitlab-ci.yml"}
 
+# The same include as a blind spot: its own jobs and needs are both invisible,
+# so the gate stops until the skip is declared with a reason.
+UNREADABLE_INCLUDES = {
+    "Jobs/Secret-Detection.gitlab-ci.yml": (
+        "GitLab's managed scanner template, a file in neither checkout"
+    )
+}
+
 
 def _run(*extra: str, repo_root: str | None = None) -> subprocess.CompletedProcess:
     argv = [sys.executable, str(GATE), "--repo-root", repo_root or str(REPO), *extra]
@@ -27,6 +35,8 @@ def test_every_optional_need_resolves_to_a_job() -> None:
     extra = ["--lib-path", str(_lib_root()), "--require-optional-needs"]
     for job, reason in EXTRA_JOBS.items():
         extra += ["--extra-job", f"{job}={reason}"]
+    for pattern, reason in UNREADABLE_INCLUDES.items():
+        extra += ["--allow-unreadable-include", f"{pattern}={reason}"]
     result = _run(*extra)
     assert result.returncode == 0, f"{result.stdout}{result.stderr}"
 

@@ -309,11 +309,16 @@ def test_the_tenant_example_gate_fails_a_render_without_the_readme(tmp_path):
 # --------------------------------------------------------------------------
 
 _OWN_PIPELINE = """\
+    spec:
+      inputs:
+        lib_ref:
+          default: v9.9.9
+    ---
     variables:
-      WEISSSRV_LIB_REF: v9.9.9
+      WEISSSRV_LIB_REF: $[[ inputs.lib_ref ]]
     include:
       - project: eric/weisssrv-lib
-        ref: v9.9.9
+        ref: $[[ inputs.lib_ref ]]
         file: /ci/lint/job.yml
     """
 
@@ -343,16 +348,27 @@ def _fake_lib(tmp_path, engine: bool = True) -> Path:
     return lib
 
 
-def test_the_own_ref_arm_accepts_a_pipeline_pinned_to_the_fixture_ref(monkeypatch, tmp_path):
+def test_the_own_ref_arm_accepts_a_pipeline_declaring_the_fixture_ref(monkeypatch, tmp_path):
     _own_tree(monkeypatch, tmp_path, _OWN_PIPELINE)
     assert validate_render._assert_one_lib_ref() == []
 
 
-def test_the_own_ref_arm_rejects_an_include_on_another_ref(monkeypatch, tmp_path):
-    _own_tree(monkeypatch, tmp_path, _OWN_PIPELINE.replace("ref: v9.9.9", "ref: v0.1.0"))
+def test_the_own_ref_arm_rejects_a_header_on_another_ref(monkeypatch, tmp_path):
+    _own_tree(monkeypatch, tmp_path, _OWN_PIPELINE.replace("default: v9.9.9", "default: v0.1.0"))
     problems = validate_render._assert_one_lib_ref()
     assert len(problems) == 1
     assert "v0.1.0" in problems[0] and PIN in problems[0]
+
+
+def test_the_own_ref_arm_rejects_an_include_left_on_a_literal(monkeypatch, tmp_path):
+    """A `--fix` that missed one entry leaves that include on the old tag while
+    the header already names the new one."""
+    _own_tree(
+        monkeypatch, tmp_path, _OWN_PIPELINE.replace("ref: $[[ inputs.lib_ref ]]", "ref: v0.1.0")
+    )
+    problems = validate_render._assert_one_lib_ref()
+    assert len(problems) == 1
+    assert "v0.1.0" in problems[0] and "inputs.lib_ref" in problems[0]
 
 
 def test_the_own_ref_arm_reports_a_tree_with_no_pipeline_of_its_own(monkeypatch, tmp_path):
@@ -367,7 +383,7 @@ def test_the_registered_copy_arm_reports_a_tree_with_no_pipeline(monkeypatch, tm
     (root / validate_render.MANIFEST_RELPATH).write_text("copies: []\n")
     problems = validate_render._check_registered_copies(_fake_lib(tmp_path))
     assert len(problems) == 1
-    assert "WEISSSRV_LIB_REF" in problems[0]
+    assert "spec.inputs.lib_ref.default" in problems[0]
 
 
 def test_the_registered_copy_arm_reports_a_pipeline_without_the_pin(monkeypatch, tmp_path):
@@ -375,7 +391,7 @@ def test_the_registered_copy_arm_reports_a_pipeline_without_the_pin(monkeypatch,
     (root / validate_render.MANIFEST_RELPATH).write_text("copies: []\n")
     problems = validate_render._check_registered_copies(_fake_lib(tmp_path))
     assert len(problems) == 1
-    assert "WEISSSRV_LIB_REF" in problems[0]
+    assert "spec.inputs.lib_ref.default" in problems[0]
 
 
 def test_the_registered_copy_arm_reports_a_missing_manifest(monkeypatch, tmp_path):
@@ -446,7 +462,10 @@ def _fake_render(tmp_path, ref: str = PIN) -> Path:
     (render / "tests").mkdir(parents=True)
     (render / validate_render.MANIFEST_RELPATH).write_text("vendored: []\n")
     (render / validate_render.RENDER_GATE_RELPATH).write_text("")
-    (render / ".gitlab-ci.yml").write_text(f"variables:\n  WEISSSRV_LIB_REF: {ref}\n")
+    (render / ".gitlab-ci.yml").write_text(
+        f"spec:\n  inputs:\n    lib_ref:\n      default: {ref}\n---\n"
+        "variables:\n  WEISSSRV_LIB_REF: $[[ inputs.lib_ref ]]\n"
+    )
     return render
 
 

@@ -111,6 +111,45 @@ def test_a_spec_header_file_still_lists_its_jobs():
     assert list(ci_yaml.jobs(ci_yaml.parse_ci(SPEC_HEADER))) == ["build"]
 
 
+def test_split_header_returns_the_spec_document_and_the_body_text():
+    """The pin gate reads the header for the declared ref and rewrites the body,
+    so the split has to hand back both halves."""
+    header, body = ci_yaml.split_header(SPEC_HEADER)
+    assert header == {"spec": {"inputs": {"stage": {"default": "test"}}}}
+    assert body.startswith("---\n")
+    assert "build:" in body and "spec:" not in body
+    assert SPEC_HEADER.endswith(body)
+
+
+def test_split_header_on_a_file_without_one_hands_back_the_whole_text():
+    assert ci_yaml.split_header(PIPELINE) == (None, PIPELINE)
+
+
+def test_a_leading_document_marker_alone_is_not_a_header():
+    """Most pipeline files open with `---`; that is one document, not two."""
+    text = "---\nbuild:\n  script: ['true']\n"
+    assert ci_yaml.split_header(text) == (None, text)
+    assert "build" in ci_yaml.parse_ci(text)
+
+
+def test_a_two_document_file_whose_first_doc_is_not_a_spec_is_not_split():
+    """`spec:` is what makes the first document a header, not its position."""
+    text = "notspec: 1\n---\nbuild:\n  script: ['true']\n"
+    assert ci_yaml.split_header(text) == (None, text)
+
+
+def test_spec_inputs_reads_the_declared_inputs():
+    assert ci_yaml.spec_inputs(SPEC_HEADER) == {"stage": {"default": "test"}}
+
+
+def test_spec_inputs_is_empty_without_a_header():
+    assert ci_yaml.spec_inputs(PIPELINE) == {}
+
+
+def test_spec_inputs_is_empty_when_the_header_declares_none():
+    assert ci_yaml.spec_inputs("spec:\n---\nbuild:\n  script: ['true']\n") == {}
+
+
 TAGGED = """
 job:
   a: !custom scalar

@@ -106,17 +106,17 @@ section — read it before running `copier update`.
 
 `lib_ref` is an answer, so a generated cluster can pin any library tag it likes —
 but exactly **one** pair is ever proved to work: the `lib_ref` default in
-`copier.yml`, currently weisssrv-lib `v0.19.0`. `validate-rendered-cluster`
+`copier.yml`, currently weisssrv-lib `v0.20.0`. `validate-rendered-cluster`
 renders the template with the answer fixtures — which do not answer `lib_ref`,
 so they inherit that default — and runs the real toolchain over the output
 against a checkout of the library at that ref.
 
-That default is the single source, and three places have to agree with it: the
-fixtures inherit it, this repository's own `include:` refs repeat it as literals
-(`include:` is resolved before job variables exist), and
-`tests/validate_render.py`'s `_assert_one_lib_ref` fails any disagreement. They
-move together, in one MR. `docs/CI.md` § Library pin carries the rest of the
-gate detail.
+That default is the single source, and two places have to agree with it: the
+fixtures inherit it, and this repository's own pipeline declares it as
+`spec.inputs.lib_ref.default`, which every `include:` entry reads.
+`tests/validate_render.py`'s `_assert_one_lib_ref` fails any disagreement, in
+either direction. They move together, in one MR. `docs/CI.md` § Library pin
+carries the rest of the gate detail.
 
 An unpinned `copier copy` resolves to the template's **latest release tag**, so
 when `main` carries a newer `lib_ref` than the newest tag does, the documented

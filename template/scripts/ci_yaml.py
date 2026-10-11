@@ -70,13 +70,40 @@ CILoader.add_multi_constructor("!", _passthrough)
 NullTagCILoader.add_multi_constructor("!", lambda loader, suffix, node: None)
 
 
+def split_header(text: str, loader: type = CILoader) -> tuple[Any, str]:
+    """-> (the `spec:` header document, the body TEXT it heads).
+
+    GitLab's inputs syntax makes a pipeline file two documents, `spec:` then the
+    jobs. (None, the whole text) when there is no header.
+    """
+    docs = list(yaml.load_all(text, Loader=loader))
+    if len(docs) < 2 or not (isinstance(docs[0], dict) and "spec" in docs[0]):
+        return None, text
+    starts = [
+        event.start_mark.index
+        for event in yaml.parse(text, Loader=loader)
+        if isinstance(event, yaml.DocumentStartEvent)
+    ]
+    if len(starts) < 2:
+        return None, text
+    return docs[0], text[starts[1]:]
+
+
+def spec_inputs(text: str, loader: type = CILoader) -> dict:
+    """The header's `spec: inputs:` mapping; empty when the file has none."""
+    header, _ = split_header(text, loader)
+    inputs = ((header or {}).get("spec") or {}).get("inputs")
+    return inputs if isinstance(inputs, dict) else {}
+
+
 def parse_ci(text: str, loader: type = CILoader) -> dict:
     """The jobs document of pipeline YAML already in memory.
 
-    GitLab's inputs syntax makes a pipeline file two documents, `spec:` then the
-    jobs, so the last mapping document is the one a caller wants.
+    A `spec:` header is split off first (see split_header), so a caller always
+    reads the body.
     """
-    docs = [d for d in yaml.load_all(text, Loader=loader) if isinstance(d, dict)]
+    _, body = split_header(text, loader)
+    docs = [d for d in yaml.load_all(body, Loader=loader) if isinstance(d, dict)]
     return docs[-1] if docs else {}
 
 

@@ -72,8 +72,8 @@ with kubeconform.
 CR schemas come from the datreeio CRD catalog at one pinned revision.
 `taskfiles/flux.yml` holds it as `CRD_CATALOG_REF` and the `flux-lint` include
 passes the same sha as `crd_catalog_ref`, so the pipeline and `task flux:lint`
-accept the same schema set. It moves with `WEISSSRV_LIB_REF`: a bump that
-changes the job's default needs both spellings changed with it.
+accept the same schema set. It moves with the library pin: a bump that changes
+the job's default needs both spellings changed with it.
 
 A kind that validates against no schema is a finding, not a note:
 `scripts/kubeconform-expected-skipped.txt` is the baseline of apiVersion/Kind
@@ -98,6 +98,7 @@ rendered corpus, each covering a class kubeconform structurally cannot see:
 |---|---|
 | `check-hpa-vpa-invariant.py` | an HPA and a CPU-controlling VPA target one workload; a container declares a CPU limit; a container sets `requests.memory == limits.memory` under a memory-controlling VPA |
 | `check-scrape-netpol.py` | a scraped namespace's NetworkPolicies do not admit Prometheus (the symptom is a bare `TargetDown`) |
+| `check-scrape-wiring.py` | a NetworkPolicy admits the observability namespace but not the PORT its monitor scrapes, so the target is down with the namespace arm green. Over the corpus, where a monitor's `matchNames` resolves against the namespaces that exist |
 | `check-netpol-except-parity.py` | an egress rule reaches the LAN, Tailscale or the metadata address in full, or a `/0` peer's `except:` list is not a canonical reserved-CIDR set. Over the corpus, where every `ipBlock` CIDR is substituted |
 | `check-default-deny-coverage.py` | a namespace owns a workload but carries no namespace-wide ingress default-deny (or one defeated by an allow-everything rule beside it) |
 | `check-secretstore-scope.py` | a `ClusterSecretStore` has no `spec.conditions`, or a consumer namespace those conditions do not admit |
@@ -162,7 +163,7 @@ read one:
 | `tests/test_grafana_dashboards.py` | a dashboard's JSON is unparseable or malformed, which `flux-lint` cannot see inside the ConfigMap that carries it |
 | `tests/test_helm_values_releases.py` | `scripts/helm-values-releases.yaml` misses a HelmRelease, or names a chart the sources do not declare, so its values block is validated against nothing |
 | `tests/test_inventory_defaults.py` | an inventory variable restates the role default it already gets |
-| `tests/test_lib_pins.py` | a library pin drifts from `variables.WEISSSRV_LIB_REF` — the collection `version:`, a Terraform `?ref=`, or the Taskfile's `LIB_REF` |
+| `tests/test_lib_pins.py` | a library pin stops deriving from the declared `lib_ref` input — an `include: ref:`, the collection `version:`, a Terraform `?ref=` the site list names, or the Taskfile's `LIB_REF` |
 | `tests/test_local_gate_floors.py` | a local `task lint` gate that mirrors a CI include drops its linted-nothing floor, so it passes on a target list that matches nothing |
 | `tests/test_namespace_psa.py` | a Namespace this repo declares carries no Pod Security Admission labels, which admits at `privileged` |
 | `tests/test_playbook_extra_var_bools.py` | a `when:` reads an `-e` extra var without ending its filter chain in `\| bool`, which ansible-core refuses because the value arrives as a string |
@@ -205,10 +206,11 @@ the library blob it was last reconciled against. Read the `forked:` list in the
 manifest rather than a copy of it here.
 
 That is why this job clones the library: `setup_command` fetches it at
-`variables.WEISSSRV_LIB_REF` into `$WEISSSRV_LIB_PATH` with the job token, so a
-private library works as long as it lists this project on its CI/CD job-token
-allowlist. The gate **never skips** — an unreachable checkout fails the job,
-because a copy nobody compares is exactly the drift it exists to catch.
+`$WEISSSRV_LIB_REF` — the variable that reads the declared input — into
+`$WEISSSRV_LIB_PATH` with the job token, so a private library works as long as
+it lists this project on its CI/CD job-token allowlist. The gate **never
+skips** — an unreachable checkout fails the job, because a copy nobody
+compares is exactly the drift it exists to catch.
 
 Locally the same suite runs as `task lint:invariants` (part of `task lint`)
 against the `.weisssrv-lib/` checkout `task lib:sync` creates. Refreshing a
@@ -720,23 +722,23 @@ embedded in the MR description rather than committed.
 
 ## Bumping the library
 
-Change every `ref:` in `.gitlab-ci.yml`, the `version:` in
-`ansible/requirements.yml`, the `?ref=` on each Terraform module source and
-`LIB_REF` in `Taskfile.yml` to the new tag, in one MR, and record it in
-`.copier-answers.yml` by re-running `copier update`. All four are gated:
-`scripts/check-lib-pins.py` (and `--fix`) covers the `include:` entries, and
-`tests/test_lib_pins.py` covers the other three — a stale `version:` in
+`scripts/check-lib-pins.py --bump vX.Y.Z` moves the declared `lib_ref` input in
+`.gitlab-ci.yml`'s `spec:` header and every pin derived from it: each
+`include: ref:`, `variables.WEISSSRV_LIB_REF`, the `version:` in
+`ansible/requirements.yml` and each site `scripts/lib-ref-sites.yml` names (the
+Terraform `?ref=` on every module source). `Taskfile.yml`'s `LIB_REF` reads
+`--print`, so it follows with no edit. Do it in one MR and record it in
+`.copier-answers.yml` by re-running `copier update`. `tests/test_lib_pins.py`
+is the pipeline's own arm over all four pin families — a stale `version:` in
 `requirements.yml` is the one that keeps the pipeline green while every deploy
 job installs the OLD role code. There is no dependency bot for it: a library
 bump can change job behaviour and role interfaces, so it is deliberate. `docs/RUNBOOKS.md` § The platform library is the full procedure,
 including the re-initialisation each Terraform module needs afterwards.
 
 The pin in git is the record of what was validated. A pipeline proves this
-cluster state against the tag in `variables.WEISSSRV_LIB_REF` at that commit,
-and the gates hold `ansible/requirements.yml`, each Terraform `?ref=` and the
-Taskfile's `LIB_REF` equal to it. After a rollback,
-`git show <sha>:.gitlab-ci.yml` names the library release that state was tested
-against, so no separate table is kept.
+cluster state against the tag the header declared at that commit. After a
+rollback, `git show <sha>:.gitlab-ci.yml` names the library release that state
+was tested against, so no separate table is kept.
 
 ## Backend seams
 

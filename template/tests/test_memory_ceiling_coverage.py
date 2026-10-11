@@ -1,7 +1,7 @@
-"""Every container excluded from the memory-ceiling rule needs a replacement band.
+"""The memory-ceiling rule judges containers on memory the kernel cannot reclaim.
 
-PageCacheWorkloadRSSNearLimit covers on RSS what ContainerMemoryNearLimit
-excludes; an exclusion with no band leaves only an OOMKill as a memory signal.
+Page cache in a working set reads as a container at its ceiling, so RSS is the
+metric, a working-set arm is pinned, and an exclusion needs a replacement band.
 """
 
 from __future__ import annotations
@@ -14,13 +14,14 @@ import pytest
 import yaml
 from conftest import REPO, load_script, reported
 
-WORKING_SET = "ContainerMemoryNearLimit"
-RSS_BAND = "PageCacheWorkloadRSSNearLimit"
-# The workload whose death blinds every other alert, so it must never sit in an
-# exclusion without a band of its own.
-MUST_BE_BANDED = "prometheus"
+CEILING = "ContainerMemoryNearLimit"
+RSS_METRIC = "container_memory_rss"
+WORKING_SET_METRIC = "container_memory_working_set_bytes"
 
-_CONTAINER_RE = re.compile(r'container=~"([^"]+)"')
+_CONTAINER_RE = re.compile(r'container=~?"([^"]+)"')
+_UNLESS_RE = re.compile(r"\bunless\b(?P<arm>.*)", re.S)
+# A `metric{...}` selector, matched non-greedily so one arm's braces end it.
+_SELECTOR_RE = re.compile(r"(?P<metric>[a-z_][a-z0-9_]*)\{(?P<matchers>[^{}]*)\}")
 
 
 def _expressions() -> dict[str, str]:
@@ -42,7 +43,7 @@ def _expressions() -> dict[str, str]:
 
 
 def containers(expr: str) -> set[str]:
-    """Container names in every `container=~"a|b"` alternation of an expression."""
+    """Container names in every `container=` matcher, alternations expanded."""
     return {
         name
         for match in _CONTAINER_RE.finditer(expr)
@@ -51,34 +52,76 @@ def containers(expr: str) -> set[str]:
     }
 
 
+def unpinned_working_set_arms(expr: str) -> list[str]:
+    """Working-set selectors that do not pin both a namespace and a container.
+
+    An unpinned one judges every container on its working set, which is the
+    page cache the rule exists to stop reading.
+    """
+    return [
+        match.group(0)
+        for match in _SELECTOR_RE.finditer(" ".join(expr.split()))
+        if match.group("metric") == WORKING_SET_METRIC
+        and not ("namespace=" in match.group("matchers") and "container=" in match.group("matchers"))
+    ]
+
+
+def unbanded(expressions: dict[str, str]) -> list[str]:
+    """Containers the ceiling rule excludes that no other alert's expr names."""
+    arm = _UNLESS_RE.search(expressions[CEILING])
+    excluded = containers(arm.group("arm")) if arm else set()
+    banded = {
+        name
+        for alert, expr in expressions.items()
+        if alert != CEILING
+        for name in containers(expr)
+    }
+    return sorted(excluded - banded)
+
+
 @pytest.fixture(scope="module")
 def expressions() -> dict[str, str]:
     found = _expressions()
-    for alert in (WORKING_SET, RSS_BAND):
-        assert alert in found, f"{alert} is not in the rule corpus — the gate would be vacuous"
+    assert CEILING in found, f"{CEILING} is not in the rule corpus — the gate would be vacuous"
     return found
 
 
-def test_every_excluded_container_has_a_replacement_band(expressions):
-    excluded = containers(expressions[WORKING_SET])
-    assert excluded, f"{WORKING_SET} excludes nothing — the gate would be vacuous"
-    missing = sorted(excluded - containers(expressions[RSS_BAND]))
+def test_the_ceiling_rule_reads_rss(expressions):
+    """A working-set ratio pages on reclaimable cache, so RSS is the metric."""
+    assert RSS_METRIC in expressions[CEILING], (
+        f"{CEILING} does not read {RSS_METRIC}: a working-set ratio counts page "
+        "cache, which sits at the limit for as long as the container is busy"
+    )
+
+
+def test_every_working_set_arm_names_its_container(expressions):
+    """The working-set exception is one named container, never a whole tier."""
+    unpinned = unpinned_working_set_arms(expressions[CEILING])
+    assert not unpinned, (
+        f"{CEILING} holds working-set selectors with no namespace and container "
+        f"pin: {unpinned} — they judge every container on its page cache"
+    )
+
+
+def test_an_unpinned_working_set_arm_fails(expressions):
+    """Mutation case: widening the arm to a whole namespace must red the gate."""
+    widened = expressions[CEILING].replace('container="postgresql"', 'container!=""')
+    assert unpinned_working_set_arms(widened), (
+        "the pin gate accepts a selector with no container matcher, so it would "
+        "not catch a working-set arm widened to a whole namespace"
+    )
+
+
+def test_no_excluded_container_is_left_without_a_band(expressions):
+    """An exclusion with no band leaves an OOMKill as the only memory signal."""
+    missing = unbanded(expressions)
     assert not missing, (
-        f"containers excluded from {WORKING_SET} with no band in {RSS_BAND}: {missing} — "
-        "their only memory signal is an OOMKill. Add them to the RSS rule's selector."
+        f"containers excluded from {CEILING} that no other alert bands: {missing} "
+        "— give each one its own rule, or drop the exclusion"
     )
 
 
-def test_prometheus_is_banded(expressions):
-    """Prometheus dying is what blinds every other alert, so it is never exempt."""
-    assert MUST_BE_BANDED in containers(expressions[RSS_BAND]), (
-        f"{MUST_BE_BANDED} has no memory band: it is the one workload whose death "
-        "stops every other alert from being evaluated"
-    )
-
-
-def test_dropping_a_container_from_the_band_fails(expressions):
-    """Mutation case: a shortened RSS selector must red the coverage assertion."""
-    excluded = containers(expressions[WORKING_SET])
-    dropped = sorted(excluded)[0]
-    assert sorted(excluded - (containers(expressions[RSS_BAND]) - {dropped})) == [dropped]
+def test_an_exclusion_without_a_band_fails(expressions):
+    """Mutation case: an invented exclusion no other alert covers must report."""
+    invented = expressions[CEILING] + ' unless on (namespace, container) x{container=~"nothing"}'
+    assert unbanded({**expressions, CEILING: invented}) == ["nothing"]

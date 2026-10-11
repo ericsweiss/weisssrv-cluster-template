@@ -1,6 +1,6 @@
 """Runs the vendored `scripts/check-lib-pins.py` against this repository's real
-pipeline: every weisssrv-lib `include:` pins the literal release tag held in
-`variables.WEISSSRV_LIB_REF`. The checker's own unit suite lives in the lib."""
+pipeline: every weisssrv-lib pin derives from the one `lib_ref` input the
+pipeline header declares. The checker's own unit suite lives in the lib."""
 
 from __future__ import annotations
 
@@ -24,16 +24,24 @@ def _project() -> str:
     return variables.get("LIB_PROJECT") or check_lib_pins.LIB_PROJECT
 
 
-def test_every_library_include_pins_the_single_source() -> None:
-    problems = check_lib_pins.check(CI_FILE, _project())
-    assert problems == [], "\n".join(problems)
-
-
 def _want_ref() -> str:
-    variables = check_lib_pins.load_ci(CI_FILE).get("variables") or {}
-    want = variables.get("WEISSSRV_LIB_REF")
-    assert want, "variables.WEISSSRV_LIB_REF is the single source and must be set"
+    want = check_lib_pins.declared_ref(CI_FILE.read_text(encoding="utf-8"))
+    assert want, "spec.inputs.lib_ref.default is the single source and must be set"
     return str(want)
+
+
+def test_every_library_pin_derives_from_the_declared_ref() -> None:
+    """No CI job runs the checker here, so this is the pipeline's own arm over
+    all four pin families: the includes, the variable, the collection and every
+    site `scripts/lib-ref-sites.yml` declares."""
+    want = _want_ref()
+    project = _project()
+    problems = (
+        check_lib_pins.check(CI_FILE, project)
+        + check_lib_pins.check_requirements(CI_FILE, want, project)
+        + check_lib_pins.check_sites(CI_FILE, want)
+    )
+    assert problems == [], "\n".join(problems)
 
 
 _MODULE_REF = re.compile(r'source\s*=\s*"git::[^"]*//terraform/modules/[^"?]+\?ref=([^"]+)"')
@@ -83,18 +91,22 @@ def test_the_terraform_roots_are_discovered() -> None:
 
 @needs_terraform
 @pytest.mark.parametrize("root", TERRAFORM_ROOTS, ids=lambda p: p.name)
-def test_every_terraform_root_pins_the_same_ref(root: Path) -> None:
-    """Each root is a thin caller of one library module, checked per root: a
-    whole-tree scan stays green while one root stops pinning anything at all."""
-    want = _want_ref()
+def test_every_terraform_root_is_declared_as_a_site(root: Path) -> None:
+    """The site list is what holds each `?ref=` to the declared ref, and it
+    cannot see a root it does not name: a new root would ship ungated."""
     found = _module_refs(root)
     assert found, (
         f"terraform/{root.name} pins no weisssrv-lib module source — either it "
         "stopped calling the module, or the source spelling changed and this "
         "root is no longer gated."
     )
-    stale = [f"{p.relative_to(REPO)}: ?ref={r}" for p, r in found if r != want]
-    assert not stale, f"Terraform module sources not pinned to {want}:\n" + "\n".join(stale)
+    main_tf = root / "main.tf"
+    globs = [glob for glob, _pattern in check_lib_pins.load_sites(CI_FILE)]
+    covered = [glob for glob in globs if main_tf in set(REPO.glob(glob))]
+    assert covered, (
+        f"{main_tf.relative_to(REPO)} is matched by none of {globs} in "
+        "scripts/lib-ref-sites.yml, so its module pin is not checked"
+    )
 
 
 def test_a_root_pinning_no_library_module_is_reported(tmp_path) -> None:
@@ -116,130 +128,62 @@ def test_a_root_pinning_no_library_module_is_reported(tmp_path) -> None:
     assert [ref for _path, ref in _module_refs(tmp_path / "pinned")] == ["v1.2.3"]
 
 
-_TASKFILE_LIB_REF = re.compile(r"^\s{2}LIB_REF:\s*(\S+)\s*$", re.MULTILINE)
-
-
-def _repo_name(value: str) -> str:
-    """The repository name in a Galaxy source URL or an include project path."""
-    return value.split("#", 1)[0].rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
-
-
-def _names_project(entry: dict, project: str) -> bool:
-    """Whether a collection entry installs `project`. The include path resolves
-    instance-locally, so a mirror or fork on another host matches on repository
-    name rather than as a substring, as the library gate does."""
-    return any(
-        project in value or _repo_name(value) == _repo_name(project)
-        for value in (str(entry.get("name", "")), str(entry.get("source", "")))
-        if value
+def test_the_taskfile_derives_the_ref_from_the_declared_input() -> None:
+    """`task lib:sync` and the molecule image must read the pipeline's declared
+    ref, not a second literal only a local run sees."""
+    text = (REPO / "Taskfile.yml").read_text(encoding="utf-8")
+    assert "scripts/check-lib-pins.py --print" in text, (
+        "Taskfile.yml no longer derives LIB_REF from "
+        "`scripts/check-lib-pins.py --print` — a literal there is a second pin "
+        "that only local runs read"
     )
+    literal = re.search(r"^\s{2}LIB_REF:\s*(v\d+\.\d+\.\d+)\s*$", text, re.MULTILINE)
+    assert not literal, f"Taskfile.yml pins LIB_REF as the literal {literal.group(1)!r}"
 
 
-def _is_git_collection(entry: dict) -> bool:
-    source = str(entry.get("source") or entry.get("name") or "")
-    return str(entry.get("type", "")) == "git" or source.startswith("git+")
-
-
-def test_collection_and_taskfile_pin_the_same_ref() -> None:
-    """`ansible/requirements.yml` and the Taskfile `LIB_REF` pin the same ref;
-    `check-lib-pins.py --fix` does not repair either."""
-    want = _want_ref()
-    project = _project()
-    stale: list[str] = []
-
-    requirements = yaml.safe_load(
-        (REPO / "ansible" / "requirements.yml").read_text(encoding="utf-8")
-    )
-    entries = [
-        c
-        for c in (requirements.get("collections") or [])
-        if isinstance(c, dict) and _is_git_collection(c) and _names_project(c, project)
-    ]
-    assert entries, f"ansible/requirements.yml pins no git collection from {project}"
-    stale += [
-        f"ansible/requirements.yml: {c.get('name') or c.get('source')} "
-        f"version={c.get('version')}"
-        for c in entries
-        if str(c.get("version")) != want
-    ]
-
-    refs = _TASKFILE_LIB_REF.findall((REPO / "Taskfile.yml").read_text(encoding="utf-8"))
-    assert refs, "Taskfile.yml declares no LIB_REF variable"
-    stale += [f"Taskfile.yml: LIB_REF={ref}" for ref in refs if ref.strip("\"'") != want]
-
-    assert not stale, f"library pins not on {want}:\n" + "\n".join(stale)
-
-
-def test_the_collection_selector_follows_a_mirror_not_a_stranger() -> None:
-    """Mutation case: a mirror in another namespace, and a `source:` entry, are
-    still selected; an unrelated collection never is."""
-    project = "infra/weisssrv-lib"
-    mirror = {
-        "type": "git",
-        "name": "git+https://git.nonesuch.invalid/platform/weisssrv-lib.git"
-        "#/ansible_collections/weisssrv/infra",
-    }
-    assert _is_git_collection(mirror)
-    assert _names_project(mirror, project)
-
-    sourced = {
-        "name": "weisssrv.infra",
-        "source": "git+https://git.nonesuch.invalid/x/weisssrv-lib",
-    }
-    assert _is_git_collection(sourced)
-    assert _names_project(sourced, project)
-
-    stranger = {"name": "community.general", "version": "1.0.0"}
-    assert not _is_git_collection(stranger)
-    assert not _names_project(stranger, project)
-
-
-_MOLECULE_IMAGE = re.compile(r"molecule-test:([A-Za-z0-9._-]+)")
 SCENARIOS = REPO / "ansible" / "integration-tests"
-TESTING_DOC = REPO / "ansible" / "TESTING.md"
 
 needs_scenarios = pytest.mark.skipif(
     not SCENARIOS.is_dir(), reason="this repository ships no integration scenarios"
 )
 
+_IMAGE_LINE = re.compile(r"^\s*image:\s*(.+?)\s*$", re.MULTILINE)
+_BARE_IMAGE = '"${MOLECULE_TEST_IMAGE}"'
 
-def _molecule_image_tags(scenarios: Path, doc: Path) -> list[tuple[Path, str]]:
-    paths = sorted(scenarios.glob("*/molecule/*/molecule.yml"))
-    if doc.is_file():
-        paths.append(doc)
+
+def _scenario_images(scenarios: Path) -> list[tuple[Path, str]]:
     return [
-        (path, tag)
-        for path in paths
-        for tag in _MOLECULE_IMAGE.findall(path.read_text(encoding="utf-8"))
+        (path, image)
+        for path in sorted(scenarios.glob("*/molecule/*/molecule.yml"))
+        for image in _IMAGE_LINE.findall(path.read_text(encoding="utf-8"))
     ]
 
 
 @needs_scenarios
-def test_molecule_test_image_fallbacks_pin_the_same_ref() -> None:
-    """The local fallback tag each scenario falls back to, and the command in
-    ansible/TESTING.md. CI overrides the image, so only local runs read these —
-    a stale tag tests roles this cluster does not install."""
-    want = _want_ref()
-    found = _molecule_image_tags(SCENARIOS, TESTING_DOC)
+def test_every_scenario_takes_the_image_from_the_environment() -> None:
+    """A `:vX.Y.Z` fallback would be a second pin only a local run reads: green
+    pipeline, stale local image. The Taskfile wrapper exports the variable."""
+    found = _scenario_images(SCENARIOS)
     assert found, (
-        "no molecule-test image tag under ansible/integration-tests/ or in "
-        "ansible/TESTING.md — this gate is examining nothing"
+        "no platform image under ansible/integration-tests/ — this gate is "
+        "examining nothing"
     )
     stale = [
-        f"{path.relative_to(REPO)}: molecule-test:{tag}" for path, tag in found if tag != want
+        f"{path.relative_to(REPO)}: {image}" for path, image in found if image != _BARE_IMAGE
     ]
-    assert not stale, f"molecule test-image tags not on {want}:\n" + "\n".join(stale)
+    assert not stale, (
+        f"platform images are not the bare {_BARE_IMAGE}:\n" + "\n".join(stale)
+    )
 
 
-def test_a_stale_molecule_image_tag_is_reported(tmp_path: Path) -> None:
+def test_a_pinned_fallback_image_is_reported(tmp_path: Path) -> None:
     """Mutation case: the collector, not just the shipped tree."""
     scenario = tmp_path / "base" / "molecule" / "default"
     scenario.mkdir(parents=True)
     (scenario / "molecule.yml").write_text(
         '      image: "${MOLECULE_TEST_IMAGE:-registry.example.com/lib/molecule-test:v0.0.1}"\n'
     )
-    found = _molecule_image_tags(tmp_path, tmp_path / "absent.md")
-    assert [tag for _path, tag in found] == ["v0.0.1"]
+    assert [image for _path, image in _scenario_images(tmp_path)] != [_BARE_IMAGE]
 
 
 # The lint job installs ansible-lint from the include's input; requirements.txt

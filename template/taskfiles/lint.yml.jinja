@@ -104,10 +104,10 @@ tasks:
         [ "$PIN" = "$AV" ] || { echo "busybox pin (${PIN}) drifted from busybox_version (${AV}) — bump scripts/post-maintenance-verify.sh"; exit 1; }
 
   lib-pins:
-    desc: Assert every weisssrv-lib include pins variables.WEISSSRV_LIB_REF
-    # `include:` is resolved before job variables exist, so the ref is a literal
-    # on every entry. This is what keeps the copies equal to the single source
-    # and rejects a branch ref. `--fix` rewrites them after a bump.
+    desc: Assert every weisssrv-lib pin derives from the declared lib_ref input
+    # `include:` resolves before `variables:` exists, so the declared input is
+    # what reaches a `ref:`. This gates all four pin families and rejects a
+    # branch ref; `--bump vX.Y.Z` moves them together.
     preconditions:
       - *needs_pyyaml
     cmds:
@@ -126,11 +126,13 @@ tasks:
       - python3 scripts/check-collection-pin-trigger.py
       - bash scripts/check-ci-pin-parity.sh
       # An optional need naming no job is ignored by GitLab, so the gate the
-      # pipeline waits for silently stops blocking it.
+      # pipeline waits for silently stops blocking it. The allowance declares
+      # GitLab's own scanner template, a file in neither checkout.
       - >-
         python3 scripts/check-ci-include-job-names.py --require-optional-needs
         --lib-path "${WEISSSRV_LIB_PATH:-{{.LIB_DIR}}}"
         --extra-job "secret_detection=GitLab's managed Secret-Detection.gitlab-ci.yml"
+        --allow-unreadable-include "Jobs/Secret-Detection.gitlab-ci.yml=GitLab's managed scanner template, a file in neither checkout"
 
   deploy-preflight:
     desc: Assert every CI deploy job's playbook and --tags selection resolves to real tasks (mirrors the CI check-deploy-playbooks job)

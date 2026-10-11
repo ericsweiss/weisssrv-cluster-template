@@ -56,8 +56,8 @@ tool (`task lint` names each one in its precondition message), an unauthenticate
 | `LokiRulerRulesMissing` | the Loki ruler loaded no rules | the `loki-sc-rules` sidecar and the rule ConfigMap's folder annotation |
 | `LokiRulerEvaluationFailures` | LogQL rule evaluations are failing, so log-based alerts do not fire | the ruler's log, then the failing rule's query |
 | `LokiRulerNotificationFailures` | the ruler cannot reach Alertmanager, so a firing log alert reaches no receiver | the ruler's Alertmanager URL and the NetworkPolicy between them |
-| `ContainerMemoryNearLimit` | a container has held above 90% of its memory limit | raise the limit in git, and the paired VPA `maxAllowed` with it |
-| `PageCacheWorkloadRSSNearLimit` | an observability container's non-reclaimable memory is near its limit | same, but it is not page cache, so the limit really is too low |
+| `ContainerMemoryNearLimit` | a container has held unreclaimable memory above 90% of its memory limit | raise the limit in git, and the paired VPA `maxAllowed` with it |
+| `ContainerOOMKilled` | the kernel killed a container at its memory limit, and it restarted cleanly | same, and check whether the charge was tmpfs or kernel memory rather than RSS |
 
 The three Loki ruler alerts matter more than their severity suggests: the ruler
 is the only alert path that does not run through Prometheus, so nothing else
@@ -89,7 +89,7 @@ to read on:
 | `KubeletImageGCIneffective` | a node root filesystem is above the kubelet image-gc watermark | Storage, "Kubelet image store" |
 | `ZFSPoolNotOnline` / `ZFSPoolDataErrors` | a pool is DEGRADED or has unrecoverable data | Storage, "A degraded pool" |
 | `ZFSPoolDeviceErrors` / `ZFSPoolScrubStale` | checksum errors on an ONLINE pool, or no scrub in 35 days | Storage, "A degraded pool" |
-| `SMARTDeviceUnhealthy` / `SMARTPendingSectors` / `SMARTOfflineUncorrectable` / `SMARTMediaErrors` / `SMARTReallocatedSectorsGrowing` | a drive's own SMART attributes say it is failing | Storage, "A failing drive" |
+| `SMARTDeviceUnhealthy` / `SMARTPendingSectorsGrowing` / `SMARTOfflineUncorrectableGrowing` / `SMARTMediaErrors` / `SMARTReallocatedSectorsGrowing` | a drive's own SMART attributes say it is failing | Storage, "A failing drive" |
 | `SMARTCollectorStale` | the smartmon textfile collector stopped refreshing, so the SMART alerts serve stale or no inputs | Storage, "A failing drive" |
 | `ZfsEncryptedMountStuck` / `ZfsEncryptedMountStuckCritical` | encrypted datasets have not mounted, so their exports and gated guests stay down | Storage |
 | `SwapCleanFailed` / `SwapCleanSkipped` | the swap-clean job failed, or a conflicting unit has blocked every run for 3 days | Storage |
@@ -403,11 +403,18 @@ version bump in the other direction plus the same task.
 ### The platform library
 
 Bumping `lib_ref` upgrades the Ansible collection, the CI templates and the
-Terraform modules together — three pin surfaces, one answer. Read the library's
-release notes first ([weisssrv-lib]({{ links.lib_home() }})), then change the
-ref in every place it is written: each `ref:` in `.gitlab-ci.yml`, the
-`version:` in `ansible/requirements.yml`, the `?ref=` on each Terraform module
-source, and `LIB_REF` in `Taskfile.yml`.
+Terraform modules together — three pin surfaces, one declared ref. Read the
+library's release notes first ([weisssrv-lib]({{ links.lib_home() }})), then
+move the pin with one command:
+
+```bash
+scripts/check-lib-pins.py --bump vX.Y.Z
+```
+
+It rewrites `.gitlab-ci.yml`'s declared `lib_ref` input, every `include: ref:`
+reading it, the `version:` in `ansible/requirements.yml` and each site
+`scripts/lib-ref-sites.yml` names — the `?ref=` on every Terraform module
+source. `Taskfile.yml`'s `LIB_REF` reads `--print`, so it follows with no edit.
 
 ```bash
 task ansible:install-collections    # re-installs the collection at the new ref
@@ -1026,14 +1033,16 @@ collector. Every window is an `*_over_time` so a spun-down drive's absent series
 does not clear a finding.
 
 `SMARTDeviceUnhealthy` is the drive's overall self-assessment reporting FAILED —
-replace it. `SMARTReallocatedSectorsGrowing` fires on growth rather than on a
-standing historical count, because a drive actively remapping sectors is the one
-that is degrading now. `SMARTPendingSectors` and `SMARTOfflineUncorrectable`
-are acute: a non-zero value is a sector unreadable right now, so scrub the
-backing pool to surface any affected data. `SMARTMediaErrors` is the NVMe
-equivalent. `SMARTCollectorStale` is the meta-alert: the collector is missing,
-its sentinel stopped refreshing, or a scan failed on a host that does have SMART
-devices, so every alert above is serving stale or no inputs.
+replace it. `SMARTReallocatedSectorsGrowing`, `SMARTPendingSectorsGrowing` and
+`SMARTOfflineUncorrectableGrowing` fire on growth rather than on a standing
+historical count, because a drive actively remapping sectors is the one that is
+degrading now. Each reads the latest value minus the 24h floor, so a replacement
+drive's counter reset is not growth; pending and uncorrectable sectors are
+unreadable right now, so scrub the backing pool to surface any affected data.
+`SMARTMediaErrors` is the NVMe equivalent. `SMARTCollectorStale` is the
+meta-alert: the collector is missing, its sentinel stopped refreshing, or a scan
+failed on a host that does have SMART devices, so every alert above is serving
+stale or no inputs.
 
 ```bash
 smartctl -a /dev/disk/by-id/<disk>          # the full attribute table

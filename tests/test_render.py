@@ -190,6 +190,7 @@ def _k8s_manifest_and_asset_files(root: Path):
 
 
 _load_ci = render_cluster.load_ci
+_declared_lib_ref = render_cluster.declared_lib_ref
 
 
 def _cluster_config(root: Path) -> tuple[Path, dict[str, str]]:
@@ -1144,15 +1145,26 @@ def test_playbook_roles_are_fqcn(cluster):
 # --------------------------------------------------------------------------
 
 
+LIB_REF_INPUT = "$[[ inputs.lib_ref ]]"
+
+
 def test_generated_ci_pins_the_library(cluster):
+    """One declared ref feeds every include. lib_ref is inherited from
+    copier.yml's default; the tag copier resolved is recorded in the render's
+    .copier-answers.yml."""
     ci = _load_ci(cluster.path / ".gitlab-ci.yml")
-    # lib_ref is inherited from copier.yml's default; the tag copier resolved is
-    # recorded in the render's .copier-answers.yml.
     want = yaml.safe_load((cluster.path / ".copier-answers.yml").read_text())["lib_ref"]
+    assert _declared_lib_ref(cluster.path / ".gitlab-ci.yml") == want, (
+        "the generated pipeline's spec.inputs.lib_ref.default must be the answered lib_ref"
+    )
     includes = [inc for inc in ci.get("include", []) if isinstance(inc, dict) and "project" in inc]
     assert includes, "the generated pipeline includes no library templates"
-    assert all(str(inc["ref"]) == want for inc in includes), (
-        "every library include must pin lib_ref"
+    assert all(str(inc["ref"]) == LIB_REF_INPUT for inc in includes), (
+        f"every library include must read the declared input as {LIB_REF_INPUT}"
+    )
+    assert (ci.get("variables") or {}).get("WEISSSRV_LIB_REF") == LIB_REF_INPUT, (
+        "variables.WEISSSRV_LIB_REF must read the declared input, so a job script "
+        "interpolating it at run time cannot name another ref"
     )
     files = {inc["file"] for inc in includes}
     for required in ("/ci/validate/flux-lint.yml", "/ci/security/secret-detection.yml"):
@@ -1202,6 +1214,7 @@ def test_flux_lint_reads_both_configmaps(cluster):
 EXTRA_VALIDATION_GATES = (
     "scripts/check-hpa-vpa-invariant.py",
     "scripts/check-scrape-netpol.py",
+    "scripts/check-scrape-wiring.py",
     "scripts/check-default-deny-coverage.py",
     "scripts/check-secretstore-scope.py",
     "scripts/check-pvc-storageclass.py",
@@ -1295,6 +1308,11 @@ def test_task_lint_mirrors_the_ci_lint_stage(cluster):
     )
 
 
+# The render/scan/kubeconform program `task flux:lint` and the CI flux-lint job
+# both run, vendored from the library.
+FLUX_LINT_PROGRAM = "scripts/flux-lint.sh"
+
+
 def test_flux_lint_renders_through_fluxs_strict_envsubst(cluster):
     """`task flux:lint` must run each build through `flux envsubst --strict`.
 
@@ -1305,13 +1323,20 @@ def test_flux_lint_renders_through_fluxs_strict_envsubst(cluster):
     lint = tasks.get("flux:lint") or {}
     script = "\n".join(str(step) for step in lint.get("cmds") or [])
     assert script, "the rendered flux:lint has no cmds — this gate read nothing"
-    assert "flux envsubst --strict" in script, (
-        "the rendered flux:lint never runs Flux's strict substitution, so only "
+    # The loop is one vendored script the CI flux-lint job runs too, so the
+    # strict pass is asserted where it is implemented rather than twice.
+    assert FLUX_LINT_PROGRAM in script, (
+        f"the rendered flux:lint no longer calls {FLUX_LINT_PROGRAM}, which is "
+        "where the strict render and every floor below it live"
+    )
+    program = (cluster.path / FLUX_LINT_PROGRAM).read_text(encoding="utf-8")
+    assert "flux envsubst --strict" in program, (
+        f"{FLUX_LINT_PROGRAM} never runs Flux's strict substitution, so only "
         "the cheap pre-substitution scans stand between a bad placeholder and "
         "a BuildFailed Kustomization on main"
     )
-    strict = script.index("flux envsubst --strict")
-    gnu = script.index('envsubst "$FLUX_ENVSUBST_VARS"')
+    strict = program.index("flux envsubst --strict")
+    gnu = program.index('envsubst "$FLUX_ENVSUBST_VARS"')
     assert strict < gnu, (
         "the strict pass runs after the GNU render, so a form Flux rejects is "
         "reported only once kubeconform has already validated the output"
@@ -2360,15 +2385,16 @@ def test_the_crd_catalog_ref_is_pinned_to_the_library_default(cluster):
         f"taskfiles/flux.yml pins CRD_CATALOG_REF {variables.get('CRD_CATALOG_REF')!r}, "
         f"expected {CRD_CATALOG_REF!r}"
     )
-    catalog = str(variables.get("CRD_CATALOG", ""))
-    assert "{{.CRD_CATALOG_REF}}" in catalog, (
-        "CRD_CATALOG spells the revision itself instead of building it from "
-        f"CRD_CATALOG_REF: {catalog!r}"
+    # The schema location is flux-lint.sh's to build; the taskfile hands it the
+    # revision, so a call site spelling its own URL would escape the pin.
+    passed = re.findall(r"--crd-catalog-ref '([^']+)'", flux_tasks)
+    assert passed == ["{{.CRD_CATALOG_REF}}"], (
+        "the rendered flux taskfile does not hand flux-lint.sh the pinned "
+        f"revision: {passed}"
     )
-    locations = re.findall(r"-schema-location '([^']+)'", flux_tasks)
-    assert locations, "no kubeconform -schema-location in the rendered flux taskfile"
-    assert all(location == "{{.CRD_CATALOG}}" for location in locations), (
-        f"a kubeconform call site spells its own catalog URL: {sorted(set(locations))}"
+    assert "raw.githubusercontent.com/datreeio" not in flux_tasks, (
+        "the rendered flux taskfile spells a catalog URL of its own instead of "
+        "passing --crd-catalog-ref"
     )
     inputs = _flux_lint_include(cluster.path)["inputs"]
     assert str(inputs.get("crd_catalog_ref")) == CRD_CATALOG_REF, (
@@ -2633,7 +2659,7 @@ def test_render_manifest_covers_exactly_the_library_copies_it_ships(cluster):
 
 
 def test_registered_copies_are_compared_at_the_pinned_ref(monkeypatch, tmp_path):
-    """validate_render's manifest run must pass `--ref WEISSSRV_LIB_REF`.
+    """validate_render's manifest run must pass `--ref <the declared lib_ref>`.
 
     Without it the copies are compared against whatever the library checkout
     holds, and the gate tells the operator to re-vendor backwards.
@@ -2659,10 +2685,8 @@ def test_registered_copies_are_compared_at_the_pinned_ref(monkeypatch, tmp_path)
 
     monkeypatch.setattr(validate_render, "_run", record)
 
-    expected = (
-        (_load_ci(REPO_ROOT / ".gitlab-ci.yml").get("variables") or {}).get("WEISSSRV_LIB_REF")
-    )
-    assert expected, "this repository's .gitlab-ci.yml declares no WEISSSRV_LIB_REF"
+    expected = validate_render._declared_lib_ref(REPO_ROOT / ".gitlab-ci.yml")
+    assert expected, "this repository's .gitlab-ci.yml declares no spec.inputs.lib_ref.default"
     assert not validate_render._check_registered_copies(lib)
     assert calls, "the manifest engine was never invoked"
     assert ["--ref", expected] == calls[0][-2:], (
@@ -2671,11 +2695,13 @@ def test_registered_copies_are_compared_at_the_pinned_ref(monkeypatch, tmp_path)
     )
 
     # No pin to read: the gate must report, never fall back to the working tree.
+    # `variables.WEISSSRV_LIB_REF` is the trap — it holds the truthy
+    # interpolation, so a reader of that key never reaches this arm.
     calls.clear()
-    monkeypatch.setattr(validate_render.render_cluster, "load_ci", lambda _path: {})
+    monkeypatch.setattr(validate_render, "_declared_lib_ref", lambda _path: None)
     problems = validate_render._check_registered_copies(lib)
     assert not calls, "the engine ran with no resolvable pin"
-    assert len(problems) == 1 and "WEISSSRV_LIB_REF" in problems[0], problems
+    assert len(problems) == 1 and "spec.inputs.lib_ref.default" in problems[0], problems
 
 
 _PLAYBOOK_REF = re.compile(r"\b(?:ansible/)?(playbooks/[a-z0-9_/-]+\.yml)\b")
@@ -3285,17 +3311,26 @@ def test_scenarios_reach_the_shared_prep_and_the_pinned_inventory(cluster):
         assert (default / "../../../../requirements.yml").resolve().is_file(), name
 
 
-def test_scenario_images_track_the_pinned_library_ref(cluster):
-    """The local fallback tag and the CI override must name the same build: a
-    scenario left on an older tag tests roles the cluster does not install."""
+def test_scenario_images_come_from_the_environment(cluster):
+    """A `:vX.Y.Z` fallback would be a second pin only a local run reads — green
+    pipeline, stale local image. The Taskfile wrapper exports the variable from
+    the one declared ref, and the CI job from WEISSSRV_LIB_REF."""
     ref = yaml.safe_load((REPO_ROOT / "copier.yml").read_text())["lib_ref"]["default"]
     for name, default in _scenarios(cluster).items():
         for platform in yaml.safe_load((default / "molecule.yml").read_text())["platforms"]:
-            image = platform["image"]
-            assert "MOLECULE_TEST_IMAGE" in image, f"{name} pins no CI override"
-            assert image.rstrip("}").endswith(f"molecule-test:{ref}"), (
-                f"{name} falls back to {image}, not the pinned {ref}"
+            assert platform["image"] == "${MOLECULE_TEST_IMAGE}", (
+                f"{name} resolves its image as {platform['image']!r} rather than the "
+                "bare ${MOLECULE_TEST_IMAGE}"
             )
+    exported = (cluster.path / "taskfiles" / "ansible.yml").read_text()
+    assert "MOLECULE_TEST_IMAGE: " in exported, (
+        "no taskfiles/ansible.yml export of MOLECULE_TEST_IMAGE — a bare `task "
+        "ansible:test-integration-*` would resolve an empty image"
+    )
+    assert f"molecule-test:{ref}" not in exported, (
+        f"taskfiles/ansible.yml spells the tag {ref} itself instead of reading "
+        "{{.LIB_REF}}, which is a second pin"
+    )
 
 
 def test_the_ci_matrix_runs_exactly_the_rendered_scenarios(cluster):

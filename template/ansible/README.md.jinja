@@ -31,9 +31,9 @@ Roles are not edited here. The workflow is:
 
 1. Change the role in weisssrv-lib. Its molecule scenario lives with it.
 2. Merge there and cut a release tag.
-3. Here, in ONE merge request: bump `version:` in `requirements.yml`, bump
-   `WEISSSRV_LIB_REF` in `.gitlab-ci.yml`, run `scripts/check-lib-pins.py --fix`,
-   re-vendor the byte-identical scripts, then
+3. Here, in ONE merge request: `scripts/check-lib-pins.py --bump vX.Y.Z` (it
+   moves the declared `lib_ref` input and every pin derived from it, this
+   `version:` included), re-vendor the byte-identical scripts, then
    `ansible-galaxy install -r requirements.yml --force` and re-run the gates.
 
 Step 3 also carries the inventory changes a renamed variable needs. Every role

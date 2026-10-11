@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import os
 import shutil
+import stat
 import sys
 import tarfile
 import tempfile
@@ -23,6 +24,7 @@ FETCH_TIMEOUT_SECONDS = 120
 BINARY_MODE = 0o755
 RAW = "raw"
 ARCHIVE_MODES = {"tar.gz": "r:gz", "tar.xz": "r:xz"}
+ASSETS_DIR = ".assets"
 
 
 class FetchError(Exception):
@@ -206,27 +208,89 @@ def stamp_path(directory: Path, name: str) -> Path:
 
 
 def stamp_text(tool: Tool, installed: str) -> str:
-    """What the stamp beside an installed tool holds.
-
-    The installed binary's own digest joins the archive's, so the bytes on disk
-    are part of what the stamp claims.
-    """
+    """The effective version, the pinned asset's digest and the binary's own."""
     return "%s %s %s\n" % (tool.version, tool.sha256.strip().lower(), installed)
 
 
-def is_installed(name: str, tool: Tool, directory: Path) -> bool:
+def asset_path(directory: Path, name: str) -> Path:
+    """Where the verified download is kept for the next run."""
+    return directory / ASSETS_DIR / name
+
+
+def cached_asset(name: str, tool: Tool, directory: Path) -> Path | None:
+    """The kept asset, while it still hashes to the pin in this file.
+
+    The directory is mutable, so an asset that no longer matches reads as
+    absent and the download happens again.
+    """
+    asset = asset_path(directory, name)
+    try:
+        return asset if digest(asset) == tool.sha256.strip().lower() else None
+    except OSError:
+        return None
+
+
+def obtain_asset(
+    name: str, tool: Tool, directory: Path, staging: Path
+) -> tuple[Path, bool]:
+    """The pinned asset, and whether it had to be downloaded."""
+    cached = cached_asset(name, tool, directory)
+    if cached is not None:
+        return cached, False
+    url = tool.url.format(version=tool.version)
+    fresh = staging / "asset"
+    download(url, fresh)
+    verify(fresh, tool.sha256, "%s %s (%s)" % (name, tool.version, url))
+    return fresh, True
+
+
+def clear_path(path: Path) -> None:
+    """Make way for a rename: a directory is the one thing it cannot replace."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+
+
+def keep_asset(asset: Path, directory: Path, name: str) -> None:
+    """Move a verified asset into the cache, replacing any earlier one."""
+    kept = asset_path(directory, name)
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    clear_path(kept)
+    os.replace(asset, kept)
+
+
+def unpack(name: str, tool: Tool, asset: Path, staging: Path) -> Path:
+    """The executable the asset carries, materialized under `staging`."""
+    binary = staging / name
+    if tool.kind == RAW:
+        shutil.copyfile(asset, binary)
+    else:
+        extract(asset, tool, binary)
+    binary.chmod(BINARY_MODE)
+    return binary
+
+
+def is_runnable(path: Path) -> bool:
+    """Whether `path` is a plain file with an execute bit, symlinks excluded."""
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return False
+    return stat.S_ISREG(mode) and bool(mode & 0o111)
+
+
+def is_installed(name: str, tool: Tool, directory: Path, expected: str) -> bool:
     """Whether the pinned tool is already there, bytes included.
 
-    The binary is re-hashed against its stamp, so a cached, pre-seeded,
-    truncated or differently-versioned one is re-fetched rather than trusted.
+    `expected` is the digest of what the verified asset installs, so a stamp in
+    the same mutable directory cannot speak for a binary that differs from it.
     """
     binary = directory / name
-    if not binary.exists():
+    if not is_runnable(binary):
         return False
     try:
-        return stamp_path(directory, name).read_text() == stamp_text(
-            tool, digest(binary)
-        )
+        return digest(binary) == expected and stamp_path(
+            directory, name
+        ).read_text() == stamp_text(tool, expected)
     except OSError:
         return False
 
@@ -234,20 +298,18 @@ def is_installed(name: str, tool: Tool, directory: Path) -> bool:
 def install_tool(name: str, tool: Tool, directory: Path, force: bool = False) -> str:
     """Install one tool into `directory`, and return the line to print."""
     destination = directory / name
-    if is_installed(name, tool, directory) and not force:
-        return "%s %s: present" % (name, tool.version)
-    url = tool.url.format(version=tool.version)
     staging = Path(tempfile.mkdtemp(dir=directory, prefix=".fetch-"))
     try:
-        asset = staging / "asset"
-        download(url, asset)
-        verify(asset, tool.sha256, "%s %s (%s)" % (name, tool.version, url))
-        binary = asset
-        if tool.kind != RAW:
-            binary = staging / name
-            extract(asset, tool, binary)
-        binary.chmod(BINARY_MODE)
+        asset, fetched = obtain_asset(name, tool, directory, staging)
+        binary = unpack(name, tool, asset, staging)
         installed = digest(binary)
+        # The asset is kept only once it has yielded a binary, so a failed
+        # install leaves nothing behind in `directory`.
+        if fetched:
+            keep_asset(asset, directory, name)
+        if is_installed(name, tool, directory, installed) and not force:
+            return "%s %s: present" % (name, tool.version)
+        clear_path(destination)
         # The stamp lands after the binary, so an interrupted install reads as
         # absent and re-fetches rather than as the pinned version.
         os.replace(binary, destination)

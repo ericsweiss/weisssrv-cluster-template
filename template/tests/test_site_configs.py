@@ -35,8 +35,15 @@ def pinned(package: str) -> str:
 
 
 def ci_variables() -> dict:
-    doc = yaml.load(CI_FILE.read_text(encoding="utf-8"), Loader=_CILoader) or {}
-    return doc.get("variables") or {}
+    """The jobs document's `variables:`. The pipeline is TWO documents — the
+    `spec:` header declaring lib_ref, then the jobs — so a single-document load
+    raises instead of reading the file."""
+    docs = [
+        doc
+        for doc in yaml.load_all(CI_FILE.read_text(encoding="utf-8"), Loader=_CILoader)
+        if isinstance(doc, dict)
+    ]
+    return (docs[-1] if docs else {}).get("variables") or {}
 
 
 def test_the_ansible_pin_matches_the_ci_variable():

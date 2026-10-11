@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ConfigMap -> eval-able shell exports, plus the kubeconform schema version.
-# The build + kubeconform loop stays in each caller: run-render-gates.sh here,
-# the render loops in weisssrv and the cluster template. docs/SCRIPTS.md.
+# The build + kubeconform loop is flux-lint.sh's; this file is the half
+# run-render-gates.sh needs too. docs/SCRIPTS.md.
 set -euo pipefail
 
 die() {

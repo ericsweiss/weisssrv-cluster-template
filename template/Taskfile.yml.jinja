@@ -47,7 +47,10 @@ vars:
   # (scripts/vendored-manifest.yml). Read by lint:invariants only; no deploy path touches it.
   LIB_DIR: .weisssrv-lib
   LIB_URL: {{ lib_url }}
-  LIB_REF: {{ lib_ref }}
+  # The pipeline header's declared ref, so a bump is one line in .gitlab-ci.yml
+  # and this and the molecule image follow it.
+  LIB_REF:
+    sh: scripts/check-lib-pins.py --print
   # GitLab-managed Terraform state. The API takes the URL-encoded project PATH
   # wherever it documents a numeric ID; pass `TF_STATE_PROJECT=<id>` if your
   # instance rejects the path form.

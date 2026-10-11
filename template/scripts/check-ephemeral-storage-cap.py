@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Assert a sized emptyDir fits inside its container's ephemeral-storage limit.
+"""Assert a pod's sized emptyDirs fit inside its ephemeral-storage budget.
 
-A container whose limit is below the emptyDirs it mounts is evicted before the
-volume it sized ever fills. Contract: weisssrv-lib docs/SCRIPTS.md.
+A pod whose budget is below the emptyDirs it mounts is evicted before the
+volumes it sized ever fill. Contract: weisssrv-lib docs/SCRIPTS.md.
 """
 from __future__ import annotations
 
@@ -105,37 +105,104 @@ def sized_volumes(spec: dict) -> dict[str, object]:
     return found
 
 
-def _mounted(container: dict, sized: dict) -> list[tuple[str, object]]:
-    """The sized emptyDirs this container mounts, in mount order."""
-    out = []
+def _declared(container: dict, section: str) -> object:
+    """The container's `resources.<section>.ephemeral-storage`, or None."""
+    resources = container.get("resources")
+    block = resources.get(section) if isinstance(resources, dict) else None
+    return block.get(RESOURCE) if isinstance(block, dict) else None
+
+
+def _containers(spec: dict, section: str) -> list[dict]:
+    """The mapping entries of one container list."""
+    return [c for c in spec.get(section) or [] if isinstance(c, dict)]
+
+
+def _sized_mounts(container: dict, sized: dict) -> list[str]:
+    """The sized emptyDirs this container mounts, in mount order, each once."""
+    out: list[str] = []
     for mount in container.get("volumeMounts") or []:
-        if isinstance(mount, dict) and mount.get("name") in sized:
-            out.append((mount["name"], sized[mount["name"]]))
+        if not isinstance(mount, dict):
+            continue
+        name = mount.get("name")
+        if isinstance(name, str) and name in sized and name not in out:
+            out.append(name)
     return out
 
 
-def _container_violations(label: str, container: dict, sized: dict) -> list[str]:
-    name = container.get("name", "?")
-    mounts = _mounted(container, sized)
-    if not mounts:
+def format_bytes(count: float) -> str:
+    """A byte count as the largest binary suffix that divides it evenly."""
+    for suffix, scale in (("Gi", 2**30), ("Mi", 2**20), ("Ki", 2**10)):
+        if count >= scale and count % scale == 0:
+            return "%d%s" % (count // scale, suffix)
+    if float(count).is_integer():
+        return "%d bytes" % count
+    return "%g bytes" % count
+
+
+def pod_limit(spec: dict) -> tuple[float, list[tuple[str, object]]]:
+    """-> (the pod's ephemeral-storage limit in bytes, the unreadable quantities).
+
+    The kubelet takes the higher of the app containers plus every sidecar, and
+    each plain init container beside the sidecars declared before it.
+    """
+    app = 0.0
+    sidecars = 0.0
+    init_floor = 0.0
+    unreadable: list[tuple[str, object]] = []
+    for container in _containers(spec, "containers"):
+        parsed = _limit(container, unreadable)
+        if parsed is not None:
+            app += parsed
+    for container in _containers(spec, "initContainers"):
+        parsed = _limit(container, unreadable)
+        if parsed is None:
+            continue
+        if container.get("restartPolicy") == "Always":
+            sidecars += parsed
+        else:
+            init_floor = max(init_floor, sidecars + parsed)
+    return max(app + sidecars, init_floor), unreadable
+
+
+def _limit(container: dict, unreadable: list[tuple[str, object]]) -> float | None:
+    """One container's ephemeral-storage limit; None when absent or unreadable."""
+    raw = _declared(container, "limits")
+    if raw is None:
+        return None
+    parsed = parse_quantity(raw)
+    if parsed is None:
+        unreadable.append((container.get("name", "?"), raw))
+    return parsed
+
+
+def _pod_violations(label: str, spec: dict) -> list[str]:
+    """Everything wrong with one pod spec's sized emptyDirs."""
+    sized = sized_volumes(spec)
+    if not sized:
         return []
-    resources = container.get("resources")
-    resources = resources if isinstance(resources, dict) else {}
+
+    # A volume is charged once however many containers mount it, but each
+    # mounting container owes the pair the scheduler and the kubelet read.
     out: list[str] = []
-    for section in ("requests", "limits"):
-        block = resources.get(section)
-        if not isinstance(block, dict) or block.get(RESOURCE) is None:
-            out.append(
-                "  %s container %r: mounts a sized emptyDir but declares no "
-                "%s in resources.%s" % (label, name, RESOURCE, section)
-            )
-    if out:
+    mounted: dict[str, object] = {}
+    for section in ("initContainers", "containers"):
+        for container in _containers(spec, section):
+            names = _sized_mounts(container, sized)
+            if not names:
+                continue
+            mounted.update({name: sized[name] for name in names})
+            for block in ("requests", "limits"):
+                if _declared(container, block) is None:
+                    out.append(
+                        "  %s container %r: mounts a sized emptyDir but declares "
+                        "no %s in resources.%s"
+                        % (label, container.get("name", "?"), RESOURCE, block)
+                    )
+    if out or not mounted:
         return out
 
-    # Every emptyDir the container mounts draws on the same budget, so the sum
-    # is what the kubelet weighs the limit against.
     total = 0.0
-    for volume, size in mounts:
+    for volume, size in mounted.items():
         parsed = parse_quantity(size)
         if parsed is None:
             out.append(
@@ -144,21 +211,23 @@ def _container_violations(label: str, container: dict, sized: dict) -> list[str]
             )
         else:
             total += parsed
-    limit = parse_quantity(resources["limits"][RESOURCE])
-    if limit is None:
+    limit, unreadable = pod_limit(spec)
+    for name, raw in unreadable:
         out.append(
             "  %s container %r: limits.%s %r is not a readable quantity"
-            % (label, name, RESOURCE, resources["limits"][RESOURCE])
+            % (label, name, RESOURCE, raw)
         )
     if out:
         return out
+
     if limit < total:
         out.append(
-            "  %s container %r: limits.%s is %s but it mounts %s of sized "
-            "emptyDir — the kubelet evicts the pod before the volume fills"
+            "  %s: mounts %s of sized emptyDir (%s) against a pod %s limit of %s "
+            "— the kubelet evicts the pod before the volume fills"
             % (
-                label, name, RESOURCE, resources["limits"][RESOURCE],
-                ", ".join("%s=%s" % (v, s) for v, s in mounts),
+                label, format_bytes(total),
+                ", ".join("%s=%s" % (v, s) for v, s in mounted.items()),
+                RESOURCE, format_bytes(limit),
             )
         )
     return out
@@ -171,19 +240,13 @@ def violations(docs: list[dict]) -> tuple[list[str], int]:
     for doc in docs:
         for label, spec in pod_specs(doc):
             seen += 1
-            sized = sized_volumes(spec)
-            if not sized:
-                continue
-            for section in ("initContainers", "containers"):
-                for container in spec.get(section) or []:
-                    if isinstance(container, dict):
-                        out.extend(_container_violations(label, container, sized))
+            out.extend(_pod_violations(label, spec))
     return out, seen
 
 
 def main() -> int:
-    docs = load_corpus()
     try:
+        docs = load_corpus()
         found, seen = violations(docs)
     except OperatorError as exc:
         print("ERROR: %s" % exc, file=sys.stderr)
@@ -191,9 +254,10 @@ def main() -> int:
 
     if found:
         print(
-            "Sized emptyDirs their container's ephemeral-storage budget does "
-            "not cover. The kubelet evicts on the container's limit, not on the "
-            "volume's sizeLimit, so the pod dies before the volume is full:",
+            "Sized emptyDirs the pod's ephemeral-storage budget does not cover. "
+            "The kubelet evicts on the pod's limit — its containers' limits added "
+            "up — not on the volume's sizeLimit, so the pod dies before the "
+            "volume is full:",
             file=sys.stderr,
         )
         print("\n".join(found), file=sys.stderr)

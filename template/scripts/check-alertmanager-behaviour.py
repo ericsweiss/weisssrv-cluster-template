@@ -25,13 +25,19 @@ MATCHER_RE = re.compile(r'^\s*(\w+)\s*(=~|!~|!=|=)\s*"?(.*?)"?\s*$')
 
 DEFAULT_ESCALATION_SUFFIXES = ("Prolonged", "Critical")
 
+# The trailing word a warning alert's own name ends in. Its critical sibling
+# either replaces the marker (DiskUsageWarning -> DiskUsageCritical) or sits in
+# front of it (HostMemLow -> HostMemCriticalLow); both spellings are in use.
+DEFAULT_ESCALATION_WARNING_MARKERS = ("Warning", "Low", "High")
+
 
 class Config:
     """The consumer data from --config. A value, not module state."""
 
     def __init__(self, route_cases, synthetic, upstream, escalation_suffixes,
                  escalation_pairs, escalation_exceptions, escalation_equal,
-                 matcher_parity_labels=()):
+                 matcher_parity_labels=(), rule_corpora=(),
+                 escalation_warning_markers=DEFAULT_ESCALATION_WARNING_MARKERS):
         self.route_cases = route_cases
         self.synthetic_route_alerts = synthetic
         self.upstream_alerts = upstream
@@ -42,6 +48,10 @@ class Config:
         # Matcher labels whose regex must appear verbatim in the rule's own expr.
         # Opt-in: a consumer whose matchers do not mirror an expr declares none.
         self.matcher_parity_labels = tuple(matcher_parity_labels or ())
+        # Rule trees the Prometheus extractor cannot see, a Loki ruler's among
+        # them, whose alertnames a route case or an inhibit rule may name.
+        self.rule_corpora = tuple(rule_corpora or ())
+        self.escalation_warning_markers = tuple(escalation_warning_markers or ())
 
 
 def _escalation_pairs(raw, path, key) -> list[tuple[str, str, tuple[str, ...]]]:
@@ -88,6 +98,14 @@ def load_config(path) -> Config:
     parity_labels = doc.get("matcher_parity_labels") or []
     if not isinstance(parity_labels, list):
         raise ValueError(f"{path}: `matcher_parity_labels` must be a list")
+    corpora = doc.get("rule_corpora") or []
+    if not isinstance(corpora, list):
+        raise ValueError(f"{path}: `rule_corpora` must be a list")
+    markers = doc.get("escalation_warning_markers")
+    if markers is None:
+        markers = list(DEFAULT_ESCALATION_WARNING_MARKERS)
+    elif not isinstance(markers, list):
+        raise ValueError(f"{path}: `escalation_warning_markers` must be a list")
     return Config(
         cases,
         {str(a) for a in doc.get("synthetic_route_alerts") or []},
@@ -97,7 +115,46 @@ def load_config(path) -> Config:
         _escalation_pairs(doc.get("escalation_exceptions"), path, "escalation_exceptions"),
         [str(x) for x in equal],
         [str(x) for x in parity_labels],
+        rule_corpora=[str(x) for x in corpora],
+        escalation_warning_markers=[str(x) for x in markers],
     )
+
+
+def load_rule_corpora(paths, repo_root: Path) -> dict:
+    """Rule groups from the consumer's extra corpora, as a rules document.
+
+    A corpus is a plain `groups:` file, or a directory of them, that the
+    Prometheus extractor never reads — a Loki ruler's rule tree, say.
+    """
+    groups: list = []
+    for raw in paths:
+        base = Path(raw)
+        if not base.is_absolute():
+            base = repo_root / base
+        if base.is_dir():
+            files = sorted({*base.rglob("*.yaml"), *base.rglob("*.yml")})
+        elif base.is_file():
+            files = [base]
+        else:
+            raise ValueError(
+                f"`rule_corpora` entry {raw!r} resolves to {base}, which does not "
+                f"exist. Entries are relative to --repo-root; point it at the rule "
+                f"tree or drop it."
+            )
+        found: list = []
+        for file_path in files:
+            with file_path.open() as fh:
+                for doc in yaml.safe_load_all(fh):
+                    if isinstance(doc, dict) and isinstance(doc.get("groups"), list):
+                        found.extend(doc["groups"])
+        if not _known_alertnames({"groups": found}):
+            raise ValueError(
+                f"`rule_corpora` entry {raw!r} ({base}) declares no alerting rule, "
+                f"so every alertname it is meant to resolve stays unknown and the "
+                f"route and inhibit cases naming them fail. Renamed or moved tree?"
+            )
+        groups.extend(found)
+    return {"groups": groups}
 
 
 class ExtractionError(RuntimeError):
@@ -282,7 +339,35 @@ def _alert_severities(rules_doc: dict) -> dict[str, set[str]]:
     return out
 
 
-def derive_escalation_pairs(rules_doc: dict, suffixes) -> list[tuple[str, str]]:
+def _alert_rules(rules_doc: dict) -> dict[str, list[dict]]:
+    """alertname -> every rule in the corpus that declares it."""
+    out: dict[str, list[dict]] = {}
+    for group in rules_doc.get("groups") or []:
+        for rule in group.get("rules") or []:
+            if isinstance(rule, dict) and rule.get("alert"):
+                out.setdefault(str(rule["alert"]), []).append(rule)
+    return out
+
+
+def _escalation_candidates(name: str, suffixes, markers) -> list[str]:
+    """The critical names a warning alert called `name` could escalate into.
+
+    A suffix is either appended to the whole name, or it replaces the warning
+    marker the name ends in, or it lands in front of that marker.
+    """
+    names = [name + suffix for suffix in suffixes]
+    for marker in markers:
+        if not name.endswith(marker) or len(name) == len(marker):
+            continue
+        stem = name[: -len(marker)]
+        for suffix in suffixes:
+            names += [stem + suffix, stem + suffix + marker]
+    return [n for n in names if n != name]
+
+
+def derive_escalation_pairs(
+    rules_doc: dict, suffixes, markers=DEFAULT_ESCALATION_WARNING_MARKERS
+) -> list[tuple[str, str]]:
     """(critical, warning) pairs the rules corpus itself declares.
 
     A warning alert with a same-stem critical sibling escalates into it, so both
@@ -293,31 +378,53 @@ def derive_escalation_pairs(rules_doc: dict, suffixes) -> list[tuple[str, str]]:
     for name in sorted(severities):
         if "warning" not in severities[name]:
             continue
-        for suffix in suffixes:
-            escalation = name + suffix
-            if "critical" in severities.get(escalation, set()):
+        for escalation in _escalation_candidates(name, suffixes, markers):
+            if "critical" not in severities.get(escalation, set()):
+                continue
+            if (escalation, name) not in pairs:
                 pairs.append((escalation, name))
     return pairs
 
 
-def _inhibit_index(am_doc: dict) -> list[tuple[int, set[str], set[str], set[str]]]:
-    """Each inhibit rule as (position, source names, target names, equal labels).
+def _inhibit_index(am_doc: dict) -> list[tuple[int, list, list, set[str]]]:
+    """Each inhibit rule as (position, source matchers, target matchers, equal).
 
-    The names are what each side can match, so a rule that negates an alertname
-    never certifies a pair naming it.
+    The matcher sets stay parsed rather than reduced to names: a rule scoping by
+    severity and component pins no alertname yet still binds a pair.
     """
     index = []
     for i, rule in enumerate(am_doc.get("inhibit_rules") or []):
         discard: list[str] = []
-        src = _parse_matchers(rule.get("source_matchers"), i, "source", discard)
-        tgt = _parse_matchers(rule.get("target_matchers"), i, "target", discard)
         index.append((
             i,
-            set(_covered_alertnames(src)[0]),
-            set(_covered_alertnames(tgt)[0]),
+            _parse_matchers(rule.get("source_matchers"), i, "source", discard),
+            _parse_matchers(rule.get("target_matchers"), i, "target", discard),
             {str(label) for label in rule.get("equal") or []},
         ))
     return index
+
+
+def _side_admits(parsed, name: str, rules_by_name) -> bool:
+    """Whether one side of an inhibit rule can match an alert called `name`.
+
+    A side pinning alertnames admits only those; one scoping by severity or
+    component admits an alert whose own labels satisfy every matcher.
+    """
+    pinned, unreadable = _exact_alertnames(parsed)
+    if unreadable:
+        return False
+    negated, unreadable = _negated_alertnames(parsed)
+    if unreadable or name in negated:
+        return False
+    if pinned and name not in pinned:
+        return False
+    # A pin alone covers an upstream alert the corpus does not declare; any
+    # other matcher still has to hold on the alert's own labels.
+    others = [m for m in parsed if m[0] != "alertname"]
+    if pinned and not others:
+        return True
+    declared = rules_by_name.get(name) or []
+    return bool(declared) and all(_matches_labels(rule, others) for rule in declared)
 
 
 def check_escalation_inhibits(am_doc: dict, rules_doc: dict, config: Config) -> list[str]:
@@ -328,18 +435,27 @@ def check_escalation_inhibits(am_doc: dict, rules_doc: dict, config: Config) -> 
     """
     exceptions = {(c, w) for c, w, _ in config.escalation_exceptions}
     pairs: dict[tuple[str, str], tuple[str, ...]] = {}
-    for critical, warning in derive_escalation_pairs(rules_doc, config.escalation_suffixes):
+    derived = derive_escalation_pairs(
+        rules_doc, config.escalation_suffixes, config.escalation_warning_markers
+    )
+    for critical, warning in derived:
         pairs[(critical, warning)] = tuple(config.escalation_equal)
     for critical, warning, extra in config.escalation_pairs:
         pairs[(critical, warning)] = tuple(extra) or tuple(config.escalation_equal)
 
+    rules_by_name = _alert_rules(rules_doc)
     index = _inhibit_index(am_doc)
     problems = []
     for (critical, warning), want_equal in sorted(pairs.items()):
         if (critical, warning) in exceptions:
             continue
         matching = [
-            entry for entry in index if critical in entry[1] and warning in entry[2]
+            entry for entry in index
+            # An `equal: [alertname]` rule pairs same-named alerts only, so it
+            # can never bind a pair whose two names differ.
+            if "alertname" not in entry[3]
+            and _side_admits(entry[1], critical, rules_by_name)
+            and _side_admits(entry[2], warning, rules_by_name)
         ]
         if not matching:
             problems.append(
@@ -655,6 +771,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         config = load_config(args.config)
+        corpora_doc = load_rule_corpora(config.rule_corpora, repo_root)
     except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -668,7 +785,13 @@ def main(argv: list[str] | None = None) -> int:
             # rather than a traceback from mid-check on exit 1.
             am_doc = _load_extracted(am_config, "Alertmanager config")
             rules_doc = _load_extracted(rules_file, "rules")
-            known = _known_alertnames(rules_doc)
+            # The extra corpora widen the alertname and severity inventory; the
+            # expr-reading arms below stay on the extracted PromQL corpus, which
+            # a LogQL rule tree is not.
+            corpus_doc = {
+                "groups": (rules_doc.get("groups") or []) + (corpora_doc.get("groups") or [])
+            }
+            known = _known_alertnames(corpus_doc)
             route_problems = check_routes(
                 am_config, config.route_cases
             ) + check_route_case_alertnames(known, config)
@@ -676,7 +799,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
         inhibit_problems = check_inhibits(am_doc, known, config.upstream_alerts)
-        inhibit_problems += check_escalation_inhibits(am_doc, rules_doc, config)
+        inhibit_problems += check_escalation_inhibits(am_doc, corpus_doc, config)
         inhibit_problems += check_equal_label_scope(am_doc, rules_doc)
         inhibit_problems += check_inhibit_target_scope(am_doc, rules_doc)
         inhibit_problems += check_matcher_value_parity(

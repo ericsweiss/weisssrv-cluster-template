@@ -55,7 +55,7 @@ The render suite proves the generated pipeline wires these gates. This check
 runs them, over the manifests the template ships. The rendered
 `scripts/flux-corpus-gates.sh` runs the corpus arms, the same wrapper
 `task flux:lint` calls: `check-hpa-vpa-invariant`,
-`check-netpol-except-parity`, `check-scrape-netpol`,
+`check-netpol-except-parity`, `check-scrape-netpol`, `check-scrape-wiring`,
 `check-default-deny-coverage`, `check-secretstore-scope`,
 `check-pvc-storageclass` and `check-ephemeral-storage-cap` over the rendered
 corpus, plus `check-backup-artifact-apps` over the inventory and the alert
@@ -76,10 +76,13 @@ The alert rules and the Alertmanager config live inside a HelmRelease's
 sha256-verified like `kubeconform`, `kustomize` and `terraform`; a local run
 without them skips that arm and says so.
 
-A clean `check-scrape-netpol` proves the namespace admits observability, not
-that the scrape lands: the allow policy's own `podSelector` and port go
-unchecked. A `TargetDown` that survives a green pipeline is the signal to read
-the live policy's targeting.
+`check-scrape-netpol` proves the namespace admits observability;
+`check-scrape-wiring` adds the port granularity, resolving each monitor through
+its Service to the container port and requiring a policy that admits that
+number. A peer narrowed by a `podSelector` keeps its credit with the narrowing
+recorded as unresolved — Prometheus is chart-installed, so its pod labels are in
+no manifest — which is the one case a `TargetDown` can still survive a green
+pipeline.
 
 ### flux-lint
 
@@ -88,7 +91,9 @@ wrapper reads as "skip the HelmRelease-values validation". That arm is where a
 VPA `maxAllowed.memory` meets the limit the chart actually renders, so a
 mismatch there is invisible to every check above it. This check closes that by
 running `task flux:lint` itself — the first command the generated cluster's own
-README hands the operator — in the render.
+README hands the operator — in the render. That task is one call to the
+generated `scripts/flux-lint.sh`, the same file and the same flags the
+`flux-lint` CI include runs, so the two cannot drift.
 
 It needs `task`, `helm` and `flux` on PATH and none of the three is fetched by
 `scripts/ci-fetch-tools.py`, so `validate-rendered-cluster` installs them in
@@ -110,8 +115,8 @@ cluster-config is silent, which is what this check refuses to allow.
 ### The vendored checks
 
 `vendored` compares this repository and the render against the library at the
-ref the `include:` block pins, and refuses to compare at all when those
-includes and `copier.yml`'s `lib_ref` default disagree. It also runs the
+ref each pipeline's `spec:` header declares, and refuses to compare at all when
+that ref and `copier.yml`'s `lib_ref` default disagree. It also runs the
 library's vendored-copy engine (`scripts/check-vendored-copies.py`) against
 [`scripts/vendored-manifest.yml`](../scripts/vendored-manifest.yml), which
 names the copies no directory walk reaches: the canonical
@@ -134,7 +139,8 @@ generated after its release.
 
 ```bash
 python3 -m pytest tests -q                      # structure + copier schema
-python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib          # every check above
+python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
+  --self-checks                                 # every check above, plus this repo's own
 python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
   --answers tests/answers-unlike.yml            # the contrast fixture
 python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
@@ -243,19 +249,22 @@ its own gate cannot be generated.
 
 ## Library pin
 
-Every `include:` in both pipelines points at `eric/weisssrv-lib`. This
-repository's own includes are pinned to the release tag `lib_ref` resolves to
-(its default lives in `copier.yml`); the generated pipeline pins whatever
-`lib_ref` the operator answered.
+Every `include:` in both pipelines points at `eric/weisssrv-lib`, at one
+declared ref. The pipeline's `spec:` header declares `lib_ref`, and every
+`include: ref:`, `variables.WEISSSRV_LIB_REF` and the pins named in
+`scripts/lib-ref-sites.yml` read it as `$[[ inputs.lib_ref ]]`: `include:`
+resolves before `variables:` exists, while an input interpolates earlier still.
+This repository's header holds the release tag `copier.yml`'s `lib_ref` default
+names; the generated pipeline's holds whatever `lib_ref` the operator answered.
+Bump either with `scripts/check-lib-pins.py --bump vX.Y.Z`, which moves the
+declared ref and every pin derived from it.
+
 Never pin a branch: it moves under every consumer at once, and it disappears
 when it merges — which takes every include, module source and collection install
-with it. `scripts/check-lib-pins.py` fails the pipeline on a branch pin or on an
-include that drifts from `variables.WEISSSRV_LIB_REF`.
-
-`include:` is resolved before job variables exist, so each entry repeats the tag
-as a literal rather than reading `variables.WEISSSRV_LIB_REF`. The ref
-`validate-rendered-cluster` actually clones is `copier.yml`'s `lib_ref` default, so the
-gate, the render and the generated `requirements.yml` cannot disagree.
+with it. `scripts/check-lib-pins.py` fails the pipeline on a branch pin and on
+an entry left on a literal. The ref `validate-rendered-cluster` actually clones
+is `copier.yml`'s `lib_ref` default, so the gate, the render and the generated
+`requirements.yml` cannot disagree.
 
 `validate-rendered-cluster` clones the library with `CI_JOB_TOKEN`, so the job does not
 depend on anonymous access — the library project must list this project on its

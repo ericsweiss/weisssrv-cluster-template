@@ -45,7 +45,18 @@ upstream_alerts:
   - Watchdog
 
 # Label keys the inhibit rule for every escalation pair must share, so one
-# host's critical does not silence another host's warning. The four suffix
-# pairs here are all textfile-collector series, which carry instance.
+# host's critical does not silence another host's warning. The default suits a
+# textfile-collector series; a pair keyed on an object declares its own below.
 escalation_equal:
   - instance
+
+# Pairs whose identity is a namespaced object rather than a host, so `instance`
+# is not what distinguishes two firing alerts. The labels here are the ones the
+# inhibit rules in alertmanager-config.yaml already share.
+escalation_pairs:
+  - critical: PVCUsageCritical
+    warning: PVCUsageWarning
+    equal: [namespace, persistentvolumeclaim]
+  - critical: CertExpiringCritical
+    warning: CertExpiringWarning
+    equal: [namespace, name]

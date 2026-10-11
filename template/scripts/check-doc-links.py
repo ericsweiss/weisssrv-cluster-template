@@ -169,9 +169,10 @@ _HEADING_RE = re.compile(r"^#{1,6}\s+(?P<text>.+?)\s*#*\s*$")
 _MARKUP = str.maketrans("", "", "`*_")
 # Sentence punctuation and quotes a citation picks up from the prose around it.
 _TRAILING = ".,;:!?\"'()[]-\u2014\u2013"
-# Where a cited section name ends and the sentence around it resumes. Bounding
-# only shortens the citation, and a shortened one still matches by prefix.
-_BOUND = re.compile(r"[.,;:)\]`]|\s[-\u2014\u2013]\s|[\u2014\u2013]")
+# Where a cited section name ends and the sentence around it resumes; a shortened
+# citation still matches by prefix. A dot bounds only at a word's end, so a
+# heading named for a file keeps its extension.
+_BOUND = re.compile(r"[,;:)\]`]|\.(?=\s|$)|\s[-\u2014\u2013]\s|[\u2014\u2013]")
 
 
 def _words(text: str) -> list[str]:

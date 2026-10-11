@@ -65,7 +65,7 @@ that app's own directory, as `apps/registry-cache/prometheusrule.yaml` does.
 |---|---|
 | `platform.storage` | filesystem bytes/inodes, PVC usage, stray dynamically-provisioned PVs |
 | `platform.nodes` | node memory pressure, stuck cordon, stuck kured reboot, deferred maintenance reboot |
-| `platform.resources` | container memory held near its own limit, working set and RSS |
+| `platform.resources` | container RSS held near its own limit, the one working-set arm included, and the OOMKill RSS cannot see coming |
 | `platform.gitops` | Flux reconcile errors, durable `Ready=False` on any Flux resource |
 | `platform.secrets` | ExternalSecret sync failures, secrets-provider Deployment down |
 | `platform.certificates` | cert-manager expiry (warning/critical), edge-cert expiry via blackbox, host-side renewal and its per-target distribution, host-distributed wildcard expiry |

@@ -25,9 +25,11 @@ the diff.
 |---|---|
 | `flux-render.sh` | `flux-env.sh` — extracts postBuild vars from one ConfigMap |
 | `flux-env.sh` | `task flux:lint` + the CI flux-lint job (`flux_render_script`) — merges the cluster's **two** substitution ConfigMaps behind one interface (see below) |
+| `flux-lint.sh` | `task flux:lint` + the CI flux-lint job (`flux_lint_script`) — the whole render/scan/kubeconform loop: stage iteration, the `${` shape scan, the missing and empty-key scans, `flux envsubst --strict`, kubeconform and skip tracking. One implementation, so a floor cannot reach only one caller |
 | `kubeconform-skipped.py` | `task flux:lint` + the CI flux-lint job (`skipped_script`) — fails on a kind validated against no schema unless `kubeconform-expected-skipped.txt` lists it |
 | `check-hpa-vpa-invariant.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — no HPA and a CPU-controlling VPA on one workload |
 | `check-scrape-netpol.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every scraped namespace admits Prometheus through its NetworkPolicies |
+| `check-scrape-wiring.py` | `scripts/flux-corpus-gates.sh` over the corpus, so both `task flux:lint` and the CI flux-lint job run it — the port granularity of the scrape check: every monitor's scraped PORT is admitted from the observability namespace |
 | `check-secretstore-scope.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every ClusterSecretStore declares `conditions` and admits its consumers |
 | `check-default-deny-coverage.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every namespace that owns a workload carries an ingress default-deny (see below) |
 | `check-pvc-storageclass.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — every claim pins a `storageClassName` |
@@ -35,8 +37,8 @@ the diff.
 | `check-nfs-tls.py` | `scripts/flux-corpus-gates.sh`, so both `task flux:lint` and the CI flux-lint job run it — every NFS `PersistentVolume` mounts `xprtsec=tls` and names its server by hostname. `--allow-empty`, because a cluster with no NFS storage ships no such PV |
 | `validate-helm-values.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — `helm template` over the value-heavy releases |
 | `check-deploy-coverage.sh` | the CI deploy-coverage job — every changed playbook/inventory path reaches a deploy job |
-| `check-lib-pins.py` | `task lint:lib-pins` and `tests/test_lib_pins.py` — every library pin is a literal equal to `variables.WEISSSRV_LIB_REF` |
-| `check-ci-include-job-names.py` | `task lint:ci-policy` and `tests/test_ci_include_job_names.py` — every `needs: optional: true` resolves to a job some include creates, because GitLab ignores one that names nothing |
+| `check-lib-pins.py` | `task lint:lib-pins` and `tests/test_lib_pins.py` — every library pin derives from the `lib_ref` input the pipeline header declares. `--bump vX.Y.Z` moves all of them, `--print` hands the tag to the Taskfile |
+| `check-ci-include-job-names.py` | `task lint:ci-policy` and `tests/test_ci_include_job_names.py` — every `needs: optional: true` resolves to a job some include creates, because GitLab ignores one that names nothing. Both carry `--allow-unreadable-include` for GitLab's own scanner template, a file in neither checkout |
 | `ci_yaml.py` | `check-lib-pins.py`, `check-deploy-coverage.sh` and `deploy-preflight.py` — the CI-reading loader that tolerates GitLab's custom tags |
 | `ci_playbook_invocations.py` | `deploy-preflight.py` — the playbook invocations a pipeline's `script:` blocks run |
 | `gate_common.py` | the six corpus gates above, imported from this directory — shared manifest walking and reporting |
@@ -163,6 +165,7 @@ Not vendored at the pinned ref — this repository owns them.
 | `deploy-coverage.conf` | `check-deploy-coverage.sh` | Playbooks deliberately not wired to a deploy job, each with a rationale |
 | `netpol-except.yaml` | `check-netpol-except-parity.py` | Egress rules that deliberately carry no peers, each with a rationale |
 | `alertmanager-behaviour.yaml` | `check-alertmanager-behaviour.py` | The receiver each labelled alert must reach, the alertnames the chart ships rather than this repository, and the escalation pairs |
+| `lib-ref-sites.yml` | `check-lib-pins.py` | Every file beyond `.gitlab-ci.yml` and `ansible/requirements.yml` that repeats the library release tag — one entry per Terraform root. An entry matching no ref fails |
 | `comment-length.yaml` | `check-comment-length.py` | Scan scope, and the vendored copies the gate skips because their comments are the library's |
 | `kubeconform-expected-skipped.txt` | `kubeconform-skipped.py` | apiVersion/Kind pairs allowed to validate against no schema. Ships empty: the pinned CRD catalog covers every kind here, so a skip is a new CRD or a failed catalog fetch |
 | `vendored-manifest.yml` | the library's `check-vendored-copies.py`, via `tests/test_vendored_byte_identity.py` | Which files here (and at the repo root) are library copies, and which are declared forks |

@@ -77,8 +77,8 @@ tests:
         alertname: SMARTDeviceUnhealthy
         exp_alerts: []
 
-  # SMARTReallocatedSectorsGrowing: a standing historical count is silent and
-  # only growth inside the window fires, so the 24h max-min is load-bearing.
+  # The three growth alerts read the latest value minus the 24h floor, so a
+  # standing historical count is silent and only an increase fires.
   - interval: 5m
     input_series:
       - series: 'smartmon_reallocated_sector_count{device="sdb", instance="192.0.2.11:9101"}'
@@ -108,48 +108,71 @@ tests:
               device: sdb
               instance: '192.0.2.11:9101'
 
-  # SMARTPendingSectors: max_over_time, the mirror image — one non-zero sample
-  # in the window is enough, because pending sectors do not un-happen.
+  # A replaced drive's counter resets to 0. The delta is directional, so the
+  # drop reads as 0 of growth and the alert stays silent through the repair.
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_reallocated_sector_count{device="sdb", instance="192.0.2.11:9101"}'
+        values: '8+0x12 0+0x12'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: SMARTReallocatedSectorsGrowing
+        exp_alerts: []
+
+  # SMARTPendingSectorsGrowing: one sector is a worklist item, a second is the
+  # news, so a count that stands still through the window stays silent.
   - interval: 5m
     input_series:
       - series: 'smartmon_current_pending_sector_count{device="sdd", instance="192.0.2.11:9101"}'
-        values: '0+0x4 8 0+0x19'
+        values: '1+0x24'
     alert_rule_test:
-      - eval_time: 15m
-        alertname: SMARTPendingSectors
+      - eval_time: 80m
+        alertname: SMARTPendingSectorsGrowing
         exp_alerts: []
-      - eval_time: 30m
-        alertname: SMARTPendingSectors
+
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_current_pending_sector_count{device="sdd", instance="192.0.2.11:9101"}'
+        values: '1+0x12 2+0x12'
+    alert_rule_test:
+      # The step lands at 65m, inside the 15m hold at 70m.
+      - eval_time: 60m
+        alertname: SMARTPendingSectorsGrowing
         exp_alerts: []
-      - eval_time: 40m
-        alertname: SMARTPendingSectors
+      - eval_time: 70m
+        alertname: SMARTPendingSectorsGrowing
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: SMARTPendingSectorsGrowing
         exp_alerts:
           - exp_labels:
               severity: warning
               device: sdd
               instance: '192.0.2.11:9101'
 
+  # The replacement reset on this attribute: a new drive reports 0 pending
+  # sectors where the old one reported 8, which is a repair, not growth.
   - interval: 5m
     input_series:
       - series: 'smartmon_current_pending_sector_count{device="sdd", instance="192.0.2.11:9101"}'
-        values: '0+0x24'
+        values: '8+0x12 0+0x12'
     alert_rule_test:
-      - eval_time: 40m
-        alertname: SMARTPendingSectors
+      - eval_time: 80m
+        alertname: SMARTPendingSectorsGrowing
         exp_alerts: []
 
-  # SMARTOfflineUncorrectable and SMARTMediaErrors share that shape on the
-  # other two attribute sets.
+  # SMARTOfflineUncorrectableGrowing: the same shape on its own attribute, and
+  # SMARTMediaErrors is any non-zero NVMe count.
   - interval: 5m
     input_series:
       - series: 'smartmon_offline_uncorrectable_count{device="sdc", instance="192.0.2.12:9101"}'
-        values: '0+0x4 2 0+0x19'
+        values: '0+0x12 2+0x12'
     alert_rule_test:
-      - eval_time: 30m
-        alertname: SMARTOfflineUncorrectable
+      - eval_time: 70m
+        alertname: SMARTOfflineUncorrectableGrowing
         exp_alerts: []
-      - eval_time: 40m
-        alertname: SMARTOfflineUncorrectable
+      - eval_time: 80m
+        alertname: SMARTOfflineUncorrectableGrowing
         exp_alerts:
           - exp_labels:
               severity: warning
@@ -159,10 +182,19 @@ tests:
   - interval: 5m
     input_series:
       - series: 'smartmon_offline_uncorrectable_count{device="sdc", instance="192.0.2.12:9101"}'
-        values: '0+0x24'
+        values: '2+0x24'
     alert_rule_test:
-      - eval_time: 40m
-        alertname: SMARTOfflineUncorrectable
+      - eval_time: 80m
+        alertname: SMARTOfflineUncorrectableGrowing
+        exp_alerts: []
+
+  - interval: 5m
+    input_series:
+      - series: 'smartmon_offline_uncorrectable_count{device="sdc", instance="192.0.2.12:9101"}'
+        values: '4+0x12 0+0x12'
+    alert_rule_test:
+      - eval_time: 80m
+        alertname: SMARTOfflineUncorrectableGrowing
         exp_alerts: []
 
   - interval: 5m
@@ -288,12 +320,31 @@ tests:
               instance: '192.0.2.11:9101'
               job: node-exporter-host
 
-  # A node the collector never served has no devices_scanned witness, so the 7d
-  # guard keeps the up arm off it while a healthy host holds absent() false.
+  # A host the collector never served has no devices_scanned witness, so the
+  # enrolment guard keeps the up arm off it while a healthy host holds absent()
+  # false.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="192.0.2.13:9101"}'
+        values: '1+0x30'
+      - series: 'smartmon_collector_last_success_seconds{instance="192.0.2.11:9101"}'
+        values: '0+60x30'
+      - series: 'smartmon_collector_devices_scanned{instance="192.0.2.11:9101"}'
+        values: '4+0x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: SMARTCollectorStale
+        exp_alerts: []
+
+  # A target outside the host-exporter job is never witnessed, even carrying an
+  # enrolment series: the collector runs on the hosts that job scrapes, so the
+  # job scope is what keeps every other target out of the arm.
   - interval: 1m
     input_series:
       - series: 'up{job="node-exporter", instance="10.42.1.7:9100"}'
         values: '1+0x30'
+      - series: 'smartmon_collector_devices_scanned{instance="10.42.1.7:9100"}'
+        values: '4+0x30'
       - series: 'smartmon_collector_last_success_seconds{instance="192.0.2.11:9101"}'
         values: '0+60x30'
       - series: 'smartmon_collector_devices_scanned{instance="192.0.2.11:9101"}'

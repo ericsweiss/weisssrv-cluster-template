@@ -62,6 +62,8 @@ vendored:
     consumer: template/scripts/check-lib-pins.py
   - lib: scripts/check-netpol-except-parity.py
     consumer: template/scripts/check-netpol-except-parity.py
+  - lib: scripts/check-scrape-wiring.py
+    consumer: template/scripts/check-scrape-wiring.py
   - lib: scripts/check-nfs-tls.py
     consumer: template/scripts/check-nfs-tls.py
   - lib: scripts/check-pvc-storageclass.py
@@ -97,6 +99,10 @@ vendored:
     consumer: template/scripts/find-reachable-host.sh
   - lib: scripts/flux-env.sh
     consumer: template/scripts/flux-env.sh
+  # flux-lint.sh runs flux-env.sh, kubeconform-skipped.py and the expected-skip
+  # baseline by path; all three are registered beside it.
+  - lib: scripts/flux-lint.sh
+    consumer: template/scripts/flux-lint.sh
   - lib: scripts/flux-render.sh
     consumer: template/scripts/flux-render.sh
   - lib: scripts/flux-secret-consumers.py

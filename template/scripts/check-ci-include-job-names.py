@@ -38,23 +38,48 @@ _INPUT_REF = re.compile(r"\$\[\[\s*inputs\.([A-Za-z0-9_-]+)\s*(?:\|[^\]]*)?\]\]"
 # The same reference as the whole value, where an array input substitutes a list.
 _WHOLE_INPUT_REF = re.compile(r"\A\s*" + _INPUT_REF.pattern + r"\s*\Z")
 
-# Include keys this gate cannot read: the job set lives outside both checkouts.
-UNREADABLE_INCLUDE_KEYS = ("remote", "component", "template")
+# Include keys naming a file outside both checkouts: no invocation reads one,
+# so each is declared with --allow-unreadable-include or the gate stops.
+EXTERNAL_INCLUDE_KEYS = ("remote", "component", "template")
 
 
 class OperatorError(RuntimeError):
     """Input or invocation the gate cannot act on — exit 2, never exit 1."""
 
 
-def parse_extra_jobs(values: List[str]) -> Dict[str, str]:
-    """`JOB=REASON` pairs for a job created by a source this gate cannot read."""
-    extra: Dict[str, str] = {}
+class Survey:
+    """What one walk over a pipeline and the files it includes found.
+
+    A plain class, not a dataclass: importlib path-loading cannot resolve the
+    annotations.
+    """
+
+    def __init__(self, created: Set[str] | None = None) -> None:
+        self.created: Set[str] = set(created or ())
+        # job name -> the "file:job" labels declaring it as an optional need.
+        self.needs: Dict[str, Set[str]] = {}
+        # Includes outside both checkouts, as (where it is written, the value an
+        # --allow-unreadable-include matches): their jobs AND needs are hidden.
+        self.external: List[Tuple[str, str]] = []
+        # An include that should have opened and did not — the same blind spot.
+        self.unreadable: List[str] = []
+        # A key that was read but is not formable from the inputs in play.
+        self.unresolved: List[str] = []
+
+
+def parse_pairs(values: List[str], flag: str, form: str) -> Dict[str, str]:
+    """`KEY=REASON` pairs from one repeatable declaration flag.
+
+    Every blind spot this gate accepts is declared with a reason, so a reason
+    is mandatory.
+    """
+    pairs: Dict[str, str] = {}
     for raw in values or []:
-        name, sep, reason = raw.partition("=")
-        if not sep or not name.strip() or not reason.strip():
-            raise OperatorError(f"--extra-job takes JOB=REASON, got {raw!r}")
-        extra[name.strip()] = reason.strip()
-    return extra
+        key, sep, reason = raw.partition("=")
+        if not sep or not key.strip() or not reason.strip():
+            raise OperatorError(f"{flag} takes {form}, got {raw!r}")
+        pairs[key.strip()] = reason.strip()
+    return pairs
 
 
 def _load(path: Path) -> dict:
@@ -132,33 +157,38 @@ def resolve_key(key: str, supplied: dict, defaults: Dict[str, object]) -> str | 
     return None if unresolved else resolved
 
 
-def whole_input(
-    text: str, supplied: Dict[str, object], defaults: Dict[str, object]
+def interpolate(
+    value: object, supplied: Dict[str, object], defaults: Dict[str, object]
 ) -> object:
-    """The value an `$[[ inputs.x ]]` standing alone substitutes, else the text.
+    """A value with its `$[[ inputs.* ]]` references substituted, or None.
 
-    `needs: $[[ inputs.needs ]]` is how a template takes its dependencies from
-    the include, and GitLab substitutes the whole array there.
+    A reference standing alone keeps the input's parsed type, so an array input
+    reaches `needs:` or a nested include as a list; otherwise it interpolates.
     """
-    match = _WHOLE_INPUT_REF.match(text)
-    return input_value(match.group(1), supplied, defaults) if match else text
+    if not isinstance(value, str):
+        return value
+    match = _WHOLE_INPUT_REF.match(value)
+    if match:
+        return input_value(match.group(1), supplied, defaults)
+    return resolve_key(value, supplied, defaults)
+
+
+def _deref(value: object, doc: dict) -> object:
+    """A `!reference` node followed through the document it came from."""
+    return value.resolve(doc, []) if isinstance(value, Reference) else value
 
 
 def optional_need_targets(
     body: dict, doc: dict, supplied: Dict[str, object], defaults: Dict[str, object]
 ) -> List[str]:
     """The job names one job declares as optional needs, as written."""
-    needs = body.get("needs")
-    if isinstance(needs, Reference):
-        needs = needs.resolve(doc, [])
-    if isinstance(needs, str):
-        needs = whole_input(needs, supplied, defaults)
+    needs = _deref(body.get("needs"), doc)
+    needs = _deref(interpolate(needs, supplied, defaults), doc)
     if isinstance(needs, dict):
         needs = [needs]
     targets: List[str] = []
-    for need in needs if isinstance(needs, list) else []:
-        if isinstance(need, Reference):
-            need = need.resolve(doc, None)
+    for item in needs if isinstance(needs, list) else []:
+        need = _deref(item, doc)
         if not isinstance(need, dict) or not need.get("optional"):
             continue
         target = need.get("job")
@@ -179,8 +209,7 @@ def child_inputs(
     if not isinstance(passed, dict):
         return {}
     return {
-        name: resolve_key(value, supplied, defaults) if isinstance(value, str) else value
-        for name, value in passed.items()
+        name: interpolate(value, supplied, defaults) for name, value in passed.items()
     }
 
 
@@ -191,39 +220,43 @@ def include_targets(
     lib_root: Path | None,
     supplied: Dict[str, object],
     defaults: Dict[str, object],
-    unreadable: List[str],
+    survey: Survey,
 ) -> Iterator[Tuple[Path, str, Dict[str, object]]]:
     """Each file an include names, as `(checkout, path, inputs)`.
 
     A `local:` resolves in the including file's own checkout, a `project:` in
     the library one.
     """
-    if any(key in entry for key in UNREADABLE_INCLUDE_KEYS):
-        unreadable.append(f"{label}: include {entry!r} is not a file in either checkout")
-        return
+    for key in EXTERNAL_INCLUDE_KEYS:
+        if key in entry:
+            survey.external.append(
+                (f"{label}: {key}: {entry[key]!r}", str(entry[key]))
+            )
+            return
     passed = child_inputs(entry, supplied, defaults)
     if "local" in entry:
         child_base, files = base, entry["local"]
     elif "project" in entry and "file" in entry:
         if lib_root is None:
-            unreadable.append(
+            survey.unreadable.append(
                 f"{label}: include of {entry.get('project')} needs a "
                 "library checkout (--lib-path or $WEISSSRV_LIB_PATH)"
             )
             return
         child_base, files = lib_root, entry["file"]
     else:
-        unreadable.append(f"{label}: include {entry!r} has no readable file")
+        survey.unreadable.append(f"{label}: include {entry!r} has no readable file")
         return
+    files = interpolate(files, supplied, defaults)
     for relpath in files if isinstance(files, list) else [files]:
-        resolved = resolve_key(str(relpath), supplied, defaults)
+        resolved = interpolate(relpath, supplied, defaults)
         if resolved is None:
-            unreadable.append(
+            survey.unreadable.append(
                 f"{label}: include path {relpath!r} needs an input the include "
                 "neither passes nor defaults"
             )
             continue
-        yield child_base, resolved.lstrip("/"), passed
+        yield child_base, str(resolved).lstrip("/"), passed
 
 
 def collect(
@@ -234,9 +267,7 @@ def collect(
     supplied: Dict[str, object],
     lib_root: Path | None,
     ancestry: Tuple[Path, ...],
-    created: Set[str],
-    needs: Dict[str, Set[str]],
-    unreadable: List[str],
+    survey: Survey,
 ) -> None:
     """Record this file's job names and optional needs, then its includes.
 
@@ -247,31 +278,31 @@ def collect(
     for key, body in jobs(doc).items():
         name = resolve_key(key, supplied, defaults)
         if name is None:
-            unreadable.append(
+            survey.unresolved.append(
                 f"{label}: job key {key!r} needs an input the include "
                 "neither passes nor defaults"
             )
             continue
-        created.add(name)
+        survey.created.add(name)
         for target in optional_need_targets(body, doc, supplied, defaults):
             resolved = resolve_key(target, supplied, defaults)
             if resolved is None:
-                unreadable.append(
+                survey.unresolved.append(
                     f"{label}: optional need {target!r} of job {name!r} needs an "
                     "input the include neither passes nor defaults"
                 )
                 continue
-            needs.setdefault(resolved, set()).add(f"{label}:{name}")
+            survey.needs.setdefault(resolved, set()).add(f"{label}:{name}")
 
     for entry in include_entries(doc):
         for child_base, relpath, passed in include_targets(
-            entry, label, base, lib_root, supplied, defaults, unreadable
+            entry, label, base, lib_root, supplied, defaults, survey
         ):
             included = child_base / relpath
             if included.resolve() in ancestry:
                 continue
             if not included.is_file():
-                unreadable.append(
+                survey.unreadable.append(
                     f"{label}: included file {relpath} is not in {child_base}"
                 )
                 continue
@@ -280,7 +311,7 @@ def collect(
                     included.read_text(encoding="utf-8"), loader=CILoader
                 )
             except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-                unreadable.append(f"{label}: {relpath} is not parseable: {exc}")
+                survey.unreadable.append(f"{label}: {relpath} is not parseable: {exc}")
                 continue
             collect(
                 child_doc,
@@ -290,10 +321,29 @@ def collect(
                 passed,
                 lib_root,
                 ancestry + (included.resolve(),),
-                created,
-                needs,
-                unreadable,
+                survey,
             )
+
+
+def declared_blind_spots(
+    external: List[Tuple[str, str]], allowed: Dict[str, str]
+) -> Tuple[List[str], List[str], Set[str]]:
+    """(notes for the declared includes, the undeclared ones, patterns used).
+
+    An allowance matches as a substring of the include's own value, so one
+    entry covers a component across version bumps.
+    """
+    notes: List[str] = []
+    undeclared: List[str] = []
+    used: Set[str] = set()
+    for note, value in external:
+        matched = sorted(pattern for pattern in allowed if pattern in value)
+        if not matched:
+            undeclared.append(note)
+            continue
+        used.update(matched)
+        notes.append(f"{note} ({allowed[matched[0]]})")
+    return notes, undeclared, used
 
 
 def check(
@@ -301,11 +351,10 @@ def check(
     ci_files: List[str],
     lib_root: Path | None,
     extra_jobs: Dict[str, str],
-) -> Tuple[List[str], int, int]:
-    """(problems, optional needs seen, job names created)."""
-    created: Set[str] = set(extra_jobs)
-    unreadable: List[str] = []
-    needs: Dict[str, Set[str]] = {}
+    allowed_includes: Dict[str, str],
+) -> Tuple[List[str], List[str], int, int]:
+    """(problems, notes, optional needs seen, job names created)."""
+    survey = Survey(created=set(extra_jobs))
 
     for relpath in ci_files:
         path = repo_root / relpath
@@ -321,12 +370,31 @@ def check(
             {},
             lib_root,
             (path.resolve(),),
-            created,
-            needs,
-            unreadable,
+            survey,
         )
 
-    if not created:
+    if survey.unreadable:
+        raise OperatorError(
+            "these includes could not be read: "
+            + "; ".join(sorted(set(survey.unreadable)))
+            + " — the jobs and the optional needs inside them are both "
+            "invisible here, so a clean run would prove nothing; make the file "
+            "readable (--lib-path for a `project:` include)"
+        )
+
+    notes, undeclared, used = declared_blind_spots(
+        survey.external, allowed_includes
+    )
+    if undeclared:
+        raise OperatorError(
+            "these includes name a file outside both checkouts: "
+            + "; ".join(sorted(set(undeclared)))
+            + " — an optional need declared inside one of them is invisible "
+            "here, so declare the blind spot with "
+            "--allow-unreadable-include SUBSTRING=REASON"
+        )
+
+    if not survey.created:
         raise OperatorError(
             "no job names were resolved from "
             + ", ".join(ci_files)
@@ -334,28 +402,34 @@ def check(
         )
 
     problems: List[str] = []
-    for target in sorted(needs):
-        if target in created:
+    for target in sorted(survey.needs):
+        if target in survey.created:
             continue
-        declarers = ", ".join(sorted(needs[target]))
+        declarers = ", ".join(sorted(survey.needs[target]))
         problems.append(
             f"{target!r} is an optional need of {declarers} but no include "
             "creates it — GitLab ignores the need silently, so the gate it "
             "waits for does not block the pipeline"
         )
-    if problems and unreadable:
+    if survey.unresolved:
         problems.append(
-            "the job set is incomplete because these includes could not be "
-            "read: " + "; ".join(sorted(set(unreadable)))
-            + " — pass --extra-job JOB=REASON for a job they create"
+            "the job set is incomplete because these keys name an input that "
+            "is neither passed nor defaulted: "
+            + "; ".join(sorted(set(survey.unresolved)))
         )
     for name in sorted(extra_jobs):
-        if name not in needs:
+        if name not in survey.needs:
             problems.append(
                 f"--extra-job names {name}, which no optional need references — "
                 "drop the stale entry"
             )
-    return problems, len(needs), len(created)
+    for pattern in sorted(allowed_includes):
+        if pattern not in used:
+            problems.append(
+                f"--allow-unreadable-include names {pattern}, which matches no "
+                "include the gate had to skip — drop the stale entry"
+            )
+    return problems, notes, len(survey.needs), len(survey.created)
 
 
 def resolve_lib_root(explicit: str | None) -> Path | None:
@@ -381,7 +455,14 @@ def main(argv: List[str] | None = None) -> int:
     )
     parser.add_argument(
         "--extra-job", action="append", default=[], metavar="JOB=REASON",
-        help="job created by a source this gate cannot read, with its reason",
+        help="job created by a source this gate does not read — a declared "
+             "unreadable include, or a child pipeline — with its reason",
+    )
+    parser.add_argument(
+        "--allow-unreadable-include", action="append", default=[],
+        metavar="SUBSTRING=REASON",
+        help="accept an include naming a file outside both checkouts, matched "
+             "as a substring of its value, with its reason",
     )
     parser.add_argument(
         "--require-optional-needs", action="store_true",
@@ -390,15 +471,23 @@ def main(argv: List[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        problems, n_needs, n_created = check(
+        problems, notes, n_needs, n_created = check(
             args.repo_root,
             args.ci_file or [".gitlab-ci.yml"],
             resolve_lib_root(args.lib_path),
-            parse_extra_jobs(args.extra_job),
+            parse_pairs(args.extra_job, "--extra-job", "JOB=REASON"),
+            parse_pairs(
+                args.allow_unreadable_include,
+                "--allow-unreadable-include",
+                "SUBSTRING=REASON",
+            ),
         )
     except OperatorError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+
+    for note in notes:
+        print(f"  not inspected: {note}")
 
     if problems:
         print("ERROR: optional `needs:` that resolve to no job:", file=sys.stderr)

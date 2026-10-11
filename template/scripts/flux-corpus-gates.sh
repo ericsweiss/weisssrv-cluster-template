@@ -110,6 +110,11 @@ python3 scripts/check-netpol-except-parity.py --config scripts/netpol-except.yam
   --corpus "$CORPUS" || record $? check-netpol-except-parity.py
 echo "=== Checking scrape/NetworkPolicy invariant ==="
 python3 scripts/check-scrape-netpol.py < "$CORPUS" || record $? check-scrape-netpol.py
+# The port granularity of the same invariant: a policy admitting observability
+# on the wrong port leaves the target down with the namespace arm still green.
+echo "=== Checking scrape port admission over real namespaces ==="
+python3 scripts/check-scrape-wiring.py --corpus "$CORPUS" \
+  || record $? check-scrape-wiring.py
 echo "=== Checking ingress default-deny coverage ==="
 python3 scripts/check-default-deny-coverage.py < "$CORPUS" || record $? check-default-deny-coverage.py
 echo "=== Checking ClusterSecretStore scoping ==="

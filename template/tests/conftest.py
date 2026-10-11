@@ -52,10 +52,22 @@ CILoader.add_multi_constructor("!", lambda loader, suffix, node: None)
 
 
 def pinned_lib_ref() -> str:
-    """The one weisssrv-lib pin every library include and vendored copy reads."""
-    ci = yaml.load((REPO / ".gitlab-ci.yml").read_text(), Loader=CILoader) or {}
-    ref = (ci.get("variables") or {}).get("WEISSSRV_LIB_REF")
-    assert ref, ".gitlab-ci.yml variables.WEISSSRV_LIB_REF is the single source of the pin"
+    """The one weisssrv-lib pin every library include and vendored copy reads.
+
+    `variables.WEISSSRV_LIB_REF` is NOT it: that holds the truthy
+    interpolation, so a reader of it compares copies against any checkout.
+    """
+    header = next(
+        (
+            doc
+            for doc in yaml.load_all((REPO / ".gitlab-ci.yml").read_text(), Loader=CILoader)
+            if isinstance(doc, dict) and "spec" in doc
+        ),
+        {},
+    )
+    entry = ((header.get("spec") or {}).get("inputs") or {}).get("lib_ref") or {}
+    ref = entry.get("default")
+    assert ref, ".gitlab-ci.yml spec.inputs.lib_ref.default is the single source of the pin"
     return str(ref)
 
 

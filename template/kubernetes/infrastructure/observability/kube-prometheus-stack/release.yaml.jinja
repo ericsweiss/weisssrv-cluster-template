@@ -855,11 +855,11 @@ spec:
                     failure — plan replacement and check the pool it backs.
 
               # A stable non-zero count from an old event is not actionable;
-              # growth is. max-min over 24h detects an increase while tolerating
-              # standby gaps.
+              # growth is. The delta is directional — the latest reading minus
+              # the 24h floor — so a replacement zeroing the counter reads as 0.
               - alert: SMARTReallocatedSectorsGrowing
                 expr: >-
-                  max_over_time(smartmon_reallocated_sector_count[24h])
+                  last_over_time(smartmon_reallocated_sector_count[1h])
                   - min_over_time(smartmon_reallocated_sector_count[24h]) > 0
                 for: 5m
                 labels:
@@ -873,36 +873,41 @@ spec:
                     {{ $value | printf "%.0f" }} in the last 24 hours. A drive
                     actively remapping sectors is degrading — plan replacement.
 
-              # Pending and offline-uncorrectable sectors are acute: any non-zero
-              # value is a sector currently unreadable or awaiting reallocation,
-              # not a healed-over historical event.
-              - alert: SMARTPendingSectors
-                expr: max_over_time(smartmon_current_pending_sector_count[6h]) > 0
+              # A sector found once is a worklist item; a second one is the
+              # news. The alert closes 24h after the count stops moving, and a
+              # further sector fires it again.
+              - alert: SMARTPendingSectorsGrowing
+                expr: >-
+                  last_over_time(smartmon_current_pending_sector_count[1h])
+                  - min_over_time(smartmon_current_pending_sector_count[24h]) > 0
                 for: 15m
                 labels:
                   severity: warning
                 annotations:
                   runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#storage'
-                  summary: 'Current pending sectors on {{ $labels.device }} ({{ $labels.instance }})'
+                  summary: 'Pending sectors growing on {{ $labels.device }} ({{ $labels.instance }})'
                   description: >-
                     Current_Pending_Sector on {{ $labels.device }} on
-                    {{ $labels.instance }} is {{ $value | printf "%.0f" }} —
-                    sectors are unreadable and awaiting reallocation. A scrub of
-                    the backing pool will surface any affected data.
+                    {{ $labels.instance }} grew by {{ $value | printf "%.0f" }}
+                    in the last 24 hours — sectors are unreadable and awaiting
+                    reallocation. A scrub of the backing pool will surface any
+                    affected data.
 
-              - alert: SMARTOfflineUncorrectable
-                expr: max_over_time(smartmon_offline_uncorrectable_count[6h]) > 0
+              - alert: SMARTOfflineUncorrectableGrowing
+                expr: >-
+                  last_over_time(smartmon_offline_uncorrectable_count[1h])
+                  - min_over_time(smartmon_offline_uncorrectable_count[24h]) > 0
                 for: 15m
                 labels:
                   severity: warning
                 annotations:
                   runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#storage'
-                  summary: 'Offline-uncorrectable sectors on {{ $labels.device }} ({{ $labels.instance }})'
+                  summary: 'Offline-uncorrectable sectors growing on {{ $labels.device }} ({{ $labels.instance }})'
                   description: >-
                     Offline_Uncorrectable on {{ $labels.device }} on
-                    {{ $labels.instance }} is {{ $value | printf "%.0f" }} —
-                    sectors that could not be corrected on read. A strong
-                    replace-soon signal.
+                    {{ $labels.instance }} grew by {{ $value | printf "%.0f" }}
+                    in the last 24 hours — sectors that could not be corrected
+                    on read. A strong replace-soon signal.
 
               # NVMe media and data-integrity errors: the SSD-side equivalent of
               # reallocated and uncorrectable sectors.
@@ -922,21 +927,21 @@ spec:
 
               # Collector meta-failure. absent() makes an undeployed collector
               # loud but needs every host silent, so the up arm catches one host
-              # losing its series, scoped by a 7d devices_scanned window.
+              # losing its series, scoped to the job that serves them.
               - alert: SMARTCollectorStale
                 # The success arm catches a refreshed sentinel with a failed scan
-                # or no device parsed. The devices_scanned guard keeps a host
-                # with no SMART device quiet.
+                # or no device parsed. The devices_scanned witness lapses a month
+                # after the last good scan, keeping an unenrolled host quiet.
                 expr: >-
                   (time() - smartmon_collector_last_success_seconds > 900)
                   or absent(smartmon_collector_last_success_seconds)
                   or (
                     (
-                      up == 1
+                      up{job="node-exporter-host"} == 1
                       unless on (instance) smartmon_collector_last_success_seconds
                     )
                     and on (instance) (
-                      max_over_time(smartmon_collector_devices_scanned[7d]) > 0
+                      max_over_time(smartmon_collector_devices_scanned[30d]) > 0
                     )
                   )
                   or (
@@ -1101,24 +1106,32 @@ spec:
         groups:
           - name: platform.resources
             rules:
-              # Working set against the container's own limit, the leading
-              # indicator ahead of an OOMKill. The page-cache-dominated
-              # observability containers are covered by the RSS rule below.
+              # RSS against the container's own limit, so page cache never
+              # counts. authentik/postgresql is judged on its working set
+              # instead: its shared buffers are charged but sit outside RSS.
               - alert: ContainerMemoryNearLimit
                 expr: >-
                   (
                   max by (namespace, pod, container) (
-                  container_memory_working_set_bytes{container!="", container!="POD"}
+                  container_memory_rss{container!="", container!="POD"}
                   )
                   / on (namespace, pod, container) group_left ()
                   max by (namespace, pod, container) (
                   kube_pod_container_resource_limits{resource="memory"}
                   )
                   ) > 0.9
-                  unless on (namespace, container) (
-                  kube_pod_container_resource_limits{resource="memory", namespace="observability",
-                  container=~"grafana|loki|prometheus"}
+                  or
+                  (
+                  max by (namespace, pod, container) (
+                  container_memory_working_set_bytes{namespace="authentik",
+                  container="postgresql"}
                   )
+                  / on (namespace, pod, container) group_left ()
+                  max by (namespace, pod, container) (
+                  kube_pod_container_resource_limits{resource="memory", namespace="authentik",
+                  container="postgresql"}
+                  )
+                  ) > 0.9
                 for: 15m
                 labels:
                   severity: warning
@@ -1126,44 +1139,40 @@ spec:
                   runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
                   summary: >-
                     Container {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }}
-                    is within 10% of its memory limit
+                    holds unreclaimable memory within 10% of its limit
                   description: >-
-                    Container {{ $labels.container }} in pod
-                    {{ $labels.namespace }}/{{ $labels.pod }} has held above 90%
-                    of its memory limit for 15 minutes
-                    ({{ $value | humanizePercentage }}). Raise the limit in git
-                    and, where the workload has a VPA, its maxAllowed alongside.
+                    Memory the kernel cannot reclaim in container
+                    {{ $labels.container }} of {{ $labels.namespace }}/{{ $labels.pod }}
+                    (RSS; for authentik/postgresql the working set, which carries
+                    its shared buffers) has held above 90% of the memory limit
+                    for 15 minutes ({{ $value | humanizePercentage }}). This is
+                    not page cache: raise the limit in git and, where the
+                    workload has a VPA, its maxAllowed alongside.
 
-              # CRITICAL: every container excluded from the rule above needs a
-              # replacement band here, prometheus most of all — its own death is
-              # what blinds every other alert, so it must never be exempt.
-              - alert: PageCacheWorkloadRSSNearLimit
+              # The rule above reads RSS, so a charge that is tmpfs, slab or
+              # kernel memory reaches the limit unseen. Edge-triggered on the
+              # restart counter, qualified by the last-terminated reason.
+              - alert: ContainerOOMKilled
                 expr: >-
-                  (
-                  max by (namespace, pod, container) (
-                  container_memory_rss{namespace="observability",
-                  container=~"grafana|loki|prometheus"}
-                  )
-                  / on (namespace, pod, container) group_left ()
-                  max by (namespace, pod, container) (
-                  kube_pod_container_resource_limits{resource="memory", namespace="observability",
-                  container=~"grafana|loki|prometheus"}
-                  )
-                  ) > 0.9
-                for: 15m
+                  increase(kube_pod_container_status_restarts_total[1h]) > 0
+                  and on (namespace, pod, container)
+                  kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1
+                for: 5m
                 labels:
                   severity: warning
                 annotations:
                   runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
                   summary: >-
-                    {{ $labels.namespace }}/{{ $labels.container }} RSS is within
-                    10% of its memory limit
+                    Container {{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }}
+                    was OOMKilled
                   description: >-
-                    Non-reclaimable memory in {{ $labels.namespace }}/{{ $labels.pod }}
-                    has held above 90% of the container's memory limit for 15
-                    minutes ({{ $value | humanizePercentage }}). Unlike the
-                    working set this is not page cache: raise the limit and the
-                    VPA maxAllowed in git.
+                    Container {{ $labels.container }} in pod
+                    {{ $labels.namespace }}/{{ $labels.pod }} hit its memory
+                    limit and was killed by the kernel. A container that
+                    restarts cleanly after the kill is invisible to
+                    KubePodCrashLooping, so this is the only signal. Raise the
+                    limit in git and, where the workload has a VPA, its
+                    maxAllowed alongside.
 
       platform-gitops:
         groups:
@@ -1589,7 +1598,7 @@ spec:
             rules:
               # Disabled upstream. for: 15m rides out a transient receiver
               # timeout; the inner `> 0` keeps a healthy gossip peer from flooring min().
-              # Taken from kube-prometheus-stack 92.1.0
+              # Taken from kube-prometheus-stack 92.3.0
               - alert: AlertmanagerClusterFailedToSendAlerts
                 expr: >-
                   min by (namespace, service, integration) (

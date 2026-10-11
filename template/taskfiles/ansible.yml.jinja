@@ -114,6 +114,10 @@ tasks:
   _molecule-run:
     internal: true
     dir: "{{.MOLECULE_DIR}}"
+    # Every platform reads the bare ${MOLECULE_TEST_IMAGE}, so the image comes
+    # from the declared ref here and from WEISSSRV_LIB_REF in CI — one pin.
+    env:
+      MOLECULE_TEST_IMAGE: registry.{{.GIT_HOST}}/{% endraw %}{{ lib_project }}{% raw %}/molecule-test:{{.LIB_REF}}
     preconditions:
       - sh: "{{.ROOT_DIR}}/scripts/resolve-tool.sh molecule molecule >/dev/null"
         msg: "molecule not installed"

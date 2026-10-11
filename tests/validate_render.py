@@ -793,6 +793,12 @@ def _own_ci() -> dict:
     return render_cluster.load_ci(own) if own.is_file() else {}
 
 
+# The declared `lib_ref` input, never `variables.WEISSSRV_LIB_REF`: that holds
+# the truthy interpolation, and the copy engine falls back to the library's
+# working tree for a ref that does not resolve.
+_declared_lib_ref = render_cluster.declared_lib_ref
+
+
 def _check_registered_copies(lib_path: Path) -> list[str]:
     """Run the library's vendored-copy engine over this repository's manifest.
 
@@ -811,10 +817,10 @@ def _check_registered_copies(lib_path: Path) -> list[str]:
             f"{manifest} is missing — this repository's vendored copies would go "
             "ungated, and the gate must not silently skip"
         ]
-    ref = (_own_ci().get("variables") or {}).get("WEISSSRV_LIB_REF")
+    ref = _declared_lib_ref(render_cluster.REPO_ROOT / ".gitlab-ci.yml")
     if not ref:
         return [
-            "this repository's .gitlab-ci.yml declares no variables.WEISSSRV_LIB_REF — "
+            "this repository's .gitlab-ci.yml declares no spec.inputs.lib_ref.default — "
             f"{MANIFEST_RELPATH} would be compared against whatever the library "
             "checkout happens to hold, not the ref the copies were taken at"
         ]
@@ -922,12 +928,10 @@ def check_rendered_vendored(
             "there however correct the list is"
         )
 
-    ref = (render_cluster.load_ci(render / ".gitlab-ci.yml").get("variables") or {}).get(
-        "WEISSSRV_LIB_REF"
-    )
+    ref = _declared_lib_ref(render / ".gitlab-ci.yml")
     if not ref:
         raise Failure(
-            "the render declares no variables.WEISSSRV_LIB_REF — the shipped gate reads "
+            "the render declares no spec.inputs.lib_ref.default — the shipped gate reads "
             "its pin from there, so it would have nothing to compare at"
         )
 
@@ -1074,26 +1078,35 @@ def lib_checkout_problems(lib_path: Path, expected: str) -> list[str]:
 
 
 def _assert_one_lib_ref() -> list[str]:
-    """The template's own pipeline must pin the ref the fixtures resolve to.
+    """The template's own pipeline must declare the ref the fixtures resolve to.
 
-    One library checkout gates both trees, so includes on another tag would have
-    the comparison above run against the wrong ref.
+    One library checkout gates both trees, so a header on another tag runs the
+    comparison above against the wrong ref. Every `include:` reads that header.
     """
     expected = _pinned_lib_ref()
+    problems = []
+    declared = _declared_lib_ref(render_cluster.REPO_ROOT / ".gitlab-ci.yml")
+    if declared is not None and declared != expected:
+        problems.append(
+            f"this template's own .gitlab-ci.yml declares lib_ref {declared} but "
+            f"copier.yml's lib_ref default is {expected} — "
+            "validate-rendered-cluster clones only the latter, so "
+            "the vendored-script comparison below would run against a ref the "
+            "repository's own copies were never taken from"
+        )
+    marker = "$[[ inputs.lib_ref ]]"
     refs = {
         inc["ref"]
         for inc in _own_ci().get("include", [])
         if isinstance(inc, dict) and "ref" in inc
     }
-    if refs - {expected}:
-        return [
+    if refs - {marker}:
+        problems.append(
             "this template's own .gitlab-ci.yml pins library ref(s) "
-            f"{sorted(refs)} but copier.yml's lib_ref default is {expected} — "
-            "validate-rendered-cluster clones only the latter, so "
-            "the vendored-script comparison below would run against a ref the "
-            "repository's own copies were never taken from"
-        ]
-    return []
+            f"{sorted(refs)} rather than reading the declared input as "
+            f"{marker!r}, so a bump would leave one entry behind"
+        )
+    return problems
 
 
 # The render's own copy of the library gate, so what runs here is the wiring a

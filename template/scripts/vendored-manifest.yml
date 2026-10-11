@@ -28,6 +28,7 @@ vendored:
   - scripts/check-kubectl-version-pin.py
   - scripts/check-lib-pins.py
   - scripts/check-netpol-except-parity.py
+  - scripts/check-scrape-wiring.py
   - scripts/check-nfs-tls.py
   - scripts/check-pvc-storageclass.py
   - scripts/check-role-inputs.py
@@ -46,6 +47,9 @@ vendored:
   - scripts/extract-prometheus-config.py
   - scripts/find-reachable-host.sh
   - scripts/flux-env.sh
+  # flux-lint.sh runs flux-env.sh, kubeconform-skipped.py and the
+  # expected-skip baseline by path; all three are registered beside it.
+  - scripts/flux-lint.sh
   - scripts/flux-render.sh
   - scripts/flux-secret-consumers.py
   - scripts/gate_common.py

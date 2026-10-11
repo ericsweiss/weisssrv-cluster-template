@@ -29,10 +29,10 @@ weisssrv-lib at `{{ lib_ref }}`. A behaviour change is a library merge request a
 a release tag, then a pin bump here.
 
 1. The change lands in the library and a release tag is cut.
-2. Here: bump the collection version in `ansible/requirements.yml` and the single
-   ref variable in `.gitlab-ci.yml`, then run `scripts/check-lib-pins.py --fix`.
-   The Terraform module `?ref=` pins are bumped by hand; a missed one is caught
-   by the pin-parity test, not by the fixer.
+2. Here: `scripts/check-lib-pins.py --bump vX.Y.Z`. It moves the declared
+   `lib_ref` input in `.gitlab-ci.yml` and every pin derived from it — the
+   `include:` refs, `ansible/requirements.yml` and each Terraform `?ref=` the
+   `scripts/lib-ref-sites.yml` list names.
 3. `task lib:sync` to refresh the local checkout, re-vendor the byte-identical
    copies, and re-run the gates. A vendored copy edited here is reverted by the
    next re-vendor and reds the byte-identity gate meanwhile.

@@ -20,13 +20,48 @@ assert _spec and _spec.loader
 clp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(clp)
 
+MARKER = "$[[ inputs.lib_ref ]]"
 
-def _ci(ref_var: str = "v0.4.0", refs: tuple[str, ...] = ("v0.4.0", "v0.4.0")) -> str:
-    """A minimal .gitlab-ci.yml with two lib includes, the 2nd a `file:` list."""
+
+def _ci(
+    declared: str = "v0.4.0",
+    refs: tuple[str, ...] = (MARKER, MARKER),
+    variable: str = MARKER,
+) -> str:
+    """The header layout: a `spec:` document, then two lib includes reading it."""
     return textwrap.dedent(
         f"""\
+        spec:
+          inputs:
+            lib_ref:
+              default: {declared}
+        ---
         variables:
-          WEISSSRV_LIB_REF: "{ref_var}"
+          WEISSSRV_LIB_REF: {variable}
+        include:
+          - project: eric/weisssrv-lib
+            ref: {refs[0]}
+            file: /ci/lint/docs-link-check.yml
+          - project: eric/weisssrv-lib
+            ref: {refs[1]}
+            file:
+              - /ci/lint/yaml-lint.yml
+              - /ci/lint/shellcheck.yml
+          - local: .gitlab/ci/molecule-jobs.gitlab-ci.yml
+        """
+    )
+
+
+def _literal_ci(
+    declared: str = "v0.4.0", refs: tuple[str, ...] = ("v0.4.0", "v0.4.0")
+) -> str:
+    """The layout --fix converts from: a literal tag repeated on every pin."""
+    return textwrap.dedent(
+        f"""\
+        ---
+        # A consumer pipeline with no `spec:` header.
+        variables:
+          WEISSSRV_LIB_REF: "{declared}"
         include:
           - project: eric/weisssrv-lib
             ref: {refs[0]}
@@ -47,75 +82,103 @@ def _write(tmp_path: Path, content: str) -> Path:
     return p
 
 
-def test_consistent_pins_pass(tmp_path: Path) -> None:
+# ---------------------------------------------------------------------------
+# The declared ref lives in the header document.
+
+
+def test_the_declared_ref_is_the_header_default(tmp_path: Path) -> None:
+    assert clp.declared_ref(_ci("v0.4.0")) == "v0.4.0"
+
+
+def test_a_file_without_a_header_declares_nothing(tmp_path: Path) -> None:
+    assert clp.declared_ref(_literal_ci()) is None
+
+
+def test_the_header_is_not_mistaken_for_the_pipeline_body(tmp_path: Path) -> None:
+    """parse_ci must read the jobs document, not the `spec:` one."""
+    doc = clp.parse_ci(_ci())
+    assert "include" in doc and "spec" not in doc
+
+
+def test_a_clean_header_layout_passes(tmp_path: Path) -> None:
     assert clp.check(_write(tmp_path, _ci())) == []
 
 
-def _spec_headed_ci(ref: str = "v0.3.2") -> str:
-    """A pipeline using GitLab inputs: a `spec:` document, then the jobs."""
-    return textwrap.dedent(
-        f"""\
-        spec:
-          inputs:
-            env:
-              default: prod
-        ---
-        variables:
-          WEISSSRV_LIB_REF: "v0.5.0"
-        include:
-          - project: eric/weisssrv-lib
-            ref: {ref}
-            file: /ci/lint/yaml-lint.yml
-        """
-    )
+def test_a_quoted_interpolation_is_the_same_pin(tmp_path: Path) -> None:
+    """Quoting is invisible after the parse, so both spellings are the pin."""
+    content = _ci(refs=(f'"{MARKER}"', MARKER), variable=f'"{MARKER}"')
+    assert clp.check(_write(tmp_path, content)) == []
 
 
-def test_a_spec_headed_pipeline_is_read_not_refused(tmp_path: Path) -> None:
-    """A `spec:`-headed file is two documents; the jobs are the second one."""
-    p = _write(tmp_path, _spec_headed_ci())
-    problems = clp.check(p)
-    assert len(problems) == 1
-    assert "v0.3.2" in problems[0]
-    assert clp.check(_write(tmp_path, _spec_headed_ci(ref="v0.5.0"))) == []
+def test_fix_normalizes_a_quoted_pin_to_the_bare_interpolation(
+    tmp_path: Path,
+) -> None:
+    """One spelling, so a bump's diff is the declared ref and nothing else."""
+    p = _write(tmp_path, _ci(refs=(f'"{MARKER}"', MARKER), variable=f'"{MARKER}"'))
+    assert clp.fix(p) == 2
+    assert f"ref: {MARKER}\n" in p.read_text()
+    assert clp.fix(p) == 0
 
 
-def test_fix_rewrites_a_spec_headed_pipeline(tmp_path: Path) -> None:
-    """--fix locates the `ref:` line in the second document, not the first."""
-    p = _write(tmp_path, _spec_headed_ci())
-    assert clp.fix(p) == 1
-    assert clp.load_ci(p)["include"][0]["ref"] == "v0.5.0"
-    assert clp.check(p) == []
-    assert "inputs:" in p.read_text()
+# ---------------------------------------------------------------------------
+# What the contract refuses.
 
 
-def test_drifted_entry_is_reported_per_file(tmp_path: Path) -> None:
-    problems = clp.check(_write(tmp_path, _ci(refs=("v0.4.0", "v0.3.2"))))
+def test_a_literal_include_ref_fails(tmp_path: Path) -> None:
+    problems = clp.check(_write(tmp_path, _ci(refs=(MARKER, "v0.4.0"))))
     # The drifted entry carries TWO files, and both must be named — a caller
-    # who sees only the entry cannot tell which jobs came from the stale tag.
+    # who sees only the entry cannot tell which jobs came from the literal.
     assert len(problems) == 2
     assert any("yaml-lint" in p for p in problems)
     assert any("shellcheck" in p for p in problems)
-    assert all("v0.3.2" in p for p in problems)
+    assert all("inputs.lib_ref" in p for p in problems)
 
 
-def test_branch_ref_is_rejected_even_when_all_entries_agree(tmp_path: Path) -> None:
-    # Every entry agrees, so a pure equality check would pass this. A branch is
-    # forbidden by the include contract regardless of consistency.
-    problems = clp.check(_write(tmp_path, _ci("main", ("main", "main"))))
+def test_a_literal_include_ref_fails_even_at_the_declared_tag(tmp_path: Path) -> None:
+    """Equality with the declared tag is not the contract; the input is."""
+    problems = clp.check(_write(tmp_path, _ci("v0.4.0", ("v0.4.0", "v0.4.0"))))
+    assert problems and all("$[[ inputs.lib_ref ]]" in p for p in problems)
+
+
+def test_a_literal_variable_fails(tmp_path: Path) -> None:
+    problems = clp.check(_write(tmp_path, _ci(variable="v0.4.0")))
+    assert len(problems) == 1
+    assert "WEISSSRV_LIB_REF" in problems[0]
+
+
+def test_an_absent_variable_fails(tmp_path: Path) -> None:
+    content = _ci().replace("variables:\n  WEISSSRV_LIB_REF: %s\n" % MARKER, "")
+    problems = clp.check(_write(tmp_path, content))
+    assert len(problems) == 1
+    assert "WEISSSRV_LIB_REF is None" in problems[0]
+
+
+def test_a_missing_header_is_reported(tmp_path: Path) -> None:
+    problems = clp.check(_write(tmp_path, _literal_ci()))
+    assert len(problems) == 1
+    assert "spec.inputs.lib_ref.default is not set" in problems[0]
+
+
+def test_a_branch_default_is_rejected(tmp_path: Path) -> None:
+    # Every pin reads the input, so a pure consistency check would pass this. A
+    # branch is forbidden by the include contract regardless.
+    problems = clp.check(_write(tmp_path, _ci("main")))
     assert any("not a release tag" in p for p in problems)
 
 
-def test_missing_variable_is_reported(tmp_path: Path) -> None:
-    content = _ci().replace('  WEISSSRV_LIB_REF: "v0.4.0"\n', "")
-    problems = clp.check(_write(tmp_path, content))
-    assert any("WEISSSRV_LIB_REF" in p for p in problems)
+def test_a_default_with_a_trailing_newline_is_rejected(tmp_path: Path) -> None:
+    """Python's `$` matches before a trailing newline; `fullmatch` does not."""
+    content = _ci('"v0.5.1\\n"')
+    assert any("not a release tag" in p for p in clp.check(_write(tmp_path, content)))
 
 
 def test_no_lib_includes_is_a_failure_not_a_pass(tmp_path: Path) -> None:
     # An empty set must not read as "consistent": if the includes are ever
     # restructured out from under the gate it has to say so.
     content = _ci().replace("eric/weisssrv-lib", "eric/somewhere-else")
-    assert clp.check(_write(tmp_path, content)) != []
+    problems = clp.check(_write(tmp_path, content))
+    assert len(problems) == 1
+    assert "no `eric/weisssrv-lib` include entries found" in problems[0]
 
 
 def test_reference_tag_does_not_break_parsing(tmp_path: Path) -> None:
@@ -131,11 +194,71 @@ def test_reference_tag_does_not_break_parsing(tmp_path: Path) -> None:
     assert clp.check(_write(tmp_path, content)) == []
 
 
-def test_fix_rewrites_drift_and_is_idempotent(tmp_path: Path) -> None:
-    p = _write(tmp_path, _ci(refs=("v0.4.0", "v0.3.2")))
-    assert clp.fix(p) == 1
+def test_project_and_ref_var_are_overridable(tmp_path: Path) -> None:
+    """A consumer pinning a fork, or naming its variable differently."""
+    content = textwrap.dedent(
+        f"""\
+        spec:
+          inputs:
+            lib_ref:
+              default: v1.2.3
+        ---
+        variables:
+          MY_LIB_REF: {MARKER}
+        include:
+          - project: acme/my-lib
+            ref: {MARKER}
+            file: /ci/lint/yaml-lint.yml
+          - project: eric/weisssrv-lib
+            ref: not-a-tag
+            file: /ci/lint/shellcheck.yml
+        """
+    )
+    p = _write(tmp_path, content)
+    # Scoped to the fork + its own variable: clean, and the OTHER project's
+    # literal ref is none of this invocation's business.
+    assert clp.check(p, project="acme/my-lib", ref_var="MY_LIB_REF") == []
+    assert clp.check(p) != []
+
+
+# ---------------------------------------------------------------------------
+# --fix converts the literal layout, and stays put once converted.
+
+
+def test_fix_converts_a_literal_file_and_is_idempotent(tmp_path: Path) -> None:
+    p = _write(tmp_path, _literal_ci())
+    assert clp.fix(p) > 0
     assert clp.check(p) == []
+    assert clp.declared_ref(p.read_text()) == "v0.4.0"
     assert clp.fix(p) == 0  # nothing left to change
+
+
+def test_fix_keeps_the_leading_document_marker_as_the_separator(
+    tmp_path: Path,
+) -> None:
+    """A second `---` would open an empty document between header and body."""
+    p = _write(tmp_path, _literal_ci())
+    clp.fix(p)
+    text = p.read_text()
+    assert text.startswith("spec:\n")
+    assert text.count("---\n") == 1
+    assert "# A consumer pipeline with no `spec:` header." in text
+
+
+def test_fix_adds_the_separator_when_the_file_has_none(tmp_path: Path) -> None:
+    content = _literal_ci().replace("---\n", "", 1)
+    p = _write(tmp_path, content)
+    clp.fix(p)
+    assert clp.check(p) == []
+    assert p.read_text().startswith("spec:\n")
+
+
+def test_fix_moves_only_the_default_once_the_header_exists(tmp_path: Path) -> None:
+    """A converted file's include refs already read the input; only the tag moves."""
+    p = _write(tmp_path, _ci("v0.4.0"))
+    assert clp.fix(p, want="v0.5.0") == 1
+    assert clp.declared_ref(p.read_text()) == "v0.5.0"
+    assert clp.check(p) == []
 
 
 def test_fix_leaves_non_lib_includes_alone(tmp_path: Path) -> None:
@@ -159,43 +282,16 @@ def test_fix_leaves_non_lib_includes_alone(tmp_path: Path) -> None:
         for i in clp.load_ci(p)["include"]
         if isinstance(i, dict) and i.get("project")
     }
-    assert refs["eric/weisssrv-lib"] == "v0.4.0"
+    assert refs["eric/weisssrv-lib"] == MARKER
     # The other project's pin is not ours to move.
     assert refs["eric/some-other-project"] == "v0.3.2"
     assert clp.check(p) == []
 
 
-def test_project_and_ref_var_are_overridable(tmp_path: Path) -> None:
-    """A consumer pinning a fork, or naming its variable differently."""
-    content = textwrap.dedent(
-        """\
-        variables:
-          MY_LIB_REF: "v1.2.3"
-        include:
-          - project: acme/my-lib
-            ref: v1.2.3
-            file: /ci/lint/yaml-lint.yml
-          - project: eric/weisssrv-lib
-            ref: not-a-tag
-            file: /ci/lint/shellcheck.yml
-        """
-    )
-    p = _write(tmp_path, content)
-    # Scoped to the fork + its own variable: clean, and the OTHER project's
-    # non-tag ref is none of this invocation's business.
-    assert clp.check(p, project="acme/my-lib", ref_var="MY_LIB_REF") == []
-    # Defaults would look at eric/weisssrv-lib, which has no MY_LIB_REF.
-    assert clp.check(p) != []
-
-
 def test_fix_does_not_rewrite_a_project_whose_path_merely_ends_with_ours(
     tmp_path: Path,
 ) -> None:
-    """--fix edits exactly what check() verifies, never a suffix match.
-
-    `acme/eric/weisssrv-lib` is a different project; check() compares the whole
-    value, so rewriting that entry would edit a pin nothing verifies.
-    """
+    """--fix edits exactly what check() verifies, never a suffix match."""
     content = textwrap.dedent(
         """\
         variables:
@@ -210,13 +306,13 @@ def test_fix_does_not_rewrite_a_project_whose_path_merely_ends_with_ours(
         """
     )
     p = _write(tmp_path, content)
-    assert clp.fix(p) == 1  # only ours
+    clp.fix(p)
     refs = {
         i["project"]: i["ref"]
         for i in clp.load_ci(p)["include"]
         if isinstance(i, dict) and i.get("project")
     }
-    assert refs["eric/weisssrv-lib"] == "v0.5.0"
+    assert refs["eric/weisssrv-lib"] == MARKER
     assert refs["acme/eric/weisssrv-lib"] == "v9.9.9"
     assert clp.check(p) == []
 
@@ -237,19 +333,19 @@ def test_fix_matches_a_quoted_or_commented_project_value(tmp_path: Path) -> None
         """
     )
     p = _write(tmp_path, content)
-    assert clp.fix(p) == 2
+    clp.fix(p)
     assert clp.check(p) == []
 
 
 def test_fix_refuses_a_branch_source_without_touching_the_file(
     tmp_path: Path,
 ) -> None:
-    """A branch in the single source is validated before anything is written.
+    """The ref is validated before anything is written.
 
-    The rewrite cannot repair it, so propagating it to every entry and only then
-    reporting would leave the CI file worse than it found it.
+    The rewrite cannot repair a branch, so propagating it to every entry and
+    only then reporting would leave the CI file worse than it found it.
     """
-    p = _write(tmp_path, _ci("main", ("v0.4.0", "v0.4.0")))
+    p = _write(tmp_path, _literal_ci("main"))
     before = p.read_text()
     with pytest.raises(SystemExit) as excinfo:
         clp.fix(p)
@@ -257,14 +353,53 @@ def test_fix_refuses_a_branch_source_without_touching_the_file(
     assert p.read_text() == before
 
 
+def test_fix_refuses_a_file_declaring_no_ref_at_all(tmp_path: Path) -> None:
+    """With no header and no variable there is nothing to convert from."""
+    content = textwrap.dedent(
+        """\
+        include:
+          - project: eric/weisssrv-lib
+            ref: v0.3.2
+            file: /ci/lint/yaml-lint.yml
+        """
+    )
+    p = _write(tmp_path, content)
+    before = p.read_text()
+    with pytest.raises(SystemExit) as excinfo:
+        clp.fix(p)
+    assert "nothing to sync" in str(excinfo.value)
+    assert p.read_text() == before
+
+
+def test_fix_refuses_a_header_that_declares_no_lib_ref_input(tmp_path: Path) -> None:
+    """Inventing an input inside someone else's header is not a line rewrite."""
+    content = textwrap.dedent(
+        f"""\
+        spec:
+          inputs:
+            env:
+              default: prod
+        ---
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.0"
+        include:
+          - project: eric/weisssrv-lib
+            ref: {MARKER}
+            file: /ci/lint/yaml-lint.yml
+        """
+    )
+    p = _write(tmp_path, content)
+    before = p.read_text()
+    with pytest.raises(SystemExit) as excinfo:
+        clp.fix(p)
+    assert "declares no `lib_ref:` input" in str(excinfo.value)
+    assert p.read_text() == before
+
+
 def test_fix_ignores_project_ref_pairs_outside_the_include_block(
     tmp_path: Path,
 ) -> None:
-    """--fix touches only `include:`, the one thing check() reads.
-
-    A job carrying `project:`/`ref:` variables is not an include entry, and the
-    post-fix check() would not catch an edit to it either.
-    """
+    """--fix touches only `include:`, the one thing check() reads."""
     content = textwrap.dedent(
         """\
         variables:
@@ -282,9 +417,9 @@ def test_fix_ignores_project_ref_pairs_outside_the_include_block(
         """
     )
     p = _write(tmp_path, content)
-    assert clp.fix(p) == 1  # the include entry only
+    clp.fix(p)
     doc = clp.load_ci(p)
-    assert doc["include"][0]["ref"] == "v0.5.0"
+    assert doc["include"][0]["ref"] == MARKER
     assert doc["mirror-job"]["variables"]["ref"] == "v0.1.1"
     assert clp.check(p) == []
 
@@ -304,8 +439,8 @@ def test_fix_rewrites_an_empty_ref_without_corrupting_the_line(
         """
     )
     p = _write(tmp_path, content)
-    assert clp.fix(p) == 1
-    assert "    ref: v0.5.0\n" in p.read_text()
+    clp.fix(p)
+    assert f"    ref: {MARKER}\n" in p.read_text()
     assert clp.check(p) == []
 
 
@@ -316,13 +451,13 @@ def test_fix_preserves_a_trailing_comment_on_the_ref_line(tmp_path: Path) -> Non
           WEISSSRV_LIB_REF: "v0.5.0"
         include:
           - project: eric/weisssrv-lib
-            ref: v0.3.2  # pinned deliberately
+            ref: v0.3.2  # one of the lint templates
             file: /ci/lint/yaml-lint.yml
         """
     )
     p = _write(tmp_path, content)
-    assert clp.fix(p) == 1
-    assert "ref: v0.5.0  # pinned deliberately" in p.read_text()
+    clp.fix(p)
+    assert f"ref: {MARKER}  # one of the lint templates" in p.read_text()
 
 
 def test_fix_leaves_a_nested_inputs_ref_alone(tmp_path: Path) -> None:
@@ -340,75 +475,10 @@ def test_fix_leaves_a_nested_inputs_ref_alone(tmp_path: Path) -> None:
         """
     )
     p = _write(tmp_path, content)
-    assert clp.fix(p) == 1
+    clp.fix(p)
     doc = clp.load_ci(p)
-    assert doc["include"][0]["ref"] == "v0.5.0"
+    assert doc["include"][0]["ref"] == MARKER
     assert doc["include"][0]["inputs"]["ref"] == "some-user-value"
-
-
-def test_fix_does_not_treat_a_hash_inside_the_ref_as_a_comment(
-    tmp_path: Path,
-) -> None:
-    """In YAML a `#` opens a comment only when whitespace precedes it."""
-    content = textwrap.dedent(
-        """\
-        variables:
-          WEISSSRV_LIB_REF: "v0.5.0"
-        include:
-          - project: eric/weisssrv-lib
-            ref: v1.0#rc1
-            file: /ci/lint/yaml-lint.yml
-        """
-    )
-    p = _write(tmp_path, content)
-    assert clp.fix(p) == 1
-    # The whole old value is replaced — no fragment survives as a comment.
-    assert "#rc1" not in p.read_text()
-    assert clp.check(p) == []
-
-
-def test_fix_replaces_a_quoted_ref_value(tmp_path: Path) -> None:
-    content = textwrap.dedent(
-        """\
-        variables:
-          WEISSSRV_LIB_REF: "v0.5.0"
-        include:
-          - project: eric/weisssrv-lib
-            ref: "v0.3.2"
-            file: /ci/lint/yaml-lint.yml
-        """
-    )
-    p = _write(tmp_path, content)
-    assert clp.fix(p) == 1
-    assert clp.load_ci(p)["include"][0]["ref"] == "v0.5.0"
-    assert clp.check(p) == []
-
-
-def test_fix_ignores_a_nested_inputs_project_and_ref_pair(tmp_path: Path) -> None:
-    """`inputs:` may carry `project` and `ref` of its own - they are inputs.
-
-    check() reads only the direct include mappings, so --fix must not rewrite
-    them.
-    """
-    content = textwrap.dedent(
-        """\
-        variables:
-          WEISSSRV_LIB_REF: "v0.5.0"
-        include:
-          - project: eric/weisssrv-lib
-            ref: v0.3.2
-            file: /ci/thing.yml
-            inputs:
-              project: eric/weisssrv-lib
-              ref: user-supplied
-        """
-    )
-    p = _write(tmp_path, content)
-    assert clp.fix(p) == 1
-    entry = clp.load_ci(p)["include"][0]
-    assert entry["ref"] == "v0.5.0"
-    assert entry["inputs"]["ref"] == "user-supplied"
-    assert clp.check(p) == []
 
 
 def test_fix_refuses_a_block_scalar_ref_and_leaves_the_file_alone(
@@ -438,17 +508,32 @@ def test_fix_refuses_a_block_scalar_ref_and_leaves_the_file_alone(
     assert p.read_text() == before
 
 
-def test_fix_refuses_a_non_tag_source_value(tmp_path: Path) -> None:
-    """A source value YAML would retype (`on`) is rejected before anything is
-    written - by the release-tag validation, since `on` is not vX.Y.Z.
-    """
+def test_fix_refuses_a_flow_style_entry_it_cannot_rewrite(tmp_path: Path) -> None:
+    """The line rewriter only understands block style; say so, do not return 0."""
     content = textwrap.dedent(
         """\
         variables:
-          WEISSSRV_LIB_REF: "on"
+          WEISSSRV_LIB_REF: "v0.5.2"
+        include:
+          - {project: eric/weisssrv-lib, ref: v0.3.2, file: /ci/lint/yaml-lint.yml}
+        """
+    )
+    p = _write(tmp_path, content)
+    before = p.read_text()
+    with pytest.raises(SystemExit) as excinfo:
+        clp.fix(p)
+    assert "did not land cleanly" in str(excinfo.value)
+    assert p.read_text() == before
+
+
+def test_fix_refuses_an_entry_with_no_ref_to_rewrite(tmp_path: Path) -> None:
+    """`--fix` cannot ADD a missing pin; reporting 0 would hide that."""
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.2"
         include:
           - project: eric/weisssrv-lib
-            ref: v0.3.2
             file: /ci/lint/yaml-lint.yml
         """
     )
@@ -456,24 +541,8 @@ def test_fix_refuses_a_non_tag_source_value(tmp_path: Path) -> None:
     before = p.read_text()
     with pytest.raises(SystemExit) as excinfo:
         clp.fix(p)
-    assert "must be a release tag" in str(excinfo.value)
+    assert "did not land cleanly" in str(excinfo.value)
     assert p.read_text() == before
-
-
-def test_check_rejects_a_tag_with_a_trailing_newline(tmp_path: Path) -> None:
-    """Python's `$` matches before a trailing newline; `fullmatch` does not."""
-    content = textwrap.dedent(
-        """\
-        variables:
-          WEISSSRV_LIB_REF: "v0.5.1\\n"
-        include:
-          - project: eric/weisssrv-lib
-            ref: "v0.5.1\\n"
-            file: /ci/lint/yaml-lint.yml
-        """
-    )
-    problems = clp.check(_write(tmp_path, content))
-    assert any("not a release tag" in p for p in problems)
 
 
 def test_fix_ignores_a_ref_reached_through_an_alias_outside_include(
@@ -498,65 +567,156 @@ def test_fix_ignores_a_ref_reached_through_an_alias_outside_include(
     )
     p = _write(tmp_path, content)
     before = p.read_text()
-    # Nothing inside include: to rewrite — and rather than report that as a
-    # clean 0, fix() says it cannot repair the file and leaves it alone.
     with pytest.raises(SystemExit) as excinfo:
         clp.fix(p)
     assert "anchor or alias" in str(excinfo.value)
     assert p.read_text() == before  # the anchor is untouched
 
 
-def test_fix_refuses_a_flow_style_entry_it_cannot_rewrite(tmp_path: Path) -> None:
-    """The line rewriter only understands block style; say so, do not return 0."""
-    content = textwrap.dedent(
-        """\
-        variables:
-          WEISSSRV_LIB_REF: "v0.5.2"
-        include:
-          - {project: eric/weisssrv-lib, ref: v0.3.2, file: /ci/lint/yaml-lint.yml}
-        """
-    )
-    p = _write(tmp_path, content)
-    before = p.read_text()
-    with pytest.raises(SystemExit) as excinfo:
-        clp.fix(p)
-    assert "could not repair" in str(excinfo.value)
-    assert p.read_text() == before
+def test_fix_refuses_an_alias_anchored_inside_the_include_block(
+    tmp_path: Path,
+) -> None:
+    """An alias anchored inside `include:` passes the bounds check.
 
-
-def test_fix_refuses_an_entry_with_no_ref_to_rewrite(tmp_path: Path) -> None:
-    """`--fix` cannot ADD a missing pin; reporting 0 would hide that."""
+    It still points the rewrite at another entry's nested config, so the whole
+    block is refused rather than edited.
+    """
     content = textwrap.dedent(
         """\
         variables:
           WEISSSRV_LIB_REF: "v0.5.2"
         include:
           - project: eric/weisssrv-lib
-            file: /ci/lint/yaml-lint.yml
+            file: /ci/a.yml
+            inputs:
+              shared: &shared
+                ref: v0.0.1
+          - project: eric/weisssrv-lib
+            ref: v0.3.2
+            file: /ci/b.yml
+            inputs:
+              reused: *shared
         """
     )
     p = _write(tmp_path, content)
     before = p.read_text()
     with pytest.raises(SystemExit) as excinfo:
         clp.fix(p)
-    assert "could not repair" in str(excinfo.value)
+    assert "anchor or alias" in str(excinfo.value)
+    assert p.read_text() == before
+
+
+def test_fix_refuses_an_anchor_defined_inside_the_include_block(
+    tmp_path: Path,
+) -> None:
+    """An anchor defined here can be referenced from outside the block, so the
+    block is refused even though no alias appears within it.
+    """
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.2"
+        include:
+          - &entry
+            project: eric/weisssrv-lib
+            ref: v0.3.2
+            file: /ci/lint/yaml-lint.yml
+        elsewhere:
+          copy: *entry
+        """
+    )
+    p = _write(tmp_path, content)
+    before = p.read_text()
+    with pytest.raises(SystemExit) as excinfo:
+        clp.fix(p)
+    assert "anchor or alias" in str(excinfo.value)
+    assert p.read_text() == before
+
+
+def test_fix_still_works_with_an_alias_outside_the_include_block(
+    tmp_path: Path,
+) -> None:
+    """An alias elsewhere in the file must not disable --fix."""
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.2"
+        .base: &base
+          image: python:3.13
+        some-job:
+          <<: *base
+          script: ["true"]
+        include:
+          - project: eric/weisssrv-lib
+            ref: v0.3.2
+            file: /ci/lint/yaml-lint.yml
+        """
+    )
+    p = _write(tmp_path, content)
+    assert clp.fix(p) > 0
+    assert clp.check(p) == []
+
+
+def test_fix_refuses_duplicate_top_level_include_keys(tmp_path: Path) -> None:
+    """check() reads the LAST duplicate; rewriting the first would disagree."""
+    content = textwrap.dedent(
+        """\
+        variables:
+          WEISSSRV_LIB_REF: "v0.5.2"
+        include:
+          - project: eric/weisssrv-lib
+            ref: v0.1.1
+            file: /ci/ignored.yml
+        include:
+          - project: eric/weisssrv-lib
+            ref: v0.3.2
+            file: /ci/live.yml
+        """
+    )
+    p = _write(tmp_path, content)
+    before = p.read_text()
+    with pytest.raises(SystemExit) as excinfo:
+        clp.fix(p)
+    # The message matters: a different SystemExit would let this pass.
+    assert "multiple top-level `include:`" in str(excinfo.value)
     assert p.read_text() == before
 
 
 def test_check_names_an_entry_that_has_no_file_key(tmp_path: Path) -> None:
     """Drift on a file-less entry must not be reported against a bare None."""
+    content = _ci(refs=(MARKER, MARKER)).replace(
+        "    file: /ci/lint/docs-link-check.yml\n", ""
+    ).replace(f"    ref: {MARKER}\n", "    ref: v0.3.2\n", 1)
+    problems = clp.check(_write(tmp_path, content))
+    assert problems and "<entry with no file:>" in problems[0]
+
+
+def test_check_reports_drift_on_an_entry_with_an_empty_file_list(
+    tmp_path: Path,
+) -> None:
+    """`file: []` must not collapse the report loop and hide a literal pin."""
     content = textwrap.dedent(
         """\
+        spec:
+          inputs:
+            lib_ref:
+              default: v0.5.2
+        ---
         variables:
-          WEISSSRV_LIB_REF: "v0.5.2"
+          WEISSSRV_LIB_REF: $[[ inputs.lib_ref ]]
         include:
           - project: eric/weisssrv-lib
             ref: v0.3.2
+            file: []
         """
     )
     problems = clp.check(_write(tmp_path, content))
-    assert problems and "None pins" not in problems[0]
-    assert "<entry with no file:>" in problems[0]
+    assert problems, "a literal pin passed the gate because file: was empty"
+    assert "empty file: list" in problems[0]
+
+
+# ---------------------------------------------------------------------------
+# CLI surface: --print, --bump, and the operator-error exits.
 
 
 class TestCliErrors:
@@ -594,80 +754,55 @@ class TestCliErrors:
         assert e.value.code == 0
 
 
-def test_fix_refuses_an_alias_anchored_inside_the_include_block(
-    tmp_path: Path,
-) -> None:
-    """An alias anchored inside `include:` passes the bounds check.
-
-    It still points the rewrite at another entry's nested config, so the whole
-    block is refused rather than edited.
-    """
-    content = textwrap.dedent(
-        """\
-        variables:
-          WEISSSRV_LIB_REF: "v0.5.2"
-        include:
-          - project: eric/weisssrv-lib
-            file: /ci/a.yml
-            inputs:
-              shared: &shared
-                ref: v0.0.1
-          - project: eric/weisssrv-lib
-            ref: v0.3.2
-            file: /ci/b.yml
-            inputs:
-              reused: *shared
-        """
-    )
-    p = _write(tmp_path, content)
-    before = p.read_text()
-    with pytest.raises(SystemExit) as excinfo:
-        clp.fix(p)
-    assert "anchor or alias" in str(excinfo.value)
-    assert p.read_text() == before
+def test_print_writes_the_declared_ref_and_nothing_else(tmp_path, capsys) -> None:
+    """A Taskfile reads this into an image tag, so stdout is the bare tag."""
+    ci = _write(tmp_path, _ci("v0.7.1"))
+    assert clp.main(["--ci-file", str(ci), "--print"]) == 0
+    out = capsys.readouterr()
+    assert out.out == "v0.7.1\n"
+    assert out.err == ""
 
 
-def test_fix_still_works_with_an_alias_outside_the_include_block(
-    tmp_path: Path,
-) -> None:
-    """An alias elsewhere in the file must not disable --fix."""
-    content = textwrap.dedent(
-        """\
-        variables:
-          WEISSSRV_LIB_REF: "v0.5.2"
-        .base: &base
-          image: python:3.13
-        some-job:
-          <<: *base
-          script: ["true"]
-        include:
-          - project: eric/weisssrv-lib
-            ref: v0.3.2
-            file: /ci/lint/yaml-lint.yml
-        """
-    )
-    p = _write(tmp_path, content)
-    assert clp.fix(p) == 1
-    assert clp.check(p) == []
+def test_print_refuses_a_file_declaring_no_tag(tmp_path, capsys) -> None:
+    """Exporting a garbage image tag is worse than failing the command."""
+    ci = _write(tmp_path, _literal_ci())
+    assert clp.main(["--ci-file", str(ci), "--print"]) == 2
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert "not a release tag" in out.err
 
 
-def test_check_reports_drift_on_an_entry_with_an_empty_file_list(
-    tmp_path: Path,
-) -> None:
-    """`file: []` must not collapse the report loop and hide a drifted pin."""
-    content = textwrap.dedent(
-        """\
-        variables:
-          WEISSSRV_LIB_REF: "v0.5.2"
-        include:
-          - project: eric/weisssrv-lib
-            ref: v0.3.2
-            file: []
-        """
-    )
-    problems = clp.check(_write(tmp_path, content))
-    assert problems, "a drifted pin passed the gate because file: was empty"
-    assert "v0.3.2" in problems[0]
+def test_bump_moves_every_pin_from_one_command(tmp_path, capsys) -> None:
+    ci = _write(tmp_path, _ci("v0.4.0"))
+    _write_requirements(tmp_path, _requirements("v0.4.0"))
+    assert clp.main(["--ci-file", str(ci), "--bump", "v0.5.0"]) == 0
+    assert clp.declared_ref(ci.read_text()) == "v0.5.0"
+    assert clp.check(ci) == []
+    assert clp.check_requirements(ci, "v0.5.0") == []
+    assert "rewrote" in capsys.readouterr().out
+
+
+def test_bump_rejects_a_branch(tmp_path, capsys) -> None:
+    ci = _write(tmp_path, _ci("v0.4.0"))
+    before = ci.read_text()
+    assert clp.main(["--ci-file", str(ci), "--bump", "main"]) == 2
+    assert "release tag" in capsys.readouterr().err
+    assert ci.read_text() == before
+
+
+def test_fix_from_the_cli_converts_and_reports(tmp_path, capsys) -> None:
+    ci = _write(tmp_path, _literal_ci("v0.4.0", ("v0.4.0", "v0.3.2")))
+    _write_requirements(tmp_path, _requirements("v0.3.2"))
+    assert clp.main(["--ci-file", str(ci), "--fix"]) == 0
+    assert clp.check(ci) == []
+    assert clp.check_requirements(ci, "v0.4.0") == []
+    assert "rewrote" in capsys.readouterr().out
+
+
+def test_a_clean_tree_reports_what_it_inspected(tmp_path, capsys) -> None:
+    ci = _write(tmp_path, _ci())
+    assert clp.main(["--ci-file", str(ci)]) == 0
+    assert "3 template(s) and 0 site(s) pinned at v0.4.0" in capsys.readouterr().out
 
 
 def test_non_mapping_document_is_an_operator_error(tmp_path, capsys) -> None:
@@ -679,33 +814,6 @@ def test_non_mapping_document_is_an_operator_error(tmp_path, capsys) -> None:
     err = capsys.readouterr().err
     assert "not valid YAML" in err
     assert "Traceback" not in err
-
-
-def test_fix_refuses_an_anchor_defined_inside_the_include_block(
-    tmp_path: Path,
-) -> None:
-    """An anchor defined here can be referenced from outside the block, so the
-    block is refused even though no alias appears within it.
-    """
-    content = textwrap.dedent(
-        """\
-        variables:
-          WEISSSRV_LIB_REF: "v0.5.2"
-        include:
-          - &entry
-            project: eric/weisssrv-lib
-            ref: v0.3.2
-            file: /ci/lint/yaml-lint.yml
-        elsewhere:
-          copy: *entry
-        """
-    )
-    p = _write(tmp_path, content)
-    before = p.read_text()
-    with pytest.raises(SystemExit) as excinfo:
-        clp.fix(p)
-    assert "anchor or alias" in str(excinfo.value)
-    assert p.read_text() == before
 
 
 def test_non_mapping_variables_is_an_operator_error(tmp_path, capsys) -> None:
@@ -728,11 +836,7 @@ def test_non_mapping_variables_is_an_operator_error(tmp_path, capsys) -> None:
 def test_a_file_removed_after_the_guard_starts_still_exits_two(
     tmp_path, capsys
 ) -> None:
-    """The handler wraps the real read, not a preflight.
-
-    A preflight only shows the file was readable a moment ago; deleting between
-    the two proves the guard covers the read that matters.
-    """
+    """The handler wraps the real read, not a preflight."""
     p = tmp_path / ".gitlab-ci.yml"
     p.write_text("include: []\n")
     p.unlink()
@@ -759,61 +863,6 @@ def test_a_string_include_is_reported_not_iterated_character_wise(
     problems = clp.check(p)
     assert len(problems) == 1
     assert "no `eric/weisssrv-lib` include entries found" in problems[0]
-
-
-def test_fix_refuses_duplicate_top_level_include_keys(tmp_path: Path) -> None:
-    """check() reads the LAST duplicate; rewriting the first would disagree.
-
-    An earlier `include:` is ignored by both GitLab and check(), so editing it
-    would change a dead block and still pass verification.
-    """
-    content = textwrap.dedent(
-        """\
-        variables:
-          WEISSSRV_LIB_REF: "v0.5.2"
-        include:
-          - project: eric/weisssrv-lib
-            ref: v0.1.1
-            file: /ci/ignored.yml
-        include:
-          - project: eric/weisssrv-lib
-            ref: v0.3.2
-            file: /ci/live.yml
-        """
-    )
-    p = _write(tmp_path, content)
-    before = p.read_text()
-    with pytest.raises(SystemExit) as excinfo:
-        clp.fix(p)
-    # The message matters: a different SystemExit would let this pass.
-    assert "multiple top-level `include:`" in str(excinfo.value)
-    assert p.read_text() == before
-
-
-def test_fix_succeeds_when_a_later_job_uses_an_alias(tmp_path: Path) -> None:
-    """An alias after the include block is outside its span.
-
-    The bound is the include node's own end mark; a wider one would drag this
-    job's `<<: *base` in and refuse a safe rewrite.
-    """
-    content = textwrap.dedent(
-        """\
-        variables:
-          WEISSSRV_LIB_REF: "v0.5.2"
-        .base: &base
-          image: python:3.13
-        include:
-          - project: eric/weisssrv-lib
-            ref: v0.3.2
-            file: /ci/lint/yaml-lint.yml
-        some-job:
-          <<: *base
-          script: ["true"]
-        """
-    )
-    p = _write(tmp_path, content)
-    assert clp.fix(p) == 1
-    assert clp.check(p) == []
 
 
 # ---------------------------------------------------------------------------
@@ -864,6 +913,14 @@ def test_requirements_drift_is_reported(tmp_path: Path) -> None:
     assert "v0.3.2" in problems[0] and "v0.4.0" in problems[0]
 
 
+def test_requirements_drift_reds_the_gate_from_the_cli(tmp_path, capsys) -> None:
+    """The declared ref reaches the collection half, not just the includes."""
+    ci = _write(tmp_path, _ci("v0.4.0"))
+    _write_requirements(tmp_path, _requirements("v0.3.2"))
+    assert clp.main(["--ci-file", str(ci)]) == 1
+    assert "collection pins version 'v0.3.2'" in capsys.readouterr().err
+
+
 def test_no_requirements_file_is_a_noop(tmp_path: Path) -> None:
     ci = _write(tmp_path, _ci())  # no ansible/requirements.yml written
     assert clp.check_requirements(ci, "v0.4.0") == []
@@ -891,21 +948,6 @@ def test_fix_requirements_syncs_only_the_lib_collection_and_is_idempotent(
     assert "version: v0.4.0" in text            # library synced
     assert 'version: ">=2.1.0,<3.0.0"' in text  # unrelated collection untouched
     assert clp.fix_requirements(ci, "v0.4.0") == 0  # nothing left to change
-
-
-def test_run_fix_syncs_both_the_includes_and_requirements(tmp_path: Path) -> None:
-    """The CLI path (_run --fix) syncs the include refs AND requirements.yml from
-    the one source, and re-verifies both before reporting success."""
-    import argparse
-
-    ci = _write(tmp_path, _ci(refs=("v0.4.0", "v0.3.2")))
-    _write_requirements(tmp_path, _requirements("v0.3.2"))
-    args = argparse.Namespace(
-        ci_file=ci, project=clp.LIB_PROJECT, ref_var=clp.REF_VAR, fix=True
-    )
-    assert clp._run(args) == 0
-    assert clp.check(ci) == []
-    assert clp.check_requirements(ci, "v0.4.0") == []
 
 
 def test_requirements_matches_on_the_repository_name(tmp_path: Path) -> None:
@@ -1004,3 +1046,252 @@ def test_the_same_repository_on_another_host_is_still_the_library(
     assert len(problems) == 1
     assert "v0.3.2" in problems[0]
     assert clp.check_requirements(ci, "v0.3.2") == []
+
+
+# ---------------------------------------------------------------------------
+# The per-repo site list: every OTHER file that repeats the tag.
+
+
+_SITES = textwrap.dedent(
+    """\
+    ---
+    sites:
+      - path: terraform/*/main.tf
+        pattern: 'weisssrv-lib\\.git//terraform/modules/[a-z-]+\\?ref=(v\\d+\\.\\d+\\.\\d+)'
+    """
+)
+
+
+def _write_sites(tmp_path: Path, content: str = _SITES) -> Path:
+    path = tmp_path / "scripts" / "lib-ref-sites.yml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return path
+
+
+def _write_module(tmp_path: Path, root: str, ref: str, module: str = "cloudflare-zone"):
+    path = tmp_path / "terraform" / root / "main.tf"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        'module "x" {\n  source = "git::https://git.ericsweiss.com/eric/'
+        f'weisssrv-lib.git//terraform/modules/{module}?ref={ref}"\n}}\n'
+    )
+    return path
+
+
+def test_no_site_list_is_a_noop(tmp_path: Path) -> None:
+    ci = _write(tmp_path, _ci())
+    assert clp.load_sites(ci) == []
+    assert clp.check_sites(ci, "v0.4.0") == []
+    assert clp.fix_sites(ci, "v0.4.0") == 0
+
+
+def test_a_matching_site_passes(tmp_path: Path) -> None:
+    ci = _write(tmp_path, _ci())
+    _write_sites(tmp_path)
+    _write_module(tmp_path, "cloudflare", "v0.4.0")
+    assert clp.check_sites(ci, "v0.4.0") == []
+
+
+def test_site_drift_is_reported_with_its_line(tmp_path: Path) -> None:
+    ci = _write(tmp_path, _ci())
+    _write_sites(tmp_path)
+    _write_module(tmp_path, "cloudflare", "v0.4.0")
+    _write_module(tmp_path, "tailscale", "v0.3.2", module="tailscale-acl")
+    problems = clp.check_sites(ci, "v0.4.0")
+    assert len(problems) == 1
+    assert "tailscale/main.tf:2" in problems[0]
+    assert "v0.3.2" in problems[0]
+
+
+def test_site_drift_reds_the_gate_from_the_cli(tmp_path, capsys) -> None:
+    ci = _write(tmp_path, _ci())
+    _write_sites(tmp_path)
+    _write_module(tmp_path, "cloudflare", "v0.3.2")
+    assert clp.main(["--ci-file", str(ci)]) == 1
+    assert "pins 'v0.3.2'" in capsys.readouterr().err
+
+
+def test_a_site_that_matches_nothing_is_reported(tmp_path: Path) -> None:
+    """A stale glob or pattern would otherwise pass by inspecting nothing."""
+    ci = _write(tmp_path, _ci())
+    _write_sites(tmp_path)
+    problems = clp.check_sites(ci, "v0.4.0")
+    assert len(problems) == 1
+    assert "matched no ref" in problems[0]
+
+
+def test_fix_syncs_every_site(tmp_path: Path) -> None:
+    ci = _write(tmp_path, _ci())
+    _write_sites(tmp_path)
+    _write_module(tmp_path, "cloudflare", "v0.3.2")
+    _write_module(tmp_path, "tailscale", "v0.1.0", module="tailscale-acl")
+    assert clp.fix_sites(ci, "v0.4.0") == 2
+    assert clp.check_sites(ci, "v0.4.0") == []
+    assert clp.fix_sites(ci, "v0.4.0") == 0
+
+
+def test_fix_refuses_a_pattern_whose_group_did_not_capture(tmp_path: Path) -> None:
+    """An optional group matches with bounds of -1; slicing on it would corrupt."""
+    ci = _write(tmp_path, _ci())
+    _write_sites(
+        tmp_path,
+        "sites:\n  - path: terraform/*/main.tf\n"
+        "    pattern: 'weisssrv-lib\\.git//terraform/modules/[a-z-]+\\?ref=(v\\d+\\.\\d+\\.\\d+)?'\n",
+    )
+    path = _write_module(tmp_path, "cloudflare", "v0.3.2")
+    path.write_text(path.read_text().replace("?ref=v0.3.2", "?ref="))
+    before = path.read_text()
+    with pytest.raises(clp.OperatorError, match="without a captured ref"):
+        clp.fix_sites(ci, "v0.4.0")
+    assert path.read_text() == before
+
+
+def test_fix_leaves_an_unrelated_version_in_the_same_file_alone(
+    tmp_path: Path,
+) -> None:
+    """The pattern's capture group bounds the rewrite, not the whole match."""
+    ci = _write(tmp_path, _ci())
+    _write_sites(tmp_path)
+    path = _write_module(tmp_path, "cloudflare", "v0.3.2")
+    path.write_text(path.read_text() + 'provider "x" { version = "v9.9.9" }\n')
+    clp.fix_sites(ci, "v0.4.0")
+    assert "v9.9.9" in path.read_text()
+    assert clp.check_sites(ci, "v0.4.0") == []
+
+
+def test_bump_moves_the_sites_too(tmp_path, capsys) -> None:
+    ci = _write(tmp_path, _ci("v0.4.0"))
+    _write_requirements(tmp_path, _requirements("v0.4.0"))
+    _write_sites(tmp_path)
+    _write_module(tmp_path, "cloudflare", "v0.4.0")
+    assert clp.main(["--ci-file", str(ci), "--bump", "v0.6.0"]) == 0
+    assert clp.check_sites(ci, "v0.6.0") == []
+    assert "?ref=v0.6.0" in (tmp_path / "terraform/cloudflare/main.tf").read_text()
+
+
+def test_a_site_list_counted_in_the_success_line(tmp_path, capsys) -> None:
+    ci = _write(tmp_path, _ci())
+    _write_sites(tmp_path)
+    _write_module(tmp_path, "cloudflare", "v0.4.0")
+    assert clp.main(["--ci-file", str(ci)]) == 0
+    assert "1 site(s) pinned at v0.4.0" in capsys.readouterr().out
+
+
+class TestSiteFilesStayInTheRepo:
+    """A site glob reads and rewrites files in the repository, and nothing else.
+
+    `--fix` writes to every match, so a link out of the tree is refused before
+    it is opened rather than followed.
+    """
+
+    def _outside(self, tmp_path: Path) -> Path:
+        outside = tmp_path.parent / "outside"
+        outside.mkdir(exist_ok=True)
+        target = outside / "main.tf"
+        target.write_text(
+            'module "x" {\n  source = "git::https://git.ericsweiss.com/eric/'
+            'weisssrv-lib.git//terraform/modules/cloudflare-zone?ref=v0.1.0"\n}\n'
+        )
+        return target
+
+    def test_fix_refuses_a_symlinked_match_and_leaves_the_target_alone(
+        self, tmp_path, capsys
+    ) -> None:
+        target = self._outside(tmp_path)
+        ci = _write(tmp_path, _ci())
+        _write_sites(tmp_path)
+        link = tmp_path / "terraform" / "cloudflare" / "main.tf"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
+        assert clp.main(["--ci-file", str(ci), "--fix"]) == 2
+        err = capsys.readouterr().err
+        assert "matched the symlink" in err and str(link) in err
+        assert "?ref=v0.1.0" in target.read_text()
+
+    def test_check_refuses_a_symlinked_match_too(self, tmp_path, capsys) -> None:
+        target = self._outside(tmp_path)
+        ci = _write(tmp_path, _ci())
+        _write_sites(tmp_path)
+        link = tmp_path / "terraform" / "cloudflare" / "main.tf"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
+        assert clp.main(["--ci-file", str(ci)]) == 2
+        assert "matched the symlink" in capsys.readouterr().err
+
+    def test_a_match_a_linked_directory_carries_outside_is_refused(
+        self, tmp_path, capsys
+    ) -> None:
+        """The leaf is a real file: only resolving the whole path finds the escape."""
+        target = self._outside(tmp_path)
+        ci = _write(tmp_path, _ci())
+        _write_sites(tmp_path)
+        (tmp_path / "terraform").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "terraform" / "cloudflare").symlink_to(
+            target.parent, target_is_directory=True
+        )
+        assert clp.main(["--ci-file", str(ci), "--fix"]) == 2
+        err = capsys.readouterr().err
+        assert "resolves to" in err and str(target.parent) in err
+        assert "?ref=v0.1.0" in target.read_text()
+
+    def test_a_real_file_in_the_repo_still_passes(self, tmp_path) -> None:
+        ci = _write(tmp_path, _ci())
+        _write_sites(tmp_path)
+        _write_module(tmp_path, "cloudflare", "v0.3.2")
+        assert clp.fix_sites(ci, "v0.4.0") == 1
+        assert clp.check_sites(ci, "v0.4.0") == []
+
+
+class TestSiteListSchema:
+    """A malformed site list is an operator error (2), never a silent no-op."""
+
+    def _run(self, tmp_path, body, capsys):
+        ci = _write(tmp_path, _ci())
+        _write_sites(tmp_path, body)
+        rc = clp.main(["--ci-file", str(ci)])
+        return rc, capsys.readouterr().err
+
+    def test_a_non_mapping_document_exits_two(self, tmp_path, capsys):
+        rc, err = self._run(tmp_path, "- a\n- b\n", capsys)
+        assert rc == 2 and "mapping with `sites:`" in err
+
+    def test_a_non_list_sites_key_exits_two(self, tmp_path, capsys):
+        rc, err = self._run(tmp_path, "---\nsites: nope\n", capsys)
+        assert rc == 2 and "must be a list" in err
+
+    def test_an_entry_without_a_pattern_exits_two(self, tmp_path, capsys):
+        rc, err = self._run(tmp_path, "---\nsites:\n  - path: a/*.tf\n", capsys)
+        assert rc == 2 and "`pattern:` must be a non-empty regex" in err
+
+    def test_an_invalid_regex_exits_two(self, tmp_path, capsys):
+        rc, err = self._run(
+            tmp_path, "---\nsites:\n  - path: a/*.tf\n    pattern: '(unclosed'\n", capsys
+        )
+        assert rc == 2 and "not a valid regex" in err
+
+    def test_a_pattern_without_exactly_one_group_exits_two(self, tmp_path, capsys):
+        rc, err = self._run(
+            tmp_path, "---\nsites:\n  - path: a/*.tf\n    pattern: 'ref=v1'\n", capsys
+        )
+        assert rc == 2 and "exactly one capture group" in err
+
+    def test_a_pattern_with_two_groups_exits_two(self, tmp_path, capsys):
+        rc, err = self._run(
+            tmp_path,
+            "---\nsites:\n  - path: a/*.tf\n    pattern: '(a)(b)'\n",
+            capsys,
+        )
+        assert rc == 2 and "exactly one capture group" in err
+
+    def test_a_glob_escaping_the_repo_exits_two(self, tmp_path, capsys):
+        rc, err = self._run(
+            tmp_path,
+            "---\nsites:\n  - path: ../elsewhere/*.tf\n    pattern: 'ref=(v1)'\n",
+            capsys,
+        )
+        assert rc == 2 and "escapes it" in err
+
+    def test_an_empty_document_is_a_noop(self, tmp_path, capsys):
+        rc, _ = self._run(tmp_path, "", capsys)
+        assert rc == 0

@@ -142,10 +142,9 @@ def test_registered_copies_are_reconciled(registered) -> None:
     if at_pin and _run_gate().returncode == 0:
         hint = (
             f"These copies ARE current with the library working tree — they match it "
-            f"exactly — but WEISSSRV_LIB_REF still pins {ref}, and the pin is what the "
-            f"pipeline installs. Resolve it by bumping the pin (WEISSSRV_LIB_REF, "
-            f"ansible/requirements.yml, Taskfile.yml's LIB_REF and the terraform module "
-            f"?ref= pins) once a tag containing the change exists — not by re-vendoring "
+            f"exactly — but the declared lib_ref still pins {ref}, and the pin is what "
+            f"the pipeline installs. Resolve it with `scripts/check-lib-pins.py --bump "
+            f"vX.Y.Z` once a tag containing the change exists — not by re-vendoring "
             f"backwards."
         )
     raise AssertionError(f"{result.stdout}{result.stderr}\n{hint}")

@@ -22,7 +22,7 @@ next to `weisssrv-lib`, `weisssrv-app-template` and a generated cluster, and
 | anything under `template/kubernetes/` | [template/kubernetes/README.md.jinja](template/kubernetes/README.md.jinja) — manifests must NOT interpolate answers; site values arrive through the `cluster-config` ConfigMap |
 | CI runner `concurrent` or either ResourceQuota | [partials/ci-sizing.jinja](partials/ci-sizing.jinja) — the capacity model for BOTH tiers, imported by all four manifests; `tests/test_render.py` § CI runner sizing holds it to the reference cluster |
 | a backend seam (secrets / dns / git-CI / vpn / sso / gpu / gateway / storage / ingress) | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § Backend seams, and weisssrv-lib `docs/EXTENSIBILITY.md` |
-| the library pin | [docs/VERSIONING.md](docs/VERSIONING.md) § Which library release the template is validated against and [docs/CI.md](docs/CI.md) § Library pin — `copier.yml`'s `lib_ref` default and this repo's `include:` refs move in one MR |
+| the library pin | [docs/VERSIONING.md](docs/VERSIONING.md) § Which library release the template is validated against and [docs/CI.md](docs/CI.md) § Library pin — `copier.yml`'s `lib_ref` default and this repo's own declared `lib_ref` input move in one MR, the latter with `scripts/check-lib-pins.py --bump vX.Y.Z` |
 | a vendored script under `scripts/` or `template/scripts/` | [docs/CI.md](docs/CI.md) — these are byte-identical copies of weisssrv-lib's; fix them THERE, tag, re-vendor. TWO manifests register them: `scripts/vendored-manifest.yml` for this repository's copies, `template/scripts/vendored-manifest.yml` for the ones every generated cluster carries — adding or moving a copy edits both |
 | CI | [docs/CI.md](docs/CI.md) |
 | operator prose | [docs/PRE-SETUP.md](docs/PRE-SETUP.md), [docs/SETUP.md](docs/SETUP.md), [docs/RUNBOOKS.md](docs/RUNBOOKS.md) |
@@ -31,8 +31,8 @@ next to `weisssrv-lib`, `weisssrv-app-template` and a generated cluster, and
 
 The commands are in [README.md § Local gates](README.md#local-gates). Run that
 whole set, including the ruff, shellcheck and link lines, and do not keep a
-second copy here. It is the CI lint and test stages, and both answer fixtures
-are part of it.
+second copy here. It is the CI lint and test stages, and all three
+renders are part of it.
 
 ## House rules
 
