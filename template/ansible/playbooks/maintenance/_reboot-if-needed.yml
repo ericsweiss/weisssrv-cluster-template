@@ -200,7 +200,7 @@
         prompt: |
           {{ inventory_hostname }} requires a reboot.
           ENTER to reboot now, or Ctrl+C then 'A' to abort and reboot manually later.
-      when: not (auto_reboot | default(false))
+      when: not (auto_reboot | default(false) | bool)
 
     # Never reboot an etcd-carrying host while kured is mid-reboot of another
     # server: that drops two of three members at once.

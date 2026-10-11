@@ -38,8 +38,8 @@ Roles are not edited here. The workflow is:
 
 Step 3 also carries the inventory changes a renamed variable needs. Every role
 variable is read through `| default(...)`, so a name left un-renamed does not
-raise. It silently takes the role default. The collection's `MIGRATING.md` has
-the old to new map.
+raise. It silently takes the role default. Each role's `README.md` in the
+collection is the variable surface.
 
 To iterate against an unmerged library change, point `version:` at a branch,
 re-run `ansible-galaxy install -r requirements.yml --force`, and set it back to

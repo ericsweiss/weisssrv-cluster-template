@@ -216,19 +216,20 @@ def test_an_undeclared_baseline_file_is_caught():
 
 # Gates, helper modules and shipped pytest suites this template owns outright.
 # A library twin under one of these names is unregistered, so byte-identity
-# holds it to nothing. docs/VERSIONING.md names the ones a pin bump reclaims.
+# holds it to nothing.
 TEMPLATE_OWNED = {
     "template/scripts/check-ansible-service-names.py",
     "template/scripts/check-cluster-literals.py.jinja",
     "template/scripts/check-collection-pin-trigger.py",
     "template/scripts/check-deploy-host-coverage.py",
+    "template/scripts/check-grafana-sidecar-init.py",
     "template/scripts/check-guest-endpoint-parity.py",
     "template/scripts/check-integration-matrix-coverage.py",
     "template/scripts/check-kustomization-coverage.py",
     "template/scripts/check-skill-refs.py",
     "template/scripts/check-tenant-wiring.py.jinja",
     "template/scripts/check-role-default-flips.py",
-    "template/scripts/check-unmanaged-secrets.py",
+    "template/scripts/check-unmanaged-secrets.py.jinja",
     "template/scripts/check-tenant-traefik-isolation.py.jinja",
     "template/scripts/check-upstream-rule-mirror.py",
     "template/scripts/deploy-preflight.py",

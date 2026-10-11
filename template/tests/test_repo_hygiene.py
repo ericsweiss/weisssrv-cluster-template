@@ -156,10 +156,6 @@ DOC_LINK_SETTERS = ("Taskfile.yml", "taskfiles/lint.yml", ".gitlab-ci.yml")
 DOC_LINK_SCRIPT = REPO / "scripts" / "check-doc-links.py"
 _ENV_NAME = re.compile(r"\bCHECK_DOC_LINKS_[A-Z_]+\b")
 
-# Variables set ahead of the library release that reads them: inert until the
-# pin moves, and each entry expires at that bump.
-PRESTAGED: set[str] = set()
-
 
 def doc_link_vars_the_script_ignores(setters: dict[str, str], script: str) -> set[str]:
     """CHECK_DOC_LINKS_* names a caller sets that the gate never reads."""
@@ -179,38 +175,11 @@ def test_every_doc_link_variable_the_callers_set_is_read_by_the_gate():
     }
     assert setters, "none of the Taskfile tree or .gitlab-ci.yml is present"
     assert DOC_LINK_SCRIPT.is_file(), "scripts/check-doc-links.py is missing"
-    unread = sorted(
-        doc_link_vars_the_script_ignores(setters, DOC_LINK_SCRIPT.read_text(encoding="utf-8"))
-        - PRESTAGED
-    )
+    script = DOC_LINK_SCRIPT.read_text(encoding="utf-8")
+    unread = sorted(doc_link_vars_the_script_ignores(setters, script))
     assert not unread, (
         f"these CHECK_DOC_LINKS_* variables are set but not implemented by the "
         f"vendored check-doc-links.py: {unread} — the arm they select does nothing"
-    )
-
-
-def test_prestaged_doc_link_variables_are_still_unimplemented():
-    """An entry outliving the bump that ships its arm hides the next omission."""
-    setters = {
-        name: (REPO / name).read_text(encoding="utf-8")
-        for name in DOC_LINK_SETTERS
-        if (REPO / name).is_file()
-    }
-    assert DOC_LINK_SCRIPT.is_file(), "scripts/check-doc-links.py is missing"
-    script = DOC_LINK_SCRIPT.read_text(encoding="utf-8")
-    landed = sorted(name for name in PRESTAGED if name in script)
-    assert not landed, (
-        f"the vendored check-doc-links.py now reads these: {landed} — drop them "
-        "from PRESTAGED; the set is a staging window, not configuration."
-    )
-    unset = sorted(
-        name
-        for name in PRESTAGED
-        if not any(name in text for text in setters.values())
-    )
-    assert not unset, (
-        f"no caller sets these: {unset} — drop them from PRESTAGED rather than "
-        "staging a variable nothing passes."
     )
 
 

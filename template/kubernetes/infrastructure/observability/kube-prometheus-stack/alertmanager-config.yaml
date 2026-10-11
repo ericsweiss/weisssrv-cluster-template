@@ -75,6 +75,33 @@ spec:
               equal:
                 - namespace
                 - name
+            # Same expr at a longer `for:`, or a tighter threshold on the same
+            # textfile series, so the generic alertname-equal rule cannot pair
+            # them. Each keys on instance: the metrics carry no namespace.
+            - source_matchers:
+                - alertname="CertExpiringSoonCritical"
+              target_matchers:
+                - alertname="CertExpiringSoon"
+              equal:
+                - instance
+            - source_matchers:
+                - alertname="CertRenewalFailedProlonged"
+              target_matchers:
+                - alertname="CertRenewalFailed"
+              equal:
+                - instance
+            - source_matchers:
+                - alertname="OffsiteBackupIncompleteProlonged"
+              target_matchers:
+                - alertname="OffsiteBackupIncomplete"
+              equal:
+                - instance
+            - source_matchers:
+                - alertname="ZfsEncryptedMountStuckCritical"
+              target_matchers:
+                - alertname="ZfsEncryptedMountStuck"
+              equal:
+                - instance
             # Different alertnames for the same failing integration, so the
             # generic pair cannot match them.
             - source_matchers:

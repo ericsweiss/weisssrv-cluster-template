@@ -22,7 +22,7 @@ next to `weisssrv-lib`, `weisssrv-app-template` and a generated cluster, and
 | anything under `template/kubernetes/` | [template/kubernetes/README.md.jinja](template/kubernetes/README.md.jinja) — manifests must NOT interpolate answers; site values arrive through the `cluster-config` ConfigMap |
 | CI runner `concurrent` or either ResourceQuota | [partials/ci-sizing.jinja](partials/ci-sizing.jinja) — the capacity model for BOTH tiers, imported by all four manifests; `tests/test_render.py` § CI runner sizing holds it to the reference cluster |
 | a backend seam (secrets / dns / git-CI / vpn / sso / gpu / gateway / storage / ingress) | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § Backend seams, and weisssrv-lib `docs/EXTENSIBILITY.md` |
-| the library pin | [docs/VERSIONING.md](docs/VERSIONING.md) — the default, the fixture, this repo's `include:` refs and the validated-pair table move in one MR |
+| the library pin | [docs/VERSIONING.md](docs/VERSIONING.md) § Which library release the template is validated against and [docs/CI.md](docs/CI.md) § Library pin — `copier.yml`'s `lib_ref` default and this repo's `include:` refs move in one MR |
 | a vendored script under `scripts/` or `template/scripts/` | [docs/CI.md](docs/CI.md) — these are byte-identical copies of weisssrv-lib's; fix them THERE, tag, re-vendor. TWO manifests register them: `scripts/vendored-manifest.yml` for this repository's copies, `template/scripts/vendored-manifest.yml` for the ones every generated cluster carries — adding or moving a copy edits both |
 | CI | [docs/CI.md](docs/CI.md) |
 | operator prose | [docs/PRE-SETUP.md](docs/PRE-SETUP.md), [docs/SETUP.md](docs/SETUP.md), [docs/RUNBOOKS.md](docs/RUNBOOKS.md) |
@@ -41,12 +41,7 @@ are part of it.
 - No AI or assistant attribution anywhere: commits, MRs, code or docs.
 - Comments state the current rule and why it holds. No history, no narration, no
   commented-out manifests — ship an alternate as a real file excluded from the
-  kustomization instead. The one exception is a README arguing a *security*
-  rule, where "this actually happened" is the argument: the
-  `gitlab-runner-privileged` README keeps the instance-runner incident in one
-  sentence for that reason, and it is the only place that carries it — pages
-  that merely restate the rule point there. It stays in the prose, never in a
-  manifest.
+  kustomization instead.
 - A comment block in any file the template ships runs to three content lines.
   That covers `copier.yml`, `partials/` and everything under `template/`. A
   render gates the rendered tree with `task lint:comment-length`, and

@@ -523,6 +523,23 @@ def _prometheus_config(render: Path) -> str | None:
     )
     if result.returncode:
         return f"lint-prometheus-config.sh:\n{result.stdout}{result.stderr}"
+    # Behaviour, not syntax: amtool check-config above accepts a route reorder
+    # that silences Watchdog and a one-sided alertname rename that unbinds an
+    # inhibit pair, so the generated cluster's own second arm runs here too.
+    behaviour = _run(
+        [
+            sys.executable,
+            "scripts/check-alertmanager-behaviour.py",
+            "--config",
+            "scripts/alertmanager-behaviour.yaml",
+            "--extract-arg=--rules-dir",
+            "--extract-arg=kubernetes/apps",
+            "--extract-arg=--require-release-rules",
+        ],
+        cwd=render,
+    )
+    if behaviour.returncode:
+        return f"check-alertmanager-behaviour.py:\n{behaviour.stdout}{behaviour.stderr}"
     return None
 
 
@@ -591,7 +608,32 @@ def check_cluster_gates(render: Path, **_kw) -> None:
 
     if failures:
         raise Failure("\n".join(failures))
-    print(f"  cluster gates ok ({_CORPUS_GATE_WRAPPER} + 3 over {len(corpus)} builds)")
+    print(f"  cluster gates ok ({_CORPUS_GATE_WRAPPER} + 4 over {len(corpus)} builds)")
+
+
+def check_flux_lint(render: Path, **_kw) -> None:
+    """The generated cluster's own first gate command passes on arrival.
+
+    `cluster-gates` skips the HelmRelease-values arm (no versions ConfigMap),
+    so a chart-rendered limit against a VPA cap fails here, not on first use.
+    """
+    _need("task")
+    # Named rather than left to the Taskfile's own precondition: the values arm
+    # is the whole reason this check exists, and it is the arm helm renders.
+    _need("helm")
+    # flux's `envsubst --strict` is the substitution authority the task renders
+    # through, so a missing CLI fails by name instead of mid-render.
+    _need("flux")
+    result = _run(["task", "flux:lint"], cwd=render)
+    if result.returncode:
+        # Whole output, untrimmed: the task reports each gate where it runs, so
+        # the finding can sit a hundred per-release summaries above the last line.
+        raise Failure(
+            f"task flux:lint exited {result.returncode} on a fresh render:\n"
+            + result.stdout
+            + result.stderr
+        )
+    print("  flux:lint ok (the render passes its own first gate command)")
 
 
 _SITE_DATA_SUFFIXES = {".yml", ".yaml", ".env", ".conf", ".toml"}
@@ -1571,6 +1613,7 @@ CHECKS = (
     ("terraform", check_terraform, frozenset()),
     ("flux", check_flux, frozenset()),
     ("cluster-gates", check_cluster_gates, frozenset()),
+    ("flux-lint", check_flux_lint, frozenset()),
     ("ci-policy", check_ci_policy, frozenset()),
     ("include-contract", check_include_contract, frozenset({"lib"})),
     ("inventory-addresses", check_inventory_addresses, frozenset()),
@@ -1592,7 +1635,7 @@ CHECK_NAMES = tuple(name for name, _, _ in CHECKS)
 # to this map, so a new rendered subtree cannot arrive silently unchecked.
 RENDERED_AREAS = {
     "ansible": "ansible, role-opt-ins, role-inputs, inventory-addresses, yamllint",
-    "kubernetes": "flux, cluster-gates, versions-configmap, yamllint",
+    "kubernetes": "flux, cluster-gates, flux-lint, versions-configmap, yamllint",
     "terraform": "terraform, terraform-validate, shellcheck",
     "scripts": "shellcheck, vendored, rendered-vendored, version-coverage, yamllint",
     "lint": "yamllint, which lints with the render's own profiles from this directory",

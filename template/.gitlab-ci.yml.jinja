@@ -336,7 +336,7 @@ include:
       # With a baseline set, a kind skipped outside it fails the job rather than
       # degrading the run to core kinds in silence.
       expected_skipped_file: "scripts/kubeconform-expected-skipped.txt"
-      extra_validation: 'bash scripts/flux-corpus-gates.sh "$RENDER_ALL" "{{ versions_cm }}" || FAILED=1'
+      extra_validation: 'bash scripts/flux-corpus-gates.sh "$RENDER_ALL" "{{ versions_cm }}" || FAILED=1; python3 scripts/check-grafana-sidecar-init.py || FAILED=1'
       changes:
         - "kubernetes/**/*"
         - "ansible/inventories/prod/group_vars/all.yml"
@@ -349,6 +349,9 @@ include:
         - "scripts/check-default-deny-coverage.py"
         - "scripts/check-secretstore-scope.py"
         - "scripts/check-pvc-storageclass.py"
+        - "scripts/check-ephemeral-storage-cap.py"
+        - "scripts/check-netpol-except-parity.py"
+        - "scripts/netpol-except.yaml"
         - "scripts/check-nfs-tls.py"
         - "scripts/gate_common.py"
         - "scripts/validate-helm-values.py"
@@ -356,6 +359,7 @@ include:
         - "scripts/flux-env.sh"
         - "scripts/kubeconform-skipped.py"
         - "scripts/kubeconform-expected-skipped.txt"
+        - "scripts/check-grafana-sidecar-init.py"
         - ".gitlab-ci.yml"
 
   # Doc-link rot: the checker is vendored (scripts/check-doc-links.py) and
@@ -619,6 +623,25 @@ flux-version-pin:
       changes: *flux_version_pin_paths
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
+# kubectl supports +/-1 minor against the apiserver; outside that window its
+# output is unspecified, and scripts/deploy-verify.sh reads it to gate a deploy.
+# Mirrors `task lint:kubectl-version-pin`.
+kubectl-version-pin:
+  extends: .lint-gate
+  script:
+    - python3 scripts/check-kubectl-version-pin.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &kubectl_version_pin_paths
+        - "{{ versions_cm }}"
+        - "scripts/check-kubectl-version-pin.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *kubectl_version_pin_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
 # Three files here are OUTPUTS, not sources, and nothing else compares them
 # against what generates them, so a stale copy ships green. Regenerate and diff.
 # What each arm covers: docs/ci-pipeline.md § check-generated-files.
@@ -822,9 +845,19 @@ prometheus-config-lint:
     # ships no shared rules tree for it to require.
     RULES_DIR: "kubernetes/apps"
     REQUIRE_RELEASE_RULES: "1"
+  # The fetched binaries, keyed on the fetcher that pins them. It re-hashes each
+  # one against its version stamp every run, so a mutated cache is re-fetched
+  # rather than trusted.
+  cache:
+    key:
+      prefix: prom-tools
+      files:
+        - scripts/ci-fetch-tools.py
+    paths:
+      - .bin
   before_script:
     # The binaries come from the vendored fetcher, whose pins and sha256s are
-    # the library's. Each run downloads and verifies them afresh.
+    # the library's; the cache above spares all four shards the download.
     - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
     - pip install --user --quiet "pyyaml==$PYYAML_VERSION"
     - python3 scripts/ci-fetch-tools.py promtool amtool
@@ -851,6 +884,16 @@ prometheus-config-lint:
       done
       echo "shard ${CI_NODE_INDEX}/${CI_NODE_TOTAL}: ${copied} of ${index} unit-test file(s)"
       RULE_TESTS_DIR="$shard" bash scripts/lint-prometheus-config.sh
+    - |
+      # Behavioural half of the gate, first shard only: amtool check-config
+      # accepts a route reorder that silences Watchdog and a one-sided alertname
+      # rename that unbinds an inhibit pair. Pairs with `task lint:prometheus-config`.
+      if [ "${CI_NODE_INDEX:-1}" = "1" ]; then
+        python3 scripts/check-alertmanager-behaviour.py \
+          --config scripts/alertmanager-behaviour.yaml \
+          --extract-arg=--rules-dir --extract-arg=kubernetes/apps \
+          --extract-arg=--require-release-rules
+      fi
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
@@ -859,6 +902,8 @@ prometheus-config-lint:
         - "kubernetes/infrastructure/observability/kube-prometheus-stack/**/*"
         - "kubernetes/apps/**/prometheusrule.yaml"
         - "tests/prometheus-rules/**/*"
+        - "scripts/alertmanager-behaviour.yaml"
+        - "scripts/check-alertmanager-behaviour.py"
         - "scripts/extract-prometheus-config.py"
         - "scripts/lint-prometheus-config.sh"
         - ".gitlab-ci.yml"

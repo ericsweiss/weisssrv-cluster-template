@@ -16,6 +16,7 @@ exclude:
   - ansible/molecule/tasks/prepare-base.yml
   - lint/yamllint-relaxed.yml
   - ruff.toml
+  - scripts/check-alertmanager-behaviour.py
   - scripts/check-backup-artifact-apps.py
   - scripts/check-cluster-invariants.py
   - scripts/check-ci-include-job-names.py
@@ -24,9 +25,12 @@ exclude:
   - scripts/check-default-deny-coverage.py
   - scripts/check-deploy-coverage.sh
   - scripts/check-doc-links.py
-  - scripts/check-helm-repo-parity.py
+  - scripts/check-ephemeral-storage-cap.py
   - scripts/check-flux-version-pin.py
+  - scripts/check-guest-endpoint-parity.py
+  - scripts/check-helm-repo-parity.py
   - scripts/check-hpa-vpa-invariant.py
+  - scripts/check-kubectl-version-pin.py
   - scripts/check-lib-pins.py
   - scripts/check-netpol-except-parity.py
   - scripts/check-nfs-tls.py
@@ -49,6 +53,7 @@ exclude:
   - scripts/flux-child-kustomizations.py
   - scripts/flux-env.sh
   - scripts/flux-render.sh
+  - scripts/flux-secret-consumers.py
   - scripts/gate_common.py
   - scripts/generate-hosts-env.py
   - scripts/generate-versions-configmap.py
@@ -62,5 +67,6 @@ exclude:
   - scripts/semantic-release.py
   - scripts/shell-lib.sh
   - scripts/supervised-apply-guard.sh
+  - scripts/taskfile_tree.py
   - scripts/validate-helm-values.py
   - scripts/version-bump-mr.py

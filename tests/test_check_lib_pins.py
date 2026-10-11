@@ -972,3 +972,35 @@ def test_source_key_is_matched_like_name(tmp_path: Path) -> None:
     problems = clp.check_requirements(ci, "v0.4.0")
     assert len(problems) == 1
     assert "v0.3.2" in problems[0]
+
+
+def test_a_fork_whose_url_contains_the_project_path_is_not_the_library(
+    tmp_path: Path,
+) -> None:
+    """A substring test counted a fork or a path-prefixed mirror as the library,
+    so its unrelated pin passed the gate instead of being unchecked."""
+    ci = _write(tmp_path, _ci())
+    fork = (
+        "git+https://git.example.com/mirrors/eric/weisssrv-lib-fork.git"
+        "#/ansible_collections/weisssrv/infra"
+    )
+    _write_requirements(tmp_path, _requirements("v0.1.0", url=fork))
+    problems = clp.check_requirements(ci, "v0.4.0")
+    assert len(problems) == 1
+    assert "is not being checked" in problems[0]
+
+
+def test_the_same_repository_on_another_host_is_still_the_library(
+    tmp_path: Path,
+) -> None:
+    """The host-independent match the repo-name comparison exists for."""
+    ci = _write(tmp_path, _ci())
+    mirror = (
+        "git+https://mirror.example.com/eric/weisssrv-lib.git"
+        "#/ansible_collections/weisssrv/infra"
+    )
+    _write_requirements(tmp_path, _requirements("v0.3.2", url=mirror))
+    problems = clp.check_requirements(ci, "v0.4.0")
+    assert len(problems) == 1
+    assert "v0.3.2" in problems[0]
+    assert clp.check_requirements(ci, "v0.3.2") == []

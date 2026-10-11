@@ -31,6 +31,8 @@ vendored:
     consumer: template/ansible/molecule/tasks/prepare-apt-disable.yml
   - lib: ansible_collections/weisssrv/infra/molecule-shared/tasks/prepare-base.yml
     consumer: template/ansible/molecule/tasks/prepare-base.yml
+  - lib: scripts/check-alertmanager-behaviour.py
+    consumer: template/scripts/check-alertmanager-behaviour.py
   - lib: scripts/check-backup-artifact-apps.py
     consumer: template/scripts/check-backup-artifact-apps.py
   - lib: scripts/check-cluster-invariants.py
@@ -48,10 +50,14 @@ vendored:
     consumer: template/scripts/check-deploy-coverage.sh
   - lib: scripts/check-doc-links.py
     consumer: template/scripts/check-doc-links.py
+  - lib: scripts/check-ephemeral-storage-cap.py
+    consumer: template/scripts/check-ephemeral-storage-cap.py
   - lib: scripts/check-helm-repo-parity.py
     consumer: template/scripts/check-helm-repo-parity.py
   - lib: scripts/check-hpa-vpa-invariant.py
     consumer: template/scripts/check-hpa-vpa-invariant.py
+  - lib: scripts/check-kubectl-version-pin.py
+    consumer: template/scripts/check-kubectl-version-pin.py
   - lib: scripts/check-lib-pins.py
     consumer: template/scripts/check-lib-pins.py
   - lib: scripts/check-netpol-except-parity.py
@@ -87,12 +93,14 @@ vendored:
     consumer: template/scripts/deploy-verify-lib.sh
   - lib: scripts/extract-prometheus-config.py
     consumer: template/scripts/extract-prometheus-config.py
-  - lib: scripts/flux-env.sh
-    consumer: template/scripts/flux-env.sh
   - lib: scripts/find-reachable-host.sh
     consumer: template/scripts/find-reachable-host.sh
+  - lib: scripts/flux-env.sh
+    consumer: template/scripts/flux-env.sh
   - lib: scripts/flux-render.sh
     consumer: template/scripts/flux-render.sh
+  - lib: scripts/flux-secret-consumers.py
+    consumer: template/scripts/flux-secret-consumers.py
   - lib: scripts/gate_common.py
     consumer: template/scripts/gate_common.py
   - lib: scripts/generate-hosts-env.py
@@ -119,8 +127,8 @@ vendored:
     consumer: template/scripts/shell-lib.sh
   - lib: scripts/supervised-apply-guard.sh
     consumer: template/scripts/supervised-apply-guard.sh
-  # flux-child-kustomizations.py is still a template-local program; adopting the
-  # library's needs its tab output read at every call site.
+  - lib: scripts/taskfile_tree.py
+    consumer: template/scripts/taskfile_tree.py
   - lib: scripts/validate-helm-values.py
     consumer: template/scripts/validate-helm-values.py
   - lib: scripts/version-bump-mr.py
@@ -164,8 +172,8 @@ forked:
       from the YAML hooks, and the library's local check-taskfile hook is
       dropped because this repository ships no Taskfile.
     reconciled_sha256: f7e2dff0acee6c4787e1d89311fa72e5d089b13681ed9cd94e8b92bdcada519c
-  # Template-owned gates the library now offers under the same names. Each
-  # keeps its own CLI and its own test suite, so it is held to the library by
+  # Template-owned gates that share a name with a library gate. Each keeps its
+  # own CLI and its own test suite, so it is held to the library by
   # reconciled_sha256 rather than by byte-identity.
   - lib: scripts/check-flux-version-pin.py
     consumer: template/scripts/check-flux-version-pin.py
@@ -173,6 +181,13 @@ forked:
       Takes --root and --components where the library's takes --repo-root,
       --ci-file, --versions-configmap, --gotk-glob and --runbook.
     reconciled_sha256: 5353b33732feddc81d617138783f5fc65f09b13efc35a2f0dc0b878932e9d51c
+  - lib: scripts/check-guest-endpoint-parity.py
+    consumer: template/scripts/check-guest-endpoint-parity.py
+    reason: >-
+      Walks a fixed manifest tree and inventory directory, where the library's
+      takes --inventory, --manifest-tree and --scoped-group and additionally
+      requires an export to admit a scoped group whole.
+    reconciled_sha256: a7ab41e5de5ec07feb2a240b103b7ab24a96074da95e9e366cce0c03afd941c5
   - lib: scripts/check-secret-rotation-coverage.py
     consumer: template/scripts/check-secret-rotation-coverage.py
     reason: >-

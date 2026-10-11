@@ -94,7 +94,8 @@ weisssrv-new-project new-cluster \
 
 # Both generation blocks above are runnable as written: an unpinned VCS source
 # resolves to the template's latest release tag. docs/SETUP.md lists the flags
-# that pin a different one, and docs/VERSIONING.md the `lib_ref` each ships.
+# that pin a different one, and docs/VERSIONING.md names the library release
+# the template is validated against.
 
 # 4. Bring it up
 cd ~/src/mycluster
@@ -179,8 +180,8 @@ someone else's addresses by accident.
 
 No Ansible roles ship in the generated tree — playbooks address the collection's
 40 roles as `weisssrv.infra.<role>` by FQCN, so a platform upgrade is a one-line
-bump of `lib_ref`. The variables those roles take are documented in the library
-(role READMEs for the per-role surface, `MIGRATING.md` for what a bump renames).
+bump of `lib_ref`. The variables those roles take are documented in the library:
+each role's README lists every default it has and why.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Backends
@@ -256,6 +257,7 @@ python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
 ruff check scripts tests template/tests template/scripts template/kubernetes
 shellcheck template/scripts/*.sh
 python3 scripts/check-doc-links.py
+python3 scripts/check-comment-length.py .
 yamllint -c lint/yamllint-relaxed.yml copier.yml tests/ lint/ .gitlab-ci.yml scripts/vendored-manifest.yml
 ```
 

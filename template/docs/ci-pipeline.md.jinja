@@ -20,7 +20,7 @@ sources are unaffected — they fetch over https from `{{ lib_url }}`.
 
 | Stage | Jobs | Source |
 |---|---|---|
-| `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `lint-docs-links`, `comment-length`, `flux-lint`, `version-check` (library); `version-coverage`, `version-checksums`, `check-generated-files`, `deploy-coverage`, `netpol-parity`, `kustomization-coverage`, `cluster-literals`, `prometheus-config-lint`, `terraform-tflint`, `check-integration-matrix`, `flux-version-pin`, `check-role-inputs` (this repo) | mixed |
+| `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `lint-docs-links`, `comment-length`, `flux-lint`, `version-check` (library); `version-coverage`, `version-checksums`, `check-generated-files`, `deploy-coverage`, `netpol-parity`, `kustomization-coverage`, `cluster-literals`, `prometheus-config-lint`, `terraform-tflint`, `check-integration-matrix`, `flux-version-pin`, `kubectl-version-pin`, `check-role-inputs` (this repo) | mixed |
 | `validate` | `terraform-validate` (library); `check-deploy-playbooks`, `terraform-plan`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan`{% if use_unifi %}, `unifi-drift-plan`{% endif %} (this repo) | mixed |
 | `test` | `python-tests` (the cluster invariants in `tests/`, the suites beside the scripts in `scripts/`, the library-pin gate and the vendored-copy gate); `integration-tests` (the multi-role molecule stacks, `.gitlab/ci/integration-jobs.yml`) | mixed |
 | `security` | `secret_detection` | library |
@@ -82,7 +82,9 @@ catalog genuinely lacks, with the reason.
 
 A placeholder that resolves to nothing is the failure this catches before
 merge. In the cluster, strict substitution fails the Kustomization's reconcile
-instead of applying a blank hostname.
+instead of applying a blank hostname. `task flux:lint` runs that same pass
+locally through `flux envsubst --strict`, so the flux CLI is one of its
+prerequisites: GNU envsubst accepts forms Flux's Go substituter rejects.
 
 `require_cluster_root` ships **false**, because
 `kubernetes/clusters/{{ cluster_name }}/flux-system/` does not exist until
@@ -96,29 +98,40 @@ rendered corpus, each covering a class kubeconform structurally cannot see:
 |---|---|
 | `check-hpa-vpa-invariant.py` | an HPA and a CPU-controlling VPA target one workload; a container declares a CPU limit; a container sets `requests.memory == limits.memory` under a memory-controlling VPA |
 | `check-scrape-netpol.py` | a scraped namespace's NetworkPolicies do not admit Prometheus (the symptom is a bare `TargetDown`) |
+| `check-netpol-except-parity.py` | an egress rule reaches the LAN, Tailscale or the metadata address in full, or a `/0` peer's `except:` list is not a canonical reserved-CIDR set. Over the corpus, where every `ipBlock` CIDR is substituted |
 | `check-default-deny-coverage.py` | a namespace owns a workload but carries no namespace-wide ingress default-deny (or one defeated by an allow-everything rule beside it) |
 | `check-secretstore-scope.py` | a `ClusterSecretStore` has no `spec.conditions`, or a consumer namespace those conditions do not admit |
 | `check-pvc-storageclass.py` | a claim omits `storageClassName`, which the DefaultStorageClass admission plugin rewrites at create time with no diff in git |
+| `check-ephemeral-storage-cap.py` | a container's `ephemeral-storage` limit is below the sized emptyDirs it mounts, so the kubelet evicts the pod before the volume it sized fills |
 | `validate-helm-values.py` | a `.spec.values` block the kustomize corpus never renders fails `helm template` |
 
 The last two arms run only with `--require-chart-native-vpas`, which
 `scripts/flux-corpus-gates.sh` passes over the full corpus. A CPU limit buys
 only CFS throttling, and a 1:1 memory ratio never gains headroom because the VPA
 updater preserves it. Deliberate exceptions go in
-`scripts/autoscaling-policy.yaml` under `cpu_limit_allowlist` and
-`memory_ratio_allowlist`, each with a rationale.
+`scripts/autoscaling-policy.yaml` under `cpu_limit_allowlist`,
+`memory_ratio_allowlist` and `vpa_cap_allowlist`, each with a rationale.
 
-`netpol-parity` has a `lint` job of its own because it reads the manifests on
-disk rather than the corpus, so it also covers `kubernetes/clusters/*/flux-system/`,
-and it compares every public-egress `except:` list against the canonical
-reserved-CIDR sets. Deliberate exceptions live in `scripts/netpol-except.yaml`
-with their reason.
+The LAN fence is judged twice, because neither view sees the whole of it. Over
+the corpus the CIDRs are substituted, so the fence arms compare real addresses;
+the `netpol-parity` `lint` job reads the manifests on disk, where every
+`ipBlock` CIDR is still a `${cluster_*}` placeholder the arms skip, and covers
+`kubernetes/clusters/*/flux-system/`, which no Kustomization builds. Deliberate
+exceptions live in `scripts/netpol-except.yaml` with their reason.
 
 That list is not written twice. `extra_validation` calls
 `scripts/flux-corpus-gates.sh`, and so does `task flux:lint`, so the two cannot
 drift: add a gate to that script and both sides pick it up.
-`task lint:netpol-parity` covers the disk-reading one, and `task lint` runs
+`task lint:netpol-parity` covers the disk-reading arm, and `task lint` runs
 both.
+
+Both sides then run one gate the wrapper cannot hold:
+`scripts/check-grafana-sidecar-init.py`. Its subject is chart-rendered rather
+than in the kustomize corpus — it `helm template`s kube-prometheus-stack and
+fails any `*-sc-*` container whose `METHOD` does not match its position, `LIST`
+in an init container and `WATCH` in a long-running one. An init container left
+in the chart's default `WATCH` never exits, so the Grafana pod sits in
+`PodInitializing` until the Helm upgrade times out.
 
 `scripts/flux-render.sh` is the library's copy, vendored unmodified (the
 vendored-copy gate below checks it byte-for-byte). The multi-ConfigMap handling
@@ -152,6 +165,7 @@ read one:
 | `tests/test_lib_pins.py` | a library pin drifts from `variables.WEISSSRV_LIB_REF` — the collection `version:`, a Terraform `?ref=`, or the Taskfile's `LIB_REF` |
 | `tests/test_local_gate_floors.py` | a local `task lint` gate that mirrors a CI include drops its linted-nothing floor, so it passes on a target list that matches nothing |
 | `tests/test_namespace_psa.py` | a Namespace this repo declares carries no Pod Security Admission labels, which admits at `privileged` |
+| `tests/test_playbook_extra_var_bools.py` | a `when:` reads an `-e` extra var without ending its filter chain in `\| bool`, which ansible-core refuses because the value arrives as a string |
 | `tests/test_prometheus_rule_coverage.py` | an alert rule has no promtool unit test and no declared exemption, or an exemption names an alert that is gone or now tested |
 | `tests/test_repo_hygiene.py` | a file the ignore rules exclude is tracked anyway |
 | `tests/test_runbook_coverage.py` | an alert's `runbook_url` points at a document, or an anchor, that does not name it |
@@ -321,6 +335,38 @@ exit at startup.
 Before `task flux:bootstrap` there is no `gotk-components.yaml`, and the gate
 checks the two files that do exist. `task lint:flux-version-pin` is the same
 check locally.
+
+### prometheus-config-lint
+
+`scripts/lint-prometheus-config.sh` runs `promtool check rules`, the alert unit
+tests under `tests/prometheus-rules/`, and `amtool check-config`. Sharded four
+ways, because promtool re-evaluates the whole rule corpus once per
+`evaluation_interval` per test file.
+
+`amtool check-config` only proves the file parses. The first shard also runs
+`scripts/check-alertmanager-behaviour.py`, which resolves each route case in
+`scripts/alertmanager-behaviour.yaml` with `amtool config routes test` and
+compares the receiver actually reached, then holds every inhibit rule to an
+alertname that still exists.
+
+That gate also pairs each `severity=warning` alert with the
+`severity=critical` alert whose name is its own plus `Prolonged` or
+`Critical`, and requires an inhibit rule between the two: without one a
+sustained failure pages at both severities for as long as it lasts. The rule
+must carry `equal: [instance]` so one host's critical does not silence
+another host's warning. A pair that shares no name stem is declared under
+`escalation_pairs`, and one that delivers both severities on purpose under
+`escalation_exceptions`.
+
+### kubectl-version-pin
+
+kubectl supports one minor version either side of the apiserver; outside that
+window its output is unspecified, and `scripts/deploy-verify.sh` reads it to
+gate a deploy. `scripts/check-kubectl-version-pin.py` compares the
+`kubectl_version` include input against `k3s_version` in the cluster-versions
+ConfigMap and fails on a wider skew, so a k3s bump that leaves the CI kubectl
+behind reds the pipeline instead of producing unreliable readiness output.
+`task lint:kubectl-version-pin` is the same check locally.
 
 ### check-deploy-playbooks
 

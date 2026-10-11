@@ -33,7 +33,7 @@ variables:
   LIB_PROJECT: "eric/weisssrv-lib"
   # Single source for the library pin. `include:` cannot read it, so each entry
   # repeats the tag; scripts/check-lib-pins.py fails drift. `--fix` rewrites.
-  WEISSSRV_LIB_REF: "v0.18.1"
+  WEISSSRV_LIB_REF: "v0.19.0"
   # Library checkout the python-tests job clones into and tests/test_render.py
   # reads for the ruleset parity gate, which fails rather than skips in CI.
   WEISSSRV_LIB_PATH: "$CI_PROJECT_DIR/.tmp/weisssrv-lib"
@@ -50,7 +50,7 @@ include:
   # Jinja sources, not documents. validate-rendered-cluster below yamllints the
   # rendered tree, which is where template/ actually gets covered.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/lint/yaml-lint.yml
     inputs:
       tags: []
@@ -65,7 +65,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/lint/python-lint.yml
     inputs:
       tags: []
@@ -85,7 +85,7 @@ include:
   # The one .sh.jinja source is covered by the render check in
   # tests/validate_render.py, which shellchecks the generated scripts.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/lint/shellcheck.yml
     inputs:
       tags: []
@@ -99,7 +99,7 @@ include:
   # ones included: the gate reads a `.jinja` source as the file it renders into.
   # No config file, so PyYAML is not installed.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/lint/comment-length.yml
     inputs:
       tags: []
@@ -108,7 +108,7 @@ include:
   # copier.yml schema checks + the full render invariants. Everything in the
   # repository feeds the render, hence the catch-all `changes`.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/test/python-tests.yml
     inputs:
       tags: []
@@ -122,16 +122,15 @@ include:
       # test_deploy_preflight.py, which fails rather than skips without it.
       pip_packages: "copier==9.17.0 ansible-core==2.21.5"
       # The library checkout the ruleset parity gate compares against; the
-      # python:3.13 image already ships git. The fetch brings this repo's own
-      # tags, which the validated-pair gate needs and a CI clone omits.
-      setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" "$WEISSSRV_LIB_PATH" && git fetch --tags --quiet'
+      # python:3.13 image already ships git.
+      setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" "$WEISSSRV_LIB_PATH"'
       changes:
         - "**/*"
 
   # Self-application: the template ships this gate into every generated cluster,
   # and its own docs carry the same relative cross-links.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/lint/docs-link-check.yml
     inputs:
       job_name: lint-docs-links
@@ -145,7 +144,7 @@ include:
   # Pin drift in the SHIPPED defaults, checked inside a render of this template.
   # Soft-fail: rc 1 means updates are available.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/maintenance/version-check.yml
     inputs:
       tags: []
@@ -168,7 +167,7 @@ include:
         - ".gitlab-ci.yml"
 
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/security/secret-detection.yml
     inputs:
       tags: []
@@ -178,7 +177,7 @@ include:
       cpu_selector: "esweiss.com/cpu=modern"
 
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/review/pr-agent.yml
     inputs:
       tags: []
@@ -200,7 +199,7 @@ include:
   # generated cluster's `copier update` resolves to. `release` is declared last
   # above, so stage order gates it on every job here. Policy: docs/VERSIONING.md.
   - project: eric/weisssrv-lib
-    ref: v0.18.1
+    ref: v0.19.0
     file: /ci/release/semantic-release.yml
     inputs:
       tags: []
@@ -225,9 +224,24 @@ validate-rendered-cluster:
     # no passwd entry, so `--syntax-check` dies without them.
     USER: gitlab-runner
     LOGNAME: gitlab-runner
+    # go-task is outside scripts/ci-fetch-tools.py's set, and the flux-lint
+    # check runs the render's own `task flux:lint`, so it is pinned here and
+    # sha256-verified in before_script like every other fetched binary.
+    TASK_VERSION: "3.53.1"
+    TASK_SHA256: "a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7"
+    # The render's `task flux:lint` renders through GNU envsubst; the runner is
+    # not root, so the trixie gettext-base package is unpacked next to the
+    # fetched binaries instead of installed.
+    GETTEXT_BASE_VERSION: "0.23.1-2"
+    GETTEXT_BASE_SHA256: "1a3dfadd661520ff01d379fd89cd0d49972a5a775d490609f1712134ee3d62ca"
   before_script:
-    - export PATH="$CI_PROJECT_DIR/.bin:$(python -m site --user-base)/bin:$PATH"
-    - mkdir -p "$CI_PROJECT_DIR/.bin"
+    - export PATH="$CI_PROJECT_DIR/.bin:$CI_PROJECT_DIR/.deb/usr/bin:$(python -m site --user-base)/bin:$PATH"
+    - mkdir -p "$CI_PROJECT_DIR/.bin" "$CI_PROJECT_DIR/.deb"
+    - |
+      curl -fsSL -o gettext-base.deb "https://deb.debian.org/debian/pool/main/g/gettext/gettext-base_${GETTEXT_BASE_VERSION}_amd64.deb"
+      echo "${GETTEXT_BASE_SHA256}  gettext-base.deb" | sha256sum -c -
+      dpkg-deb -x gettext-base.deb "$CI_PROJECT_DIR/.deb"
+      envsubst --version | head -1
     - |
       pip install --user --quiet \
         "copier==${COPIER_VERSION}" \
@@ -247,6 +261,30 @@ validate-rendered-cluster:
       git clone --depth 1 --branch "$LIB_REF" \
         "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" \
         "$LIB_CHECKOUT"
+    - |
+      set -eo pipefail
+      # The flux-lint check runs the render's own `task flux:lint`: task runs
+      # it, helm renders its values arm, flux is its substitution authority.
+      # Both pins come from the library include, never a second spelling.
+      LINT_PINS=$(python3 - "$LIB_CHECKOUT/ci/validate/flux-lint.yml" <<'PY'
+      import sys, yaml
+      inputs = next(yaml.safe_load_all(open(sys.argv[1])))["spec"]["inputs"]
+      print(*(inputs[key]["default"] for key in (
+          "helm_version", "helm_sha256", "flux_version", "flux_sha256")))
+      PY
+      )
+      read -r HELM_VERSION HELM_SHA256 FLUX_VERSION FLUX_SHA256 <<<"$LINT_PINS"
+      curl -fsSL -o helm.tar.gz "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+      echo "${HELM_SHA256}  helm.tar.gz" | sha256sum -c -
+      tar xzf helm.tar.gz -C "$CI_PROJECT_DIR/.bin" --strip-components=1 linux-amd64/helm
+      curl -fsSL -o task.tar.gz "https://github.com/go-task/task/releases/download/v${TASK_VERSION}/task_linux_amd64.tar.gz"
+      echo "${TASK_SHA256}  task.tar.gz" | sha256sum -c -
+      tar xzf task.tar.gz -C "$CI_PROJECT_DIR/.bin" task
+      curl -fsSL -o flux.tar.gz "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_amd64.tar.gz"
+      echo "${FLUX_SHA256}  flux.tar.gz" | sha256sum -c -
+      tar xzf flux.tar.gz -C "$CI_PROJECT_DIR/.bin" flux
+      rm -f helm.tar.gz task.tar.gz flux.tar.gz
+      helm version --short && task --version && flux --version
   script:
     # BOTH fixtures — see tests/answers-unlike.yml for why the contrast render
     # is not optional. --self-checks rides on this line alone: its arms read no

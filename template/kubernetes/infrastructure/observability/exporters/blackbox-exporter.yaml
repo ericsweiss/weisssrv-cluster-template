@@ -107,6 +107,11 @@ spec:
         - name: smtp-relay
           url: ${cluster_smtp_host}:587
           module: tcp_connect
+        # The LAN router, by ICMP: a consumer gateway exposes no port worth
+        # probing, and its liveness separates a LAN fault from a cluster one.
+        - name: lan-gateway
+          url: ${cluster_lan_gateway}
+          module: icmp_ping
         # Outside-in WAN witness, not a monitored endpoint: it tells a cluster
         # fault from an ISP outage. Suppress on
         # `max(probe_success{instance="1.1.1.1"}) == 0`; EndpointDown excludes it.

@@ -270,6 +270,10 @@ spec:
           uid: prometheus
           skipReload: true
           initDatasources: true
+          # The init container inherits this. The chart default WATCH never
+          # exits, so the pod hangs in PodInitializing and the Helm upgrade
+          # times out; init mode must list once and exit.
+          watchMethod: LIST
           resource: configmap
           extraMounts:
             - name: sidecar-kube-api-access
@@ -829,6 +833,133 @@ spec:
                     nas_storage_swap_clean_conflicting_units and
                     `journalctl -t swap-clean`.
 {% endraw %}{% endif %}{% raw %}
+
+              # Per-device SMART health from the node_exporter_host smartmon
+              # textfile collector: the drive-level precursors a pool alert sees
+              # only after corruption. over_time rides through a standby gap.
+              - alert: SMARTDeviceUnhealthy
+                # min_over_time stays 0 once a drive has reported FAILED, so a
+                # standby gap afterwards cannot clear it; a healthy (1) or
+                # never-probed (absent) drive never trips it.
+                expr: min_over_time(smartmon_device_smart_healthy[6h]) == 0
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#storage'
+                  summary: 'SMART overall-health FAILED on {{ $labels.device }} ({{ $labels.instance }})'
+                  description: >-
+                    smartmon_device_smart_healthy for {{ $labels.device }} on
+                    {{ $labels.instance }} has reported FAILED within the last
+                    6 hours. The drive's own self-assessment predicts imminent
+                    failure — plan replacement and check the pool it backs.
+
+              # A stable non-zero count from an old event is not actionable;
+              # growth is. max-min over 24h detects an increase while tolerating
+              # standby gaps.
+              - alert: SMARTReallocatedSectorsGrowing
+                expr: >-
+                  max_over_time(smartmon_reallocated_sector_count[24h])
+                  - min_over_time(smartmon_reallocated_sector_count[24h]) > 0
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#storage'
+                  summary: 'Reallocated sectors growing on {{ $labels.device }} ({{ $labels.instance }})'
+                  description: >-
+                    Reallocated_Sector_Ct on {{ $labels.device }} on
+                    {{ $labels.instance }} grew by
+                    {{ $value | printf "%.0f" }} in the last 24 hours. A drive
+                    actively remapping sectors is degrading — plan replacement.
+
+              # Pending and offline-uncorrectable sectors are acute: any non-zero
+              # value is a sector currently unreadable or awaiting reallocation,
+              # not a healed-over historical event.
+              - alert: SMARTPendingSectors
+                expr: max_over_time(smartmon_current_pending_sector_count[6h]) > 0
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#storage'
+                  summary: 'Current pending sectors on {{ $labels.device }} ({{ $labels.instance }})'
+                  description: >-
+                    Current_Pending_Sector on {{ $labels.device }} on
+                    {{ $labels.instance }} is {{ $value | printf "%.0f" }} —
+                    sectors are unreadable and awaiting reallocation. A scrub of
+                    the backing pool will surface any affected data.
+
+              - alert: SMARTOfflineUncorrectable
+                expr: max_over_time(smartmon_offline_uncorrectable_count[6h]) > 0
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#storage'
+                  summary: 'Offline-uncorrectable sectors on {{ $labels.device }} ({{ $labels.instance }})'
+                  description: >-
+                    Offline_Uncorrectable on {{ $labels.device }} on
+                    {{ $labels.instance }} is {{ $value | printf "%.0f" }} —
+                    sectors that could not be corrected on read. A strong
+                    replace-soon signal.
+
+              # NVMe media and data-integrity errors: the SSD-side equivalent of
+              # reallocated and uncorrectable sectors.
+              - alert: SMARTMediaErrors
+                expr: max_over_time(smartmon_media_errors_count[6h]) > 0
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#storage'
+                  summary: 'NVMe media errors on {{ $labels.device }} ({{ $labels.instance }})'
+                  description: >-
+                    Media and Data Integrity Errors on {{ $labels.device }} on
+                    {{ $labels.instance }} is {{ $value | printf "%.0f" }}. The
+                    controller has logged uncorrectable data errors —
+                    investigate and plan replacement.
+
+              # Collector meta-failure. absent() makes an undeployed collector
+              # loud but needs every host silent, so the up arm catches one host
+              # losing its series, scoped by a 7d devices_scanned window.
+              - alert: SMARTCollectorStale
+                # The success arm catches a refreshed sentinel with a failed scan
+                # or no device parsed. The devices_scanned guard keeps a host
+                # with no SMART device quiet.
+                expr: >-
+                  (time() - smartmon_collector_last_success_seconds > 900)
+                  or absent(smartmon_collector_last_success_seconds)
+                  or (
+                    (
+                      up == 1
+                      unless on (instance) smartmon_collector_last_success_seconds
+                    )
+                    and on (instance) (
+                      max_over_time(smartmon_collector_devices_scanned[7d]) > 0
+                    )
+                  )
+                  or (
+                    smartmon_collector_success == 0
+                    and on(instance) (
+                      smartmon_collector_devices_scanned > 0
+                    )
+                  )
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#storage'
+                  summary: 'smartmon collector is degraded or missing on {{ $labels.instance }}'
+                  description: >-
+                    smartmon_collector_last_success_seconds is stale (>15m),
+                    gone on a scraped host whose peers still report, entirely
+                    absent, or the collector reports success 0
+                    (smartctl unrunnable, scan failed, or no device parsed), so
+                    the SMART device alerts on this host serve stale or no
+                    inputs. Check
+                    `journalctl -u smartmon-collector.service` and
+                    `systemctl status smartmon-collector.timer`.
 
       platform-nodes:
         groups:

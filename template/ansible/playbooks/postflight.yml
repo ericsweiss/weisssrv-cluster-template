@@ -215,7 +215,7 @@
       changed_when: false
       when:
         - adguard_sync_enabled | default(false) | bool
-        - postflight_exercise_sync | default(true)
+        - postflight_exercise_sync | default(true) | bool
 
     - name: Trigger one sync run to exercise the sandbox  # noqa: command-instead-of-module
       ansible.builtin.command: systemctl start adguardhome-sync.service
@@ -223,7 +223,7 @@
       failed_when: false
       when:
         - adguard_sync_enabled | default(false) | bool
-        - postflight_exercise_sync | default(true)
+        - postflight_exercise_sync | default(true) | bool
 
     # A refused start job (masked unit, job rejected before exec) leaves
     # ExecMainStatus holding the previous run, so a changed InvocationID is
@@ -235,7 +235,7 @@
       changed_when: false
       when:
         - adguard_sync_enabled | default(false) | bool
-        - postflight_exercise_sync | default(true)
+        - postflight_exercise_sync | default(true) | bool
 
     - name: Read the sync service exec status  # noqa: command-instead-of-module
       ansible.builtin.command: >-
@@ -244,7 +244,7 @@
       changed_when: false
       when:
         - adguard_sync_enabled | default(false) | bool
-        - postflight_exercise_sync | default(true)
+        - postflight_exercise_sync | default(true) | bool
 
     - name: Assert the sync service started under its sandbox
       ansible.builtin.assert:
@@ -262,7 +262,7 @@
           (ExecMainStatus={{ adguardhome_sync_status.stdout | trim }}).
       when:
         - adguard_sync_enabled | default(false) | bool
-        - postflight_exercise_sync | default(true)
+        - postflight_exercise_sync | default(true) | bool
 
 - name: Verify SMTP relay
   hosts: mail

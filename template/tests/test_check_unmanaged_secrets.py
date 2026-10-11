@@ -3,10 +3,18 @@ from __future__ import annotations
 
 import io
 import json
+import re
 
-from conftest import load_script
+import pytest
+from conftest import REPO, load_script
 
 mod = load_script("check-unmanaged-secrets.py")
+
+FLUX_TASKFILE = REPO / "taskfiles" / "flux.yml"
+# The bring-up spelling that creates a Secret no controller will ever own.
+CREATE_SECRET = re.compile(
+    r"kubectl\s+-n\s+(\S+)\s+create\s+secret\s+\w+\s+(\S+)"
+)
 
 
 def _secret(name="s", ns="apps", **meta) -> dict:
@@ -91,23 +99,45 @@ def test_tailscale_device_state_is_managed(monkeypatch):
 
 
 def test_an_allowlisted_secret_passes(monkeypatch):
-    """The shipped ALLOWLIST is empty, so the entry is injected here."""
-    monkeypatch.setitem(mod.ALLOWLIST, "external-secrets/op-credentials", "bootstrap")
-    boot = _secret(name="op-credentials", ns="external-secrets")
+    monkeypatch.setitem(mod.ALLOWLIST, "apps/hand-made", "out-of-band on purpose")
+    boot = _secret(name="hand-made", ns="apps")
     assert _run([boot], monkeypatch) == 0
 
 
 def test_the_allowlist_is_exact_not_a_prefix(monkeypatch):
     """A near-miss name in the same namespace must still be flagged."""
-    monkeypatch.setitem(mod.ALLOWLIST, "external-secrets/op-credentials", "bootstrap")
-    impostor = _secret(name="op-credentials-old", ns="external-secrets")
+    monkeypatch.setitem(mod.ALLOWLIST, "apps/hand-made", "out-of-band on purpose")
+    impostor = _secret(name="hand-made-old", ns="apps")
     assert _run([impostor], monkeypatch) == 1
 
 
-def test_the_shipped_allowlist_is_empty():
-    """Site data: a generated cluster adds an entry only when it has to, and
-    every entry is a claim that the value rotates somewhere outside the repo."""
-    assert mod.ALLOWLIST == {}
+def _bootstrap_secrets() -> set[str]:
+    """Every "namespace/name" the Flux bring-up tasks create by hand."""
+    text = FLUX_TASKFILE.read_text(encoding="utf-8")
+    return {f"{ns}/{name}" for ns, name in CREATE_SECRET.findall(text)}
+
+
+def test_the_bring_up_secrets_are_credited():
+    """A bootstrap Secret this repository creates itself has no controller to
+    own it, so an uncredited one reds the gate on correct state."""
+    created = _bootstrap_secrets()
+    assert created, (
+        f"no `kubectl create secret` call found in {FLUX_TASKFILE.name}, so this "
+        "gate compared the allowlist against nothing"
+    )
+    assert created <= set(mod.ALLOWLIST), sorted(created - set(mod.ALLOWLIST))
+
+
+def test_the_flux_bootstrap_deploy_key_is_credited():
+    """`flux bootstrap` writes it directly, outside any Kustomization."""
+    assert "flux-system/flux-system" in mod.ALLOWLIST
+
+
+@pytest.mark.parametrize("entry", sorted(mod.ALLOWLIST))
+def test_every_allowlist_entry_states_a_reason(entry):
+    """An entry is a claim that the value rotates outside this repository, so a
+    blank one credits nothing."""
+    assert mod.ALLOWLIST[entry].strip()
 
 
 def test_service_account_token_is_managed(monkeypatch):

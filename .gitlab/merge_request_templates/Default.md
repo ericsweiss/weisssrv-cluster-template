@@ -29,8 +29,8 @@ This repository is an API: every question is replayed on `copier update` in
 every generated cluster. Name what a consumer has to do, or write "none".
 
   - a renamed, removed or newly REQUIRED question is breaking
-  - a `lib_ref` bump means the fixture, copier.yml's default, this repo's own
-    `include:` refs and docs/VERSIONING.md's validated-pair table move together
+  - a `lib_ref` bump means copier.yml's default and this repo's own `include:`
+    refs move together, as tests/validate_render.py holds them
   - a changed backend seam (git / secrets / storage / dns) needs its row in
     docs/ARCHITECTURE.md "Backend seams"
 -->

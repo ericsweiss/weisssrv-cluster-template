@@ -73,6 +73,7 @@ reconcile. Escape a deliberate literal as `$${...}`.
 | `cluster_external_domain` | Publicly resolvable zone |
 | `cluster_node_label_domain` | Prefix for node role labels/taints (`<prefix>/ingress`, `<prefix>/gpu`) |
 | `cluster_lan_cidr` | LAN range — ingress allowlists |
+| `cluster_lan_gateway` | The LAN router — the ICMP probe target, and any allowlist naming the default gateway |
 | `cluster_pod_cidr` / `cluster_service_cidr` | k3s CIDRs |
 {%- if vpn_tailscale %}
 | `cluster_tailnet_cidr` | Tailscale CGNAT range |

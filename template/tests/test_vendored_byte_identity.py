@@ -13,28 +13,21 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import GATE_RELPATH, REPO, SCRIPTS, _lib_root, lib_file
+from conftest import (
+    GATE_RELPATH,
+    REPO,
+    SCRIPTS,
+    CILoader,
+    _lib_root,
+    lib_file,
+    pinned_lib_ref,
+)
 
 MANIFEST = SCRIPTS / "vendored-manifest.yml"
 
 # Config files carry site data, not library code, so a same-named one is not a
 # vendored copy.
 _SITE_DATA_SUFFIXES = {".yml", ".yaml", ".env", ".conf", ".toml", ".json"}
-
-
-class _CILoader(yaml.SafeLoader):
-    """SafeLoader tolerating GitLab's `!reference` tags, subclassed so the
-    constructor is not registered on the global SafeLoader."""
-
-
-_CILoader.add_multi_constructor("!", lambda loader, suffix, node: None)
-
-
-def _pinned_ref() -> str:
-    ci = yaml.load((REPO / ".gitlab-ci.yml").read_text(), Loader=_CILoader) or {}
-    ref = (ci.get("variables") or {}).get("WEISSSRV_LIB_REF")
-    assert ref, ".gitlab-ci.yml variables.WEISSSRV_LIB_REF is the single source of the pin"
-    return str(ref)
 
 
 def _ref_available(lib: Path, ref: str) -> bool:
@@ -119,7 +112,7 @@ def announce_the_comparison_ref() -> None:
     re-vendors, so the fallback is announced rather than assumed. A fixture, not
     a test: it asserts nothing and would otherwise count as a passing check."""
     lib = _lib_root()
-    ref = _pinned_ref()
+    ref = pinned_lib_ref()
     if not _ref_available(lib, ref):
         warnings.warn(
             f"{lib} has no {ref} (fetch its tags, or `task lib:sync`); byte-identity "
@@ -130,7 +123,7 @@ def announce_the_comparison_ref() -> None:
 
 def test_registered_copies_are_reconciled(registered) -> None:
     """Every vendored copy is identical and every fork reconciled, at the pinned ref."""
-    ref = _pinned_ref()
+    ref = pinned_lib_ref()
     at_pin = _ref_available(_lib_root(), ref)
     result = _run_gate(*(["--ref", ref] if at_pin else []))
     assert result.returncode != 2, f"the vendored-copy gate could not run:\n{result.stderr}"
@@ -177,7 +170,7 @@ def test_every_library_twin_is_registered(registered) -> None:
     """
     lib = _lib_root()
     lib_names = {
-        Path(path).name for path in _lib_offer(lib, _pinned_ref()) if path.startswith("scripts/")
+        Path(path).name for path in _lib_offer(lib, pinned_lib_ref()) if path.startswith("scripts/")
     }
     assert lib_names, "the library offers no scripts at the pinned ref"
     covered = {Path(path).name for _kind, path, _lib in registered}
@@ -205,7 +198,7 @@ DOCKER_BUILD_RELPATH = "ci/build/docker-build.yml"
 
 def _lib_file(relpath: str) -> str:
     """A library file's text at the pinned ref."""
-    return lib_file(relpath, _pinned_ref())
+    return lib_file(relpath, pinned_lib_ref())
 
 
 @pytest.mark.skipif(
@@ -223,7 +216,7 @@ def test_the_dind_service_matches_the_library_input_default() -> None:
     header = next(
         (
             doc
-            for doc in yaml.load_all(text, Loader=_CILoader)
+            for doc in yaml.load_all(text, Loader=CILoader)
             if isinstance(doc, dict) and "spec" in doc
         ),
         {},
@@ -232,7 +225,7 @@ def test_the_dind_service_matches_the_library_input_default() -> None:
     default = (inputs.get("dind_service") or {}).get("default")
     assert default, f"{DOCKER_BUILD_RELPATH} no longer declares a dind_service default"
 
-    jobs = yaml.load(INTEGRATION_JOBS.read_text(), Loader=_CILoader) or {}
+    jobs = yaml.load(INTEGRATION_JOBS.read_text(), Loader=CILoader) or {}
     names = {
         service["name"] if isinstance(service, dict) else service
         for job in jobs.values()
@@ -243,11 +236,12 @@ def test_the_dind_service_matches_the_library_input_default() -> None:
     assert dind, f"no dind service found in {INTEGRATION_JOBS.relative_to(REPO)}"
     assert dind == {default}, (
         f"{INTEGRATION_JOBS.relative_to(REPO)} runs {sorted(dind)} but the library's "
-        f"dind_service default at {_pinned_ref()} is {default!r} — they are one pin."
+        f"dind_service default at {pinned_lib_ref()} is {default!r} — they are one pin."
     )
 
-    # The daemon's bridge MTU, held to the same default: 1500 black-holes large
-    # TLS frames inside the job pod, which reads as a flaky registry or git fetch.
+    # The daemon's bridge MTU, held to the same default: --mtu covers the default
+    # bridge, the default-network-opt the user-defined networks molecule creates.
+    # 1500 black-holes large TLS frames and reads as a flaky registry or fetch.
     mtu = (inputs.get("dind_mtu") or {}).get("default")
     assert mtu, f"{DOCKER_BUILD_RELPATH} no longer declares a dind_mtu default"
     commands = [
@@ -258,10 +252,14 @@ def test_the_dind_service_matches_the_library_input_default() -> None:
         if isinstance(service, dict) and "dind" in str(service.get("name"))
         for argument in (service.get("command") or [])
     ]
-    assert f"--mtu={mtu}" in commands, (
-        f"{INTEGRATION_JOBS.relative_to(REPO)} passes the dind daemon {commands}, "
-        f"missing --mtu={mtu} — the library's dind_mtu default at {_pinned_ref()}."
-    )
+    for flag in (
+        f"--mtu={mtu}",
+        f"--default-network-opt=bridge=com.docker.network.driver.mtu={mtu}",
+    ):
+        assert flag in commands, (
+            f"{INTEGRATION_JOBS.relative_to(REPO)} passes the dind daemon {commands}, "
+            f"missing {flag} — the library's dind_mtu default at {pinned_lib_ref()}."
+        )
 
 
 # The collection tree the shared molecule scaffolding is offered from. No
@@ -271,7 +269,7 @@ MOLECULE_SHARED = "ansible_collections/weisssrv/infra/molecule-shared"
 
 def test_every_shared_molecule_twin_is_registered(registered) -> None:
     """A copy of the collection's molecule-shared/ YAML scaffolding is in the manifest."""
-    offered = _lib_offer(_lib_root(), _pinned_ref())
+    offered = _lib_offer(_lib_root(), pinned_lib_ref())
     local = REPO / "ansible" / "molecule"
     if not local.is_dir():
         return

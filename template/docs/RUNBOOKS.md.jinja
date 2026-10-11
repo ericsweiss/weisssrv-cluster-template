@@ -89,6 +89,8 @@ to read on:
 | `KubeletImageGCIneffective` | a node root filesystem is above the kubelet image-gc watermark | Storage, "Kubelet image store" |
 | `ZFSPoolNotOnline` / `ZFSPoolDataErrors` | a pool is DEGRADED or has unrecoverable data | Storage, "A degraded pool" |
 | `ZFSPoolDeviceErrors` / `ZFSPoolScrubStale` | checksum errors on an ONLINE pool, or no scrub in 35 days | Storage, "A degraded pool" |
+| `SMARTDeviceUnhealthy` / `SMARTPendingSectors` / `SMARTOfflineUncorrectable` / `SMARTMediaErrors` / `SMARTReallocatedSectorsGrowing` | a drive's own SMART attributes say it is failing | Storage, "A failing drive" |
+| `SMARTCollectorStale` | the smartmon textfile collector stopped refreshing, so the SMART alerts serve stale or no inputs | Storage, "A failing drive" |
 | `ZfsEncryptedMountStuck` / `ZfsEncryptedMountStuckCritical` | encrypted datasets have not mounted, so their exports and gated guests stay down | Storage |
 | `SwapCleanFailed` / `SwapCleanSkipped` | the swap-clean job failed, or a conflicting unit has blocked every run for 3 days | Storage |
 | `EncryptedSwapPlaintextFallback` | a host swaps to the plaintext device because the dm-crypt mapper is not active | Storage, "Encrypted swap" |
@@ -402,11 +404,10 @@ version bump in the other direction plus the same task.
 
 Bumping `lib_ref` upgrades the Ansible collection, the CI templates and the
 Terraform modules together — three pin surfaces, one answer. Read the library's
-release notes first ([weisssrv-lib]({{ links.lib_home() }}),
-and `ansible_collections/weisssrv/infra/MIGRATING.md` for role variable renames
-and newly asserted inputs), then change the ref in every place it is written:
-each `ref:` in `.gitlab-ci.yml`, the `version:` in `ansible/requirements.yml`,
-the `?ref=` on each Terraform module source, and `LIB_REF` in `Taskfile.yml`.
+release notes first ([weisssrv-lib]({{ links.lib_home() }})), then change the
+ref in every place it is written: each `ref:` in `.gitlab-ci.yml`, the
+`version:` in `ansible/requirements.yml`, the `?ref=` on each Terraform module
+source, and `LIB_REF` in `Taskfile.yml`.
 
 ```bash
 task ansible:install-collections    # re-installs the collection at the new ref
@@ -1017,6 +1018,33 @@ together. Pools are never created or destroyed by Ansible — `nas_storage` only
 enforces properties on pools and datasets that already exist, and a declared
 dataset that is missing fails the deploy loudly.
 
+**A failing drive**
+
+The pool alerts fire once ZFS sees corruption; these fire on the drive's own
+SMART attributes first, from the `node_exporter_host` smartmon textfile
+collector. Every window is an `*_over_time` so a spun-down drive's absent series
+does not clear a finding.
+
+`SMARTDeviceUnhealthy` is the drive's overall self-assessment reporting FAILED —
+replace it. `SMARTReallocatedSectorsGrowing` fires on growth rather than on a
+standing historical count, because a drive actively remapping sectors is the one
+that is degrading now. `SMARTPendingSectors` and `SMARTOfflineUncorrectable`
+are acute: a non-zero value is a sector unreadable right now, so scrub the
+backing pool to surface any affected data. `SMARTMediaErrors` is the NVMe
+equivalent. `SMARTCollectorStale` is the meta-alert: the collector is missing,
+its sentinel stopped refreshing, or a scan failed on a host that does have SMART
+devices, so every alert above is serving stale or no inputs.
+
+```bash
+smartctl -a /dev/disk/by-id/<disk>          # the full attribute table
+smartctl -t long /dev/disk/by-id/<disk>     # extended self-test
+systemctl status smartmon-collector.timer   # the collector, when it goes stale
+journalctl -u smartmon-collector.service
+```
+
+A drive with pending or uncorrectable sectors is replaced, not cleared: see
+"A degraded pool" above for the `zpool replace` sequence.
+
 **NFS clients hung after a server restart**
 
 Established mounts do not recover from a server that went away: the export is
@@ -1489,7 +1517,6 @@ upstream:
 |---|---|
 | Role variables and behaviour | [`ansible_collections/weisssrv/infra/roles/<role>/README.md`]({{ lib_tree }}{{ lib_ref }}/ansible_collections/weisssrv/infra/roles) in weisssrv-lib |
 | The collection's inventory-wide variable table | [collection README]({{ lib_blob }}{{ lib_ref }}/ansible_collections/weisssrv/infra/README.md) |
-| Role breaking changes across refs | [MIGRATING.md]({{ lib_blob }}{{ lib_ref }}/ansible_collections/weisssrv/infra/MIGRATING.md) |
 | CI template inputs | [docs/INCLUDE-CONTRACT.md]({{ lib_blob }}{{ lib_ref }}/docs/INCLUDE-CONTRACT.md) |
 | What a `lib_ref` bump can break | [docs/VERSIONING.md]({{ lib_blob }}{{ lib_ref }}/docs/VERSIONING.md) |
 | The generator, its answers and its own docs | [weisssrv-cluster-template](https://github.com/ericsweiss/weisssrv-cluster-template) |

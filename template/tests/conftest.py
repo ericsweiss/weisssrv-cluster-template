@@ -43,6 +43,22 @@ def _lib_root() -> Path:
     )
 
 
+class CILoader(yaml.SafeLoader):
+    """SafeLoader tolerating GitLab's `!reference` tags, subclassed so the
+    constructor is not registered on the global SafeLoader."""
+
+
+CILoader.add_multi_constructor("!", lambda loader, suffix, node: None)
+
+
+def pinned_lib_ref() -> str:
+    """The one weisssrv-lib pin every library include and vendored copy reads."""
+    ci = yaml.load((REPO / ".gitlab-ci.yml").read_text(), Loader=CILoader) or {}
+    ref = (ci.get("variables") or {}).get("WEISSSRV_LIB_REF")
+    assert ref, ".gitlab-ci.yml variables.WEISSSRV_LIB_REF is the single source of the pin"
+    return str(ref)
+
+
 def lib_file(relpath: str, ref: str) -> str:
     """A library file's text at `ref`, or from the checkout's working tree when
     that ref is not available locally. Shared by the suites that read a library
@@ -150,6 +166,7 @@ CONFIGMAP_INVENTORY_MIRROR = {
     "cluster_k3s_api_vip": ("all.yml", "k3s_api_vip"),
     "cluster_metallb_public_vip": ("all.yml", "metallb_public_vip"),
     "cluster_metallb_internal_vip": ("all.yml", "metallb_internal_vip"),
+    "cluster_lan_gateway": ("all.yml", "lan_gateway"),
 }
 
 OBSERVABILITY = REPO / "kubernetes" / "infrastructure" / "observability"

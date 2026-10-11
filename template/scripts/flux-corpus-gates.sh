@@ -102,6 +102,12 @@ echo "=== Checking HPA/VPA invariant ==="
 python3 scripts/check-hpa-vpa-invariant.py --require-chart-native-vpas \
   --allow-unjudged-vpa-caps \
   --policy-config scripts/autoscaling-policy.yaml < "$CORPUS" || record $? check-hpa-vpa-invariant.py
+# The corpus, not the tree: every ipBlock CIDR is a ${cluster_*} placeholder on
+# disk, which the fence arms skip, so the LAN-escape check examines nothing
+# there. `task lint:netpol-parity` keeps the tree arm, which covers flux-system/.
+echo "=== Checking NetworkPolicy LAN fence over real CIDRs ==="
+python3 scripts/check-netpol-except-parity.py --config scripts/netpol-except.yaml \
+  --corpus "$CORPUS" || record $? check-netpol-except-parity.py
 echo "=== Checking scrape/NetworkPolicy invariant ==="
 python3 scripts/check-scrape-netpol.py < "$CORPUS" || record $? check-scrape-netpol.py
 echo "=== Checking ingress default-deny coverage ==="
@@ -110,6 +116,10 @@ echo "=== Checking ClusterSecretStore scoping ==="
 python3 scripts/check-secretstore-scope.py < "$CORPUS" || record $? check-secretstore-scope.py
 echo "=== Checking PVC storageClassName ==="
 python3 scripts/check-pvc-storageclass.py < "$CORPUS" || record $? check-pvc-storageclass.py
+# A sized emptyDir outside its container's ephemeral-storage limit is evicted
+# before the volume it sized ever fills.
+echo "=== Checking sized emptyDir vs ephemeral-storage limits ==="
+python3 scripts/check-ephemeral-storage-cap.py < "$CORPUS" || record $? check-ephemeral-storage-cap.py
 # --allow-empty: a cluster with no NFS storage ships no such PV. The cert domain
 # only names the certificate in the IP-server message.
 echo "=== Checking NFS PersistentVolume TLS ==="

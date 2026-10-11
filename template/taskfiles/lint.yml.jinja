@@ -158,9 +158,9 @@ tasks:
 
   netpol-parity:
     desc: Assert every NetworkPolicy reserved-CIDR except-list matches the canonical set
-    # Reads the manifests on disk, not the rendered corpus, so it also covers
-    # kubernetes/clusters/*/flux-system/ — which no Kustomization builds and
-    # flux:lint therefore never sees. Mirrors the CI netpol-parity job.
+    # The tree on disk, so it also covers kubernetes/clusters/*/flux-system/,
+    # which no Kustomization builds. The placeholder CIDRs it cannot judge are
+    # judged by the corpus arm in flux:lint. Mirrors the CI netpol-parity job.
     preconditions:
       - *needs_pyyaml
     cmds:
@@ -289,6 +289,15 @@ tasks:
     cmds:
       - python3 scripts/check-flux-version-pin.py
 
+  kubectl-version-pin:
+    desc: Assert the CI kubectl pin stays within one minor of the cluster's k3s_version
+    # kubectl supports +/-1 minor against the apiserver. Outside that window its
+    # output is unspecified, and deploy-verify.sh reads it to gate a deploy.
+    preconditions:
+      - *needs_python3
+    cmds:
+      - python3 scripts/check-kubectl-version-pin.py
+
   repo-sync:
     desc: Assert every generated file still matches the source it is generated from
     # Regenerate-and-diff the three generated files: scripts/hosts.env (from the
@@ -395,4 +404,11 @@ tasks:
       REQUIRE_RELEASE_RULES: "1"
     cmds:
       - bash scripts/lint-prometheus-config.sh
+      # Syntax vs behaviour: check-config proves the file parses, this proves
+      # where each alert actually lands and that the inhibit pairs still bind.
+      - >-
+        python3 scripts/check-alertmanager-behaviour.py
+        --config scripts/alertmanager-behaviour.yaml
+        --extract-arg=--rules-dir --extract-arg=kubernetes/apps
+        --extract-arg=--require-release-rules
 {%- endraw %}
