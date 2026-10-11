@@ -258,3 +258,47 @@ tests:
       - eval_time: 10m
         alertname: SMARTCollectorStale
         exp_alerts: []
+
+  # Arm 6: one host's collector series vanish while a peer keeps exporting, so
+  # absent() stays false and the up arm is the only one that sees it.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="192.0.2.11:9101"}'
+        values: '1+0x30'
+      - series: 'smartmon_collector_last_success_seconds{instance="192.0.2.11:9101"}'
+        values: '0+60x10 _x20'
+      - series: 'smartmon_collector_devices_scanned{instance="192.0.2.11:9101"}'
+        values: '4+0x10 _x20'
+      - series: 'up{job="node-exporter-host", instance="192.0.2.12:9101"}'
+        values: '1+0x30'
+      - series: 'smartmon_collector_last_success_seconds{instance="192.0.2.12:9101"}'
+        values: '0+60x30'
+      - series: 'smartmon_collector_devices_scanned{instance="192.0.2.12:9101"}'
+        values: '4+0x30'
+    alert_rule_test:
+      # Both collectors fresh.
+      - eval_time: 10m
+        alertname: SMARTCollectorStale
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: SMARTCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: '192.0.2.11:9101'
+              job: node-exporter-host
+
+  # A node the collector never served has no devices_scanned witness, so the 7d
+  # guard keeps the up arm off it while a healthy host holds absent() false.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node-exporter", instance="10.42.1.7:9100"}'
+        values: '1+0x30'
+      - series: 'smartmon_collector_last_success_seconds{instance="192.0.2.11:9101"}'
+        values: '0+60x30'
+      - series: 'smartmon_collector_devices_scanned{instance="192.0.2.11:9101"}'
+        values: '4+0x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: SMARTCollectorStale
+        exp_alerts: []

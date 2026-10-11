@@ -920,8 +920,9 @@ spec:
                     controller has logged uncorrectable data errors —
                     investigate and plan replacement.
 
-              # Collector meta-failure. The absent() arm makes an undeployed
-              # collector loud instead of silently blind.
+              # Collector meta-failure. absent() makes an undeployed collector
+              # loud but needs every host silent, so the up arm catches one host
+              # losing its series, scoped by a 7d devices_scanned window.
               - alert: SMARTCollectorStale
                 # The success arm catches a refreshed sentinel with a failed scan
                 # or no device parsed. The devices_scanned guard keeps a host
@@ -929,6 +930,15 @@ spec:
                 expr: >-
                   (time() - smartmon_collector_last_success_seconds > 900)
                   or absent(smartmon_collector_last_success_seconds)
+                  or (
+                    (
+                      up == 1
+                      unless on (instance) smartmon_collector_last_success_seconds
+                    )
+                    and on (instance) (
+                      max_over_time(smartmon_collector_devices_scanned[7d]) > 0
+                    )
+                  )
                   or (
                     smartmon_collector_success == 0
                     and on(instance) (
@@ -943,7 +953,8 @@ spec:
                   summary: 'smartmon collector is degraded or missing on {{ $labels.instance }}'
                   description: >-
                     smartmon_collector_last_success_seconds is stale (>15m),
-                    entirely absent, or the collector reports success 0
+                    gone on a scraped host whose peers still report, entirely
+                    absent, or the collector reports success 0
                     (smartctl unrunnable, scan failed, or no device parsed), so
                     the SMART device alerts on this host serve stale or no
                     inputs. Check
