@@ -16,9 +16,11 @@ from pathlib import Path
 # `--print` is what a Taskfile var reads, so it works with no PyYAML: the
 # header's `spec.inputs` block is scanned one four-space stanza at a time and
 # a default is read only from the stanza naming the requested input.
-_PREAMBLE_RE = re.compile(r"\A(?:(?:#.*|%.*|[ \t]*)\n)*")
+_PREAMBLE_RE = re.compile(r"\A(?:(?:[ \t]*#.*|%.*|[ \t]*)\n)*")
 _DOC_SEP_RE = re.compile(r"^---(?:[ \t].*)?$", re.M)
-_INPUTS_RE = re.compile(r"^spec:\n(?:.*\n)*?  inputs:\n((?:(?:    .*|\s*)\n)*)", re.M)
+_INPUTS_RE = re.compile(
+    r"^spec:\n(?:(?=[ \t#\n])[^\n]*\n)*?  inputs:\n((?:(?:    .*|\s*)\n)*)", re.M
+)
 _STANZA_RE = re.compile(r"^    ([\w-]+):[ \t]*(?:#.*)?\n((?:(?:      .*|\s*)\n)*)", re.M)
 _DEFAULT_RE = re.compile(
     r"^      default: *(['\"]?)(v\d+\.\d+\.\d+)\1(?:[ \t]+#.*)?[ \t]*$", re.M
