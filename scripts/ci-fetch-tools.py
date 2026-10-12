@@ -239,8 +239,10 @@ def replace_into(directory: Path, source: Path, name: str) -> None:
     # os.py registers renameat as `rename`, and os.replace makes the same call,
     # so that entry is the probe for a rename taking a directory descriptor.
     if os.rename not in os.supports_dir_fd:
-        os.replace(source, directory / name)
-        return
+        raise FetchError(
+            "this platform cannot rename through a directory descriptor, so a "
+            "cache write cannot be held inside the install directory; refusing"
+        )
     handle = os.open(directory, OPEN_CACHE_FLAGS)
     try:
         os.replace(source, name, dst_dir_fd=handle)

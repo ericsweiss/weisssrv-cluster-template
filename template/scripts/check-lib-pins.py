@@ -13,9 +13,12 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
-# `--print` is what a Taskfile var and a shell read, so it must work on a
-# Python with no PyYAML; the header's default is a fixed shape read by regex.
-_PRINT_RE = re.compile(r"^spec:\n(?:.*\n)*?    (\w+):\n(?:.*\n)*?      default: *['\"]?(v\d+\.\d+\.\d+)['\"]?\s*$", re.M)
+# `--print` is what a Taskfile var reads, so it works with no PyYAML: the
+# header's `spec.inputs` block is scanned one four-space stanza at a time and
+# a default is read only from the stanza naming the requested input.
+_INPUTS_RE = re.compile(r"^spec:\n(?:(?!---$).*\n)*?  inputs:\n((?:(?:    .*|\s*)\n)*)", re.M)
+_STANZA_RE = re.compile(r"^    ([\w-]+):[ \t]*(?:#.*)?\n((?:(?:      .*|\s*)\n)*)", re.M)
+_DEFAULT_RE = re.compile(r"^      default: *['\"]?(v\d+\.\d+\.\d+)['\"]?[ \t]*(?:#.*)?$", re.M)
 
 
 def print_declared_ref(argv: list[str]) -> int:
@@ -37,10 +40,15 @@ def print_declared_ref(argv: list[str]) -> int:
     except OSError as exc:
         print(f"ERROR: {ci}: {exc}", file=sys.stderr)
         return 2
-    for m in _PRINT_RE.finditer(text):
-        if m.group(1) == want:
-            print(m.group(2))
+    block = _INPUTS_RE.search(text)
+    for stanza in _STANZA_RE.finditer(block.group(1) if block else ""):
+        if stanza.group(1) != want:
+            continue
+        found = _DEFAULT_RE.search(stanza.group(2))
+        if found:
+            print(found.group(1))
             return 0
+        break
     print(f"ERROR: {ci}: no spec.inputs.{want}.default release tag in the header", file=sys.stderr)
     return 2
 
@@ -545,7 +553,13 @@ def plan_fix(
                 + "\n  ".join(remaining)
             )
         return updated, 0
-    landed = [entry.get("ref") for entry in lib_includes(reparsed, project)]
+    project_includes = lib_includes(reparsed, project)
+    if not project_includes:
+        raise OperatorError(
+            f"{path}: no `include:` entry names project {project!r}, so there is "
+            "no pin for the declared ref to feed; file left unchanged"
+        )
+    landed = [entry.get("ref") for entry in project_includes]
     landed.append((reparsed.get("variables") or {}).get(ref_var))
     if any(ref != marker for ref in landed):
         raise SystemExit(
@@ -853,6 +867,16 @@ def plan_fix_sites(ci_file: Path, want: str) -> list[tuple[Path, str]]:
             seen += sum(1 for _ in pattern.finditer(text))
             updated = _sub_group(pattern, text, want)
             if updated != text:
+                # The rewritten text must still match with the new ref in every
+                # capture, or a pattern whose context embeds the old tag would
+                # pass planning and fail the check after the write.
+                after = [m.group(1) for m in pattern.finditer(updated)]
+                if not after or any(ref != want for ref in after):
+                    raise OperatorError(
+                        f"{path}: site {glob!r} fails to match its own rewrite "
+                        f"(captures {after!r}); the pattern's context embeds the "
+                        "tag, so narrow it to the ref itself; nothing written"
+                    )
                 writes.append((path, updated))
         if not seen:
             raise OperatorError(
