@@ -407,8 +407,8 @@ def _inhibit_index(am_doc: dict) -> list[tuple[int, list, list, set[str]]]:
 def _side_admits(parsed, name: str, rules_by_name) -> bool:
     """Whether one side of an inhibit rule can match an alert called `name`.
 
-    A side pinning alertnames admits only those; one scoping by severity or
-    component admits an alert whose own labels satisfy every matcher.
+    A side pinning alertnames admits only those; an alert instance carries one
+    declaration's labels, so a declaration satisfying every matcher admits.
     """
     pinned, unreadable = _exact_alertnames(parsed)
     if unreadable:
@@ -419,12 +419,11 @@ def _side_admits(parsed, name: str, rules_by_name) -> bool:
     if pinned and name not in pinned:
         return False
     # A pin alone covers an upstream alert the corpus does not declare; any
-    # other matcher still has to hold on the alert's own labels.
+    # other matcher still has to hold on some declaration's own labels.
     others = [m for m in parsed if m[0] != "alertname"]
     if pinned and not others:
         return True
-    declared = rules_by_name.get(name) or []
-    return bool(declared) and all(_matches_labels(rule, others) for rule in declared)
+    return any(_matches_labels(rule, others) for rule in rules_by_name.get(name) or [])
 
 
 def check_escalation_inhibits(am_doc: dict, rules_doc: dict, config: Config) -> list[str]:

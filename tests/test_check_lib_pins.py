@@ -7,6 +7,9 @@ scripts/README.md) and adds only its own smoke test.
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
+import sys
 import textwrap
 
 import pytest
@@ -524,6 +527,75 @@ def test_fix_refuses_a_flow_style_entry_it_cannot_rewrite(tmp_path: Path) -> Non
         clp.fix(p)
     assert "did not land cleanly" in str(excinfo.value)
     assert p.read_text() == before
+
+
+# ---------------------------------------------------------------------------
+# The header `default:` every other surface is rewritten from.
+
+
+def _flow_header_ci(header: str) -> str:
+    """A clean pipeline whose only unusual shape is its header `default:`."""
+    return header + textwrap.dedent(
+        f"""\
+        ---
+        variables:
+          WEISSSRV_LIB_REF: {MARKER}
+        include:
+          - project: eric/weisssrv-lib
+            ref: {MARKER}
+            file: /ci/lint/yaml-lint.yml
+        """
+    )
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "spec:\n  inputs:\n    lib_ref: {default: v0.4.0}\n",
+        "spec: {inputs: {lib_ref: {default: v0.4.0}}}\n",
+        'spec:\n  inputs:\n    lib_ref: {default: "v0.4.0", type: string}\n',
+        "spec:\n  inputs:\n    lib_ref: {default: }\n",
+    ],
+    ids=["flow-input", "flow-spec", "flow-with-a-sibling-key", "flow-empty-default"],
+)
+def test_bump_rewrites_a_single_line_flow_header(tmp_path, capsys, header) -> None:
+    """A flow `default:` written on one line is a pure column splice.
+
+    Bounded by the value node's own marks, so a sibling key on the same line
+    survives it.
+    """
+    ci = _write(tmp_path, _flow_header_ci(header))
+    assert clp.main(["--ci-file", str(ci), "--bump", "v0.6.0"]) == 0
+    assert clp.declared_ref(ci.read_text()) == "v0.6.0"
+    assert clp.check(ci) == []
+    assert "v0.6.0" in capsys.readouterr().out
+    if "type: string" in header:
+        assert "type: string" in ci.read_text()
+
+
+@pytest.mark.parametrize(
+    ("header", "line"),
+    [
+        ("spec:\n  inputs:\n    lib_ref: {default:\n      v0.4.0}\n", 3),
+        ("spec:\n  inputs:\n    lib_ref:\n      default: >-\n        v0.4.0\n", 4),
+    ],
+    ids=["flow-across-lines", "folded-scalar"],
+)
+def test_bump_refuses_a_header_default_it_cannot_reach(
+    tmp_path, capsys, header, line
+) -> None:
+    """Reporting a clean 0 at the OLD tag is the failure this forecloses.
+
+    Every other pin already reads the input, so nothing else needs rewriting
+    and the bump has no drift left to betray it.
+    """
+    ci = _write(tmp_path, _flow_header_ci(header))
+    before = ci.read_text()
+    assert clp.main(["--ci-file", str(ci), "--bump", "v0.6.0"]) == 2
+    err = capsys.readouterr().err
+    assert f"{ci}:{line}" in err and "flow mapping spanning lines" in err
+    assert ci.read_text() == before
+    assert clp.declared_ref(ci.read_text()) == "v0.4.0"
 
 
 def test_fix_refuses_an_entry_with_no_ref_to_rewrite(tmp_path: Path) -> None:
@@ -1079,6 +1151,25 @@ def _write_module(tmp_path: Path, root: str, ref: str, module: str = "cloudflare
     return path
 
 
+def test_print_needs_no_pyyaml(tmp_path: Path) -> None:
+    """A Taskfile var reads --print from a shell whose python may lack PyYAML."""
+    ci = _write(tmp_path, _ci())
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(tmp_path / "no-yaml")}
+    (tmp_path / "no-yaml" / "yaml").mkdir(parents=True)
+    (tmp_path / "no-yaml" / "yaml" / "__init__.py").write_text("raise ImportError('stub')\n")
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--print", "--ci-file", str(ci)],
+        capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == clp.declared_ref(ci.read_text())
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--ci-file", str(ci)],
+        capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode == 2 and "PyYAML required" in proc.stderr
+
+
 def test_no_site_list_is_a_noop(tmp_path: Path) -> None:
     ci = _write(tmp_path, _ci())
     assert clp.load_sites(ci) == []
@@ -1295,3 +1386,104 @@ class TestSiteListSchema:
     def test_an_empty_document_is_a_noop(self, tmp_path, capsys):
         rc, _ = self._run(tmp_path, "", capsys)
         assert rc == 0
+
+
+class TestFixIsPlannedBeforeItWrites:
+    """Every surface is validated and computed before the first byte is written.
+
+    A site refusing must leave the pipeline file, requirements.yml and every
+    earlier site exactly as they were.
+    """
+
+    _TERRAFORM = (
+        r"'weisssrv-lib\.git//terraform/modules/[a-z-]+\?ref=(v\d+\.\d+\.\d+)(?=\")'"
+    )
+    _CLI = r"'weisssrv-lib\.git@(v\d+\.\d+\.\d+)(?=#subdirectory=cli)'"
+
+    def _tree(self, tmp_path: Path, second: str) -> tuple[Path, Path]:
+        """A literal-layout repo drifted on every surface, so a working --fix
+        would rewrite all of them."""
+        ci = _write(tmp_path, _literal_ci())
+        _write_requirements(tmp_path, _requirements("v0.3.2"))
+        _write_sites(
+            tmp_path,
+            "sites:\n"
+            f"  - path: terraform/*/main.tf\n    pattern: {self._TERRAFORM}\n"
+            f"  - path: docs/*.md\n    pattern: {second}\n",
+        )
+        return ci, _write_module(tmp_path, "cloudflare", "v0.3.2")
+
+    def _snapshot(self, *paths: Path) -> dict[Path, str]:
+        return {path: path.read_text() for path in paths}
+
+    def _unchanged(self, before: dict[Path, str]) -> None:
+        for path, text in before.items():
+            assert path.read_text() == text, f"{path} was rewritten"
+
+    def _install_doc(self, directory: Path, ref: str) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        doc = directory / "install.md"
+        doc.write_text(
+            "pipx install 'git+https://git.ericsweiss.com/eric/weisssrv-lib.git@"
+            f"{ref}#subdirectory=cli'\n"
+        )
+        return doc
+
+    def test_a_later_sites_bad_pattern_leaves_every_surface_untouched(
+        self, tmp_path, capsys
+    ) -> None:
+        ci, module = self._tree(tmp_path, "'(unclosed'")
+        before = self._snapshot(ci, module, tmp_path / "ansible" / "requirements.yml")
+        assert clp.main(["--ci-file", str(ci), "--fix"]) == 2
+        assert "not a valid regex" in capsys.readouterr().err
+        self._unchanged(before)
+
+    def test_a_later_site_matching_nothing_refuses_before_any_write(
+        self, tmp_path, capsys
+    ) -> None:
+        """--fix cannot repair a stale glob, so it must not half-apply around it."""
+        ci, module = self._tree(tmp_path, self._CLI)
+        before = self._snapshot(ci, module, tmp_path / "ansible" / "requirements.yml")
+        assert clp.main(["--ci-file", str(ci), "--fix"]) == 2
+        assert "matched no ref" in capsys.readouterr().err
+        self._unchanged(before)
+
+    def test_a_later_symlinked_site_leaves_the_earlier_one_alone(
+        self, tmp_path, capsys
+    ) -> None:
+        ci, module = self._tree(tmp_path, self._CLI)
+        outside = self._install_doc(tmp_path.parent / "outside", "v0.1.0")
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "install.md").symlink_to(outside)
+        before = self._snapshot(
+            ci, module, tmp_path / "ansible" / "requirements.yml", outside
+        )
+        assert clp.main(["--ci-file", str(ci), "--fix"]) == 2
+        assert "matched the symlink" in capsys.readouterr().err
+        self._unchanged(before)
+
+    def test_a_site_glob_naming_the_pipeline_file_is_refused(
+        self, tmp_path, capsys
+    ) -> None:
+        """Two surfaces rewriting one file would discard one of the two plans."""
+        ci = _write(tmp_path, _literal_ci())
+        _write_sites(
+            tmp_path,
+            "sites:\n  - path: .gitlab-ci.yml\n"
+            "    pattern: 'WEISSSRV_LIB_REF: \"(v\\d+\\.\\d+\\.\\d+)\"'\n",
+        )
+        before = self._snapshot(ci)
+        assert clp.main(["--ci-file", str(ci), "--bump", "v0.6.0"]) == 2
+        assert "rewritten by two surfaces" in capsys.readouterr().err
+        self._unchanged(before)
+
+    def test_a_clean_plan_still_writes_every_surface(self, tmp_path) -> None:
+        """The preflight must not cost the working path."""
+        ci, module = self._tree(tmp_path, self._CLI)
+        doc = self._install_doc(tmp_path / "docs", "v0.1.0")
+        assert clp.main(["--ci-file", str(ci), "--bump", "v0.6.0"]) == 0
+        assert clp.declared_ref(ci.read_text()) == "v0.6.0"
+        assert "?ref=v0.6.0" in module.read_text()
+        assert "@v0.6.0#subdirectory=cli" in doc.read_text()
+        req = (tmp_path / "ansible" / "requirements.yml").read_text()
+        assert "version: v0.6.0" in req

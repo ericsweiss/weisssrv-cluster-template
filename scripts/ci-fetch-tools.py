@@ -25,6 +25,11 @@ BINARY_MODE = 0o755
 RAW = "raw"
 ARCHIVE_MODES = {"tar.gz": "r:gz", "tar.xz": "r:xz"}
 ASSETS_DIR = ".assets"
+# Read-only, a directory, and the final component not followed, so a rename
+# through this descriptor stays inside the cache.
+OPEN_CACHE_FLAGS = (
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
 
 
 class FetchError(Exception):
@@ -202,6 +207,47 @@ def extract(archive: Path, tool: Tool, target: Path) -> None:
         raise FetchError("cannot read %s: %s" % (archive.name, exc)) from exc
 
 
+def cache_root(directory: Path) -> Path:
+    """The install directory with its own symlinks resolved, as a write finds it."""
+    return directory.resolve()
+
+
+def in_cache(directory: Path, path: Path) -> Path:
+    """`path`, refused when a link would carry a write out of `directory`.
+
+    The install directory is a mutable cache, so a link restored into it must
+    not redirect an asset or a stamp somewhere else.
+    """
+    if path.is_symlink():
+        raise FetchError(
+            "refusing the symlink at %s: the cache holds its own files" % path
+        )
+    root = cache_root(directory)
+    if not path.parent.resolve().is_relative_to(root):
+        raise FetchError(
+            "refusing %s: it resolves outside the cache at %s" % (path, root)
+        )
+    return path
+
+
+def replace_into(directory: Path, source: Path, name: str) -> None:
+    """Rename `source` onto `name` in `directory`, through the directory itself.
+
+    The descriptor carries the rename where the platform has one, so a link
+    swapped in after the check cannot redirect it.
+    """
+    # os.py registers renameat as `rename`, and os.replace makes the same call,
+    # so that entry is the probe for a rename taking a directory descriptor.
+    if os.rename not in os.supports_dir_fd:
+        os.replace(source, directory / name)
+        return
+    handle = os.open(directory, OPEN_CACHE_FLAGS)
+    try:
+        os.replace(source, name, dst_dir_fd=handle)
+    finally:
+        os.close(handle)
+
+
 def stamp_path(directory: Path, name: str) -> Path:
     """Where the installed version and checksum are recorded."""
     return directory / ("%s.version" % name)
@@ -223,7 +269,7 @@ def cached_asset(name: str, tool: Tool, directory: Path) -> Path | None:
     The directory is mutable, so an asset that no longer matches reads as
     absent and the download happens again.
     """
-    asset = asset_path(directory, name)
+    asset = in_cache(directory, asset_path(directory, name))
     try:
         return asset if digest(asset) == tool.sha256.strip().lower() else None
     except OSError:
@@ -252,10 +298,10 @@ def clear_path(path: Path) -> None:
 
 def keep_asset(asset: Path, directory: Path, name: str) -> None:
     """Move a verified asset into the cache, replacing any earlier one."""
-    kept = asset_path(directory, name)
+    kept = in_cache(directory, asset_path(directory, name))
     kept.parent.mkdir(parents=True, exist_ok=True)
     clear_path(kept)
-    os.replace(asset, kept)
+    replace_into(kept.parent, asset, name)
 
 
 def unpack(name: str, tool: Tool, asset: Path, staging: Path) -> Path:
@@ -298,6 +344,7 @@ def is_installed(name: str, tool: Tool, directory: Path, expected: str) -> bool:
 def install_tool(name: str, tool: Tool, directory: Path, force: bool = False) -> str:
     """Install one tool into `directory`, and return the line to print."""
     destination = directory / name
+    stamp = in_cache(directory, stamp_path(directory, name))
     staging = Path(tempfile.mkdtemp(dir=directory, prefix=".fetch-"))
     try:
         asset, fetched = obtain_asset(name, tool, directory, staging)
@@ -312,8 +359,12 @@ def install_tool(name: str, tool: Tool, directory: Path, force: bool = False) ->
         clear_path(destination)
         # The stamp lands after the binary, so an interrupted install reads as
         # absent and re-fetches rather than as the pinned version.
-        os.replace(binary, destination)
-        stamp_path(directory, name).write_text(stamp_text(tool, installed))
+        replace_into(cache_root(directory), binary, name)
+        # The stamp takes the same route, so a link swapped onto its path after
+        # the check is replaced rather than followed.
+        staged_stamp = staging / stamp.name
+        staged_stamp.write_text(stamp_text(tool, installed))
+        replace_into(cache_root(directory), staged_stamp, stamp.name)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return "%s %s -> %s" % (name, tool.version, destination)

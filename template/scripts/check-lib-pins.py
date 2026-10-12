@@ -13,6 +13,41 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
+# `--print` is what a Taskfile var and a shell read, so it must work on a
+# Python with no PyYAML; the header's default is a fixed shape read by regex.
+_PRINT_RE = re.compile(r"^spec:\n(?:.*\n)*?    (\w+):\n(?:.*\n)*?      default: *['\"]?(v\d+\.\d+\.\d+)['\"]?\s*$", re.M)
+
+
+def print_declared_ref(argv: list[str]) -> int:
+    """`--print` without PyYAML: the header's input default, or exit 2."""
+    ci = Path(".gitlab-ci.yml")
+    for i, a in enumerate(argv):
+        if a == "--ci-file" and i + 1 < len(argv):
+            ci = Path(argv[i + 1])
+        elif a.startswith("--ci-file="):
+            ci = Path(a.split("=", 1)[1])
+    want = "lib_ref"
+    for i, a in enumerate(argv):
+        if a == "--input" and i + 1 < len(argv):
+            want = argv[i + 1]
+        elif a.startswith("--input="):
+            want = a.split("=", 1)[1]
+    try:
+        text = ci.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"ERROR: {ci}: {exc}", file=sys.stderr)
+        return 2
+    for m in _PRINT_RE.finditer(text):
+        if m.group(1) == want:
+            print(m.group(2))
+            return 0
+    print(f"ERROR: {ci}: no spec.inputs.{want}.default release tag in the header", file=sys.stderr)
+    return 2
+
+
+if "--print" in sys.argv[1:]:
+    raise SystemExit(print_declared_ref(sys.argv[1:]))
+
 try:
     import yaml
 except ImportError:
@@ -239,6 +274,59 @@ def _header_default_line(text: str, input_name: str = INPUT_NAME) -> int | None:
     return None
 
 
+def _header_default_span(
+    text: str, input_name: str = INPUT_NAME
+) -> tuple[int, int] | None:
+    """(start, end) columns of the header default's VALUE, on its key's line.
+
+    None unless the value is a scalar written entirely on that line, the one
+    shape a single-line splice can rewrite.
+    """
+    entry = _mapping_value(
+        _mapping_value(_mapping_value(_spec_node(text), "spec"), "inputs"),
+        input_name,
+    )
+    if not isinstance(entry, yaml.MappingNode):
+        return None
+    for key, value in entry.value:
+        if not (isinstance(key, yaml.ScalarNode) and key.value == "default"):
+            continue
+        if not isinstance(value, yaml.ScalarNode):
+            return None
+        if value.start_mark.line != key.start_mark.line:
+            return None
+        if value.end_mark.line != value.start_mark.line:
+            return None
+        return value.start_mark.column, value.end_mark.column
+    return None
+
+
+def _header_default_rewrite(
+    line: str, target: str, span: tuple[int, int] | None
+) -> str | None:
+    """The header's `default:` line set to `target`, or None when unchanged.
+
+    Block style is a key rewrite; a single-line flow mapping is a column splice
+    bounded by the value node's own marks, so nothing else on the line moves.
+    """
+    block = _rewrite_scalar_line(line, "default", target)
+    if block is not None:
+        return block
+    if span is None:
+        return None
+    body = line.rstrip("\n")
+    start, end = span
+    if not 0 <= start <= end <= len(body):
+        return None
+    # An implicit null value spans zero columns on the separating space, so the
+    # replacement carries its own.
+    value = target if start < end else f" {target}"
+    updated = body[:start] + value + body[end:]
+    if updated == body:
+        return None
+    return updated + ("\n" if line.endswith("\n") else "")
+
+
 def _variable_line(text: str, ref_var: str = REF_VAR) -> int | None:
     """0-based line of the `variables:` entry holding `ref_var`."""
     variables = _mapping_value(_document_node(text, "variables", _LOADER), "variables")
@@ -364,15 +452,15 @@ def _ref_key_lines(text: str, project: str) -> set[int]:
     return found
 
 
-def fix(
+def plan_fix(
     path: Path,
     project: str = LIB_PROJECT,
     ref_var: str = REF_VAR,
     input_name: str = INPUT_NAME,
     want: str | None = None,
-) -> int:
-    """Rewrite the pipeline file into the header layout, at `want` or at the ref
-    it already declares. -> the number of rewrites made."""
+) -> tuple[str, int]:
+    """The pipeline file in the header layout, at `want` or at the ref it
+    already declares, computed with NOTHING written -> (text, rewrites)."""
     text = path.read_text(encoding="utf-8")
     doc = parse_ci(text)
     target = want if want is not None else declared_ref(text, input_name)
@@ -409,49 +497,75 @@ def fix(
     var_line = _variable_line(text, ref_var)
     if var_line is not None:
         targets.add((var_line, ref_var, marker))
-    if default_line is not None:
-        targets.add((default_line, "default", target))
     for line_no, key, value in sorted(targets):
         rewritten = _rewrite_scalar_line(lines[line_no], key, value)
         if rewritten is not None:
             lines[line_no] = rewritten
+            changed += 1
+    if default_line is not None:
+        rewritten = _header_default_rewrite(
+            lines[default_line], target, _header_default_span(text, input_name)
+        )
+        if rewritten is not None:
+            lines[default_line] = rewritten
             changed += 1
     updated = "".join(lines)
     if not has_header:
         updated = _insert_header(updated, target, input_name)
         changed += 1
 
-    if not changed:
-        remaining = check(path, project, ref_var, input_name)
-        if remaining:
-            # --fix cannot add an absent ref or variable, rewrite flow style, or
-            # reach a pin outside `include:`; reporting 0 for any of those would
-            # hand the caller a clean result over an unrepaired file.
-            raise SystemExit(
-                f"{path}: --fix could not repair this file; fix it by hand:\n  "
-                + "\n  ".join(remaining)
-            )
-        return 0
-
-    # Re-parsed and required to have landed as the exact strings intended.
-    # Nothing is written until that passes, so a refusal is never a
-    # half-edited file.
+    # Re-parsed and required to have landed as the exact strings intended, so a
+    # refusal is never a half-edited file.
     try:
         reparsed = parse_ci(updated)
+        landed_ref = declared_ref(updated, input_name)
     except yaml.YAMLError as exc:
         raise SystemExit(
             f"{path}: rewrite would produce invalid YAML ({exc}); "
             "file left unchanged"
         ) from exc
+    # Checked even when nothing changed: a `--bump` the line rewriter could not
+    # reach would otherwise report a clean 0 over the old tag.
+    if landed_ref != target:
+        where = f"{path}:{default_line + 1}" if default_line is not None else str(path)
+        raise OperatorError(
+            f"{where}: the declared ref is still {landed_ref!r}, not {target!r} — "
+            "this `default:` is in a shape the line rewriter cannot reach, such "
+            "as a flow mapping spanning lines or a multi-line scalar. Write it "
+            f"as `default: {target}` on the input's own line; file left unchanged"
+        )
+    if not changed:
+        remaining = check(path, project, ref_var, input_name)
+        if remaining:
+            # --fix cannot add an absent ref or variable, or reach a pin outside
+            # `include:`; reporting 0 for either would hand the caller a clean
+            # result over an unrepaired file.
+            raise SystemExit(
+                f"{path}: --fix could not repair this file; fix it by hand:\n  "
+                + "\n  ".join(remaining)
+            )
+        return updated, 0
     landed = [entry.get("ref") for entry in lib_includes(reparsed, project)]
     landed.append((reparsed.get("variables") or {}).get(ref_var))
-    if any(ref != marker for ref in landed) or declared_ref(updated, input_name) != target:
+    if any(ref != marker for ref in landed):
         raise SystemExit(
             f"{path}: rewrite did not land cleanly (pins parsed back as "
-            f"{landed!r} at {declared_ref(updated, input_name)!r}, wanted "
-            f"{marker!r} at {target!r}); file left unchanged"
+            f"{landed!r}, wanted {marker!r}); file left unchanged"
         )
-    path.write_text(updated, encoding="utf-8")
+    return updated, changed
+
+
+def fix(
+    path: Path,
+    project: str = LIB_PROJECT,
+    ref_var: str = REF_VAR,
+    input_name: str = INPUT_NAME,
+    want: str | None = None,
+) -> int:
+    """Plan the pipeline rewrite and write it -> the number of rewrites made."""
+    updated, changed = plan_fix(path, project, ref_var, input_name, want)
+    if changed:
+        path.write_text(updated, encoding="utf-8")
     return changed
 
 
@@ -562,17 +676,21 @@ def check_requirements(
     ]
 
 
-def fix_requirements(ci_file: Path, want: str, project: str = LIB_PROJECT) -> int:
-    """Rewrite the collection version in the sibling requirements.yml to `want`.
-    Returns 0 when absent, unpinned, or already correct. Mirrors fix(): a textual
-    rewrite of the exact node line, re-parsed and verified before writing."""
+def plan_fix_requirements(
+    ci_file: Path, want: str, project: str = LIB_PROJECT
+) -> tuple[Path, str] | None:
+    """(path, new text) for the sibling requirements.yml, NOTHING written.
+
+    None when it is absent, unpinned, or already at `want`. Mirrors plan_fix():
+    a textual rewrite of the exact node line, re-parsed and verified.
+    """
     req = requirements_path(ci_file)
     if not req.is_file():
-        return 0
+        return None
     text = req.read_text(encoding="utf-8")
     found = _collection_version(text, project)
     if found is None or found[1] == want:
-        return 0
+        return None
     line_no, _ = found
     lines = text.splitlines(keepends=True)
     rewritten = _rewrite_scalar_line(lines[line_no], "version", want)
@@ -589,7 +707,16 @@ def fix_requirements(ci_file: Path, want: str, project: str = LIB_PROJECT) -> in
             f"{req}: rewrite did not land cleanly (version parsed back as "
             f"{(landed[1] if landed else None)!r}, wanted {want!r}); file left unchanged"
         )
-    req.write_text(updated, encoding="utf-8")
+    return req, updated
+
+
+def fix_requirements(ci_file: Path, want: str, project: str = LIB_PROJECT) -> int:
+    """Write the planned requirements.yml rewrite -> 1 when there was one."""
+    planned = plan_fix_requirements(ci_file, want, project)
+    if planned is None:
+        return 0
+    path, updated = planned
+    path.write_text(updated, encoding="utf-8")
     return 1
 
 
@@ -707,18 +834,40 @@ def check_sites(ci_file: Path, want: str) -> list[str]:
     return problems
 
 
-def fix_sites(ci_file: Path, want: str) -> int:
-    """Rewrite every declared site's captured ref to `want`; -> files changed."""
+def plan_fix_sites(ci_file: Path, want: str) -> list[tuple[Path, str]]:
+    """Every site file to rewrite, as (path, new text), NOTHING written.
+
+    Each site is validated here: a glob matching a symlink or escaping the tree,
+    a capture that did not land, and a site matching no ref all refuse the plan.
+    """
     root = ci_file.parent
-    changed = 0
+    where = str(sites_path(ci_file))
+    writes: list[tuple[Path, str]] = []
     for glob, pattern in load_sites(ci_file):
-        for path in site_files(root, glob, str(sites_path(ci_file))):
-            text = path.read_text(encoding="utf-8")
+        seen = 0
+        for path in site_files(root, glob, where):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise OperatorError(f"{path}: {exc}") from exc
+            seen += sum(1 for _ in pattern.finditer(text))
             updated = _sub_group(pattern, text, want)
             if updated != text:
-                path.write_text(updated, encoding="utf-8")
-                changed += 1
-    return changed
+                writes.append((path, updated))
+        if not seen:
+            raise OperatorError(
+                f"{where}: site {glob!r} matched no ref — the glob or the "
+                "pattern is stale, so that pin would go unrewritten"
+            )
+    return writes
+
+
+def fix_sites(ci_file: Path, want: str) -> int:
+    """Write every planned site rewrite; -> files changed."""
+    writes = plan_fix_sites(ci_file, want)
+    for path, updated in writes:
+        path.write_text(updated, encoding="utf-8")
+    return len(writes)
 
 
 def _sub_group(pattern: re.Pattern, text: str, want: str) -> str:
@@ -738,6 +887,51 @@ def _sub_group(pattern: re.Pattern, text: str, want: str) -> str:
         position = match.end(1)
     out.append(text[position:])
     return "".join(out)
+
+
+# The whole rewrite as one plan: every surface is validated and its new text
+# computed before the first byte is written, so a refusal anywhere leaves the
+# pipeline file, requirements.yml and every site exactly as they were.
+
+
+def plan_writes(
+    ci_file: Path,
+    project: str = LIB_PROJECT,
+    ref_var: str = REF_VAR,
+    input_name: str = INPUT_NAME,
+    want: str | None = None,
+) -> tuple[list[tuple[Path, str]], int, str]:
+    """(writes, rewrite count, the ref every surface ends up at)."""
+    writes: list[tuple[Path, str]] = []
+    pipeline, changed = plan_fix(ci_file, project, ref_var, input_name, want)
+    if changed:
+        writes.append((ci_file, pipeline))
+    # plan_fix has already proved this is the target tag, so the other surfaces
+    # read it from the planned text rather than from disk.
+    target = declared_ref(pipeline, input_name)
+    requirements = plan_fix_requirements(ci_file, target, project)
+    if requirements is not None:
+        writes.append(requirements)
+        changed += 1
+    sites = plan_fix_sites(ci_file, target)
+    writes.extend(sites)
+    changed += len(sites)
+    _one_write_per_file(writes)
+    return writes, changed, target
+
+
+def _one_write_per_file(writes: list[tuple[Path, str]]) -> None:
+    """Refuse a plan that rewrites one file twice; the second would discard the
+    first. Only a site glob reaching another surface's file gets here."""
+    seen: set[Path] = set()
+    for path, _updated in writes:
+        real = path.resolve()
+        if real in seen:
+            raise OperatorError(
+                f"{path} is rewritten by two surfaces at once; a site glob must "
+                "not name the pipeline file or its ansible/requirements.yml"
+            )
+        seen.add(real)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -822,15 +1016,13 @@ def _run(args: argparse.Namespace) -> int:
         raise OperatorError(f"--bump takes a release tag (vX.Y.Z), got {args.bump!r}")
 
     if args.fix or args.bump is not None:
-        changed = fix(args.ci_file, args.project, args.ref_var, args.input, args.bump)
-        # Re-read: fix() may have just written the header this reads from.
-        want = declared_ref(
-            args.ci_file.read_text(encoding="utf-8"), args.input
+        writes, changed, want = plan_writes(
+            args.ci_file, args.project, args.ref_var, args.input, args.bump
         )
-        changed += fix_requirements(args.ci_file, want, args.project)
-        changed += fix_sites(args.ci_file, want)
-        # Verified rather than trusted: --fix cannot repair a flow-style entry,
-        # an absent include block, or a pin the line rewriter did not match.
+        for path, updated in writes:
+            path.write_text(updated, encoding="utf-8")
+        # Verified rather than trusted: --fix cannot repair a flow-style include
+        # entry, an absent include block, or a pin outside `include:`.
         problems = (
             check(args.ci_file, args.project, args.ref_var, args.input)
             + check_requirements(args.ci_file, want, args.project, args.ref_var)

@@ -259,6 +259,23 @@ def include_targets(
         yield child_base, str(resolved).lstrip("/"), passed
 
 
+def resolved_include(child_base: Path, relpath: str, label: str) -> Path:
+    """An include's real path, required to stay inside its own checkout.
+
+    GitLab includes a file only from inside the project, so a `..` component or
+    a symlink out of the checkout names jobs the pipeline never gets.
+    """
+    root = child_base.resolve()
+    real = (root / relpath).resolve()
+    if not real.is_relative_to(root):
+        raise OperatorError(
+            f"{label}: include {relpath!r} resolves to {real}, outside the "
+            f"checkout {root} — GitLab includes nothing from there, so "
+            "crediting its jobs would hide a dangling need"
+        )
+    return real
+
+
 def collect(
     doc: dict,
     path: Path,
@@ -298,8 +315,8 @@ def collect(
         for child_base, relpath, passed in include_targets(
             entry, label, base, lib_root, supplied, defaults, survey
         ):
-            included = child_base / relpath
-            if included.resolve() in ancestry:
+            included = resolved_include(child_base, relpath, label)
+            if included in ancestry:
                 continue
             if not included.is_file():
                 survey.unreadable.append(
@@ -320,7 +337,7 @@ def collect(
                 child_base,
                 passed,
                 lib_root,
-                ancestry + (included.resolve(),),
+                ancestry + (included,),
                 survey,
             )
 
