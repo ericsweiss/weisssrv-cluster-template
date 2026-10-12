@@ -201,12 +201,18 @@ def askpass_env(secret: str):
     os.write(handle, b'#!/bin/sh\nprintf \'%s\' "$GIT_BOT_SECRET"\n')
     os.close(handle)
     os.chmod(path, 0o700)
+    # The runner writes credential.interactive=never into the workspace repo,
+    # which would skip the shim; a command-scope override outranks that file.
+    count = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
     try:
         yield {
             **os.environ,
             "GIT_ASKPASS": path,
             "GIT_BOT_SECRET": secret,
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_COUNT": str(count + 1),
+            "GIT_CONFIG_KEY_%d" % count: "credential.interactive",
+            "GIT_CONFIG_VALUE_%d" % count: "always",
         }
     finally:
         try:

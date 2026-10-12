@@ -1252,6 +1252,77 @@ def test_print_reads_only_the_requested_input_stanza(tmp_path: Path) -> None:
     assert proc.returncode == 2
 
 
+def _print(ci: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(_SCRIPT), "--print", "--ci-file", str(ci)],
+        capture_output=True, text=True,
+    )
+
+
+def test_print_reads_only_the_leading_document(tmp_path: Path) -> None:
+    """GitLab reads `spec:` from the first document alone, so a later document
+    must not lend the header an inputs block, whatever the separator carries."""
+    ci = tmp_path / ".gitlab-ci.yml"
+    ci.write_text(textwrap.dedent("""\
+        --- # the header
+        spec:
+          description: no inputs here
+        --- # the pipeline
+        spec:
+          inputs:
+            lib_ref:
+              default: v9.9.9
+        """))
+    proc = _print(ci)
+    assert proc.returncode == 2, proc.stdout
+    assert proc.stdout == ""
+    ci.write_text(textwrap.dedent("""\
+        spec:
+          inputs:
+            lib_ref:
+              default: v0.4.0
+        ---\t
+        variables: {}
+        """))
+    proc = _print(ci)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "v0.4.0\n"
+
+
+def test_print_reads_the_header_behind_a_preamble(tmp_path: Path) -> None:
+    """Comments, blank lines and a directive may precede the first `---`;
+    the document that follows is still the header."""
+    ci = tmp_path / ".gitlab-ci.yml"
+    ci.write_text(textwrap.dedent("""\
+        # the pipeline
+
+        %YAML 1.2
+        --- # header
+        spec:
+          inputs:
+            lib_ref:
+              default: v0.4.0
+        ---
+        variables: {}
+        """))
+    proc = _print(ci)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "v0.4.0\n"
+
+
+def test_print_refuses_a_default_glued_to_a_comment(tmp_path: Path) -> None:
+    """`v0.4.0#x` is one scalar to YAML, so it is no release tag; only a `#`
+    after separation whitespace is a comment."""
+    ci = tmp_path / ".gitlab-ci.yml"
+    for default, expect in (
+        ("v0.4.0#x", 2), ("v0.4.0 # x", 0), ("\"v0.4.0\"  # x", 0), ("\"v0.4.0", 2), ("'v0.4.0\"", 2)
+    ):
+        ci.write_text(f"spec:\n  inputs:\n    lib_ref:\n      default: {default}\n---\nvariables: {{}}\n")
+        proc = _print(ci)
+        assert proc.returncode == expect, (default, proc.stdout, proc.stderr)
+        assert proc.stdout == ("v0.4.0\n" if expect == 0 else "")
+
+
 def test_a_pipeline_with_no_project_include_is_refused_before_any_write(tmp_path: Path) -> None:
     """With the variable drifted the plan has a rewrite to make, and the absent
     include must still refuse it during planning, not after the write."""
