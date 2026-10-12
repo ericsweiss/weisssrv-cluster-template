@@ -1222,6 +1222,65 @@ def test_fix_syncs_every_site(tmp_path: Path) -> None:
     assert clp.fix_sites(ci, "v0.4.0") == 0
 
 
+def test_print_reads_only_the_requested_input_stanza(tmp_path: Path) -> None:
+    """A header with several inputs must not bind lib_ref to a sibling's default."""
+    ci = tmp_path / ".gitlab-ci.yml"
+    ci.write_text(textwrap.dedent("""\
+        spec:
+          inputs:
+            k8s_version:
+              default: 1.36.0
+            lib_ref:
+              description: the library release
+              default: v0.4.0
+            other_ref:
+              default: v9.9.9
+        ---
+        variables: {}
+        """))
+    for want, expect in (("lib_ref", "v0.4.0"), ("other_ref", "v9.9.9")):
+        proc = subprocess.run(
+            [sys.executable, str(_SCRIPT), "--print", "--ci-file", str(ci), "--input", want],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == expect
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--print", "--ci-file", str(ci), "--input", "k8s_version"],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 2
+
+
+def test_a_pipeline_with_no_project_include_is_refused_before_any_write(tmp_path: Path) -> None:
+    """With the variable drifted the plan has a rewrite to make, and the absent
+    include must still refuse it during planning, not after the write."""
+    text = _ci(variable="v0.1.0").replace("  - project: eric/weisssrv-lib\n", "  - project: eric/other\n")
+    ci = _write(tmp_path, text)
+    _write_sites(tmp_path)
+    site = _write_module(tmp_path, "cloudflare", "v0.3.2")
+    before = (ci.read_text(), site.read_text())
+    with pytest.raises((clp.OperatorError, SystemExit), match="include"):
+        clp.plan_fix(ci, "v0.4.0")
+    assert (ci.read_text(), site.read_text()) == before
+
+
+def test_a_site_whose_context_embeds_the_tag_is_refused_at_planning(tmp_path: Path) -> None:
+    """The pattern matches `modules/x?ref=v0.3.2` only while the tag is v0.3.2,
+    so after the rewrite it matches nothing and the check would red post-write."""
+    ci = _write(tmp_path, _ci())
+    _write_sites(
+        tmp_path,
+        "sites:\n  - path: terraform/*/main.tf\n"
+        "    pattern: 'ref=(v0\\.3\\.2)'\n",
+    )
+    site = _write_module(tmp_path, "cloudflare", "v0.3.2")
+    before = site.read_text()
+    with pytest.raises(clp.OperatorError, match="fails to match its own rewrite"):
+        clp.plan_fix_sites(ci, "v0.4.0")
+    assert site.read_text() == before
+
+
 def test_fix_refuses_a_pattern_whose_group_did_not_capture(tmp_path: Path) -> None:
     """An optional group matches with bounds of -1; slicing on it would corrupt."""
     ci = _write(tmp_path, _ci())

@@ -1,0 +1,5 @@
+---
+# Taskfile env entries win over the caller's environment, which is what lets
+# the root env block put the pyenv shim directory ahead of PATH.
+experiments:
+  ENV_PRECEDENCE: 1

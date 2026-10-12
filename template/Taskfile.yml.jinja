@@ -14,6 +14,13 @@ version: '3'
 # vars. Editing hosts.yml without re-running that task leaves this stale.
 dotenv: ['scripts/hosts.env']
 
+# Task resolves every command through the caller's PATH, where a Homebrew
+# python3 can shadow the pyenv interpreter the gates are tested on, so the shim
+# directory leads PATH whenever it exists (.taskrc.yml lets env override PATH).
+env:
+  PATH:
+    sh: '[ -d "$HOME/.pyenv/shims" ] && printf "%s:%s" "$HOME/.pyenv/shims" "$PATH" || printf "%s" "$PATH"'
+
 # One file per task namespace; task names are unchanged (`flux:lint` is the task
 # `lint:` in taskfiles/flux.yml). The root vars: and dotenv: reach every included
 # file, and a task calls another namespace's with a leading colon.

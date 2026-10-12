@@ -407,6 +407,11 @@ run_substitute_mode() {
         FL_RENDER_ALL=$(mktemp)
         # shellcheck disable=SC2064  # expand the path now, not at trap time
         trap "rm -f '$FL_RENDER_ALL'" EXIT
+    elif ! : > "$FL_RENDER_ALL"; then
+        # A caller-owned corpus starts empty, or an earlier run's manifests
+        # would satisfy the nonempty-corpus floor for a run that rendered none.
+        echo "ERROR: cannot start the rendered corpus at $FL_RENDER_ALL"
+        return 1
     fi
 
     local stages label srcpath

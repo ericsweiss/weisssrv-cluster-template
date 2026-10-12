@@ -516,11 +516,17 @@ def admits(policy: dict, pods: dict, accepted: set[int | str], scrape_ns: str) -
                     for k in sorted(set(labels) - {"kubernetes.io/metadata.name"})
                 ]
                 pod_sel = peer.get("podSelector")
-                if isinstance(pod_sel, dict) and pod_sel:
+                if pod_sel is not None and not isinstance(pod_sel, dict):
+                    narrowing.append("podSelector")
+                elif isinstance(pod_sel, dict) and pod_sel:
                     wanted = pod_sel.get("matchLabels") or {}
-                    if set(pod_sel) - {"matchLabels"} or not wanted:
+                    if (
+                        set(pod_sel) - {"matchLabels"}
+                        or not isinstance(wanted, dict)
+                        or not wanted
+                    ):
                         narrowing.append("podSelector")
-                    elif not wanted.items() <= SCRAPER_LABELS.items():
+                    elif any(SCRAPER_LABELS.get(k) != v for k, v in wanted.items()):
                         note(
                             f"{name}: its peer for namespace {scrape_ns} selects pods by "
                             f"{wanted}, which the declared scraper labels do not carry "
