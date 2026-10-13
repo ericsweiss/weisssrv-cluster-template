@@ -45,7 +45,7 @@ lose. A dropped override is silent — the job still runs, against different rul
 | Include | Override that is load-bearing |
 |---|---|
 | `yaml-lint` | `config: "-c lint/yamllint-relaxed.yml"`. The profile sits under `lint/` so ansible-lint cannot discover it as a repo-root `.yamllint` and replace its yaml rule. Without the input the job runs yamllint's shipped `-d relaxed`, which reports different findings than `task lint` does |
-| `ansible-lint` | `image: python:3.13`, not the slim image: `ansible-galaxy` installs the collection from a `git+` source and needs `git` |
+| `ansible-lint` | `image: python:3.14`, not the slim image: `ansible-galaxy` installs the collection from a `git+` source and needs `git` |
 | `python-lint` | `targets: "scripts tests kubernetes"` — `kubernetes` is there for the Python a manifest delivers through a `configMapGenerator`. `ruff_version` is pinned as an input because include inputs resolve before job variables exist |
 | `python-tests` | `setup_command` clones the library, which is what the vendored-copy gate compares against, and `changes:` names every path the suites read |
 | `terraform` (`terraform-fmt`, `terraform-validate`) | `image` set to `$TF_JOB_IMAGE` — one exact Terraform patch for the lint jobs and the credentialed plan and apply jobs alike, so a plan cannot be refused by a different version |

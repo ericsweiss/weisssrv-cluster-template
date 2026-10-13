@@ -243,6 +243,7 @@ TEMPLATE_OWNED = {
     # The suites that ship into the generated repository and run there.
     "template/scripts/test_check_ansible_service_names.py",
     "template/scripts/test_check_ci_pin_parity.py",
+    "template/scripts/test_flux_rotate_db_password.py",
     "template/scripts/test_check_collection_pin_trigger.py",
     "template/scripts/test_check_deploy_host_coverage.py",
     "template/scripts/test_check_flux_version_pin.py",

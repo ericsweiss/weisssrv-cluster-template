@@ -144,8 +144,8 @@ PIP_MODULES = {"yaml": {"pyyaml", "ansible", "ansible-core"}, "requests": {"requ
 # here provides nothing, so a job on a new image installs what its scripts call.
 IMAGE_TOOLS = {
     "python:3.11-slim": frozenset(),
-    "python:3.13-slim": frozenset(),
-    "python:3.13": frozenset({"curl", "git", "ssh"}),
+    "python:3.14-slim": frozenset(),
+    "python:3.14": frozenset({"curl", "git", "ssh"}),
     "alpine:3.23": frozenset(),
     "hashicorp/terraform": frozenset({"terraform", "git", "ssh"}),
 }
@@ -498,15 +498,15 @@ class TestLiveJobToolProvisioning:
     def test_a_dropped_install_is_detected(self):
         """The mutation: the fragment that installed jq stops installing it."""
         with_jq = "apt-get install -y -qq jq\nkubectl get pods -o json | jq .items"
-        assert unprovisioned("python:3.13-slim", with_jq) == ["kubectl"]
+        assert unprovisioned("python:3.14-slim", with_jq) == ["kubectl"]
         without_jq = "kubectl get pods -o json | jq .items"
-        assert unprovisioned("python:3.13-slim", without_jq) == ["jq", "kubectl"]
+        assert unprovisioned("python:3.14-slim", without_jq) == ["jq", "kubectl"]
 
     def test_a_dropped_fetch_is_detected(self):
         """The repo's own provisioning path: scripts/ci-fetch-tools.py."""
         fetched = "python3 scripts/ci-fetch-tools.py jq amtool\namtool check-config x\njq ."
-        assert unprovisioned("python:3.13-slim", fetched) == []
-        assert unprovisioned("python:3.13-slim", "amtool check-config x\njq .") == [
+        assert unprovisioned("python:3.14-slim", fetched) == []
+        assert unprovisioned("python:3.14-slim", "amtool check-config x\njq .") == [
             "amtool",
             "jq",
         ]
@@ -514,14 +514,14 @@ class TestLiveJobToolProvisioning:
     def test_a_missing_python_module_is_detected(self):
         """The class a live gate hits: it imports PyYAML through gate_common.py
         and the slim image ships none."""
-        assert unprovisioned("python:3.13-slim", "true", also_required={"py:yaml"}) == [
+        assert unprovisioned("python:3.14-slim", "true", also_required={"py:yaml"}) == [
             "py:yaml"
         ]
         pinned = 'pip install --quiet "pyyaml==6.0.2"'
-        assert unprovisioned("python:3.13-slim", pinned, also_required={"py:yaml"}) == []
+        assert unprovisioned("python:3.14-slim", pinned, also_required={"py:yaml"}) == []
         assert (
             unprovisioned(
-                "python:3.13-slim",
+                "python:3.14-slim",
                 'pip install --quiet "ansible-core==2.21.5"',
                 also_required={"py:yaml"},
             )
@@ -530,5 +530,5 @@ class TestLiveJobToolProvisioning:
 
     def test_an_off_path_tool_is_excused_only_when_declared(self):
         probe = "nc -z -w 5 host 22"
-        assert unprovisioned("python:3.13-slim", probe) == ["nc"]
-        assert unprovisioned("python:3.13-slim", probe, excused={"nc"}) == []
+        assert unprovisioned("python:3.14-slim", probe) == ["nc"]
+        assert unprovisioned("python:3.14-slim", probe, excused={"nc"}) == []

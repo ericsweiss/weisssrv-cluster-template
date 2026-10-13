@@ -98,7 +98,7 @@ default:
   # Pinned here rather than left to the runner default, which is not reviewable
   # from this repository. The deploy fragment apt-installs and pip-installs, so
   # the image must be Debian-based with pip.
-  image: python:3.13-slim
+  image: python:3.14-slim
   # An untagged job goes to the shared, non-root, LAN-blocked runner, where
   # apt-get and every SSH reach to the hosts fail. This default catches a job
   # that forgets the tag.
@@ -160,7 +160,7 @@ variables:
   # The Python image for jobs that have already been handed vault credentials or
   # a kubeconfig, so a repointed upstream tag would execute there. Append
   # @sha256:<digest> here when you resolve one; lint-only jobs stay floating.
-  PY_JOB_IMAGE: "python:3.13-slim"
+  PY_JOB_IMAGE: "python:3.14-slim"
   # git reads these three as config, so every clone of the library — terraform
   # init, ansible-galaxy, molecule's dependency step — authenticates with the
   # job token and no ~/.gitconfig. Only credential-less URLs are rewritten.
@@ -206,7 +206,7 @@ include:
       galaxy_requirements: "ansible/requirements.yml"
       # Full image, not slim: galaxy installs the collection from a git+ URL,
       # which needs the git executable.
-      image: python:3.13
+      image: python:3.14
       changes:
         - "ansible/**/*"
         - ".ansible-lint"
@@ -246,7 +246,7 @@ include:
     file: /ci/lint/python-lint.yml
     inputs:
       tags: ["{{ runner_tag }}"]
-      image: python:3.13-slim
+      image: python:3.14-slim
       # ruff is pinned here; include inputs resolve before job variables exist.
       ruff_version: "0.16.7"
       # kubernetes/ is in the list for the Python a manifest delivers through a
@@ -271,7 +271,7 @@ include:
     file: /ci/test/python-tests.yml
     inputs:
       tags: ["{{ runner_tag }}"]
-      image: python:3.13
+      image: python:3.14
       # jq: test_collect_state_lib.py drives the collector's jq filters.
       # ansible-core: test_deploy_preflight.py fails rather than skips without it,
       # and the pin is the core line requirements.txt's `ansible==` resolves to.
@@ -554,7 +554,7 @@ python-tests:
 # rather than merging it, so each job's arms live with its `changes:` anchor.
 .lint-gate:
   stage: lint
-  image: python:3.13-slim
+  image: python:3.14-slim
   tags: ["{{ runner_tag }}"]
   needs: []
 
@@ -926,7 +926,7 @@ deploy-coverage:
   stage: lint
   # The FULL python image: the checker shells out to git, which python:*-slim
   # does not ship.
-  image: python:3.13
+  image: python:3.14
   tags: ["{{ runner_tag }}"]
   needs: []
   variables:
@@ -954,7 +954,7 @@ check-deploy-playbooks:
   stage: validate
   needs: []
   # The FULL python image: ansible-galaxy installs weisssrv.infra from a git+ URL.
-  image: python:3.13
+  image: python:3.14
   tags: ["{{ runner_tag }}"]
   before_script:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
@@ -994,7 +994,7 @@ check-role-inputs:
   stage: lint
   needs: []
   # The FULL python image: ansible-galaxy installs weisssrv.infra from a git+ URL.
-  image: python:3.13
+  image: python:3.14
   tags: ["{{ runner_tag }}"]
   before_script:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
@@ -1564,11 +1564,11 @@ cluster-verify:
       # flux CLI alongside the kubectl .kubectl-setup installs: verification
       # queries Flux CRs. Version and sha256 are one pin, so bump both;
       # check-flux-version-pin.py holds it equal to the ConfigMap and gotk.
-      FLUX_VERSION="2.9.0"
+      FLUX_VERSION="2.9.6"
       # Per-job download dir: a fixed /tmp path collides when two jobs share /tmp.
       dl=$(mktemp -d)
       curl -fsSL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_amd64.tar.gz" -o "$dl/flux.tar.gz"
-      echo "7aa9779fc7ec6d030e609dab7dbed8c6fc9e3a7f4670834ad02369268aaf341f  $dl/flux.tar.gz" | sha256sum -c -
+      echo "b4d22673e9246cbd628881f1a9ef3b090085dced291e42d804555cee8e8d42c5  $dl/flux.tar.gz" | sha256sum -c -
       tar xzf "$dl/flux.tar.gz" -C /usr/local/bin flux
       rm -rf "$dl"
       flux --version

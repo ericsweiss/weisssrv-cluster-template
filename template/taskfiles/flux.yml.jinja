@@ -264,6 +264,12 @@ tasks:
         fi
         kubectl wait -n "$NS" externalsecret "$NAME" --for=condition=Ready --timeout=60s
 
+  rotate-db-password:
+    desc: "Rotate an in-cluster Postgres role password end to end (usage: task flux:rotate-db-password -- <authentik>)"
+    preconditions: *flux_preconditions
+    cmds:
+      - bash scripts/flux-rotate-db-password.sh {{.CLI_ARGS}}
+
   rotate-secret:
     desc: "Re-fetch an ExternalSecret and restart its consumers (task flux:rotate-secret -- <ns>/<name>)"
     cmds:

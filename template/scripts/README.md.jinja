@@ -123,6 +123,7 @@ Not vendored at the pinned ref — this repository owns them.
 
 | Script | Used by |
 |---|---|
+| `flux-rotate-db-password.sh` | `task flux:rotate-db-password` — one in-cluster Postgres role rotation end to end: the 1Password item first, `ALTER USER` in the database pod, then `task flux:rotate-secret` for the refresh and restarts |
 | `check-kustomization-coverage.py` | `task lint:kustomization-coverage`, the CI kustomization-coverage job — every manifest beside a `kustomization.yaml` is listed in it and every `kustomization.yaml` names something, with an `EXEMPT` map for the files applied by hand |
 | `check-cluster-literals.py` | `task lint:cluster-literals`, the CI cluster-literals job — the substituted trees spell cluster identity as `${cluster_*}` placeholders, and cluster-config agrees with the Ansible inventory |
 | `flux-corpus-gates.sh` | `task flux:lint` and the CI flux-lint job (`extra_validation`) — the one list of gates that read the whole rendered corpus |
