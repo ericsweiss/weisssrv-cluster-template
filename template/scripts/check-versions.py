@@ -53,6 +53,8 @@ REQUEST_TIMEOUT = 15
 # Bounded retry on transient failures only (URLError, socket.timeout, HTTP 5xx)
 # — never on 4xx, so a 403 rate-limit is surfaced rather than masked as a blip.
 RETRY_ATTEMPTS = 3
+# Releases a tag_filter scan covers, whatever page size the entry asks for.
+RELEASE_SCAN_HORIZON = 500
 RETRY_BACKOFF = 0.5  # seconds; multiplied by attempt number for linear backoff
 
 
@@ -785,18 +787,22 @@ def fetch_github_release(svc: dict) -> str:
 
     if tag_filter:
         matching_versions = []
-        max_pages = 5  # Limit pagination to avoid excessive API calls
         # A repo that attaches many assets per release serves pages too large
-        # to finish reliably; the entry can ask for smaller ones.
+        # to finish reliably; the entry can ask for smaller ones. The scan
+        # still covers the same number of releases, over more pages.
         per_page = int(svc.get("releases_per_page", 100))
         if not 1 <= per_page <= 100:
             raise RuntimeError(f"releases_per_page must be 1-100, got {per_page}")
+        max_pages = -(-RELEASE_SCAN_HORIZON // per_page)
 
         for page in range(1, max_pages + 1):
             releases = github_api(f"/repos/{repo}/releases?per_page={per_page}&page={page}")
 
             if not releases:
                 break
+            # The last page may run past the horizon when the page size does
+            # not divide it; releases beyond the horizon are not scanned.
+            releases = releases[: RELEASE_SCAN_HORIZON - (page - 1) * per_page]
 
             for release in releases:
                 if release.get("draft") or release.get("prerelease"):

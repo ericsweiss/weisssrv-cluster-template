@@ -5,7 +5,7 @@
 spec:
   inputs:
     lib_ref:
-      default: v0.20.5
+      default: v0.20.6
 ---
 # CI for the template itself. Generic jobs come from the shared library, and
 # every job is tag-less and non-root safe so it lands on the shared runner.

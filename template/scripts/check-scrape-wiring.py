@@ -526,7 +526,7 @@ def admits(policy: dict, pods: dict, accepted: set[int | str], scrape_ns: str) -
                         or not wanted
                     ):
                         narrowing.append("podSelector")
-                    elif any(SCRAPER_LABELS.get(k) != v for k, v in wanted.items()):
+                    elif any(k not in SCRAPER_LABELS or SCRAPER_LABELS[k] != v for k, v in wanted.items()):
                         note(
                             f"{name}: its peer for namespace {scrape_ns} selects pods by "
                             f"{wanted}, which the declared scraper labels do not carry "
