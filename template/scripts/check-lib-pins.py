@@ -19,7 +19,7 @@ from pathlib import Path
 _PREAMBLE_RE = re.compile(r"\A(?:(?:[ \t]*#.*|%.*|[ \t]*)\n)*")
 _DOC_SEP_RE = re.compile(r"^---(?:[ \t].*)?$", re.M)
 _INPUTS_RE = re.compile(
-    r"^spec:\n(?:(?=[ \t#\n])[^\n]*\n)*?  inputs:\n((?:(?:    .*|\s*)\n)*)", re.M
+    r"^spec:\n(?:(?=  |[ \t]*#|[ \t]*\n)[^\n]*\n)*?  inputs:\n((?:(?:    .*|\s*)\n)*)", re.M
 )
 _STANZA_RE = re.compile(r"^    ([\w-]+):[ \t]*(?:#.*)?\n((?:(?:      .*|\s*)\n)*)", re.M)
 _DEFAULT_RE = re.compile(
@@ -880,18 +880,20 @@ def plan_fix_sites(ci_file: Path, want: str) -> list[tuple[Path, str]]:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
                 raise OperatorError(f"{path}: {exc}") from exc
-            seen += sum(1 for _ in pattern.finditer(text))
+            before = sum(1 for _ in pattern.finditer(text))
+            seen += before
             updated = _sub_group(pattern, text, want)
             if updated != text:
-                # The rewritten text must still match with the new ref in every
-                # capture, or a pattern whose context embeds the old tag would
-                # pass planning and fail the check after the write.
+                # The rewritten text must still match as often, with the new
+                # ref in every capture, or a pattern whose context embeds the
+                # old tag would pass planning and fail the check after the write.
                 after = [m.group(1) for m in pattern.finditer(updated)]
-                if not after or any(ref != want for ref in after):
+                if len(after) != before or any(ref != want for ref in after):
                     raise OperatorError(
                         f"{path}: site {glob!r} fails to match its own rewrite "
-                        f"(captures {after!r}); the pattern's context embeds the "
-                        "tag, so narrow it to the ref itself; nothing written"
+                        f"({before} match(es) before, captures {after!r} after); the "
+                        "pattern's context embeds the tag, so narrow it to the ref "
+                        "itself; nothing written"
                     )
                 writes.append((path, updated))
         if not seen:

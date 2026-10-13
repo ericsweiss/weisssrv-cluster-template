@@ -1351,6 +1351,16 @@ def test_print_fails_fast_on_a_long_header_without_inputs(tmp_path: Path) -> Non
     assert proc.stdout == ""
 
 
+def test_print_requires_spec_children_to_be_indented_two_spaces(tmp_path: Path) -> None:
+    """A one-space-indented key is valid YAML but is not `spec.inputs`, so an
+    `inputs:` nested under it must not be read as the header's."""
+    ci = tmp_path / ".gitlab-ci.yml"
+    ci.write_text("spec:\n x:\n  inputs:\n    lib_ref:\n      default: v9.9.9\n---\nvariables: {}\n")
+    proc = _print(ci)
+    assert proc.returncode == 2, proc.stdout
+    assert proc.stdout == ""
+
+
 def test_print_refuses_a_default_glued_to_a_comment(tmp_path: Path) -> None:
     """`v0.4.0#x` is one scalar to YAML, so it is no release tag; only a `#`
     after separation whitespace is a comment."""
@@ -1375,6 +1385,22 @@ def test_a_pipeline_with_no_project_include_is_refused_before_any_write(tmp_path
     with pytest.raises((clp.OperatorError, SystemExit), match="include"):
         clp.plan_fix(ci, "v0.4.0")
     assert (ci.read_text(), site.read_text()) == before
+
+
+def test_a_site_that_loses_a_match_in_its_own_rewrite_is_refused(tmp_path: Path) -> None:
+    """Every capture after the rewrite may read the new tag while one match
+    has silently vanished; the count must survive the rewrite too."""
+    ci = _write(tmp_path, _ci("v0.1.0"))
+    _write_sites(
+        tmp_path,
+        "---\nsites:\n  - path: pins/*.txt\n    pattern: '(v\\d+\\.\\d+\\.\\d+)\\n(?!b: v0\\.2)'\n",
+    )
+    (tmp_path / "pins").mkdir()
+    site = tmp_path / "pins" / "two.txt"
+    site.write_text("a: v0.1.0\nb: v0.1.0\n")
+    with pytest.raises(clp.OperatorError, match="2 match"):
+        clp.plan_fix_sites(ci, "v0.2.0")
+    assert site.read_text() == "a: v0.1.0\nb: v0.1.0\n"
 
 
 def test_a_site_whose_context_embeds_the_tag_is_refused_at_planning(tmp_path: Path) -> None:
