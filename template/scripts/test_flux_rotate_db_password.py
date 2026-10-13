@@ -143,8 +143,19 @@ def test_a_refused_password_stops_before_the_refresh(tmp_path, app):
     case = CASES[app]
     res, log = _run(tmp_path, app, kubectl_rc=1, case=case)
     assert res.returncode == 1
-    assert "1Password item history" in res.stderr
+    assert "commit state" in res.stderr and "item history" in res.stderr
     assert (log / "op-edit.stdin").exists()
+    assert not (log / "task.argv").exists()
+
+
+@pytest.mark.parametrize("app", sorted(CASES))
+def test_a_field_missing_from_the_item_stops_before_any_change(tmp_path, app):
+    case = dict(CASES[app])
+    case["fields"] = [f for f in case["fields"] if f != next(iter(case["roles"].values()))]
+    res, log = _run(tmp_path, app, case=case)
+    assert res.returncode != 0
+    assert "missing or ambiguous 1Password fields" in res.stderr
+    assert not (log / "kubectl.argv").exists()
     assert not (log / "task.argv").exists()
 
 

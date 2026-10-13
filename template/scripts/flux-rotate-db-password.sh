@@ -53,7 +53,11 @@ echo "rotate-db-password: $item -> 1Password"
     op item get "$item" --vault Homelab --format json
     printf '%s\n' "${edits[@]}" |
         jq -R -s 'split("\n") | map(select(length > 0) | capture("^(?<k>[^=]+)=(?<v>.*)$") | {(.k): .v}) | add'
-} | jq -s '.[1] as $e | .[0] | .fields |= map(($e[.id] // $e[.label]) as $v | if $v == null then . else .value = $v end)' |
+} | jq -s '
+    .[1] as $e | .[0] | .fields as $f
+    | [$e | keys[] | . as $k | select(([$f[] | select(.id == $k or .label == $k)] | length) != 1)] as $bad
+    | if ($bad | length) > 0 then error("missing or ambiguous 1Password fields: " + ($bad | join(", ")))
+      else .fields |= map(($e[.id] // $e[.label]) as $v | if $v == null then . else .value = $v end) end' |
     op item edit "$item" --vault Homelab >/dev/null
 
 sql=""
@@ -63,8 +67,9 @@ echo "rotate-db-password: ALTER USER in the database"
 # exec argument lands in the API audit log, a half-rotated pair has no restore.
 # shellcheck disable=SC2086  # $pod is a deliberate word list of kubectl args
 if ! kubectl exec -i $pod -- sh -c "$psql_auth -v ON_ERROR_STOP=1 --single-transaction -f -" <<<"$sql" >/dev/null; then
-    echo "ERROR: the database refused the new password; restore the previous" \
-        "value of '$item' from its 1Password item history before retrying." >&2
+    echo "ERROR: the database rotation did not complete cleanly; its commit state" \
+        "is unknown. Check which value each role accepts, the current '$item'" \
+        "value or the previous one in its item history, before restoring either." >&2
     exit 1
 fi
 
