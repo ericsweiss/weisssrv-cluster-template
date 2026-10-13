@@ -3,6 +3,9 @@ the role, then the refresh, with every new password kept off every argv."""
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -110,17 +113,29 @@ def test_the_item_edit_rides_the_template_and_mirrors_the_primary(tmp_path, app)
 
 
 @pytest.mark.parametrize("app", sorted(CASES))
-def test_the_sql_travels_on_stdin_and_names_every_role(tmp_path, app):
+def test_the_sql_carries_a_verifier_for_every_role_on_stdin(tmp_path, app):
     case = CASES[app]
     _, log = _run(tmp_path, app, case=case)
     values = _edited_values(log)
     (argv,) = (log / "kubectl.argv").read_text().splitlines()
     assert argv.startswith(case["exec_prefix"]), argv
-    assert "-v ON_ERROR_STOP=1 --single-transaction" in argv
+    assert "-v ON_ERROR_STOP=1 --single-transaction -f -" in argv
     sql = (log / "kubectl.stdin").read_text()
     for role, field in case["roles"].items():
-        assert f"ALTER USER {role} PASSWORD '{values[field]}';" in sql
+        verifier = re.search(rf"ALTER USER {role} PASSWORD '([^']+)';", sql).group(1)
+        assert _scram_matches(values[field], verifier), role
+        assert values[field] not in sql
         assert values[field] not in argv
+
+
+def _scram_matches(password: str, verifier: str) -> bool:
+    """The verifier's stored key, recomputed from the cleartext and its salt."""
+    head, keys = verifier.split("$")[1:]
+    iterations, salt = head.split(":")
+    stored_key = keys.split(":")[0]
+    salted = hashlib.pbkdf2_hmac("sha256", password.encode(), base64.b64decode(salt), int(iterations))
+    client_key = hmac.new(salted, b"Client Key", "sha256").digest()
+    return base64.b64encode(hashlib.sha256(client_key).digest()).decode() == stored_key
 
 
 @pytest.mark.parametrize("app", sorted(CASES))

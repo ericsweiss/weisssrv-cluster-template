@@ -19,6 +19,18 @@ case "$app" in
         ;;
 esac
 
+# The role gets a SCRAM-SHA-256 verifier, not the password, so a statement log
+# never holds the cleartext. The generated values are ASCII, so no SASLprep.
+scram_py='
+import base64, hashlib, hmac, os, sys
+password = sys.stdin.read().encode()
+salt, iterations = os.urandom(16), 4096
+salted = hashlib.pbkdf2_hmac("sha256", password, salt, iterations)
+stored = hashlib.sha256(hmac.new(salted, b"Client Key", "sha256").digest()).digest()
+server = hmac.new(salted, b"Server Key", "sha256").digest()
+b64 = lambda b: base64.b64encode(b).decode()
+print(f"SCRAM-SHA-256${iterations}:{b64(salt)}${b64(stored)}:{b64(server)}")
+'
 declare -a edits=()
 declare -a alters=()
 for pair in $roles; do
@@ -26,7 +38,8 @@ for pair in $roles; do
     field=${pair#*:}
     new=$(openssl rand -base64 48 | tr -d '/+=' | cut -c1-40)
     edits+=("$field=$new")
-    alters+=("ALTER USER $role PASSWORD '$new'")
+    verifier=$(printf '%s' "$new" | python3 -c "$scram_py")
+    alters+=("ALTER USER $role PASSWORD '$verifier'")
 done
 # The primary field mirrors the first role's password: a Password item with an
 # empty primary is refused by the op item validator.
@@ -46,10 +59,10 @@ echo "rotate-db-password: $item -> 1Password"
 sql=""
 for a in "${alters[@]}"; do sql+="$a;"; done
 echo "rotate-db-password: ALTER USER in the database"
-# The SQL travels on stdin, as one transaction: an exec argument lands in the
-# API audit log, and a role left half-rotated has no item history to restore.
+# The SQL is a -f script on stdin, which is what --single-transaction wraps: an
+# exec argument lands in the API audit log, a half-rotated pair has no restore.
 # shellcheck disable=SC2086  # $pod is a deliberate word list of kubectl args
-if ! kubectl exec -i $pod -- sh -c "$psql_auth -v ON_ERROR_STOP=1 --single-transaction" <<<"$sql" >/dev/null; then
+if ! kubectl exec -i $pod -- sh -c "$psql_auth -v ON_ERROR_STOP=1 --single-transaction -f -" <<<"$sql" >/dev/null; then
     echo "ERROR: the database refused the new password; restore the previous" \
         "value of '$item' from its 1Password item history before retrying." >&2
     exit 1
