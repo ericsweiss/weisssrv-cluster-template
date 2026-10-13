@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Rotate an in-cluster Postgres role password: 1Password first, then the role,
+# then the ExternalSecret refresh and pod restarts. Usage: <authentik>.
+set -euo pipefail
+
+app=${1:-}
+case "$app" in
+    authentik)
+        pod="-n authentik authentik-postgresql-0 -c postgresql"
+        item="Authentik Secrets"
+        # role:1Password-field pairs; the admin role is the pod's own superuser.
+        roles="authentik:postgresql-password postgres:postgresql-admin-password"
+        psql_auth='PGPASSWORD="$(cat "$POSTGRES_POSTGRES_PASSWORD_FILE")" psql -U postgres -d postgres'
+        rotate_secret="authentik/authentik-secrets"
+        ;;
+    *)
+        echo "usage: $0 <authentik>" >&2
+        exit 2
+        ;;
+esac
+
+# The role gets a SCRAM-SHA-256 verifier, not the password, so a statement log
+# never holds the cleartext. The generated values are ASCII, so no SASLprep.
+scram_py='
+import base64, hashlib, hmac, os, sys
+password = sys.stdin.read().encode()
+salt, iterations = os.urandom(16), 4096
+salted = hashlib.pbkdf2_hmac("sha256", password, salt, iterations)
+stored = hashlib.sha256(hmac.new(salted, b"Client Key", "sha256").digest()).digest()
+server = hmac.new(salted, b"Server Key", "sha256").digest()
+b64 = lambda b: base64.b64encode(b).decode()
+print(f"SCRAM-SHA-256${iterations}:{b64(salt)}${b64(stored)}:{b64(server)}")
+'
+declare -a edits=()
+declare -a alters=()
+for pair in $roles; do
+    role=${pair%%:*}
+    field=${pair#*:}
+    new=$(openssl rand -base64 48 | tr -d '/+=' | cut -c1-40)
+    edits+=("$field=$new")
+    verifier=$(printf '%s' "$new" | python3 -c "$scram_py")
+    alters+=("ALTER USER $role PASSWORD '$verifier'")
+done
+# The primary field mirrors the first role's password: a Password item with an
+# empty primary is refused by the op item validator.
+first=${edits[0]#*=}
+edits+=("password=$first")
+
+# The item is edited through its JSON template on a pipe: an assignment on the
+# command line would show the new passwords in the process list.
+echo "rotate-db-password: $item -> 1Password"
+{
+    op item get "$item" --vault Homelab --format json
+    printf '%s\n' "${edits[@]}" |
+        jq -R -s 'split("\n") | map(select(length > 0) | capture("^(?<k>[^=]+)=(?<v>.*)$") | {(.k): .v}) | add'
+} | jq -s '
+    .[1] as $e | .[0] | .fields as $f
+    | [$e | keys[] | . as $k | select(([$f[] | select(.id == $k or .label == $k)] | length) != 1)] as $bad
+    | if ($bad | length) > 0 then error("missing or ambiguous 1Password fields: " + ($bad | join(", ")))
+      else .fields |= map(($e[.id] // $e[.label]) as $v | if $v == null then . else .value = $v end) end' |
+    op item edit "$item" --vault Homelab >/dev/null
+
+sql=""
+for a in "${alters[@]}"; do sql+="$a;"; done
+echo "rotate-db-password: ALTER USER in the database"
+# The SQL is a -f script on stdin, which is what --single-transaction wraps: an
+# exec argument lands in the API audit log, a half-rotated pair has no restore.
+# shellcheck disable=SC2086  # $pod is a deliberate word list of kubectl args
+if ! kubectl exec -i $pod -- sh -c "$psql_auth -v ON_ERROR_STOP=1 --single-transaction -f -" <<<"$sql" >/dev/null; then
+    echo "ERROR: the database rotation did not complete cleanly; its commit state" \
+        "is unknown. Check which value each role accepts, the current '$item'" \
+        "value or the previous one in its item history, before restoring either." >&2
+    exit 1
+fi
+
+echo "rotate-db-password: refresh + restart ($rotate_secret)"
+task flux:rotate-secret -- "$rotate_secret"
