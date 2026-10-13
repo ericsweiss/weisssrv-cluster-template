@@ -971,7 +971,7 @@ lib_ref:
     Never answer a tag OLDER than the default below: the generated playbooks are
     written against the role contracts of the release the template pins, and an
     older pin takes the role defaults silently rather than failing.
-  default: "v0.21.0"
+  default: "v0.21.1"
   validator: >-
     {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
     lib_ref must be a release TAG of the form vX.Y.Z (e.g. v1.2.3). A branch is
