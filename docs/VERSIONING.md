@@ -106,7 +106,7 @@ section — read it before running `copier update`.
 
 `lib_ref` is an answer, so a generated cluster can pin any library tag it likes —
 but exactly **one** pair is ever proved to work: the `lib_ref` default in
-`copier.yml`, currently weisssrv-lib `v0.20.3`. `validate-rendered-cluster`
+`copier.yml`, currently weisssrv-lib `v0.20.5`. `validate-rendered-cluster`
 renders the template with the answer fixtures — which do not answer `lib_ref`,
 so they inherit that default — and runs the real toolchain over the output
 against a checkout of the library at that ref.
