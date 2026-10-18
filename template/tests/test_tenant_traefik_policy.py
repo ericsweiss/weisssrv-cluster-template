@@ -1,10 +1,6 @@
-"""A tenant forwardAuth Middleware may call only a Service in its own namespace,
-or the platform's Authentik outpost: Traefik makes the call, and its egress
-reaches namespaces the tenant's NetworkPolicies keep the tenant out of.
-
-No CEL engine ships with this suite, so `allowed()` mirrors the validation, and
-the first test pins the expression to the shape that mirror assumes.
-"""
+"""A tenant forwardAuth Middleware may call only its own namespace's Services or
+the Authentik outpost. No CEL engine ships here, so `allowed()` mirrors the
+validation, and the first test pins the expression to the shape it assumes."""
 
 from __future__ import annotations
 
