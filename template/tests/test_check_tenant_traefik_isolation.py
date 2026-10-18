@@ -136,6 +136,24 @@ POLICY = textwrap.dedent(
     apiVersion: admissionregistration.k8s.io/v1
     kind: ValidatingAdmissionPolicy
     metadata:
+      name: tenant-no-externalname-services
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicyBinding
+    metadata:
+      name: tenant-no-externalname-services
+    spec:
+      policyName: tenant-no-externalname-services
+      validationActions: [Deny]
+      matchResources:
+        namespaceSelector:
+          matchExpressions:
+            - key: fluxcd.io/tenant
+              operator: Exists
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicy
+    metadata:
       name: tenant-traefik-ingress-refs
     ---
     apiVersion: admissionregistration.k8s.io/v1
@@ -230,6 +248,25 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
     body = POLICY.format(action="Deny")
     ingress_policy = body.rindex("---\n", 0, body.index("name: tenant-traefik-ingress-refs"))
     write_policy(root, body[:ingress_policy])
+    assert len(gate.check(root)) == 1
+
+
+# An ExternalName Service in the tenant namespace would CNAME Traefik into
+# another namespace past the forwardAuth pin, so the gate needs its refusal too.
+@pytest.mark.parametrize("kind", ["ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"])
+def test_a_policy_file_without_the_external_name_refusal_keeps_the_gate_closed(tmp_path, kind):
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    docs = POLICY.format(action="Deny").split("---\n")
+    kept = [
+        d for d in docs
+        if not (f"kind: {kind}\n" in d and "name: tenant-no-externalname-services" in d)
+    ]
+    assert len(kept) == len(docs) - 1
+    write_policy(root, "---\n".join(kept))
     assert len(gate.check(root)) == 1
 
 

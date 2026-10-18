@@ -199,3 +199,34 @@ spec:
       matchExpressions:
         - key: fluxcd.io/tenant
           operator: Exists
+---
+# An ExternalName Service in a tenant namespace passes the forwardAuth pin by
+# name, then CNAMEs Traefik, whose egress is wider, into another namespace.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-no-externalname-services
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["services"]
+  validations:
+    - expression: "!has(object.spec.type) || object.spec.type != 'ExternalName'"
+      message: "tenant Services may not be ExternalName (it would CNAME Traefik to another namespace)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-no-externalname-services
+spec:
+  policyName: tenant-no-externalname-services
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
