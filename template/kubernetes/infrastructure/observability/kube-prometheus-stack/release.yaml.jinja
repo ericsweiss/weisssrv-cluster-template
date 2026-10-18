@@ -682,12 +682,12 @@ spec:
                   summary: 'PVC {{ $labels.persistentvolumeclaim }} in {{ $labels.namespace }} above 90%'
                   description: 'PVC usage is {{ $value | printf "%.1f" }}%.'
 
-{% endraw %}{% if tenant_storage %}{% raw %}              # Platform PVs are static (storageClassName "") and tenant PVs name
-              # tenant-local, so a local-path PV means a claim fell through to the
-              # default class, onto a node bootdisk no backup covers.
-{% endraw %}{% else %}{% raw %}              # Every stateful PV here is statically provisioned. A local-path
-              # PV means a claim fell through to the default class, onto a node
-              # bootdisk no backup covers. Delete if you adopt a provisioner.
+{% endraw %}{% if tenant_storage %}{% raw %}              # k3s local-storage is disabled and tenant claims name tenant-local,
+              # so a local-path PV means k3s's default class came back and a claim
+              # fell through to it, onto a node bootdisk no backup covers.
+{% endraw %}{% else %}{% raw %}              # Every stateful PV here is statically provisioned and k3s
+              # local-storage is off: a local-path PV means its default class came
+              # back, onto an unbacked bootdisk. Delete if you adopt a provisioner.
 {% endraw %}{% endif %}{% raw %}              - alert: LocalPathPVExists
                 expr: kube_persistentvolume_info{storageclass="local-path"} > 0
                 for: 15m

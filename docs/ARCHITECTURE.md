@@ -256,10 +256,13 @@ Rules the template enforces:
 
 - **Pools are created by hand.** Ansible sets properties, creates datasets and
   zvols, and mounts them. It never runs `zpool create` or `zpool destroy`.
-- **No default StorageClass.** A claim names its class or stays Pending, so
-  nothing can land on the cluster-default local path — which lives on a
-  stateless VM disk excluded from every backup; an alert fires if anything
-  ever does. Platform volumes are static (`storageClassName: ""`). With
+- **No default StorageClass.** `local-storage` is in `k3s_disable`, so k3s
+  ships neither its `local-path` provisioner nor its default class, and
+  `tenant-local` carries no default annotation. A claim names its class or
+  stays Pending rather than landing on a stateless VM disk excluded from every
+  backup; `LocalPathPVExists` fires if a `local-path` PV ever appears (the
+  k3s add-on re-enabled, or a class left over from before it was disabled).
+  Platform volumes are static (`storageClassName: ""`). With
   `tenant_storage`, tenant claims name `tenant-local`, whose only root is a
   zvol on the NAS-colocated agent that the `ssd/appdata` replication covers,
   and whose provisioner refuses a root with no mounted filesystem (no

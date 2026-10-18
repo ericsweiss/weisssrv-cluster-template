@@ -1087,8 +1087,10 @@ the rule is per-client internal consistency, not a fleet-wide state.
 
 {% if tenant_storage %}Platform PVs are static with `storageClassName: ""`; tenant claims name
 `tenant-local`.{% else %}Every PV in the cluster is static with `storageClassName: ""`.{% endif %} If an alert says
-one is on the default class, the claim was created before the manifest was
-fixed — a StatefulSet's volume template is immutable, so the fix is: scale to
+one is on the `local-path` class, k3s's default class is back (`local-storage`
+left `k3s_disable` in `group_vars/k3s.yml`, or the class predates it) and a
+claim naming no class fell through to it. A StatefulSet's volume template is
+immutable, so the fix is: put `local-storage` back in `k3s_disable`, scale to
 zero, copy the data to the intended volume, delete the claim, recreate it bound
 to the right volume, scale back up.
 
@@ -1475,7 +1477,7 @@ Current residents and their ingress: CoreDNS `53/udp`+`53/tcp` from everything
 and `9153` from observability; metrics-server `10250` from the aggregation
 layer; kured `8080` from observability; kube-vip is hostNetwork, which
 NetworkPolicy never gates. `local-storage` sits in `k3s_disable`, so there is no
-local-path-provisioner and no default StorageClass: a PVC that omits
+k3s local-path-provisioner here and no default StorageClass: a PVC that omits
 `storageClassName` stays Pending. Adding a workload here means adding its allow
 in the same commit.
 
