@@ -27,6 +27,7 @@ BASELINE = {"tenant-crd-editor.yaml"}
 # namespace. Present with Deny bindings over every tenant namespace, they close
 # the cross-namespace gap while allowCrossNamespace stays true for the platform.
 TENANT_POLICY = "kubernetes/infrastructure/configs/tenant-traefik-policy.yaml"
+CONFIGS_KUSTOMIZATION = "kubernetes/infrastructure/configs/kustomization.yaml"
 REQUIRED_POLICIES = ("tenant-traefik-route-refs", "tenant-traefik-object-refs")
 TENANT_LABEL = "fluxcd.io/tenant"
 
@@ -73,9 +74,13 @@ def allows_cross_namespace(path: Path, root: Path) -> bool | None:
 
 
 def policies_pin_tenants(path: Path, root: Path) -> bool:
-    """True when every required policy exists and a Deny binding applies it to
-    every namespace carrying the tenant label."""
+    """True when the configs kustomization applies the policy file, every
+    required policy exists, and a Deny binding applies it to every namespace
+    carrying the tenant label."""
     if not path.is_file():
+        return False
+    configs = root / CONFIGS_KUSTOMIZATION
+    if not configs.is_file() or path.name not in tenant_resources(configs, root):
         return False
     try:
         docs = [d for d in yaml.safe_load_all(_read(path, root)) if isinstance(d, dict)]

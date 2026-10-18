@@ -136,10 +136,15 @@ POLICY = textwrap.dedent(
 )
 
 
-def write_policy(root: Path, body: str) -> None:
+def write_policy(root: Path, body: str, listed: bool = True) -> None:
+    """The policy file, plus the configs kustomization that applies it."""
     path = root / gate.TENANT_POLICY
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
+    resources = ["traefik-middlewares.yaml"] + (["tenant-traefik-policy.yaml"] if listed else [])
+    (path.parent / "kustomization.yaml").write_text(
+        "resources:\n" + "".join(f"  - {r}\n" for r in resources)
+    )
 
 
 def test_a_tenant_passes_when_the_admission_policies_pin_refs(tmp_path):
@@ -170,4 +175,15 @@ def test_a_policy_file_missing_one_binding_keeps_the_gate_closed(tmp_path):
     )
     body = POLICY.format(action="Deny").rsplit("---\n", 1)[0]
     write_policy(root, body)
+    assert len(gate.check(root)) == 1
+
+
+def test_a_policy_file_the_configs_kustomization_does_not_list_keeps_the_gate_closed(tmp_path):
+    """A policy file nothing applies pins nothing."""
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, POLICY.format(action="Deny"), listed=False)
     assert len(gate.check(root)) == 1
