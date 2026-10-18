@@ -699,9 +699,13 @@ spec:
                   description: >-
                     PV {{ $labels.persistentvolume }} uses the local-path
                     StorageClass, which lands on a stateless node bootdisk and is
-                    excluded from backups. Pin its storageClassName to "" and
+{% endraw %}{% if tenant_storage %}{% raw %}                    excluded from backups. A platform claim: pin its
+                    storageClassName to "" and rebind it to the intended static
+                    PV. A tenant claim: recreate it with storageClassName:
+                    tenant-local.
+{% endraw %}{% else %}{% raw %}                    excluded from backups. Pin its storageClassName to "" and
                     rebind it to the intended static PV.
-{% endraw %}{% if tenant_storage %}{% raw %}
+{% endraw %}{% endif %}{% if tenant_storage %}{% raw %}
 
               # tenant-local claim sizes are not enforced, so the shared zvol is
               # the only cap on what tenants write. Runbook: "Tenant volumes filling".

@@ -3717,16 +3717,28 @@ def test_the_static_pv_wording_follows_tenant_storage(cluster):
     runbooks = " ".join((cluster.path / "docs/RUNBOOKS.md").read_text().split())
     head = release.split("- alert: LocalPathPVExists")[0].splitlines()[-4:]
     comment = " ".join(line.strip() for line in head)
+    rule = release.split("- alert: LocalPathPVExists")[1].split("- alert:")[0]
+    description = " ".join(rule.split("description:")[1].split())
+    wrong_class = runbooks.split("**Something landed on the wrong storage class**")[1]
+    wrong_class = wrong_class.split("###")[0]
+    # Platform claims always rebind to a static PV; with tenant_storage a tenant
+    # claim is recreated naming tenant-local, never pinned to "".
+    assert 'storageClassName to ""' in description, description
+    assert 'storageClassName: ""' in wrong_class, wrong_class
     if cluster.answers["tenant_storage"]:
         assert "tenant-local" in comment, comment
         assert "Every stateful PV here is statically provisioned" not in comment, comment
         assert "Delete if you adopt a provisioner" not in comment, comment
         assert "tenant claims name `tenant-local`" in runbooks
         assert "Every PV in the cluster is static" not in runbooks
+        assert "storageClassName: tenant-local" in description, description
+        assert "`storageClassName: tenant-local`" in wrong_class, wrong_class
     else:
         assert "Every stateful PV here is statically provisioned" in comment, comment
         assert "tenant-local" not in comment, comment
         assert "Every PV in the cluster is static" in runbooks
+        assert "tenant-local" not in description, description
+        assert "tenant-local" not in wrong_class, wrong_class
 
 
 def test_the_example_tenant_quota_caps_tenant_local_only_with_tenant_storage(cluster):

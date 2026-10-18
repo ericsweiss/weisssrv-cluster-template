@@ -85,7 +85,7 @@ to read on:
 | `DiskUsageWarning` / `DiskUsageCritical` | a filesystem is filling | Storage |
 | `InodeUsageWarning` / `InodeUsageCritical` | inodes are exhausting before bytes do | Storage |
 | `PVCUsageWarning` / `PVCUsageCritical` | a claim is filling | Storage |
-| `LocalPathPVExists` | a PV landed on the local-path class instead of a static volume | Storage |
+| `LocalPathPVExists` | a PV landed on the local-path class instead of {% if tenant_storage %}a static volume or `tenant-local`{% else %}a static volume{% endif %} | Storage |
 | `KubeletImageGCIneffective` | a node root filesystem is above the kubelet image-gc watermark | Storage, "Kubelet image store" |
 {% if tenant_storage %}| `TenantVolumesFilling` / `TenantVolumesNearlyFull` | the shared tenant-volumes zvol is under 20% / 10% free | Storage, "Tenant volumes filling" |
 {% endif %}| `ZFSPoolNotOnline` / `ZFSPoolDataErrors` | a pool is DEGRADED or has unrecoverable data | Storage, "A degraded pool" |
@@ -1091,9 +1091,11 @@ one is on the `local-path` class, k3s's default class is back (`local-storage`
 left `k3s_disable` in `group_vars/k3s.yml`, or the class predates it) and a
 claim naming no class fell through to it. A StatefulSet's volume template is
 immutable, so the fix is: put `local-storage` back in `k3s_disable`, scale to
-zero, copy the data to the intended volume, delete the claim, recreate it bound
-to the right volume, scale back up.
-
+zero, copy the data to the intended volume, delete the claim, recreate it
+{% if tenant_storage %}(a platform claim with `storageClassName: ""` bound to its static PV, a
+tenant claim with `storageClassName: tenant-local`), scale back up.
+{% else %}with `storageClassName: ""` bound to its static PV, scale back up.
+{% endif %}
 ### Adding a dataset to a live NAS
 
 `nas_storage` never creates datasets, so a new entry under
@@ -1273,7 +1275,7 @@ plaintext device is the usual cause, and that clears on the next reboot.
 | `PveClusterBackupFailed` / `PveClusterBackupStale` | the /etc/pve backup failed or stopped; both stay inert until `nas_storage_pve_cluster_backup_enabled` is true | the backup storage's free space |
 | `BackupArtifactStale` / `BackupArtifactZeroBytes` | an application dump stopped landing, or landed empty | that app's dump CronJob and its last pod's logs |
 | `BackupArtifactNeverLanded` | no dump has ever landed for an app: the job never ran, or it writes outside the collector's glob | that app's dump CronJob, then the collector's glob for it |
-| `LocalPathPVExists` | a claim bound to the local-path class instead of a static volume | Storage, "Something landed on the wrong storage class" |
+| `LocalPathPVExists` | a claim bound to the local-path class instead of {% if tenant_storage %}a static volume or `tenant-local`{% else %}a static volume{% endif %} | Storage, "Something landed on the wrong storage class" |
 
 What the generated cluster ships, and what it does **not**:
 
