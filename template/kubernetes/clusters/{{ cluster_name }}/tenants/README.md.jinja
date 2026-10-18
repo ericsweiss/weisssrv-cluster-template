@@ -223,10 +223,15 @@ spec:
       max:
         memory: 2Gi
 ---
-# Bootstrap (NOT Flux-managed), scoped to this tenant so revocation is
-# independent. The apply form is also the rotation procedure:
+# Each tenant gets its own 1Password vault, named after the tenant, and a
+# Connect token scoped to that vault alone: a compromised tenant namespace must
+# not be able to read platform items. Bootstrap (NOT Flux-managed), scoped to
+# this tenant so revocation is independent. The apply form is also the rotation
+# procedure:
+#   op vault create example-app
+#   op connect vault grant --server <EXISTING_SERVER_ID> --vault example-app
 #   op connect token create {{ cluster_name }}-example-app-eso \
-#     --server <EXISTING_SERVER_ID> --vaults <vault>
+#     --server <EXISTING_SERVER_ID> --vaults example-app
 #   kubectl -n example-app create secret generic onepassword-connect-token \
 #     --from-literal=token=<CONNECT_TOKEN> --dry-run=client -o yaml \
 #     | kubectl apply -f -
@@ -248,8 +253,9 @@ spec:
     onepassword:
       # The cluster's 1Password Connect Service; change it if yours differs.
       connectHost: http://onepassword-connect.external-secrets.svc.cluster.local:8080
+      # The tenant's own vault, never the platform vault.
       vaults:
-        <vault>: 1
+        example-app: 1
       auth:
         secretRef:
           connectTokenSecretRef:
@@ -364,9 +370,11 @@ spec:
   the example above does.
 - **Vault isolation.** Even a tenant's *own* `ClusterSecretStore` can read every
   item in whatever vault it points at, so a per-tenant store over the shared
-  vault only isolates the token, not the contents. Acceptable for a
-  single-operator homelab; give tenants their own vault (or their own Connect
-  server) otherwise. Their store also needs its own `spec.conditions` — scope it
+  vault only isolates the token, not the contents. Give each tenant its own
+  vault, named after the tenant, and a Connect token granted that vault alone
+  (`op connect vault grant`, then `op connect token create --vaults <tenant>`),
+  as the example above does, so a compromised tenant namespace cannot read
+  platform items. Their store also needs its own `spec.conditions` — scope it
   to the tenant namespace, or the next tenant can name it too.
   `scripts/check-tenant-wiring.py` is the gate for a tenant store: the corpus
   gates read only the platform stage paths and never reach this tree. All of
