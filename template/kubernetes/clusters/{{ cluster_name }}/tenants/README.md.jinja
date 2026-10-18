@@ -83,7 +83,8 @@ The CloudNativePG operator and its Barman Cloud plugin run in `cnpg-system`,
 and `tenant-crd-editor` grants the `postgresql.cnpg.io` and
 `barmancloud.cnpg.io` kinds. Instance volumes come from the `tenant-local`
 StorageClass above. Instance
-pods admit `cnpg-system` on 8000 and `observability` on 9187. The pattern and
+pods admit `cnpg-system` on 8000 and `observability` on 9187, and reach the
+apiserver at `${cluster_apiserver_egress_cidr}` on 6443. The pattern and
 the recovery drill are in docs/postgres.md.
 
 {% endif -%}

@@ -36,8 +36,20 @@ spec:
     tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
 ```
 
-A tenant that also dumps its database needs an NFS PersistentVolume
-pre-bound to its dump claim on its own backup landing zone.
+A tenant that also dumps its database needs a backup landing zone on the NAS,
+registered in three places the way authentik's is:
+
+- an NFS PersistentVolume pre-bound by `claimRef` to the dump claim, with
+  `storageClassName: ""` and `persistentVolumeReclaimPolicy: Retain`
+  ([kubernetes/apps/authentik/storage.yaml](../kubernetes/apps/authentik/storage.yaml));
+- a per-app `nas_storage_exports` entry with its own `fsid` and
+  `xprtsec: "tls"`
+  ([ansible/inventories/prod/group_vars/nas.yml](../ansible/inventories/prod/group_vars/nas.yml),
+  the `/export/backups-apps/authentik` entry);
+- a `nas_storage_backup_artifact_apps` entry in the same file, plus the
+  matching `absent(backup_artifact_last_mtime_seconds{app="<app>"})` arm on
+  `BackupArtifactStale`
+  ([kube-prometheus-stack/release.yaml](../kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml)).
 
 ## What the tenant ships (example)
 
@@ -100,9 +112,12 @@ spec:
 
 The object-store Secret `<app>-backups` comes from an ExternalSecret against
 the tenant's store, keys `access-key-id` and `secret-access-key`. Instance pods
-must admit `cnpg-system` on 8000 and `observability` on 9187 and reach DNS, the
-apiserver at `${cluster_apiserver_egress_cidr}` on 6443 and public 443; a
-PodMonitor on `cnpg.io/cluster: <app>-db`, port `metrics`, feeds the rules.
+must admit `cnpg-system` on 8000, `observability` on 9187 and their own
+application pods on 5432, and reach DNS, the apiserver at
+`${cluster_apiserver_egress_cidr}` on 6443 and public 443; a PodMonitor on
+`cnpg.io/cluster: <app>-db`, port `metrics`, feeds the rules.
+Ship an `absent(cnpg_collector_up{namespace="<namespace>"})` rule too; the
+platform rules need a series to fire.
 
 ## Point-in-time recovery
 
@@ -156,6 +171,20 @@ Run the drill before an application holds data that matters, and quarterly.
 Alerts: `CNPGPostgresDown`. Run `kubectl cnpg status -n <ns> <cluster>` and
 `kubectl -n <ns> logs <cluster>-1 -c postgres --tail=200`. A full volume shows
 as `No space left on device`; a node reboot explains a short outage.
+
+### Database metrics absent
+
+Alerts: tenant `DatabaseAbsent`, the tenant's own
+`absent(cnpg_collector_up{namespace="<namespace>"})` rule. No series means
+none of the platform rules above can fire.
+
+1. Check that the instance pod exists and is scheduled:
+   `kubectl -n <ns> get pods,cluster.postgresql.cnpg.io` and
+   `kubectl -n <ns> describe pod <cluster>-1`.
+2. Check the PodMonitor target on port `metrics` (9187) in Prometheus.
+3. Check that the instance pods' ingress NetworkPolicy (`db-allow-ingress` in
+   the app-template) admits `observability` on 9187.
+4. Once the pod runs, continue with [Postgres down](#postgres-down).
 
 ### WAL archiving failing
 
