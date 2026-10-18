@@ -1,0 +1,166 @@
+"""Tenant claims land only on the NAS agent's backed-up zvol, through a
+non-default, retained StorageClass whose provisioner writes nowhere else."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import stat
+import subprocess
+from pathlib import Path
+
+import yaml
+from conftest import REPO
+
+LPP = REPO / "kubernetes" / "infrastructure" / "controllers" / "local-path-provisioner"
+HOSTS = REPO / "ansible" / "inventories" / "prod" / "hosts.yml"
+ALL_VARS = REPO / "ansible" / "inventories" / "prod" / "group_vars" / "all.yml"
+CLUSTER_CONFIG = REPO / "kubernetes" / "infrastructure" / "sources" / "cluster-config.yaml"
+RUNBOOKS = REPO / "docs" / "RUNBOOKS.md"
+CLASS = "tenant-local"
+PROVISIONER = "rancher.io/tenant-local"
+ROOT = "/mnt/tenant-volumes"
+
+
+def _docs(path: Path) -> list[dict]:
+    return [d for d in yaml.safe_load_all(path.read_text()) if isinstance(d, dict)]
+
+
+def _one(path: Path, kind: str) -> dict:
+    found = [d for d in _docs(path) if d.get("kind") == kind]
+    assert len(found) == 1, f"{path.name}: {len(found)} {kind}"
+    return found[0]
+
+
+def _config() -> dict:
+    return _one(LPP / "configmap.yaml", "ConfigMap")["data"]
+
+
+def _inventory_hosts(node, found: dict) -> dict:
+    """host name -> merged vars, for every `hosts:` mapping in the inventory."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "hosts" and isinstance(value, dict):
+                for name, host_vars in value.items():
+                    found.setdefault(name, {}).update(host_vars or {})
+            _inventory_hosts(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _inventory_hosts(value, found)
+    return found
+
+
+def _nas_labelled_hosts() -> list[str]:
+    domain = _one(CLUSTER_CONFIG, "ConfigMap")["data"]["cluster_node_label_domain"]
+    hosts = _inventory_hosts(yaml.safe_load(HOSTS.read_text()), {})
+    return sorted(
+        name for name, host in hosts.items()
+        if str((host.get("k3s_labels") or {}).get(f"{domain}/nas")) == "true"
+    )
+
+
+def _root_disk() -> dict:
+    labelled = _nas_labelled_hosts()
+    assert len(labelled) == 1, f"nas-labelled hosts: {labelled}"
+    hosts = _inventory_hosts(yaml.safe_load(HOSTS.read_text()), {})
+    disks = [d for d in hosts[labelled[0]].get("vm_additional_disks") or []
+             if d["mount_point"] == ROOT]
+    assert len(disks) == 1, f"{labelled[0]} mounts {len(disks)} disks at {ROOT}"
+    return disks[0]
+
+
+def _runbook_yaml(heading: str) -> dict:
+    """The first ```yaml block under a RUNBOOKS.md heading."""
+    text = RUNBOOKS.read_text()
+    assert heading in text, f"RUNBOOKS.md has no {heading!r}"
+    match = re.search(r"```yaml\n(.*?)```", text.split(heading, 1)[1], re.DOTALL)
+    assert match, f"no yaml block under {heading!r}"
+    return yaml.safe_load(match.group(1))
+
+
+def _setup(tmp_path: Path, vol_dir: Path) -> subprocess.CompletedProcess:
+    script = tmp_path / "setup"
+    script.write_text(_config()["setup"])
+    env = {**os.environ, "VOL_DIR": str(vol_dir)}
+    return subprocess.run(["sh", str(script)], env=env, capture_output=True,
+                          text=True, check=False)
+
+
+def test_the_tenant_class_is_retained_late_bound_and_not_default():
+    sc = _one(LPP / "storageclass.yaml", "StorageClass")
+    assert sc["metadata"]["name"] == CLASS
+    assert sc["provisioner"] == PROVISIONER
+    assert sc["reclaimPolicy"] == "Retain"
+    assert sc["volumeBindingMode"] == "WaitForFirstConsumer"
+    assert sc["allowVolumeExpansion"] is False
+    annotations = sc["metadata"].get("annotations") or {}
+    assert annotations.get("defaultVolumeType") == "local"
+    assert "storageclass.kubernetes.io/is-default-class" not in annotations
+
+
+def test_the_tenant_class_only_admits_the_one_nas_node():
+    sc = _one(LPP / "storageclass.yaml", "StorageClass")
+    assert sc["allowedTopologies"] == [{"matchLabelExpressions": [
+        {"key": "${cluster_node_label_domain}/nas", "values": ["true"]}]}]
+    assert len(_nas_labelled_hosts()) == 1, _nas_labelled_hosts()
+
+
+def test_the_provisioner_answers_only_for_the_tenant_class():
+    deploy = _one(LPP / "deployment.yaml", "Deployment")
+    assert deploy["spec"]["replicas"] == 1
+    assert deploy["spec"]["strategy"]["type"] == "Recreate"
+    container = deploy["spec"]["template"]["spec"]["containers"][0]
+    command = container["command"]
+    assert command[command.index("--provisioner-name") + 1] == PROVISIONER
+    assert container["image"].endswith(":${local_path_provisioner_version}")
+
+
+def test_the_provisioner_writes_only_under_the_tenant_root():
+    assert json.loads(_config()["config.json"]) == {"nodePathMap": [
+        {"node": "DEFAULT_PATH_FOR_NON_LISTED_NODES", "paths": [ROOT]}]}
+    helper = yaml.safe_load(_config()["helperPod.yaml"])
+    assert helper["spec"]["containers"][0]["image"].endswith(
+        ":${local_path_provisioner_helper_version}")
+
+
+def test_both_images_are_pinned_in_the_inventory():
+    pins = yaml.safe_load(ALL_VARS.read_text())
+    assert pins["local_path_provisioner_version"].startswith("v")
+    assert pins["local_path_provisioner_helper_version"]
+
+
+def test_the_tenant_root_is_a_zvol_on_the_nas_node():
+    disk = _root_disk()
+    assert disk["zvol"].startswith("ssd/appdata/")
+    assert disk["fstype"] == "ext4"
+
+
+def test_the_tenant_root_rides_the_documented_archive_and_offsite_backups():
+    """Archive and offsite ship off; the runbook blocks an operator pastes to
+    enable them must carry the tenant zvol."""
+    zvol = _root_disk()["zvol"]
+    archive = _runbook_yaml("### Enabling archive replication (tier 3)")
+    assert any(zvol.startswith(src + "/") for src in archive["nas_storage_archive_backup_sources"])
+    excluded = archive.get("nas_storage_archive_backup_exclude") or []
+    assert not any(zvol == ex or zvol.startswith(ex + "/") for ex in excluded)
+    offsite = _runbook_yaml("### Enabling offsite (tier 4)")
+    assert zvol in {z["zvol"] for z in offsite["restic_offsite_zvol_sources"]}
+
+
+def test_setup_refuses_a_root_that_is_not_the_zvol_filesystem(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    vol = root / "pvc-1_ns_claim"
+    result = _setup(tmp_path, vol)
+    assert result.returncode == 1
+    assert "refusing" in result.stderr
+    assert not vol.exists()
+
+
+def test_setup_creates_the_claim_directory_on_the_zvol_root(tmp_path):
+    root = tmp_path / "root"
+    (root / "lost+found").mkdir(parents=True)
+    vol = root / "pvc-1_ns_claim"
+    result = _setup(tmp_path, vol)
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(vol.stat().st_mode) == 0o777
