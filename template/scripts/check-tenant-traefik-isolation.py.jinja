@@ -34,6 +34,11 @@ REQUIRED_POLICIES = (
     "tenant-traefik-ingress-refs",
 )
 TENANT_LABEL = "fluxcd.io/tenant"
+TENANT_MATCH = {
+    "namespaceSelector": {
+        "matchExpressions": [{"key": TENANT_LABEL, "operator": "Exists"}]
+    }
+}
 
 
 class Vacuous(Exception):
@@ -79,8 +84,8 @@ def allows_cross_namespace(path: Path, root: Path) -> bool | None:
 
 def policies_pin_tenants(path: Path, root: Path) -> bool:
     """True when the configs kustomization applies the policy file, every
-    required policy exists, and a Deny binding applies it to every namespace
-    carrying the tenant label."""
+    required policy exists, and a Deny binding applies it, unnarrowed, to every
+    namespace carrying the tenant label."""
     if not path.is_file():
         return False
     configs = root / CONFIGS_KUSTOMIZATION
@@ -102,11 +107,9 @@ def policies_pin_tenants(path: Path, root: Path) -> bool:
         spec = doc.get("spec") or {}
         if "Deny" not in (spec.get("validationActions") or []):
             continue
-        selector = (spec.get("matchResources") or {}).get("namespaceSelector") or {}
-        if any(
-            e.get("key") == TENANT_LABEL and e.get("operator") == "Exists"
-            for e in selector.get("matchExpressions") or []
-        ):
+        # The tenant-label Exists must be the whole match: any other key narrows
+        # the binding (objects, resources, namespaces) while it still reads true.
+        if spec.get("matchResources") == TENANT_MATCH:
             bound.add(spec.get("policyName"))
     return all(name in policies and name in bound for name in REQUIRED_POLICIES)
 

@@ -248,3 +248,54 @@ def test_the_shipped_policy_file_pins_tenants():
     """The rendered policy file and configs kustomization must open the gate on
     their own, before any tenant exists."""
     assert gate.policies_pin_tenants(REPO / gate.TENANT_POLICY, REPO)
+
+
+# Each mutation narrows the route binding so it no longer covers every traefik.io
+# object in every tenant namespace, while its tenant-label Exists still reads true.
+@pytest.mark.parametrize(
+    "narrowing",
+    [
+        "    objectSelector:\n      matchLabels: {protected: \"true\"}\n",
+        "    resourceRules:\n      - apiGroups: [\"traefik.io\"]\n"
+        "        apiVersions: [\"*\"]\n        operations: [\"CREATE\"]\n"
+        "        resources: [\"ingressroutetcps\"]\n",
+        "    excludeResourceRules:\n      - apiGroups: [\"traefik.io\"]\n"
+        "        apiVersions: [\"*\"]\n        operations: [\"*\"]\n"
+        "        resources: [\"ingressroutes\"]\n",
+        "    namespaceSelector:\n      matchExpressions:\n"
+        "        - key: fluxcd.io/tenant\n          operator: Exists\n"
+        "        - key: kubernetes.io/metadata.name\n          operator: In\n"
+        "          values: [nobody]\n",
+        "    namespaceSelector:\n      matchLabels: {protected: \"true\"}\n"
+        "      matchExpressions:\n"
+        "        - key: fluxcd.io/tenant\n          operator: Exists\n",
+        "    namespaceSelector:\n      matchExpressions:\n"
+        "        - key: fluxcd.io/tenant\n          operator: Exists\n"
+        "          values: [nobody]\n",
+    ],
+    ids=[
+        "objectSelector",
+        "resourceRules",
+        "excludeResourceRules",
+        "second-expression",
+        "matchLabels",
+        "expression-values",
+    ],
+)
+def test_a_binding_that_narrows_its_match_keeps_the_gate_closed(tmp_path, narrowing):
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    body = POLICY.format(action="Deny")
+    selector = (
+        "  matchResources:\n    namespaceSelector:\n      matchExpressions:\n"
+        "        - key: fluxcd.io/tenant\n          operator: Exists\n"
+    )
+    assert selector in body
+    narrowed = "  matchResources:\n" + (
+        narrowing if "namespaceSelector" in narrowing else selector.split("\n", 1)[1] + narrowing
+    )
+    write_policy(root, body.replace(selector, narrowed, 1))
+    assert len(gate.check(root)) == 1
