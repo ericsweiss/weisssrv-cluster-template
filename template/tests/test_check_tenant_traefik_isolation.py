@@ -354,3 +354,53 @@ def test_the_unmutated_round_trip_still_opens_the_gate(tmp_path):
     )
     write_policy(root, _mutated("tenant-traefik-route-refs", lambda spec: None))
     assert gate.check(root) == []
+
+
+def _mutated_binding(name: str, mutate) -> str:
+    """The shipped policy file with binding `name`'s spec passed through `mutate`."""
+    docs = [d for d in yaml.safe_load_all(SHIPPED_POLICY) if d]
+    target = [
+        d for d in docs
+        if d["kind"] == "ValidatingAdmissionPolicyBinding" and d["metadata"]["name"] == name
+    ]
+    assert len(target) == 1
+    mutate(target[0]["spec"])
+    return yaml.safe_dump_all(docs, sort_keys=False)
+
+
+# Each mutation keeps the Deny action and the tenant match, so only a check of
+# the complete binding spec refuses it: a paramRef that admits on a missing
+# parameter fails open, and any other added field is unreviewed.
+BINDING_WEAKENINGS = {
+    "paramRef-allow": lambda spec: spec.__setitem__(
+        "paramRef", {"name": "absent", "parameterNotFoundAction": "Allow"}
+    ),
+    "paramRef-selector": lambda spec: spec.__setitem__(
+        "paramRef", {"selector": {}, "parameterNotFoundAction": "Allow"}
+    ),
+    "extra-action": lambda spec: spec.__setitem__("validationActions", ["Deny", "Audit"]),
+}
+
+
+@pytest.mark.parametrize("weakening", sorted(BINDING_WEAKENINGS))
+@pytest.mark.parametrize("name", sorted(gate.REQUIRED_POLICIES))
+def test_a_binding_with_more_than_the_required_spec_keeps_the_gate_closed(
+    tmp_path, name, weakening
+):
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, _mutated_binding(name, BINDING_WEAKENINGS[weakening]))
+    assert len(gate.check(root)) == 1
+
+
+def test_the_unmutated_binding_round_trip_still_opens_the_gate(tmp_path):
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, _mutated_binding("tenant-no-manual-endpoints", lambda spec: None))
+    assert gate.check(root) == []
