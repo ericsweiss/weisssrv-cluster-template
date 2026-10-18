@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Fail tenant onboarding without the Deny-bound tenant-traefik-policy.yaml, whatever
-allowCrossNamespace says: Ingress annotations, forwardAuth addresses and endpoint
-resolution cross namespaces without it. Each policy's shape is pinned, not just
-its name. Exit 0 clean, 1 findings, 2 vacuous.
+"""Fail tenant onboarding without the Deny-bound, shape-pinned tenant policies,
+whatever allowCrossNamespace says: Ingress annotations, forwardAuth and endpoints
+cross namespaces without them. Exit 0 clean, 1 findings, 2 vacuous.
 """
 
 from __future__ import annotations
@@ -24,10 +23,9 @@ TRAEFIK_RELEASE = "kubernetes/infrastructure/controllers/traefik/release.yaml"
 # The one resource that is always present: the shared tenant RBAC, not a tenant.
 BASELINE = {"tenant-crd-editor.yaml"}
 
-# The admission policies that pin tenant Traefik references, and every Service
-# Traefik may resolve, to the tenant's own namespace. Each must fail closed, match
-# exactly these resources and keep this many validations, or a weakened copy
-# would still pass by name. Change one together with tenant-traefik-policy.yaml.
+# The policies pinning tenant Traefik refs to the tenant's namespace. Each must
+# fail closed, match exactly these resources and keep this many validations, or
+# a weakened copy passes by name. Change together with tenant-traefik-policy.yaml.
 TENANT_POLICY = "kubernetes/infrastructure/configs/tenant-traefik-policy.yaml"
 CONFIGS_KUSTOMIZATION = "kubernetes/infrastructure/configs/kustomization.yaml"
 WRITES = ["CREATE", "UPDATE"]
