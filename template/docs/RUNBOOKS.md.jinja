@@ -1084,7 +1084,8 @@ the rule is per-client internal consistency, not a fleet-wide state.
 
 **Something landed on the wrong storage class**
 
-Every PV in the cluster is static with `storageClassName: ""`. If an alert says
+{% if tenant_storage %}Platform PVs are static with `storageClassName: ""`; tenant claims name
+`tenant-local`.{% else %}Every PV in the cluster is static with `storageClassName: ""`.{% endif %} If an alert says
 one is on the default class, the claim was created before the manifest was
 fixed — a StatefulSet's volume template is immutable, so the fix is: scale to
 zero, copy the data to the intended volume, delete the claim, recreate it bound

@@ -79,7 +79,7 @@ spec:
             requests:
               cpu: 10m
               memory: 32Mi
-            # Memory limit only, no CPU limit (docs/33).
+            # Memory limit only, no CPU limit.
             limits:
               memory: 128Mi
           volumeMounts:

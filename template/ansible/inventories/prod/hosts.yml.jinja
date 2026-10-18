@@ -195,9 +195,9 @@ all:
           proxmox_startup_order: 40
           proxmox_startup_delay: 10
 {%- if loop.first %}
-          # NAS-colocated agent (PreferNoSchedule, so it still takes overflow).
-          # These three zvols back the prometheus-data, loki-data and
-          # authentik-postgres-data hostPath PVs; never reorder scsi_slot.
+          # NAS-colocated agent (PreferNoSchedule: still takes overflow). These zvols back
+          # the prometheus-data, loki-data and authentik-postgres-data hostPath PVs (and,
+          # with tenant_storage, the tenant-local root); never reorder scsi_slot.
           vm_additional_disks:
             - name: prometheus-data
               size: 150G

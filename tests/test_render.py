@@ -3704,3 +3704,26 @@ def test_a_quantity_with_an_unknown_suffix_is_skipped():
     assert _quantity("${cluster_memory}") is None
     assert _quantity("128Mi") == 128 * 2**20
     assert _quantity("1G") == 10**9
+
+
+def test_the_static_pv_wording_follows_tenant_storage(cluster):
+    """With tenant_storage on, tenant claims provision from tenant-local, so the
+    LocalPathPVExists comment and the wrong-class runbook must not claim every
+    PV is static, and must not tell the operator to delete the rule."""
+    release = (
+        cluster.path
+        / "kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml"
+    ).read_text()
+    runbooks = " ".join((cluster.path / "docs/RUNBOOKS.md").read_text().split())
+    head = release.split("- alert: LocalPathPVExists")[0].splitlines()[-4:]
+    comment = " ".join(line.strip() for line in head)
+    if cluster.answers["tenant_storage"]:
+        assert "tenant-local" in comment, comment
+        assert "Every stateful PV here is statically provisioned" not in comment, comment
+        assert "Delete if you adopt a provisioner" not in comment, comment
+        assert "tenant claims name `tenant-local`" in runbooks
+        assert "Every PV in the cluster is static" not in runbooks
+    else:
+        assert "Every stateful PV here is statically provisioned" in comment, comment
+        assert "tenant-local" not in comment, comment
+        assert "Every PV in the cluster is static" in runbooks
