@@ -1984,9 +1984,13 @@ spec:
                     minutes. Applications on this cluster cannot read or write.
 
               # A failure newer than the newest success means the archive is
-              # behind now, not that one segment once failed and was retried.
+              # behind now. A database with no success yet has no archived series,
+              # so the failure is compared with zero, joined on the full label set.
               - alert: CNPGWALArchivingFailing
-                expr: cnpg_pg_stat_archiver_last_failed_time > cnpg_pg_stat_archiver_last_archived_time
+                expr: >-
+                  cnpg_pg_stat_archiver_last_failed_time
+                  > (cnpg_pg_stat_archiver_last_archived_time
+                  or cnpg_pg_stat_archiver_last_failed_time * 0)
                 for: 30m
                 labels:
                   severity: critical

@@ -44,6 +44,25 @@ tests:
               namespace: app
               pod: app-db-1
 
+
+  # A fresh database whose first archive fails exports no last_archived_time
+  # at all; the missing success must read as never, not drop the comparison.
+  - interval: 1m
+    input_series:
+      - series: 'cnpg_pg_stat_archiver_last_failed_time{namespace="fresh", pod="fresh-db-1"}'
+        values: '2000x60'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CNPGWALArchivingFailing
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: CNPGWALArchivingFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: fresh
+              pod: fresh-db-1
+
   - interval: 1m
     input_series:
       - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="app", pod="app-db-1"}'
