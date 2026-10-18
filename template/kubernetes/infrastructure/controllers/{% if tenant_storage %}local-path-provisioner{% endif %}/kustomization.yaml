@@ -1,0 +1,17 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: local-path-storage
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - storageclass.yaml
+
+# The provisioner talks only to the apiserver and its helper pods need no
+# network, so the two egress components are the namespace's whole egress.
+components:
+  - ../../../components/netpol-baseline
+  - ../../../components/netpol-egress-dns
+  - ../../../components/netpol-egress-apiserver

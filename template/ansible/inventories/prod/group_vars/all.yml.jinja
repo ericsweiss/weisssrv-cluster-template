@@ -238,6 +238,14 @@ registry_cache_version: "3.1.2"
 # is a plain kubectl run with no Flux substitution, so `task lint:busybox-version-pin`
 # is what holds its `--image=busybox:` literal to this value.
 busybox_version: "1.38"
+{%- if tenant_storage %}
+
+# Tenant StorageClass provisioner (controllers/local-path-provisioner) and the
+# busybox tag its helper pods run. The provisioner's Docker Hub tag equals its
+# GitHub release tag.
+local_path_provisioner_version: "v0.0.37"
+local_path_provisioner_helper_version: "1.38"
+{%- endif %}
 {%- if vpn_tailscale %}
 
 # CoreDNS for the tailnet split-horizon resolver, pinned to the rancher mirror

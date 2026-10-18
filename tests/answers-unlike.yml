@@ -55,6 +55,8 @@ tailnet_dns_suffix: tail9z8y7x.ts.net
 gpu: none
 # No terraform/unifi directory, no unifi-drift-plan job, no unifi tasks.
 use_unifi: false
+# No provisioner, no tenant-volumes zvol, no tenant-local class.
+tenant_storage: false
 # No cnpg-system namespace, no CNPG source, pins or rules.
 postgres_operator: false
 

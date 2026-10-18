@@ -145,7 +145,8 @@ checks live there. Summary:
 | `tailnet_dns_suffix` | *(none — asked)* | Asked only with `vpn_tailscale`; MagicDNS suffix, rejected if left at the `CHANGEME` placeholder |
 | `gpu` | `none` | `nvidia` adds VFIO prep, driver + container toolkit, device plugin; GPU telemetry is a documented add-on, **not shipped** (`kubernetes/infrastructure/observability/README.md`) |
 | `use_unifi` | `false` | Manages a UniFi gateway as code: `terraform/unifi`, its supervised tasks, a drift-plan job. The generated site data is a worked example to edit |
-| `postgres_operator` | `false` | CloudNativePG operator and its Barman Cloud plugin in `cnpg-system`, so tenants can run PostgreSQL with WAL archiving and point-in-time recovery |
+| `tenant_storage` | `false` | StorageClass `tenant-local`: local-path-provisioner over a `ssd/appdata/tenant-volumes/data` zvol on the NAS-colocated agent. Required by `postgres_operator` |
+| `postgres_operator` | `false` | CloudNativePG operator and its Barman Cloud plugin in `cnpg-system`, so tenants can run PostgreSQL with WAL archiving and point-in-time recovery. Needs `tenant_storage` |
 | `compose_app_guests` | `[]` | Single-VM docker-compose guests `task collect-state` collects from. Each entry needs `host`, `label` and `compose_dir` |
 | `lib_url` / `lib_ref` | defaults in `copier.yml` | weisssrv-lib source and pin for collection, CI includes, TF modules |
 | `lib_project` | path part of `lib_url` | GitLab project path for `include: project:` (instance-local) |

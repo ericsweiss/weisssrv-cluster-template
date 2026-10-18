@@ -245,6 +245,26 @@ CONFIG = {
             "source_url": "https://hub.docker.com/_/busybox/tags",
             "deploy_command": "edit scripts/post-maintenance-verify.sh to match",
         },
+{%- if tenant_storage %}
+        {
+            "name": "local-path-provisioner",
+            "var_name": "local_path_provisioner_version",
+            "category": "dockerhub",
+            "docker_image": "rancher/local-path-provisioner",
+            "tag_regex": r"^(v\d+\.\d+\.\d+)$",
+            "source_url": "https://github.com/rancher/local-path-provisioner/releases",
+            "deploy_command": _FLUX,
+        },
+        {
+            "name": "local-path-provisioner helper (BusyBox)",
+            "var_name": "local_path_provisioner_helper_version",
+            "category": "dockerhub",
+            "docker_image": "library/busybox",
+            "tag_regex": r"^(\d+\.\d+)$",
+            "source_url": "https://hub.docker.com/_/busybox/tags",
+            "deploy_command": _FLUX,
+        },
+{%- endif %}
 {%- if git_backend == 'gitlab_selfhosted' %}
         {
             "name": "GitLab Runner",

@@ -914,14 +914,30 @@ use_unifi:
     leaves your router exactly as it is.
   default: false
 
+tenant_storage:
+  type: bool
+  help: >-
+    Serve tenant PersistentVolumeClaims from StorageClass tenant-local: Rancher
+    local-path-provisioner, one directory per claim on a zvol on the
+    NAS-colocated agent that the ssd/appdata replication covers. Not the
+    default class; a volume is kept when its claim is deleted and is never
+    grown. Required by postgres_operator.
+  default: false
+
 postgres_operator:
   type: bool
   help: >-
     Install the CloudNativePG operator and its Barman Cloud plugin, so tenants
     can run their own PostgreSQL clusters with WAL archiving and point-in-time
     recovery to an S3-compatible object store. Needs cert-manager (always
-    rendered). The tenant RBAC grants the CNPG kinds either way.
+    rendered) and tenant_storage. The tenant RBAC grants the CNPG kinds either
+    way.
   default: false
+  validator: >-
+    {% if postgres_operator and not tenant_storage %}
+    postgres_operator needs tenant_storage: every CNPG instance requests the
+    tenant-local StorageClass that module installs
+    {% endif %}
 
 compose_app_guests:
   type: yaml

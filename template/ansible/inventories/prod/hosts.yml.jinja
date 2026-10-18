@@ -227,6 +227,18 @@ all:
               # The restorable copy is the nightly pg_dump on the NAS
               # (/backups-apps/authentik), not this block device.
               vzdump_backup: false
+{%- if tenant_storage %}
+            # Root of StorageClass tenant-local: one directory per tenant claim,
+            # replicated with ssd/appdata like the zvols above.
+            - name: tenant-volumes
+              size: 100G
+              zvol: ssd/appdata/tenant-volumes/data
+              mount_point: /mnt/tenant-volumes
+              fstype: ext4
+              scsi_slot: 4
+              sparse: true
+              vzdump_backup: false
+{%- endif %}
 {%- endif %}
           k3s_labels:
             {{ internal_domain }}/general: "true"

@@ -1,0 +1,20 @@
+---
+# The tenant StorageClass: a `local` volume per claim, so fsGroup applies, kept
+# after its claim is deleted. Not the default class, so a claim naming no class
+# still stays Pending; allowedTopologies keeps every claim on the NAS agent.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: tenant-local
+  annotations:
+    defaultVolumeType: local
+    kustomize.toolkit.fluxcd.io/force: "Enabled"
+provisioner: rancher.io/tenant-local
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false
+allowedTopologies:
+  - matchLabelExpressions:
+      - key: ${cluster_node_label_domain}/nas
+        values:
+          - "true"

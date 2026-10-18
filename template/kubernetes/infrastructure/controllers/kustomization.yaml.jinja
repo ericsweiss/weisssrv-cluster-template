@@ -19,6 +19,9 @@ resources:
 {%- if gpu == 'nvidia' %}
   - nvidia-device-plugin
 {%- endif %}
+{%- if tenant_storage %}
+  - local-path-provisioner
+{%- endif %}
 {%- if postgres_operator %}
   - cnpg
 {%- endif %}

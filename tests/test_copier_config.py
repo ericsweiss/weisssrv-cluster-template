@@ -1389,6 +1389,15 @@ VALIDATOR_CASES = [
         {},
         "must not contain a space",
     ),
+    ("postgres_operator", False, None, {"tenant_storage": False}),
+    (
+        "postgres_operator",
+        True,
+        "every CNPG instance requests the tenant-local StorageClass, which only "
+        "tenant_storage renders",
+        {"tenant_storage": False},
+        "needs tenant_storage",
+    ),
 ]
 
 

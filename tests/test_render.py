@@ -82,6 +82,7 @@ MODULES_ON = {
     "vpn_tailscale": True,
     "gpu": "nvidia",
     "use_unifi": True,
+    "tenant_storage": True,
     "postgres_operator": True,
     "enable_semantic_release": False,
     "compose_app_guests": [
@@ -872,6 +873,10 @@ GATED_ENTRY_POINTS = {
     "postgres_operator": (
         "kubernetes/infrastructure/controllers/cnpg/release.yaml",
         "kubernetes/infrastructure/sources/cloudnative-pg.yaml",
+    ),
+    "tenant_storage": (
+        "kubernetes/infrastructure/controllers/local-path-provisioner/storageclass.yaml",
+        "kubernetes/infrastructure/controllers/local-path-provisioner/configmap.yaml",
     ),
     "vpn_tailscale": (
         "kubernetes/apps/tailnet-dns/kustomization.yaml",
