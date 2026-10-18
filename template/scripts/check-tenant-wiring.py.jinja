@@ -247,31 +247,43 @@ def check_file(path: Path, rel: str, listed: set[str],
     if not kustomizations:
         problems.append(f"{rel}: declares no Flux Kustomization")
         return problems
-    spec = kustomizations[0].get("spec") or {}
+    for kustomization in kustomizations:
+        name = (kustomization.get("metadata") or {}).get("name", "?")
+        problems += _kustomization_problems(
+            docs, f"{rel} [{name}]", kustomization, namespace, root
+        )
+    return problems
 
+
+def _kustomization_problems(docs: list, label: str, kustomization: dict,
+                            namespace, root: Path | None) -> list[str]:
+    """One Flux Kustomization's confinement. Every Kustomization in a tenant
+    file reconciles with the same reach, so each is checked, not the first."""
+    problems = []
+    spec = kustomization.get("spec") or {}
     service_account = spec.get("serviceAccountName")
     if not service_account:
         problems.append(
-            f"{rel}: Kustomization has no serviceAccountName — it would reconcile "
+            f"{label}: Kustomization has no serviceAccountName — it would reconcile "
             "as kustomize-controller's own cluster-admin"
         )
     if spec.get("prune") is not True:
-        problems.append(f"{rel}: Kustomization does not set prune: true")
+        problems.append(f"{label}: Kustomization does not set prune: true")
     target = spec.get("targetNamespace")
     if not target:
-        problems.append(f"{rel}: Kustomization has no targetNamespace")
+        problems.append(f"{label}: Kustomization has no targetNamespace")
     elif namespace and target != namespace:
         problems.append(
-            f"{rel}: Kustomization targetNamespace {target!r} is not the tenant "
+            f"{label}: Kustomization targetNamespace {target!r} is not the tenant "
             f"namespace {namespace!r}"
         )
-    problems += _substitute_problems(spec, rel)
-    problems += _source_problems(docs, rel, spec)
-    problems += _path_problems(rel, spec, root)
+    problems += _substitute_problems(spec, label)
+    problems += _source_problems(docs, label, spec)
+    problems += _path_problems(label, spec, root)
     depends = {str((d or {}).get("name")) for d in (spec.get("dependsOn") or [])}
     if REQUIRED_DEPENDENCY not in depends:
         problems.append(
-            f"{rel}: Kustomization does not dependOn {REQUIRED_DEPENDENCY} — on a "
+            f"{label}: Kustomization does not dependOn {REQUIRED_DEPENDENCY} — on a "
             "fresh bootstrap it applies before the platform CRDs exist"
         )
 
@@ -282,10 +294,10 @@ def check_file(path: Path, rel: str, listed: set[str],
         }
         if (service_account, FLUX_NAMESPACE) not in accounts:
             problems.append(
-                f"{rel}: no ServiceAccount {service_account} in {FLUX_NAMESPACE} — "
+                f"{label}: no ServiceAccount {service_account} in {FLUX_NAMESPACE} — "
                 "kustomize-controller impersonates it from its own namespace"
             )
-        problems += _rolebinding_problems(docs, rel, service_account, namespace)
+        problems += _rolebinding_problems(docs, label, service_account, namespace)
     return problems
 
 

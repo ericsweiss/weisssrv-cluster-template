@@ -464,3 +464,45 @@ def test_a_non_utf8_tenant_file_is_reported_not_dropped(repo: Path) -> None:
     (repo / gate.TENANTS_DIR / "demo-app.yaml").write_bytes(b"kind: \xff\xfe\n")
     problems = gate.check(repo)
     assert any("demo-app.yaml: unparseable YAML" in p for p in problems)
+
+
+SECOND = textwrap.dedent(
+    """\
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: demo-app-db
+      namespace: flux-system
+    spec:
+      dependsOn:
+        - name: infrastructure-configs
+      sourceRef:
+        kind: GitRepository
+        name: demo-app
+      path: ./kubernetes/db
+      prune: true
+      targetNamespace: demo-app
+      postBuild:
+        substituteFrom:
+          - kind: ConfigMap
+            name: cluster-config
+            optional: false
+    """
+)
+
+
+def test_every_kustomization_in_a_tenant_file_is_checked(repo: Path) -> None:
+    """A second Kustomization reconciles with the first one's reach, so it is
+    held to the same confinement rather than skipped."""
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + SECOND)
+    problems = gate.check(repo)
+    assert any("demo-app-db" in p and "serviceAccountName" in p for p in problems), problems
+
+
+def test_a_confined_second_kustomization_passes(repo: Path) -> None:
+    second = SECOND.replace(
+        "  dependsOn:\n", "  serviceAccountName: demo-app-flux\n  dependsOn:\n"
+    )
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
+    assert gate.check(repo) == []

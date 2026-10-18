@@ -1,0 +1,139 @@
+---
+# Tenants hold full traefik.io write while Traefik allows cross-namespace refs
+# for the platform. These policies pin every reference a tenant route makes to
+# its own namespace, except the platform middlewares listed below.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-traefik-route-refs
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingressroutes", "ingressroutetcps", "ingressrouteudps"]
+  variables:
+    - name: ns
+      expression: "object.metadata.namespace"
+    - name: platformMiddlewares
+      expression: >-
+        ['traefik/lan-tailscale-only', 'traefik/lan-tailscale-strict',
+        'traefik/hsts-header', 'traefik/security-headers', 'authentik/authentik-auth']
+  validations:
+    - expression: >-
+        !has(object.spec.routes) || object.spec.routes.all(r,
+        !has(r.services) || r.services.all(s,
+        !has(s.namespace) || s.namespace == variables.ns))
+      message: "a tenant route may reference Services only in its own namespace"
+    - expression: >-
+        !has(object.spec.routes) || object.spec.routes.all(r,
+        !has(r.middlewares) || r.middlewares.all(m,
+        !has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares))
+      message: "a tenant route may reference only its own middlewares or the platform allowlist"
+    # Traefik resolves a name@provider reference (for example
+    # other-ns-mw@kubernetescrd) ignoring the namespace field, so it is refused.
+    - expression: >-
+        !has(object.spec.routes) || object.spec.routes.all(r,
+        (!has(r.middlewares) || r.middlewares.all(m, !m.name.contains('@')))
+        && (!has(r.services) || r.services.all(s, !s.name.contains('@')
+        && (!has(s.serversTransport) || !s.serversTransport.contains('@')))))
+      message: "a tenant route may not use a name@provider middleware, service or transport reference"
+    - expression: >-
+        !has(object.spec.tls) || ((!has(object.spec.tls.options)
+        || ((!has(object.spec.tls.options.namespace)
+        || object.spec.tls.options.namespace == variables.ns)
+        && !object.spec.tls.options.name.contains('@')))
+        && (!has(object.spec.tls.store)
+        || ((!has(object.spec.tls.store.namespace)
+        || object.spec.tls.store.namespace == variables.ns)
+        && !object.spec.tls.store.name.contains('@'))))
+      message: "a tenant route may reference TLS options and stores only in its own namespace"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-traefik-route-refs
+spec:
+  policyName: tenant-traefik-route-refs
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
+# Middlewares and TraefikServices can point across namespaces too: a chain, an
+# errors page service, and weighted or mirrored services.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-traefik-object-refs
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["middlewares", "traefikservices"]
+  variables:
+    - name: ns
+      expression: "object.metadata.namespace"
+  validations:
+    - expression: >-
+        !has(object.spec.chain) || !has(object.spec.chain.middlewares)
+        || object.spec.chain.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns))
+      message: "a tenant chain middleware may reference only its own namespace"
+    - expression: >-
+        !has(object.spec.errors) || !has(object.spec.errors.service)
+        || !has(object.spec.errors.service.namespace)
+        || object.spec.errors.service.namespace == variables.ns
+      message: "a tenant errors middleware may reference only its own namespace"
+    - expression: >-
+        !has(object.spec.weighted) || !has(object.spec.weighted.services)
+        || object.spec.weighted.services.all(s,
+        !has(s.namespace) || s.namespace == variables.ns)
+      message: "a tenant weighted service may reference only its own namespace"
+    - expression: >-
+        !has(object.spec.mirroring)
+        || ((!has(object.spec.mirroring.namespace)
+        || object.spec.mirroring.namespace == variables.ns)
+        && (!has(object.spec.mirroring.mirrors)
+        || object.spec.mirroring.mirrors.all(s,
+        !has(s.namespace) || s.namespace == variables.ns)))
+      message: "a tenant mirroring service may reference only its own namespace"
+    # As for routes: a TraefikService-kind name such as api@internal or
+    # other-ns-svc@kubernetescrd is resolved ignoring the namespace field.
+    - expression: >-
+        (!has(object.spec.errors) || !has(object.spec.errors.service)
+        || (!object.spec.errors.service.name.contains('@')
+        && (!has(object.spec.errors.service.serversTransport)
+        || !object.spec.errors.service.serversTransport.contains('@'))))
+        && (!has(object.spec.weighted) || !has(object.spec.weighted.services)
+        || object.spec.weighted.services.all(s, !s.name.contains('@')
+        && (!has(s.serversTransport) || !s.serversTransport.contains('@'))))
+        && (!has(object.spec.mirroring)
+        || (!object.spec.mirroring.name.contains('@')
+        && (!has(object.spec.mirroring.serversTransport)
+        || !object.spec.mirroring.serversTransport.contains('@'))
+        && (!has(object.spec.mirroring.mirrors)
+        || object.spec.mirroring.mirrors.all(s, !s.name.contains('@')
+        && (!has(s.serversTransport) || !s.serversTransport.contains('@'))))))
+      message: "a tenant errors, weighted or mirroring service may not use a name@provider service or transport reference"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-traefik-object-refs
+spec:
+  policyName: tenant-traefik-object-refs
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists

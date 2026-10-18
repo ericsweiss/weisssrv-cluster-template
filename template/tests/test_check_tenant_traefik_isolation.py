@@ -93,3 +93,81 @@ def test_an_unparseable_input_is_vacuous_not_a_finding(tmp_path, target):
     with pytest.raises(gate.Vacuous):
         gate.check(root)
     assert gate.main(["--repo", str(root)]) == 2
+
+
+POLICY = textwrap.dedent(
+    """\
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicy
+    metadata:
+      name: tenant-traefik-route-refs
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicy
+    metadata:
+      name: tenant-traefik-object-refs
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicyBinding
+    metadata:
+      name: tenant-traefik-route-refs
+    spec:
+      policyName: tenant-traefik-route-refs
+      validationActions: [{action}]
+      matchResources:
+        namespaceSelector:
+          matchExpressions:
+            - key: fluxcd.io/tenant
+              operator: Exists
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicyBinding
+    metadata:
+      name: tenant-traefik-object-refs
+    spec:
+      policyName: tenant-traefik-object-refs
+      validationActions: [Deny]
+      matchResources:
+        namespaceSelector:
+          matchExpressions:
+            - key: fluxcd.io/tenant
+              operator: Exists
+    """
+)
+
+
+def write_policy(root: Path, body: str) -> None:
+    path = root / gate.TENANT_POLICY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+
+
+def test_a_tenant_passes_when_the_admission_policies_pin_refs(tmp_path):
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, POLICY.format(action="Deny"))
+    assert gate.check(root) == []
+
+
+def test_a_warn_only_binding_does_not_open_the_gate(tmp_path):
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, POLICY.format(action="Warn"))
+    assert len(gate.check(root)) == 1
+
+
+def test_a_policy_file_missing_one_binding_keeps_the_gate_closed(tmp_path):
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    body = POLICY.format(action="Deny").rsplit("---\n", 1)[0]
+    write_policy(root, body)
+    assert len(gate.check(root)) == 1

@@ -45,3 +45,23 @@ rules:
     resources:
       - certificates
     verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  # Must equal `kubectl api-resources --api-group=postgresql.cnpg.io
+  # --namespaced=true`; re-check after a CNPG chart bump. A tenant owns its
+  # own Cluster, ScheduledBackup and on-demand Backup objects.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources:
+      - backups
+      - clusters
+      - databaseroles
+      - databases
+      - failoverquorums
+      - imagecatalogs
+      - poolers
+      - publications
+      - scheduledbackups
+      - subscriptions
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  - apiGroups: ["barmancloud.cnpg.io"]
+    resources:
+      - objectstores
+    verbs: [get, list, watch, create, update, patch, delete, deletecollection]

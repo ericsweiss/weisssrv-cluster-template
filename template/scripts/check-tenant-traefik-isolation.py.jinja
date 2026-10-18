@@ -23,6 +23,13 @@ TRAEFIK_RELEASE = "kubernetes/infrastructure/controllers/traefik/release.yaml"
 # The one resource that is always present: the shared tenant RBAC, not a tenant.
 BASELINE = {"tenant-crd-editor.yaml"}
 
+# The admission policies that pin tenant Traefik references to the tenant's own
+# namespace. Present with Deny bindings over every tenant namespace, they close
+# the cross-namespace gap while allowCrossNamespace stays true for the platform.
+TENANT_POLICY = "kubernetes/infrastructure/configs/tenant-traefik-policy.yaml"
+REQUIRED_POLICIES = ("tenant-traefik-route-refs", "tenant-traefik-object-refs")
+TENANT_LABEL = "fluxcd.io/tenant"
+
 
 class Vacuous(Exception):
     """The gate could not inspect its subject — exit 2, never a silent pass."""
@@ -65,6 +72,36 @@ def allows_cross_namespace(path: Path, root: Path) -> bool | None:
     return False if answered else None
 
 
+def policies_pin_tenants(path: Path, root: Path) -> bool:
+    """True when every required policy exists and a Deny binding applies it to
+    every namespace carrying the tenant label."""
+    if not path.is_file():
+        return False
+    try:
+        docs = [d for d in yaml.safe_load_all(_read(path, root)) if isinstance(d, dict)]
+    except yaml.YAMLError as exc:
+        raise Vacuous(f"{path.relative_to(root)}: {exc}") from exc
+    policies = {
+        (d.get("metadata") or {}).get("name")
+        for d in docs
+        if d.get("kind") == "ValidatingAdmissionPolicy"
+    }
+    bound = set()
+    for doc in docs:
+        if doc.get("kind") != "ValidatingAdmissionPolicyBinding":
+            continue
+        spec = doc.get("spec") or {}
+        if "Deny" not in (spec.get("validationActions") or []):
+            continue
+        selector = (spec.get("matchResources") or {}).get("namespaceSelector") or {}
+        if any(
+            e.get("key") == TENANT_LABEL and e.get("operator") == "Exists"
+            for e in selector.get("matchExpressions") or []
+        ):
+            bound.add(spec.get("policyName"))
+    return all(name in policies and name in bound for name in REQUIRED_POLICIES)
+
+
 def check(root: Path = REPO) -> list[str]:
     kustomization = root / TENANTS_KUSTOMIZATION
     release = root / TRAEFIK_RELEASE
@@ -86,14 +123,16 @@ def check(root: Path = REPO) -> list[str]:
     tenants = [r for r in resources if r not in BASELINE]
     if not tenants or not allows:
         return []
+    if policies_pin_tenants(root / TENANT_POLICY, root):
+        return []
 
     return [
         f"{TENANTS_KUSTOMIZATION} onboards {', '.join(tenants)} while "
         f"{TRAEFIK_RELEASE} still sets providers.kubernetesCRD.allowCrossNamespace: "
         "true. tenant-crd-editor grants tenants full traefik.io write, so that "
         "tenant can route to another namespace's Service or Middleware. Work the "
-        "tenant onboarding checklist first: scope the CRD provider per-tenant, "
-        "or set allowCrossNamespace: false."
+        "tenant onboarding checklist first: ship the Deny-bound tenant "
+        f"policies in {TENANT_POLICY}, or set allowCrossNamespace: false."
     ]
 
 
