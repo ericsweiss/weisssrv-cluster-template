@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Fail the first tenant onboarding while Traefik still allows cross-namespace refs.
-Tenants hold full traefik.io write, so a cross-namespace ref lets one route to
-another namespace's Service. Exit 0 clean, 1 findings, 2 vacuous.
+"""Fail tenant onboarding while Traefik allows cross-namespace refs unpinned:
+without the Deny-bound tenant-traefik-policy.yaml, a tenant with traefik.io write
+can route to another namespace's Service. Exit 0 clean, 1 findings, 2 vacuous.
 """
 
 from __future__ import annotations
@@ -28,7 +28,11 @@ BASELINE = {"tenant-crd-editor.yaml"}
 # the cross-namespace gap while allowCrossNamespace stays true for the platform.
 TENANT_POLICY = "kubernetes/infrastructure/configs/tenant-traefik-policy.yaml"
 CONFIGS_KUSTOMIZATION = "kubernetes/infrastructure/configs/kustomization.yaml"
-REQUIRED_POLICIES = ("tenant-traefik-route-refs", "tenant-traefik-object-refs")
+REQUIRED_POLICIES = (
+    "tenant-traefik-route-refs",
+    "tenant-traefik-object-refs",
+    "tenant-traefik-ingress-refs",
+)
 TENANT_LABEL = "fluxcd.io/tenant"
 
 

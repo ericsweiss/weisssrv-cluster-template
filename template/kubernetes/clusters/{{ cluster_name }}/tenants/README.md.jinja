@@ -421,12 +421,17 @@ spec:
   where the tenant carries a second route.
 - **Traefik cross-namespace refs.** The platform runs the Traefik CRD provider
   with `allowCrossNamespace: true` so app IngressRoutes can use the shared
-  middlewares in the `traefik` namespace. A tenant-authored IngressRoute can
-  therefore also reference another namespace's Service. Scope the provider per
-  tenant, add a validating policy, or set it back to `false` before opening the
-  cluster to untrusted authors. Turning it off fails closed: Traefik refuses the
-  whole router, so a route that referenced a shared middleware 404s rather than
-  serving without it. Move those middlewares into each namespace first.
+  middlewares in the `traefik` namespace.
+  `infrastructure/configs/tenant-traefik-policy.yaml` holds tenants to their own
+  namespace: its ValidatingAdmissionPolicies, Deny-bound on every
+  `fluxcd.io/tenant` namespace, pin each Service, Middleware, TLS and
+  TraefikService reference to the tenant's namespace apart from the platform
+  middlewares they allowlist, and refuse `name@provider` references. On a plain
+  Ingress or Service, a `traefik.ingress.kubernetes.io/*` annotation may use
+  `name@provider` only for an allowlisted platform middleware. Add any shared
+  middleware a tenant needs to both allowlists.
+  `task lint:tenant-traefik-isolation` fails if the policies or their bindings go
+  missing.
 - **Namespace ownership** is cooperative: nothing stops a tenant manifest from
   targeting a platform namespace today. An admission policy engine
   (Kyverno/OPA) is the durable fix.

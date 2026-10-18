@@ -1,11 +1,11 @@
-"""Tests that check-tenant-traefik-isolation.py fails when a tenant lands while Traefik allows cross-namespace refs."""
+"""Tests that check-tenant-traefik-isolation.py fails when a tenant lands while Traefik allows cross-namespace refs unpinned."""
 from __future__ import annotations
 
 import textwrap
 from pathlib import Path
 
 import pytest
-from conftest import load_script
+from conftest import REPO, load_script
 
 gate = load_script("check-tenant-traefik-isolation.py")
 
@@ -132,6 +132,24 @@ POLICY = textwrap.dedent(
           matchExpressions:
             - key: fluxcd.io/tenant
               operator: Exists
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicy
+    metadata:
+      name: tenant-traefik-ingress-refs
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicyBinding
+    metadata:
+      name: tenant-traefik-ingress-refs
+    spec:
+      policyName: tenant-traefik-ingress-refs
+      validationActions: [Deny]
+      matchResources:
+        namespaceSelector:
+          matchExpressions:
+            - key: fluxcd.io/tenant
+              operator: Exists
     """
 )
 
@@ -178,6 +196,43 @@ def test_a_policy_file_missing_one_binding_keeps_the_gate_closed(tmp_path):
     assert len(gate.check(root)) == 1
 
 
+# Each mutation leaves a Deny binding that enforces nothing on a tenant
+# namespace: one selecting no tenant, or one naming a policy the file never defines.
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("key: fluxcd.io/tenant\n", "key: fluxcd.io/not-tenant\n"),
+        ("operator: Exists", "operator: DoesNotExist"),
+        ("kind: ValidatingAdmissionPolicy\n", "kind: ConfigMap\n"),
+    ],
+    ids=["selector-key", "selector-operator", "policy-undefined"],
+)
+def test_a_binding_that_pins_no_tenant_keeps_the_gate_closed(tmp_path, old, new):
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    body = POLICY.format(action="Deny")
+    assert old in body
+    write_policy(root, body.replace(old, new, 1))
+    assert len(gate.check(root)) == 1
+
+
+def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path):
+    """A plain Ingress resolves name@provider annotations across namespaces, so
+    the gate needs the Ingress policy and its binding too."""
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    body = POLICY.format(action="Deny")
+    ingress_policy = body.rindex("---\n", 0, body.index("name: tenant-traefik-ingress-refs"))
+    write_policy(root, body[:ingress_policy])
+    assert len(gate.check(root)) == 1
+
+
 def test_a_policy_file_the_configs_kustomization_does_not_list_keeps_the_gate_closed(tmp_path):
     """A policy file nothing applies pins nothing."""
     root = build(
@@ -187,3 +242,9 @@ def test_a_policy_file_the_configs_kustomization_does_not_list_keeps_the_gate_cl
     )
     write_policy(root, POLICY.format(action="Deny"), listed=False)
     assert len(gate.check(root)) == 1
+
+
+def test_the_shipped_policy_file_pins_tenants():
+    """The rendered policy file and configs kustomization must open the gate on
+    their own, before any tenant exists."""
+    assert gate.policies_pin_tenants(REPO / gate.TENANT_POLICY, REPO)

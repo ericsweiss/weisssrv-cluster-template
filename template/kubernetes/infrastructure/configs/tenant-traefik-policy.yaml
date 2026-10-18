@@ -137,3 +137,49 @@ spec:
       matchExpressions:
         - key: fluxcd.io/tenant
           operator: Exists
+---
+# The kubernetesIngress provider resolves name@provider annotations on plain
+# Ingresses and Services in any namespace, and allowCrossNamespace does not
+# govern it, so only the platform middlewares below may be referenced that way.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-traefik-ingress-refs
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingresses"]
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["services"]
+  variables:
+    - name: platformRefs
+      expression: >-
+        ['traefik-lan-tailscale-only@kubernetescrd', 'traefik-lan-tailscale-strict@kubernetescrd',
+        'traefik-hsts-header@kubernetescrd', 'traefik-security-headers@kubernetescrd',
+        'authentik-authentik-auth@kubernetescrd']
+  validations:
+    - expression: >-
+        !has(object.metadata.annotations) || object.metadata.annotations.all(k,
+        !k.startsWith('traefik.ingress.kubernetes.io/')
+        || object.metadata.annotations[k].split(',').all(v,
+        !v.contains('@') || v.trim() in variables.platformRefs))
+      message: "a tenant Traefik annotation may use a name@provider reference only from the platform allowlist"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-traefik-ingress-refs
+spec:
+  policyName: tenant-traefik-ingress-refs
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
