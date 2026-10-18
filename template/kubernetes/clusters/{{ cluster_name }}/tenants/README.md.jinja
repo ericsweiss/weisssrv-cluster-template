@@ -82,10 +82,10 @@ namespace with a ResourceQuota on
 The CloudNativePG operator and its Barman Cloud plugin run in `cnpg-system`,
 and `tenant-crd-editor` grants the `postgresql.cnpg.io` and
 `barmancloud.cnpg.io` kinds. Instance volumes come from the `tenant-local`
-StorageClass above. Instance
-pods admit `cnpg-system` on 8000 and `observability` on 9187, and reach the
-apiserver at `${cluster_apiserver_egress_cidr}` on 6443. The pattern and
-the recovery drill are in docs/postgres.md.
+StorageClass above. Instance pods must admit `cnpg-system` on 8000,
+`observability` on 9187 and their own application pods on 5432, and reach DNS,
+the apiserver at `${cluster_apiserver_egress_cidr}` on 6443 and public 443 for
+the object store. The pattern and the recovery drill are in docs/postgres.md.
 
 {% endif -%}
 ### Tenant CI is the tenant's choice, and one option is none

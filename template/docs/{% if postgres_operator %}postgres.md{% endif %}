@@ -84,6 +84,8 @@ metadata:
     kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   instances: 1
+  # Pinned: the default image follows the operator chart, major included.
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie
   enablePDB: false
   plugins:
     - name: barman-cloud.cloudnative-pg.io
@@ -124,7 +126,8 @@ Recover into a side cluster in a scratch namespace, check it, then cut over.
 2. Create the scratch namespace and copy the object-store Secret and
    `ObjectStore` into it, the `ObjectStore` without `retentionPolicy`.
 3. Create the side cluster with no `plugins:` section, so it never archives
-   into the production path:
+   into the production path. Give it production's `spec.imageName`: a base
+   backup restores only into the same PostgreSQL major.
 
 ```yaml
 apiVersion: postgresql.cnpg.io/v1
@@ -133,6 +136,7 @@ metadata:
   name: <side>
 spec:
   instances: 1
+  imageName: <production's spec.imageName>
   enablePDB: false
   bootstrap:
     recovery:
