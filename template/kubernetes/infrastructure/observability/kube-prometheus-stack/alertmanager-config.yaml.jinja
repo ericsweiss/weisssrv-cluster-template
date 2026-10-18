@@ -102,7 +102,13 @@ spec:
                 - alertname="ZfsEncryptedMountStuck"
               equal:
                 - instance
-{% endraw %}{% if postgres_operator %}{% raw %}            # One pair per CNPG instance, keyed on the scraped namespace and pod.
+{% endraw %}{% if tenant_storage %}{% raw %}            - source_matchers:
+                - alertname="TenantVolumesNearlyFull"
+              target_matchers:
+                - alertname="TenantVolumesFilling"
+              equal:
+                - instance
+{% endraw %}{% endif %}{% if postgres_operator %}{% raw %}            # One pair per CNPG instance, keyed on the scraped namespace and pod.
             - source_matchers:
                 - alertname="CNPGBaseBackupStaleCritical"
               target_matchers:

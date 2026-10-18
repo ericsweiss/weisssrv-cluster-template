@@ -701,7 +701,42 @@ spec:
                     StorageClass, which lands on a stateless node bootdisk and is
                     excluded from backups. Pin its storageClassName to "" and
                     rebind it to the intended static PV.
-{% endraw %}{% if storage_backend == 'zfs' %}{% raw %}
+{% endraw %}{% if tenant_storage %}{% raw %}
+
+              # tenant-local claim sizes are not enforced, so the shared zvol is
+              # the only cap on what tenants write. Runbook: "Tenant volumes filling".
+              - alert: TenantVolumesFilling
+                expr: >-
+                  node_filesystem_avail_bytes{job="node-exporter", mountpoint="/mnt/tenant-volumes"}
+                  / node_filesystem_size_bytes{job="node-exporter", mountpoint="/mnt/tenant-volumes"}
+                  < 0.20
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#tenant-volumes-filling'
+                  summary: 'The tenant-volumes filesystem on {{ $labels.instance }} is under 20% free'
+                  description: >-
+                    {{ $value | humanizePercentage }} of /mnt/tenant-volumes is
+                    free. Every tenant-local claim shares it, and a claim can
+                    write past its declared size.
+
+              - alert: TenantVolumesNearlyFull
+                expr: >-
+                  node_filesystem_avail_bytes{job="node-exporter", mountpoint="/mnt/tenant-volumes"}
+                  / node_filesystem_size_bytes{job="node-exporter", mountpoint="/mnt/tenant-volumes"}
+                  < 0.10
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#tenant-volumes-filling'
+                  summary: 'The tenant-volumes filesystem on {{ $labels.instance }} is under 10% free'
+                  description: >-
+                    {{ $value | humanizePercentage }} of /mnt/tenant-volumes is
+                    free. When it fills, every tenant volume on it, database
+                    instances included, stops accepting writes.
+{% endraw %}{% endif %}{% if storage_backend == 'zfs' %}{% raw %}
 
               # Pool integrity, from the node_exporter_host zpool textfile
               # collector — it covers every host with a pool, not only the NAS.

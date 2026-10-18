@@ -87,7 +87,8 @@ to read on:
 | `PVCUsageWarning` / `PVCUsageCritical` | a claim is filling | Storage |
 | `LocalPathPVExists` | a PV landed on the local-path class instead of a static volume | Storage |
 | `KubeletImageGCIneffective` | a node root filesystem is above the kubelet image-gc watermark | Storage, "Kubelet image store" |
-| `ZFSPoolNotOnline` / `ZFSPoolDataErrors` | a pool is DEGRADED or has unrecoverable data | Storage, "A degraded pool" |
+{% if tenant_storage %}| `TenantVolumesFilling` / `TenantVolumesNearlyFull` | the shared tenant-volumes zvol is under 20% / 10% free | Storage, "Tenant volumes filling" |
+{% endif %}| `ZFSPoolNotOnline` / `ZFSPoolDataErrors` | a pool is DEGRADED or has unrecoverable data | Storage, "A degraded pool" |
 | `ZFSPoolDeviceErrors` / `ZFSPoolScrubStale` | checksum errors on an ONLINE pool, or no scrub in 35 days | Storage, "A degraded pool" |
 | `SMARTDeviceUnhealthy` / `SMARTPendingSectorsGrowing` / `SMARTOfflineUncorrectableGrowing` / `SMARTMediaErrors` / `SMARTReallocatedSectorsGrowing` | a drive's own SMART attributes say it is failing | Storage, "A failing drive" |
 | `SMARTCollectorStale` | the smartmon textfile collector stopped refreshing, so the SMART alerts serve stale or no inputs | Storage, "A failing drive" |
@@ -1208,7 +1209,31 @@ the churn. `proxmox_vm_disk_size` applies at VM create only, so growing an
 existing node means resizing the disk on the hypervisor and running `growpart`
 plus `resize2fs` in the guest, or rebuilding the node from the inventory.
 
-### Encrypted swap
+{% if tenant_storage %}### Tenant volumes filling
+
+`TenantVolumesFilling` (under 20% free for 15 minutes) and
+`TenantVolumesNearlyFull` (under 10% for 5 minutes) watch `/mnt/tenant-volumes`
+on the NAS-colocated agent. Every `tenant-local` volume is a plain directory
+there, so a claim's size is never enforced: a tenant's ResourceQuota bounds what
+it declares, not what it writes, and one volume can fill the zvol for all of
+them. Find the volume that grew:
+
+```bash
+kubectl get pv -o custom-columns=PV:.metadata.name,CLAIM:.spec.claimRef.namespace,NAME:.spec.claimRef.name,PATH:.spec.local.path \
+  | grep tenant-volumes
+ssh {{ admin_user }}@<nas agent>
+sudo du -sh /mnt/tenant-volumes/* | sort -h | tail
+```
+
+Take the largest directory to its tenant. {% if postgres_operator %}A database volume usually means WAL
+piling up behind a failing archive (`CNPGWALArchivingFailing`), which clears once
+archiving recovers; anything else is the tenant's data to trim.{% else %}What it holds is the tenant's data
+to trim.{% endif %} If the tenants'
+declared sizes have simply outgrown the zvol, grow it as in "Expanding a
+zvol-backed volume" above, and raise the `tenant-volumes` disk size in
+`hosts.yml` with it.
+
+{% endif %}### Encrypted swap
 
 Every `encrypted_swap` fallback branch exits 0 so the host keeps booting, so the
 textfile gauges are the only report that swap is not encrypted.

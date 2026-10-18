@@ -13,8 +13,9 @@ the operator, the RBAC, the `tenant-local` StorageClass and the alert rules.
 - Instance volumes come from StorageClass `tenant-local` (`tenant_storage`):
   one `local` volume per claim, a directory on the `tenant-volumes` zvol of
   the NAS-colocated agent, kept when its claim is deleted. A `local` volume
-  applies the pod's `fsGroup` (26), which `hostPath` ignores. The provisioner
-  does not enforce sizes, so each tenant namespace carries a storage quota.
+  applies the pod's `fsGroup` (26), which `hostPath` ignores. The volume is a
+  plain directory, so `storage.size` is accounting metadata, not a limit; the
+  class is for trusted tenants only until a backend that enforces sizes exists.
 - `enablePDB: false` on one instance: an unsatisfiable PodDisruptionBudget
   makes every node drain time out.
 
@@ -22,8 +23,7 @@ the operator, the RBAC, the `tenant-local` StorageClass and the alert rules.
 
 No volume: the tenant's claim provisions its own from `tenant-local`. The
 tenant's existing `<app>-quota` ResourceQuota (the one in its wiring file) must
-carry two keys in `spec.hard`, as the tenants README example does, because the
-provisioner does not enforce sizes on the shared zvol:
+carry two keys in `spec.hard`, as the tenants README example does:
 
 ```yaml
 spec:
@@ -31,6 +31,12 @@ spec:
     persistentvolumeclaims: "4"
     tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
 ```
+
+The quota bounds the sizes the tenant's claims declare, not the bytes they
+write: an instance can grow past its `storage.size` on the shared zvol. The
+zvol's size bounds the blast radius to the tenant volumes, and
+`TenantVolumesFilling` and `TenantVolumesNearlyFull` fire before it fills
+([RUNBOOKS.md](RUNBOOKS.md#tenant-volumes-filling)).
 
 A tenant that also dumps its database needs a backup landing zone on the NAS,
 registered in three places the way authentik's is:

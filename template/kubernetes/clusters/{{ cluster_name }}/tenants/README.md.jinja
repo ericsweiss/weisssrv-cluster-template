@@ -71,9 +71,13 @@ loudly when they are missing:
 StorageClass `tenant-local` serves tenant claims: one `local` volume per
 claim, a directory on the NAS-colocated agent's `tenant-volumes` zvol, kept
 (`Retain`) when the claim is deleted and never grown. It is not the default
-class, so a claim must name it. Sizes are not enforced; cap each tenant
-namespace with a ResourceQuota on
-`tenant-local.storageclass.storage.k8s.io/requests.storage`.
+class, so a claim must name it. A claim's size is accounting metadata: the
+volume is a plain directory, and nothing stops it writing past its request. A
+ResourceQuota on `tenant-local.storageclass.storage.k8s.io/requests.storage`
+bounds what each tenant namespace declares, not what it writes; the zvol's size
+bounds what all tenant volumes together can fill, and `TenantVolumesFilling`
+warns before they do. Until a backend that enforces sizes replaces this one,
+the class is for trusted tenants only.
 
 {% endif -%}
 {% if postgres_operator -%}
@@ -204,7 +208,7 @@ spec:
     requests.memory: 4Gi
     limits.memory: 8Gi
 {%- if tenant_storage %}
-    # tenant-local sizes are not enforced; this caps the tenant's share of the zvol.
+    # tenant-local sizes are not enforced; this bounds declared requests only.
     # Use "0" for a tenant that runs no database.
     persistentvolumeclaims: "4"
     tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
