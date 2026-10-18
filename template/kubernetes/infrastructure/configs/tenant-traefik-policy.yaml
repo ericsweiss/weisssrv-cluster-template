@@ -200,8 +200,9 @@ spec:
         - key: fluxcd.io/tenant
           operator: Exists
 ---
-# An ExternalName Service in a tenant namespace passes the forwardAuth pin by
-# name, then CNAMEs Traefik, whose egress is wider, into another namespace.
+# An ExternalName or selectorless Service passes the forwardAuth pin by name,
+# then sends Traefik, whose egress is wider, into another namespace by CNAME or
+# by hand-written endpoints.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -217,6 +218,8 @@ spec:
   validations:
     - expression: "!has(object.spec.type) || object.spec.type != 'ExternalName'"
       message: "tenant Services may not be ExternalName (it would CNAME Traefik to another namespace)"
+    - expression: "has(object.spec.selector) && size(object.spec.selector) > 0"
+      message: "tenant Services must select pods (selectorless Services allow hand-written endpoints)"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -224,6 +227,44 @@ metadata:
   name: tenant-no-externalname-services
 spec:
   policyName: tenant-no-externalname-services
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
+# k3s runs kube-controller-manager with use-service-account-credentials=true
+# (pkg/daemons/control/server.go), so the endpoint, endpointslice and mirroring
+# controllers write as kube-system ServiceAccounts; no tenant writes these.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-no-manual-endpoints
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["endpoints"]
+      - apiGroups: ["discovery.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["endpointslices"]
+  validations:
+    - expression: >-
+        request.userInfo.username == 'system:kube-controller-manager' ||
+        request.userInfo.username.startsWith('system:serviceaccount:kube-system:')
+      message: "tenant Endpoints and EndpointSlices are managed by the control plane only"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-no-manual-endpoints
+spec:
+  policyName: tenant-no-manual-endpoints
   validationActions: [Deny]
   matchResources:
     namespaceSelector:

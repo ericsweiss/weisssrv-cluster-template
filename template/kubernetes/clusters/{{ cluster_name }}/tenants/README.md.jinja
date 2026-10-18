@@ -441,10 +441,19 @@ spec:
   `name@provider` only for an allowlisted platform middleware. Add any shared
   middleware a tenant needs to both allowlists. A tenant `forwardAuth`
   middleware may call only the platform's Authentik outpost or a Service in its
-  own namespace, and tenant Services cannot be ExternalName, because Traefik
-  makes that call with its own wider egress. `tenant-no-externalname-services`
-  refuses an ExternalName Service in every tenant namespace: one would pass the
-  address pin by name and CNAME Traefik into another namespace.
+  own namespace. Traefik makes that call, and every route's backend call, with
+  its own egress, which is wider than a tenant's; the policies pin what a tenant
+  can point it at, not where Traefik itself may connect. A same-namespace
+  Service name is only safe while that Service resolves to the tenant's own
+  pods, so `tenant-no-externalname-services` refuses an ExternalName Service
+  (it would CNAME Traefik into another namespace) and a Service with no
+  selector, and `tenant-no-manual-endpoints` refuses any Endpoints or
+  EndpointSlice not written by the control plane (hand-written ones could name
+  another namespace's pod or Service IP). An off-cluster backend a tenant needs
+  is fronted from the platform `vm-ingress` namespace instead. In full, the set is
+  `tenant-traefik-route-refs`, `tenant-traefik-object-refs`,
+  `tenant-traefik-ingress-refs`, `tenant-no-externalname-services` and
+  `tenant-no-manual-endpoints`.
   `task lint:tenant-traefik-isolation` fails if the policies or their bindings go
   missing, or if a binding narrows its match below every tenant namespace.
 - **Namespace ownership** is cooperative: nothing stops a tenant manifest from

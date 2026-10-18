@@ -154,6 +154,24 @@ POLICY = textwrap.dedent(
     apiVersion: admissionregistration.k8s.io/v1
     kind: ValidatingAdmissionPolicy
     metadata:
+      name: tenant-no-manual-endpoints
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicyBinding
+    metadata:
+      name: tenant-no-manual-endpoints
+    spec:
+      policyName: tenant-no-manual-endpoints
+      validationActions: [Deny]
+      matchResources:
+        namespaceSelector:
+          matchExpressions:
+            - key: fluxcd.io/tenant
+              operator: Exists
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicy
+    metadata:
       name: tenant-traefik-ingress-refs
     ---
     apiVersion: admissionregistration.k8s.io/v1
@@ -251,10 +269,12 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
     assert len(gate.check(root)) == 1
 
 
-# An ExternalName Service in the tenant namespace would CNAME Traefik into
-# another namespace past the forwardAuth pin, so the gate needs its refusal too.
+# An ExternalName or selectorless Service, or hand-written endpoints, would
+# send Traefik into another namespace past the forwardAuth pin, so the gate
+# needs both refusals too.
 @pytest.mark.parametrize("kind", ["ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"])
-def test_a_policy_file_without_the_external_name_refusal_keeps_the_gate_closed(tmp_path, kind):
+@pytest.mark.parametrize("name", ["tenant-no-externalname-services", "tenant-no-manual-endpoints"])
+def test_a_policy_file_without_a_service_refusal_keeps_the_gate_closed(tmp_path, kind, name):
     root = build(
         tmp_path,
         ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
@@ -263,7 +283,7 @@ def test_a_policy_file_without_the_external_name_refusal_keeps_the_gate_closed(t
     docs = POLICY.format(action="Deny").split("---\n")
     kept = [
         d for d in docs
-        if not (f"kind: {kind}\n" in d and "name: tenant-no-externalname-services" in d)
+        if not (f"kind: {kind}\n" in d and f"name: {name}\n" in d)
     ]
     assert len(kept) == len(docs) - 1
     write_policy(root, "---\n".join(kept))
