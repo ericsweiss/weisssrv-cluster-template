@@ -32,3 +32,29 @@ tests:
               severity: critical
               namespace: app
               pod: app-db-1
+  # A timestamp of 0 is a database never backed up; it must fire too.
+  - interval: 15m
+    input_series:
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="fresh", pod="fresh-db-1"}'
+        values: '0x260'
+    alert_rule_test:
+      - eval_time: 30h45m
+        alertname: CNPGBaseBackupStale
+        exp_alerts: []
+      - eval_time: 31h30m
+        alertname: CNPGBaseBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: fresh
+              pod: fresh-db-1
+      - eval_time: 54h45m
+        alertname: CNPGBaseBackupStaleCritical
+        exp_alerts: []
+      - eval_time: 55h30m
+        alertname: CNPGBaseBackupStaleCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: fresh
+              pod: fresh-db-1
