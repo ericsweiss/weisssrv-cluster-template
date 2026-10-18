@@ -1,0 +1,63 @@
+---
+# promtool unit tests for the CloudNativePG alerts (platform.databases group).
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'cnpg_collector_up{namespace="app", pod="app-db-1"}'
+        values: '1x5 0x20'
+      - series: 'cnpg_collector_up{namespace="other-app", pod="other-app-db-1"}'
+        values: '1x25'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: CNPGPostgresDown
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: CNPGPostgresDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: app
+              pod: app-db-1
+
+  - interval: 1m
+    input_series:
+      - series: 'cnpg_pg_stat_archiver_last_archived_time{namespace="app", pod="app-db-1"}'
+        values: '1000x60'
+      - series: 'cnpg_pg_stat_archiver_last_failed_time{namespace="app", pod="app-db-1"}'
+        values: '0x10 2000x50'
+      - series: 'cnpg_pg_stat_archiver_last_archived_time{namespace="other-app", pod="other-app-db-1"}'
+        values: '3000x60'
+      - series: 'cnpg_pg_stat_archiver_last_failed_time{namespace="other-app", pod="other-app-db-1"}'
+        values: '2000x60'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: CNPGWALArchivingFailing
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CNPGWALArchivingFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: app
+              pod: app-db-1
+
+  - interval: 1m
+    input_series:
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="app", pod="app-db-1"}'
+        values: '1000x40'
+      - series: 'barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp{namespace="app", pod="app-db-1"}'
+        values: '0x5 2000x35'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CNPGBaseBackupFailed
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CNPGBaseBackupFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: app
+              pod: app-db-1

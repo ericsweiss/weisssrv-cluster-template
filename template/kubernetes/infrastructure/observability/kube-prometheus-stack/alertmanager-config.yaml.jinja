@@ -1,4 +1,4 @@
----
+{% raw %}---
 # Alertmanager configuration, rendered by ESO from the secrets backend. A Secret
 # because it embeds credentials; `quote` keeps a rotated password valid YAML.
 # webhook_url, not webhook_url_file — the operator's parser rejects the suffix.
@@ -102,7 +102,15 @@ spec:
                 - alertname="ZfsEncryptedMountStuck"
               equal:
                 - instance
-            # Different alertnames for the same failing integration, so the
+{% endraw %}{% if postgres_operator %}{% raw %}            # One pair per CNPG instance, keyed on the scraped namespace and pod.
+            - source_matchers:
+                - alertname="CNPGBaseBackupStaleCritical"
+              target_matchers:
+                - alertname="CNPGBaseBackupStale"
+              equal:
+                - namespace
+                - pod
+{% endraw %}{% endif %}{% raw %}            # Different alertnames for the same failing integration, so the
             # generic pair cannot match them.
             - source_matchers:
                 - alertname="AlertmanagerClusterFailedToSendAlerts"
@@ -212,3 +220,4 @@ spec:
       remoteRef:
         key: Healthchecks Watchdog
         property: ping url
+{%- endraw %}

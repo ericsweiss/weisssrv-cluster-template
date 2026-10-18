@@ -1927,3 +1927,73 @@ spec:
                     recent mtime — the run wrote nothing. An empty dump restores
                     nothing; treat it as no backup for that app tonight.
 {%- endraw %}
+{%- if postgres_operator %}{% raw %}
+
+      platform-databases:
+        groups:
+          - name: platform.databases
+            rules:
+              - alert: CNPGPostgresDown
+                expr: cnpg_collector_up == 0
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#postgres-down'
+                  summary: 'PostgreSQL in {{ $labels.namespace }}/{{ $labels.pod }} is not accepting connections'
+                  description: >-
+                    The CNPG instance manager reports PostgreSQL down for 5
+                    minutes. Applications on this cluster cannot read or write.
+
+              # A failure newer than the newest success means the archive is
+              # behind now, not that one segment once failed and was retried.
+              - alert: CNPGWALArchivingFailing
+                expr: cnpg_pg_stat_archiver_last_failed_time > cnpg_pg_stat_archiver_last_archived_time
+                for: 30m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#wal-archiving-failing'
+                  summary: 'WAL archiving from {{ $labels.namespace }}/{{ $labels.pod }} has been failing for 30 minutes'
+                  description: >-
+                    Point-in-time recovery stops at the last archived segment,
+                    and WAL accumulates on the instance volume until this clears.
+
+              - alert: CNPGBaseBackupFailed
+                expr: >-
+                  barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp
+                  > barman_cloud_cloudnative_pg_io_last_available_backup_timestamp
+                for: 15m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#base-backup-failed-or-stale'
+                  summary: 'The latest base backup of {{ $labels.namespace }}/{{ $labels.pod }} failed'
+                  description: >-
+                    A failed base backup is newer than the last good one; the
+                    recovery window shrinks every night this repeats.
+
+              # 30h is one nightly cycle plus margin; 0 (no backup ever) fires too.
+              - alert: CNPGBaseBackupStale
+                expr: time() - barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 108000
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#base-backup-failed-or-stale'
+                  summary: 'No base backup of {{ $labels.namespace }}/{{ $labels.pod }} in over 30 hours'
+                  description: >-
+                    The nightly ScheduledBackup has missed at least one run.
+
+              - alert: CNPGBaseBackupStaleCritical
+                expr: time() - barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 194400
+                for: 1h
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#base-backup-failed-or-stale'
+                  summary: 'No base backup of {{ $labels.namespace }}/{{ $labels.pod }} in over 54 hours'
+                  description: >-
+                    Two nightly base backups in a row are missing; restores now
+                    replay more than two days of WAL.
+{%- endraw %}{% endif %}
