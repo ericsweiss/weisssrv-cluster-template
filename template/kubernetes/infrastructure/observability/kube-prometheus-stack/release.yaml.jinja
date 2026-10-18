@@ -2005,10 +2005,13 @@ spec:
                     Point-in-time recovery stops at the last archived segment,
                     and WAL accumulates on the instance volume until this clears.
 
+              # As for WAL: no success yet exports no available series, so the
+              # failure is compared with zero, joined on the full label set.
               - alert: CNPGBaseBackupFailed
                 expr: >-
                   barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp
-                  > barman_cloud_cloudnative_pg_io_last_available_backup_timestamp
+                  > (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp
+                  or barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp * 0)
                 for: 15m
                 labels:
                   severity: critical
