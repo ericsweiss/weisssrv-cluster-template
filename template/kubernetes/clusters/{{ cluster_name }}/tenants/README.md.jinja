@@ -435,9 +435,11 @@ spec:
   middlewares they allowlist, and refuse `name@provider` references. On a plain
   Ingress or Service, a `traefik.ingress.kubernetes.io/*` annotation may use
   `name@provider` only for an allowlisted platform middleware. Add any shared
-  middleware a tenant needs to both allowlists.
+  middleware a tenant needs to both allowlists. A tenant `forwardAuth`
+  middleware may call only a Service in its own namespace or the platform's
+  Authentik outpost, because Traefik makes that call with its own wider egress.
   `task lint:tenant-traefik-isolation` fails if the policies or their bindings go
-  missing.
+  missing, or if a binding narrows its match below every tenant namespace.
 - **Namespace ownership** is cooperative: nothing stops a tenant manifest from
   targeting a platform namespace today. An admission policy engine
   (Kyverno/OPA) is the durable fix.

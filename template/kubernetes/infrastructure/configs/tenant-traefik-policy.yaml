@@ -66,7 +66,7 @@ spec:
           operator: Exists
 ---
 # Middlewares and TraefikServices can point across namespaces too: a chain, an
-# errors page service, and weighted or mirrored services.
+# errors page service, a forwardAuth address, and weighted or mirrored services.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -82,6 +82,14 @@ spec:
   variables:
     - name: ns
       expression: "object.metadata.namespace"
+    # The Authentik outpost the platform authentik-auth middleware calls.
+    - name: platformForwardAuth
+      expression: >-
+        ['http://authentik-server.authentik.svc.cluster.local/outpost.goauthentik.io/auth/traefik']
+    - name: ownServiceAddress
+      expression: >-
+        '^https?://[a-z]([-a-z0-9]*[a-z0-9])?[.]' + variables.ns
+        + '[.]svc([.]cluster[.]local)?(:[0-9]{1,5})?(/.*)?$'
   validations:
     - expression: >-
         !has(object.spec.chain) || !has(object.spec.chain.middlewares)
@@ -93,6 +101,14 @@ spec:
         || !has(object.spec.errors.service.namespace)
         || object.spec.errors.service.namespace == variables.ns
       message: "a tenant errors middleware may reference only its own namespace"
+    # Traefik, whose egress is wider than the tenant's, calls this address
+    # itself. redirectRegex only answers the client, and plugin settings reach
+    # only plugins Traefik's static config loads, of which there are none.
+    - expression: >-
+        !has(object.spec.forwardAuth)
+        || object.spec.forwardAuth.address in variables.platformForwardAuth
+        || object.spec.forwardAuth.address.matches(variables.ownServiceAddress)
+      message: "a tenant forwardAuth middleware may call only a Service in its own namespace"
     - expression: >-
         !has(object.spec.weighted) || !has(object.spec.weighted.services)
         || object.spec.weighted.services.all(s,
