@@ -610,6 +610,14 @@ Policy ORDER, mDNS reflection, device adoption, per-port VLAN assignment and
 README so they can be written into your own cut-over runbook rather than
 discovered during one.
 
+### Tenant databases (`postgres_operator`)
+
+Turn it on if a tenant will run its own PostgreSQL. It installs the
+CloudNativePG operator and its Barman Cloud plugin in `cnpg-system`; the plugin
+takes its mTLS pair from cert-manager, which every render ships. Nothing is
+needed before generating: each tenant brings its own object-store bucket and
+credentials when it adds a database.
+
 ---
 
 ## 9. Answers to accept as they come

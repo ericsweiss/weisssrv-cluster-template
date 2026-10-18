@@ -1339,6 +1339,16 @@ NO_CRDS = {
         "API and hold no cluster-scoped state"
     ),
 }
+# Optional modules: classified only where the answers rendered them, since a
+# keeper whose file is absent would fail as "checked nothing".
+CRD_KEEPERS.update({
+    rel: shape
+    for rel, shape in {
+        "infrastructure/controllers/cnpg/release.yaml": "postRenderer",
+        "infrastructure/controllers/cnpg/release-barman-cloud.yaml": "postRenderer",
+    }.items()
+    if (K8S_ROOT / rel).is_file()
+})
 # cert-manager keeps its CRDs through an uninstall via crds.keep, so it does not
 # need the retry strategy the others use to avoid one.
 CRD_RETRY_RELEASES = sorted(

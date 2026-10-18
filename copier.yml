@@ -914,6 +914,15 @@ use_unifi:
     leaves your router exactly as it is.
   default: false
 
+postgres_operator:
+  type: bool
+  help: >-
+    Install the CloudNativePG operator and its Barman Cloud plugin, so tenants
+    can run their own PostgreSQL clusters with WAL archiving and point-in-time
+    recovery to an S3-compatible object store. Needs cert-manager (always
+    rendered). The tenant RBAC grants the CNPG kinds either way.
+  default: false
+
 compose_app_guests:
   type: yaml
   help: >-

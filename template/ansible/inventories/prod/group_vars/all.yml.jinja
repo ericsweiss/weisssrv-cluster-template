@@ -211,6 +211,12 @@ helm_chart_versions:
   vpa: "5.1.0"
   kured: "6.1.0"
   reloader: "2.2.18"
+{%- if postgres_operator %}
+  # CloudNativePG operator (chart 0.29.1 = operator 1.30.1) and its Barman
+  # Cloud plugin (chart 0.8.1 = plugin v0.15.1); one chart repository.
+  cloudnative_pg: "0.29.1"
+  plugin_barman_cloud: "0.8.1"
+{%- endif %}
 {%- if vpn_tailscale %}
   tailscale_operator: "1.102.4"
 {%- endif %}

@@ -1,0 +1,16 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: cnpg-system
+resources:
+  - namespace.yaml
+  - release.yaml
+  - release-barman-cloud.yaml
+  - networkpolicy.yaml
+
+# Both pods watch the apiserver and resolve names; networkpolicy.yaml holds the
+# namespace's default-deny egress and the operator's one scoped allow.
+components:
+  - ../../../components/netpol-baseline
+  - ../../../components/netpol-egress-dns
+  - ../../../components/netpol-egress-apiserver

@@ -21,6 +21,9 @@ data:
 {%- endif %}
   helm_chart_versions_alloy: 1.13.1
   helm_chart_versions_cert_manager: v1.21.2
+{%- if postgres_operator %}
+  helm_chart_versions_cloudnative_pg: 0.29.1
+{%- endif %}
   helm_chart_versions_external_dns: 1.23.0
   helm_chart_versions_external_secrets: 2.12.0
   helm_chart_versions_kube_prometheus_stack: 92.3.0
@@ -31,6 +34,9 @@ data:
   helm_chart_versions_nvidia_device_plugin: 0.20.1
 {%- endif %}
   helm_chart_versions_onepassword_connect: 2.4.2
+{%- if postgres_operator %}
+  helm_chart_versions_plugin_barman_cloud: 0.8.1
+{%- endif %}
   helm_chart_versions_prometheus_blackbox_exporter: 11.20.0
   helm_chart_versions_prometheus_operator_crds: 32.0.1
   helm_chart_versions_reloader: 2.2.18

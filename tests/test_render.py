@@ -82,6 +82,7 @@ MODULES_ON = {
     "vpn_tailscale": True,
     "gpu": "nvidia",
     "use_unifi": True,
+    "postgres_operator": True,
     "enable_semantic_release": False,
     "compose_app_guests": [
         {
@@ -867,6 +868,10 @@ GATED_ENTRY_POINTS = {
         "terraform/unifi/main.tf",
         "docs/unifi-network.md",
         "scripts/check-unifi-doc-parity.py",
+    ),
+    "postgres_operator": (
+        "kubernetes/infrastructure/controllers/cnpg/release.yaml",
+        "kubernetes/infrastructure/sources/cloudnative-pg.yaml",
     ),
     "vpn_tailscale": (
         "kubernetes/apps/tailnet-dns/kustomization.yaml",

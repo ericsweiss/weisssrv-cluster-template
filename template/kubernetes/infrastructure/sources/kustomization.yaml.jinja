@@ -31,6 +31,9 @@ resources:
 {%- if vpn_tailscale %}
   - tailscale.yaml
 {%- endif %}
+{%- if postgres_operator %}
+  - cloudnative-pg.yaml
+{%- endif %}
   # Not HelmRepositories: cluster identity, versions and the priority classes.
   - cluster-config.yaml
   - priorityclasses.yaml

@@ -19,3 +19,6 @@ resources:
 {%- if gpu == 'nvidia' %}
   - nvidia-device-plugin
 {%- endif %}
+{%- if postgres_operator %}
+  - cnpg
+{%- endif %}
