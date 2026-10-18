@@ -65,6 +65,28 @@ loudly when they are missing:
   prefix the annotation is ignored and no record appears, while the pods stay
   ready and nothing alerts.
 
+{% if tenant_storage -%}
+### Persistent storage
+
+StorageClass `tenant-local` serves tenant claims: one `local` volume per
+claim, a directory on the NAS-colocated agent's `tenant-volumes` zvol, kept
+(`Retain`) when the claim is deleted and never grown. It is not the default
+class, so a claim must name it. Sizes are not enforced; cap each tenant
+namespace with a ResourceQuota on
+`tenant-local.storageclass.storage.k8s.io/requests.storage`.
+
+{% endif -%}
+{% if postgres_operator -%}
+### PostgreSQL
+
+The CloudNativePG operator and its Barman Cloud plugin run in `cnpg-system`,
+and `tenant-crd-editor` grants the `postgresql.cnpg.io` and
+`barmancloud.cnpg.io` kinds. Instance volumes come from the `tenant-local`
+StorageClass above. Instance
+pods admit `cnpg-system` on 8000 and `observability` on 9187. The pattern and
+the recovery drill are in docs/postgres.md.
+
+{% endif -%}
 ### Tenant CI is the tenant's choice, and one option is none
 
 **The cluster side is indifferent to a tenant's CI** — the deploy is always this

@@ -1,0 +1,172 @@
+# PostgreSQL clusters (CloudNativePG)
+
+The CloudNativePG (CNPG) operator and its Barman Cloud plugin run in
+`cnpg-system` (`kubernetes/infrastructure/controllers/cnpg/`). Each tenant runs
+its own one-instance cluster in its own namespace; the cluster side provides
+the operator, the RBAC, the `tenant-local` StorageClass and the alert rules.
+
+## Decisions
+
+- One CNPG cluster per app, so each app's point-in-time recovery is its own.
+- Backups through the Barman Cloud plugin `ObjectStore`, not the deprecated
+  in-tree `barmanObjectStore`.
+- Instance volumes come from StorageClass `tenant-local` (`tenant_storage`):
+  one `local` volume per claim, a directory on the `tenant-volumes` zvol of
+  the NAS-colocated agent, kept when its claim is deleted. A `local` volume
+  applies the pod's `fsGroup` (26), which `hostPath` ignores. The provisioner
+  does not enforce sizes, so each tenant namespace carries a storage quota.
+- `enablePDB: false` on one instance: an unsatisfiable PodDisruptionBudget
+  makes every node drain time out.
+
+## What the operator adds per tenant
+
+No volume: the tenant's claim provisions its own from `tenant-local`. The
+tenant's wiring file carries a storage quota, because the provisioner does
+not enforce sizes on the shared zvol:
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: <app>-quota
+  namespace: <namespace>
+spec:
+  hard:
+    persistentvolumeclaims: "4"
+    tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
+```
+
+A tenant that also dumps its database needs an NFS PersistentVolume
+pre-bound to its dump claim on its own backup landing zone.
+
+## What the tenant ships (example)
+
+Every object below lives in the tenant's own repository and namespace, with
+no `namespace:` set (the tenant Kustomization's `targetNamespace` supplies it).
+The connection-Secret contract is weisssrv-lib's docs/DATABASE-CONTRACT.md,
+in releases v0.22.0 and later.
+
+```yaml
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: <app>-backups
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  retentionPolicy: "30d"
+  configuration:
+    destinationPath: s3://<bucket>/
+    endpointURL: https://<s3 endpoint>
+    s3Credentials:
+      accessKeyId: {name: <app>-backups, key: access-key-id}
+      secretAccessKey: {name: <app>-backups, key: secret-access-key}
+    wal: {compression: gzip, maxParallel: 2}
+    data: {compression: gzip}
+  instanceSidecarConfiguration:
+    env:
+      - {name: AWS_REQUEST_CHECKSUM_CALCULATION, value: when_required}
+      - {name: AWS_RESPONSE_CHECKSUM_VALIDATION, value: when_required}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: <app>-db
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  instances: 1
+  enablePDB: false
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters: {barmanObjectName: <app>-backups}
+  storage:
+    storageClass: tenant-local
+    size: 20Gi
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: <app>-db-nightly
+spec:
+  schedule: "0 0 11 * * *"
+  immediate: true
+  backupOwnerReference: self
+  cluster: {name: <app>-db}
+  method: plugin
+  pluginConfiguration: {name: barman-cloud.cloudnative-pg.io}
+```
+
+The object-store Secret `<app>-backups` comes from an ExternalSecret against
+the tenant's store, keys `access-key-id` and `secret-access-key`. Instance pods
+must admit `cnpg-system` on 8000 and `observability` on 9187 and reach DNS, the
+apiserver at `${cluster_apiserver_egress_cidr}` on 6443 and public 443; a
+PodMonitor on `cnpg.io/cluster: <app>-db`, port `metrics`, feeds the rules.
+
+## Point-in-time recovery
+
+Recover into a side cluster in a scratch namespace, check it, then cut over.
+
+1. Pick the target time `T` (RFC 3339, UTC). The side cluster's volume
+   comes from `tenant-local` like any other claim.
+2. Create the scratch namespace and copy the object-store Secret and
+   `ObjectStore` into it, the `ObjectStore` without `retentionPolicy`.
+3. Create the side cluster with no `plugins:` section, so it never archives
+   into the production path:
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: <side>
+spec:
+  instances: 1
+  enablePDB: false
+  bootstrap:
+    recovery:
+      source: production
+      recoveryTarget: {targetTime: "<T>"}
+  externalClusters:
+    - name: production
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters: {barmanObjectName: <app>-backups, serverName: <app>-db}
+  storage:
+    storageClass: tenant-local
+    size: 20Gi
+```
+
+4. `kubectl -n <scratch namespace> wait --for=condition=Ready cluster/<side> --timeout=60m`,
+   then compare row counts of the tables that matter, and a marker row written
+   just before `T`, against production.
+5. Cut over by restoring the application's database from the side cluster
+   (`pg_dump` from the side, restore into production after stopping writers),
+   or by re-pointing the application at a cluster bootstrapped the same way.
+6. Delete the scratch namespace, then the side volume it leaves `Released`:
+   read its directory with `kubectl get pv <pv> -o jsonpath='{.spec.local.path}'`,
+   delete the PersistentVolume, and remove that directory on the storage node.
+
+Run the drill before an application holds data that matters, and quarterly.
+
+## Runbooks
+
+### Postgres down
+
+Alerts: `CNPGPostgresDown`. Run `kubectl cnpg status -n <ns> <cluster>` and
+`kubectl -n <ns> logs <cluster>-1 -c postgres --tail=200`. A full volume shows
+as `No space left on device`; a node reboot explains a short outage.
+
+### WAL archiving failing
+
+Alerts: `CNPGWALArchivingFailing`. Read
+`kubectl -n <ns> logs <cluster>-1 -c plugin-barman-cloud --tail=200`: an expired
+object-store key, an object store refusing checksum headers (set the two
+`AWS_*_CHECKSUM_*` variables above to `when_required`), or no public egress.
+
+### Base backup failed or stale
+
+Alerts: `CNPGBaseBackupFailed`, `CNPGBaseBackupStale`, `CNPGBaseBackupStaleCritical`.
+`kubectl -n <ns> get backups.postgresql.cnpg.io`, describe the newest failed
+one, fix the cause, then
+`kubectl cnpg backup -n <ns> <cluster> --method=plugin --plugin-name=barman-cloud.cloudnative-pg.io`.

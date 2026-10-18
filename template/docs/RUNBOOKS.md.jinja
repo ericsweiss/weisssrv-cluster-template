@@ -1352,6 +1352,12 @@ restic_offsite_cache_dir: /mnt/ssd/restic-cache
 restic_offsite_sources:
   - {name: backups, mountpoint: /mnt/tank/backups}
   - {name: appdata, mountpoint: /mnt/ssd/appdata}
+{%- if tenant_storage %}
+# The tenant-local root is a zvol, empty in the appdata walk: restic clones its
+# newest snapshot and walks the clone.
+restic_offsite_zvol_sources:
+  - {name: tenant-volumes, zvol: ssd/appdata/tenant-volumes/data, fstype: ext4, mount_opts: ro}
+{%- endif %}
 ```
 
 In the **same change**, flip `cluster_offsite_backup_probe_metric` in
@@ -1531,3 +1537,7 @@ upstream:
 | The generator, its answers and its own docs | [weisssrv-cluster-template](https://github.com/ericsweiss/weisssrv-cluster-template) |
 
 This cluster's pipeline is described in [ci-pipeline.md](ci-pipeline.md).
+{%- if postgres_operator %}
+PostgreSQL clusters, their backups and point-in-time recovery are described in
+[postgres.md](postgres.md).
+{%- endif %}

@@ -256,10 +256,13 @@ Rules the template enforces:
 
 - **Pools are created by hand.** Ansible sets properties, creates datasets and
   zvols, and mounts them. It never runs `zpool create` or `zpool destroy`.
-- **Every PV is static.** No dynamic provisioner, and `storageClassName: ""`
-  everywhere, so nothing can land on the cluster-default local path — which lives
-  on a stateless VM disk excluded from every backup. An alert fires if anything
-  ever does.
+- **No default StorageClass.** A claim names its class or stays Pending, so
+  nothing can land on the cluster-default local path — which lives on a
+  stateless VM disk excluded from every backup; an alert fires if anything
+  ever does. Platform volumes are static (`storageClassName: ""`). With
+  `tenant_storage`, tenant claims name `tenant-local`, whose only root is a
+  zvol on the NAS-colocated agent that the `ssd/appdata` replication covers,
+  and whose provisioner refuses any root that is not that zvol's filesystem.
 - **NFS is authenticated in transit.** Exports require TLS (`xprtsec=tls`) and
   mounts address the server **by hostname**, because the certificate has no
   address in its SAN.

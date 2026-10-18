@@ -212,6 +212,10 @@ taskfiles/                   one file per task namespace
   WLANs `terraform/unifi` manages. Its § Site settings table is held against
   `networks.tf` by a gate, so edit both together.
 {%- endif %}
+{%- if postgres_operator %}
+- [docs/postgres.md](docs/postgres.md) — PostgreSQL clusters on CloudNativePG:
+  the tenant pattern, point-in-time recovery and the database runbooks
+{%- endif %}
 - the cluster template's `docs/ARCHITECTURE.md` — the Flux stage graph,
   substitution model, storage tiers, DNS split, backups
 - [weisssrv-lib]({{ links.lib_home() }}) — the roles, CI templates and Terraform
