@@ -262,7 +262,8 @@ Rules the template enforces:
   ever does. Platform volumes are static (`storageClassName: ""`). With
   `tenant_storage`, tenant claims name `tenant-local`, whose only root is a
   zvol on the NAS-colocated agent that the `ssd/appdata` replication covers,
-  and whose provisioner refuses any root that is not that zvol's filesystem.
+  and whose provisioner refuses a root with no mounted filesystem (no
+  `lost+found`).
 - **NFS is authenticated in transit.** Exports require TLS (`xprtsec=tls`) and
   mounts address the server **by hostname**, because the certificate has no
   address in its SAN.

@@ -1,5 +1,5 @@
 """Tenant claims land only on the NAS agent's backed-up zvol, through a
-non-default, retained StorageClass whose provisioner writes nowhere else."""
+non-default, retained StorageClass that refuses an unmounted root."""
 from __future__ import annotations
 
 import json
