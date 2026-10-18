@@ -454,8 +454,10 @@ spec:
   `tenant-traefik-route-refs`, `tenant-traefik-object-refs`,
   `tenant-traefik-ingress-refs`, `tenant-no-externalname-services` and
   `tenant-no-manual-endpoints`.
-  `task lint:tenant-traefik-isolation` fails if the policies or their bindings go
-  missing, or if a binding narrows its match below every tenant namespace.
+  Once any tenant is onboarded, `task lint:tenant-traefik-isolation` fails if
+  the policies or their bindings go missing, if a binding narrows its match
+  below every tenant namespace, or if a policy fails open, narrows its resources
+  or loses a validation, even with `allowCrossNamespace: false`.
 - **Namespace ownership** is cooperative: nothing stops a tenant manifest from
   targeting a platform namespace today. An admission policy engine
   (Kyverno/OPA) is the durable fix.

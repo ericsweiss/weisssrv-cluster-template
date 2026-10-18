@@ -1,10 +1,11 @@
-"""Tests that check-tenant-traefik-isolation.py fails when a tenant lands while Traefik allows cross-namespace refs unpinned."""
+"""Tests that check-tenant-traefik-isolation.py fails when a tenant lands without the full Deny-bound policies."""
 from __future__ import annotations
 
 import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 from conftest import REPO, load_script
 
 gate = load_script("check-tenant-traefik-isolation.py")
@@ -52,12 +53,32 @@ def test_a_tenant_with_cross_namespace_still_true_fails(tmp_path):
     assert "hermes-tenant.yaml" in problems[0]
 
 
-def test_a_tenant_passes_once_cross_namespace_is_off(tmp_path):
+# Plain-Ingress annotations, forwardAuth addresses and endpoint resolution do
+# not depend on allowCrossNamespace, so turning it off does not open the gate.
+def test_a_tenant_without_the_policies_fails_with_cross_namespace_off(tmp_path):
     root = build(
         tmp_path,
         ["tenant-crd-editor.yaml", "hermes-tenant.yaml"],
         RELEASE_WITH_VALUES.format(allow="false"),
     )
+    problems = gate.check(root)
+    assert len(problems) == 1
+    assert "hermes-tenant.yaml" in problems[0]
+    assert "even when providers.kubernetesCRD.allowCrossNamespace is false" in problems[0]
+
+
+def test_baseline_only_passes_with_cross_namespace_off(tmp_path):
+    root = build(tmp_path, ["tenant-crd-editor.yaml"], RELEASE_WITH_VALUES.format(allow="false"))
+    assert gate.check(root) == []
+
+
+def test_a_tenant_passes_with_the_policies_and_cross_namespace_off(tmp_path):
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="false"),
+    )
+    write_policy(root, policy())
     assert gate.check(root) == []
 
 
@@ -95,99 +116,14 @@ def test_an_unparseable_input_is_vacuous_not_a_finding(tmp_path, target):
     assert gate.main(["--repo", str(root)]) == 2
 
 
-POLICY = textwrap.dedent(
-    """\
-    apiVersion: admissionregistration.k8s.io/v1
-    kind: ValidatingAdmissionPolicy
-    metadata:
-      name: tenant-traefik-route-refs
-    ---
-    apiVersion: admissionregistration.k8s.io/v1
-    kind: ValidatingAdmissionPolicy
-    metadata:
-      name: tenant-traefik-object-refs
-    ---
-    apiVersion: admissionregistration.k8s.io/v1
-    kind: ValidatingAdmissionPolicyBinding
-    metadata:
-      name: tenant-traefik-route-refs
-    spec:
-      policyName: tenant-traefik-route-refs
-      validationActions: [{action}]
-      matchResources:
-        namespaceSelector:
-          matchExpressions:
-            - key: fluxcd.io/tenant
-              operator: Exists
-    ---
-    apiVersion: admissionregistration.k8s.io/v1
-    kind: ValidatingAdmissionPolicyBinding
-    metadata:
-      name: tenant-traefik-object-refs
-    spec:
-      policyName: tenant-traefik-object-refs
-      validationActions: [Deny]
-      matchResources:
-        namespaceSelector:
-          matchExpressions:
-            - key: fluxcd.io/tenant
-              operator: Exists
-    ---
-    apiVersion: admissionregistration.k8s.io/v1
-    kind: ValidatingAdmissionPolicy
-    metadata:
-      name: tenant-no-externalname-services
-    ---
-    apiVersion: admissionregistration.k8s.io/v1
-    kind: ValidatingAdmissionPolicyBinding
-    metadata:
-      name: tenant-no-externalname-services
-    spec:
-      policyName: tenant-no-externalname-services
-      validationActions: [Deny]
-      matchResources:
-        namespaceSelector:
-          matchExpressions:
-            - key: fluxcd.io/tenant
-              operator: Exists
-    ---
-    apiVersion: admissionregistration.k8s.io/v1
-    kind: ValidatingAdmissionPolicy
-    metadata:
-      name: tenant-no-manual-endpoints
-    ---
-    apiVersion: admissionregistration.k8s.io/v1
-    kind: ValidatingAdmissionPolicyBinding
-    metadata:
-      name: tenant-no-manual-endpoints
-    spec:
-      policyName: tenant-no-manual-endpoints
-      validationActions: [Deny]
-      matchResources:
-        namespaceSelector:
-          matchExpressions:
-            - key: fluxcd.io/tenant
-              operator: Exists
-    ---
-    apiVersion: admissionregistration.k8s.io/v1
-    kind: ValidatingAdmissionPolicy
-    metadata:
-      name: tenant-traefik-ingress-refs
-    ---
-    apiVersion: admissionregistration.k8s.io/v1
-    kind: ValidatingAdmissionPolicyBinding
-    metadata:
-      name: tenant-traefik-ingress-refs
-    spec:
-      policyName: tenant-traefik-ingress-refs
-      validationActions: [Deny]
-      matchResources:
-        namespaceSelector:
-          matchExpressions:
-            - key: fluxcd.io/tenant
-              operator: Exists
-    """
-)
+# The fixture is the shipped policy file itself, so a gate spec that drifts from
+# what the file ships fails here and in the shipped-file test below.
+SHIPPED_POLICY = (REPO / gate.TENANT_POLICY).read_text()
+
+
+def policy(action: str = "Deny") -> str:
+    """The shipped policy file, its first binding's action set to `action`."""
+    return SHIPPED_POLICY.replace("validationActions: [Deny]", f"validationActions: [{action}]", 1)
 
 
 def write_policy(root: Path, body: str, listed: bool = True) -> None:
@@ -207,7 +143,7 @@ def test_a_tenant_passes_when_the_admission_policies_pin_refs(tmp_path):
         ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
         RELEASE_WITH_VALUES.format(allow="true"),
     )
-    write_policy(root, POLICY.format(action="Deny"))
+    write_policy(root, policy())
     assert gate.check(root) == []
 
 
@@ -217,7 +153,7 @@ def test_a_warn_only_binding_does_not_open_the_gate(tmp_path):
         ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
         RELEASE_WITH_VALUES.format(allow="true"),
     )
-    write_policy(root, POLICY.format(action="Warn"))
+    write_policy(root, policy("Warn"))
     assert len(gate.check(root)) == 1
 
 
@@ -227,7 +163,7 @@ def test_a_policy_file_missing_one_binding_keeps_the_gate_closed(tmp_path):
         ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
         RELEASE_WITH_VALUES.format(allow="true"),
     )
-    body = POLICY.format(action="Deny").rsplit("---\n", 1)[0]
+    body = policy().rsplit("---\n", 1)[0]
     write_policy(root, body)
     assert len(gate.check(root)) == 1
 
@@ -249,7 +185,7 @@ def test_a_binding_that_pins_no_tenant_keeps_the_gate_closed(tmp_path, old, new)
         ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
         RELEASE_WITH_VALUES.format(allow="true"),
     )
-    body = POLICY.format(action="Deny")
+    body = policy()
     assert old in body
     write_policy(root, body.replace(old, new, 1))
     assert len(gate.check(root)) == 1
@@ -263,7 +199,7 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
         ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
         RELEASE_WITH_VALUES.format(allow="true"),
     )
-    body = POLICY.format(action="Deny")
+    body = policy()
     ingress_policy = body.rindex("---\n", 0, body.index("name: tenant-traefik-ingress-refs"))
     write_policy(root, body[:ingress_policy])
     assert len(gate.check(root)) == 1
@@ -280,7 +216,7 @@ def test_a_policy_file_without_a_service_refusal_keeps_the_gate_closed(tmp_path,
         ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
         RELEASE_WITH_VALUES.format(allow="true"),
     )
-    docs = POLICY.format(action="Deny").split("---\n")
+    docs = policy().split("---\n")
     kept = [
         d for d in docs
         if not (f"kind: {kind}\n" in d and f"name: {name}\n" in d)
@@ -297,7 +233,7 @@ def test_a_policy_file_the_configs_kustomization_does_not_list_keeps_the_gate_cl
         ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
         RELEASE_WITH_VALUES.format(allow="true"),
     )
-    write_policy(root, POLICY.format(action="Deny"), listed=False)
+    write_policy(root, policy(), listed=False)
     assert len(gate.check(root)) == 1
 
 
@@ -345,7 +281,7 @@ def test_a_binding_that_narrows_its_match_keeps_the_gate_closed(tmp_path, narrow
         ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
         RELEASE_WITH_VALUES.format(allow="true"),
     )
-    body = POLICY.format(action="Deny")
+    body = policy()
     selector = (
         "  matchResources:\n    namespaceSelector:\n      matchExpressions:\n"
         "        - key: fluxcd.io/tenant\n          operator: Exists\n"
@@ -356,3 +292,65 @@ def test_a_binding_that_narrows_its_match_keeps_the_gate_closed(tmp_path, narrow
     )
     write_policy(root, body.replace(selector, narrowed, 1))
     assert len(gate.check(root)) == 1
+
+
+def _mutated(name: str, mutate) -> str:
+    """The shipped policy file with policy `name`'s spec passed through `mutate`."""
+    docs = [d for d in yaml.safe_load_all(SHIPPED_POLICY) if d]
+    target = [
+        d for d in docs
+        if d["kind"] == "ValidatingAdmissionPolicy" and d["metadata"]["name"] == name
+    ]
+    assert len(target) == 1
+    mutate(target[0]["spec"])
+    return yaml.safe_dump_all(docs, sort_keys=False)
+
+
+def _narrow_resources(spec):
+    rules = spec["matchConstraints"]["resourceRules"]
+    rules[0]["resources"] = rules[0]["resources"][:-1]
+
+
+def _narrow_operations(spec):
+    spec["matchConstraints"]["resourceRules"][0]["operations"] = ["CREATE"]
+
+
+# Each mutation weakens one policy while its name and Deny binding still read
+# true: errors fail open, a validation is dropped, or the match narrows.
+WEAKENINGS = {
+    "failurePolicy-Ignore": lambda spec: spec.__setitem__("failurePolicy", "Ignore"),
+    "failurePolicy-absent": lambda spec: spec.pop("failurePolicy"),
+    "validation-dropped": lambda spec: spec["validations"].pop(),
+    "validations-empty": lambda spec: spec.__setitem__("validations", []),
+    "resources-narrowed": _narrow_resources,
+    "operations-narrowed": _narrow_operations,
+    "namespaceSelector-added": lambda spec: spec["matchConstraints"].__setitem__(
+        "namespaceSelector", {"matchLabels": {"protected": "true"}}
+    ),
+    "matchConditions-added": lambda spec: spec.__setitem__(
+        "matchConditions", [{"name": "never", "expression": "false"}]
+    ),
+}
+
+
+@pytest.mark.parametrize("weakening", sorted(WEAKENINGS))
+@pytest.mark.parametrize("name", sorted(gate.REQUIRED_POLICIES))
+def test_a_weakened_policy_keeps_the_gate_closed(tmp_path, name, weakening):
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, _mutated(name, WEAKENINGS[weakening]))
+    assert len(gate.check(root)) == 1
+
+
+def test_the_unmutated_round_trip_still_opens_the_gate(tmp_path):
+    """The YAML round trip the weakening cases use changes nothing by itself."""
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, _mutated("tenant-traefik-route-refs", lambda spec: None))
+    assert gate.check(root) == []
