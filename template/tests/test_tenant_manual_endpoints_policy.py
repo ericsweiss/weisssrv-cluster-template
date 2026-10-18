@@ -10,9 +10,16 @@ from conftest import REPO
 
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
 NAME = "tenant-no-manual-endpoints"
+CONTROLLERS = [
+    "system:serviceaccount:kube-system:endpoint-controller",
+    "system:serviceaccount:kube-system:endpointslice-controller",
+    "system:serviceaccount:kube-system:endpointslicemirroring-controller",
+]
 EXPRESSION = (
     "request.userInfo.username == 'system:kube-controller-manager' || "
-    "request.userInfo.username.startsWith('system:serviceaccount:kube-system:')"
+    "request.userInfo.username in ["
+    + ", ".join(f"'{c}'" for c in CONTROLLERS)
+    + "]"
 )
 MESSAGE = "tenant Endpoints and EndpointSlices are managed by the control plane only"
 TENANT_MATCH = {
@@ -31,9 +38,7 @@ def _docs(kind: str) -> list[dict]:
 
 
 def allowed(username: str) -> bool:
-    return username == "system:kube-controller-manager" or username.startswith(
-        "system:serviceaccount:kube-system:"
-    )
+    return username == "system:kube-controller-manager" or username in CONTROLLERS
 
 
 def test_the_policy_is_the_shape_the_mirror_evaluates():
@@ -69,7 +74,7 @@ def test_the_binding_denies_on_every_tenant_namespace():
 
 
 # k3s runs kube-controller-manager with use-service-account-credentials, so
-# each controller writes as its own kube-system ServiceAccount.
+# each controller writes as its own kube-system ServiceAccount; only these three.
 @pytest.mark.parametrize(
     "username",
     [
@@ -89,6 +94,9 @@ def test_the_control_plane_is_admitted(username):
         "system:serviceaccount:demo:flux-reconciler",
         "system:serviceaccount:demo:default",
         "system:serviceaccount:kube-systemx:endpoint-controller",
+        "system:serviceaccount:kube-system:default",
+        "system:serviceaccount:kube-system:coredns",
+        "system:serviceaccount:kube-system:endpoint-controller-evil",
         "tenant-admin@example.com",
         "system:kube-controller-manager-evil",
     ],

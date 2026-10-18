@@ -235,8 +235,8 @@ spec:
           operator: Exists
 ---
 # k3s runs kube-controller-manager with use-service-account-credentials=true
-# (pkg/daemons/control/server.go), so the endpoint, endpointslice and mirroring
-# controllers write as kube-system ServiceAccounts; no tenant writes these.
+# (pkg/daemons/control/server.go): the endpoint, endpointslice and mirroring
+# controllers write as those three kube-system ServiceAccounts, and only they may.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -256,7 +256,9 @@ spec:
   validations:
     - expression: >-
         request.userInfo.username == 'system:kube-controller-manager' ||
-        request.userInfo.username.startsWith('system:serviceaccount:kube-system:')
+        request.userInfo.username in ['system:serviceaccount:kube-system:endpoint-controller',
+        'system:serviceaccount:kube-system:endpointslice-controller',
+        'system:serviceaccount:kube-system:endpointslicemirroring-controller']
       message: "tenant Endpoints and EndpointSlices are managed by the control plane only"
 ---
 apiVersion: admissionregistration.k8s.io/v1
