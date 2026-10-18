@@ -273,6 +273,11 @@ template's CLI. Each is a declared `forked:` entry carrying the difference in
 its `reason:`, held to the library by `reconciled_sha256` so a library-side
 change forces a review.
 
+`check-scrape-wiring.py` is an interim fork: its `CLUSTER_SCOPED_KINDS` also
+names `ValidatingAdmissionPolicyBinding`, which the tenant Traefik policy brings
+into every render. It returns to `vendored:` in both manifests once the library
+ships the same line and `lib_ref` takes it.
+
 ## Related
 
 - [RUNBOOKS.md](RUNBOOKS.md) § Updating the template — the operator-side procedure
