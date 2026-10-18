@@ -201,7 +201,16 @@ object-store key, an object store refusing checksum headers (set the two
 
 ### Base backup failed or stale
 
-Alerts: `CNPGBaseBackupFailed`, `CNPGBaseBackupStale`, `CNPGBaseBackupStaleCritical`.
+Alerts: `CNPGBaseBackupFailed`, `CNPGBaseBackupStale`, `CNPGBaseBackupStaleCritical`,
+`CNPGNeverBackedUp`.
 `kubectl -n <ns> get backups.postgresql.cnpg.io`, describe the newest failed
 one, fix the cause, then
 `kubectl cnpg backup -n <ns> <cluster> --method=plugin --plugin-name=barman-cloud.cloudnative-pg.io`.
+
+The two age alerts measure from the last successful backup: the warning fires
+31 hours after it and the critical 55 hours after it (30h and 54h plus one hour
+pending). A database that has never completed a backup reports a timestamp of 0,
+which the age alerts skip; `CNPGNeverBackedUp` (warning) fires instead once the
+instance has reported that 0 for 31 hours, so a new database never pages before
+its first nightly run has had a chance. It is a warning only: when the first backup
+runs and fails, `CNPGBaseBackupFailed` pages as critical.

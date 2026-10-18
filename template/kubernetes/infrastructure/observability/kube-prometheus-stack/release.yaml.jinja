@@ -2022,9 +2022,12 @@ spec:
                     A failed base backup is newer than the last good one; the
                     recovery window shrinks every night this repeats.
 
-              # 30h is one nightly cycle plus margin; 0 (no backup ever) fires too.
+              # 30h is one nightly cycle plus margin. A timestamp of 0 is no backup
+              # ever, which CNPGNeverBackedUp covers; the age alerts skip it.
               - alert: CNPGBaseBackupStale
-                expr: time() - barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 108000
+                expr: >-
+                  time() - barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 108000
+                  and barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 0
                 for: 1h
                 labels:
                   severity: warning
@@ -2035,7 +2038,9 @@ spec:
                     The nightly ScheduledBackup has missed at least one run.
 
               - alert: CNPGBaseBackupStaleCritical
-                expr: time() - barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 194400
+                expr: >-
+                  time() - barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 194400
+                  and barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 0
                 for: 1h
                 labels:
                   severity: critical
@@ -2045,4 +2050,21 @@ spec:
                   description: >-
                     Two nightly base backups in a row are missing; restores now
                     replay more than two days of WAL.
+
+              # Still 0 in every sample for 30h, and reported 30h ago: an instance
+              # up that long has missed its first nightly backup.
+              - alert: CNPGNeverBackedUp
+                expr: >-
+                  max by (namespace, pod) (max_over_time(barman_cloud_cloudnative_pg_io_last_available_backup_timestamp[30h])) == 0
+                  and on (namespace, pod)
+                  count by (namespace, pod) (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp offset 30h)
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#base-backup-failed-or-stale'
+                  summary: '{{ $labels.namespace }}/{{ $labels.pod }} has reported for 30 hours without a base backup'
+                  description: >-
+                    The instance has never completed a base backup, so there is
+                    nothing to restore from; the first nightly run was missed.
 {%- endraw %}{% endif %}
