@@ -203,6 +203,12 @@ spec:
     requests.cpu: "2"
     requests.memory: 4Gi
     limits.memory: 8Gi
+{%- if tenant_storage %}
+    # tenant-local sizes are not enforced; this caps the tenant's share of the zvol.
+    # Use "0" for a tenant that runs no database.
+    persistentvolumeclaims: "4"
+    tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
+{%- endif %}
 ---
 # Defaults and per-container ceilings, so a pod with no resources block cannot
 # land unbounded inside the quota. A `max:` key with no matching `default:` key

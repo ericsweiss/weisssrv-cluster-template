@@ -18,18 +18,14 @@ the operator, the RBAC, the `tenant-local` StorageClass and the alert rules.
 - `enablePDB: false` on one instance: an unsatisfiable PodDisruptionBudget
   makes every node drain time out.
 
-## What the operator adds per tenant
+## What the cluster side adds per tenant
 
 No volume: the tenant's claim provisions its own from `tenant-local`. The
-tenant's wiring file carries a storage quota, because the provisioner does
-not enforce sizes on the shared zvol:
+tenant's existing `<app>-quota` ResourceQuota (the one in its wiring file) must
+carry two keys in `spec.hard`, as the tenants README example does, because the
+provisioner does not enforce sizes on the shared zvol:
 
 ```yaml
-apiVersion: v1
-kind: ResourceQuota
-metadata:
-  name: <app>-quota
-  namespace: <namespace>
 spec:
   hard:
     persistentvolumeclaims: "4"

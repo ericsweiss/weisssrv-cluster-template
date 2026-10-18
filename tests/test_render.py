@@ -3727,3 +3727,18 @@ def test_the_static_pv_wording_follows_tenant_storage(cluster):
         assert "Every stateful PV here is statically provisioned" in comment, comment
         assert "tenant-local" not in comment, comment
         assert "Every PV in the cluster is static" in runbooks
+
+
+def test_the_example_tenant_quota_caps_tenant_local_only_with_tenant_storage(cluster):
+    """tenant-local enforces no size on the shared zvol, so the example quota every
+    tenant wiring file is copied from must cap it whenever tenant_storage renders,
+    and the off render must carry no key for a class it does not have."""
+    readme = next((cluster.path / "kubernetes/clusters").glob("*/tenants/README.md")).read_text()
+    quota = readme.split("name: example-app-quota")[1].split("\n---")[0]
+    key = "tenant-local.storageclass.storage.k8s.io/requests.storage:"
+    if cluster.answers["tenant_storage"]:
+        assert key in quota, quota
+        assert "persistentvolumeclaims:" in quota, quota
+    else:
+        assert key not in readme
+        assert "persistentvolumeclaims:" not in quota, quota
