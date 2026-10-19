@@ -653,11 +653,20 @@ spec:
   `serviceAccountName` for the `cert-manager` release) writes it from a
   Certificate `tenant-certificates` has already admitted. A request to an
   Issuer in the tenant's own namespace stays allowed. The same policy admits
-  only that controller to create or update an ACME Order or Challenge
+  only that controller to create an ACME Order or Challenge
   (`acme.cert-manager.io`) in a tenant namespace. That is defence in depth,
-  not a live bypass: `cert-manager-edit` grants no create on `orders`, only
-  delete, and the cert-manager webhook refuses a change to a Challenge's spec;
-  the policy holds if a future RBAC change widens either.
+  not a live bypass: `cert-manager-edit` grants no create or update on
+  `orders`, only delete, and the policy holds if a future RBAC change widens
+  that. The policy matches CREATE alone on CertificateRequests and Challenges,
+  because cert-manager's validating webhook (`failurePolicy: Fail`) refuses
+  any spec change to either after creation
+  (`internal/apis/certmanager/validation/certificaterequest.go` and
+  `internal/apis/acme/validation/challenge.go` in v1.21.2). An Order's spec is
+  frozen only in `spec.request` (`internal/apis/acme/validation/order.go`), so
+  Order UPDATE stays matched, with the garbage collector
+  (`system:serviceaccount:kube-system:generic-garbage-collector`) admitted
+  beside the controller so that removing a `foregroundDeletion` finalizer
+  cannot wedge a deletion.
   Setting
   `global.rbac.aggregateClusterRoles: false` on the cert-manager release, and
   granting tenants Certificate and Issuer rights explicitly, would close the
