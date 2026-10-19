@@ -449,12 +449,13 @@ spec:
         && (!has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind in ['', 'Issuer']))
       message: "tenant certificate requests may use a platform ClusterIssuer (via a validated Certificate) or a cert-manager.io Issuer in their own namespace only"
     # Defence in depth, not a live bypass: cert-manager-edit grants no Order create or
-    # update. The garbage collector removes foregroundDeletion finalizers on Orders.
+    # update. The garbage collector may only UPDATE Orders (foregroundDeletion finalizers).
     - expression: >-
         request.resource.group != 'acme.cert-manager.io'
         || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'
-        || request.userInfo.username == 'system:serviceaccount:kube-system:generic-garbage-collector'
-      message: "tenant ACME Orders and Challenges are written by cert-manager's controller only"
+        || (request.operation == 'UPDATE'
+        && request.userInfo.username == 'system:serviceaccount:kube-system:generic-garbage-collector')
+      message: "tenant ACME Orders and Challenges are created by cert-manager's controller only"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

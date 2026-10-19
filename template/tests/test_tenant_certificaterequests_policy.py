@@ -1,6 +1,7 @@
 """Only cert-manager's controller may send a tenant CertificateRequest to any
-issuer but a core cert-manager.io Issuer, or write an ACME Order or Challenge; only Orders, whose spec the
-webhook leaves mutable, match UPDATE. `allowed()` mirrors the policy."""
+issuer but a core cert-manager.io Issuer, or create an ACME Order or Challenge;
+only Orders, whose spec the webhook leaves mutable, match UPDATE, where the
+garbage collector is admitted too. `allowed()` mirrors the policy."""
 
 from __future__ import annotations
 
@@ -26,9 +27,9 @@ VALIDATIONS = [
     (
         "request.resource.group != 'acme.cert-manager.io'"
         " || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'"
-        " || request.userInfo.username"
-        " == 'system:serviceaccount:kube-system:generic-garbage-collector'",
-        "tenant ACME Orders and Challenges are written by cert-manager's controller only",
+        " || (request.operation == 'UPDATE' && request.userInfo.username"
+        " == 'system:serviceaccount:kube-system:generic-garbage-collector')",
+        "tenant ACME Orders and Challenges are created by cert-manager's controller only",
     ),
 ]
 TENANT_MATCH = {
@@ -135,7 +136,9 @@ def allowed(
         "kind", ""
     ) in ("", "Issuer")
     return (acme or username == CONTROLLER or core_issuer) and (
-        not acme or username in (CONTROLLER, GARBAGE_COLLECTOR)
+        not acme
+        or username == CONTROLLER
+        or (operation == "UPDATE" and username == GARBAGE_COLLECTOR)
     )
 
 
@@ -221,6 +224,12 @@ def test_a_non_controller_update_of_a_frozen_spec_kind_is_admitted(group, resour
 def test_the_garbage_collector_may_update_an_order():
     """foregroundDeletion finalizer removal must not wedge an Order's deletion."""
     assert allowed(PROD, GARBAGE_COLLECTOR, ACME, "orders", "UPDATE")
+
+
+@pytest.mark.parametrize("resource", ["orders", "challenges"])
+def test_the_garbage_collector_may_not_create_an_acme_object(resource):
+    """Its exception covers the finalizer UPDATE only, never a CREATE."""
+    assert not allowed(PROD, GARBAGE_COLLECTOR, ACME, resource, "CREATE")
 
 
 def test_the_controllers_acme_order_and_challenge_writes_are_admitted():

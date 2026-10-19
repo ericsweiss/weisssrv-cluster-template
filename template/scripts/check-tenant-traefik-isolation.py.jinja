@@ -385,8 +385,8 @@ REQUIRED_POLICIES = {
                 "request.resource.group != 'acme.cert-manager.io' || "
                 "request.userInfo.username == "
                 "'system:serviceaccount:cert-manager:cert-manager' || "
-                "request.userInfo.username == "
-                "'system:serviceaccount:kube-system:generic-garbage-collector'"
+                "(request.operation == 'UPDATE' && request.userInfo.username == "
+                "'system:serviceaccount:kube-system:generic-garbage-collector')"
             ),
         ],
     },
