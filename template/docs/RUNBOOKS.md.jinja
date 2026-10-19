@@ -1,4 +1,5 @@
 {%- import "partials/links.jinja" as links with context -%}
+{%- from "partials/tenant-volumes.jinja" import tenant_volumes_zvol -%}
 # Runbooks — {{ cluster_name }}
 
 Day-two operations for this cluster. This is the file every alert's
@@ -1241,13 +1242,15 @@ zvol-backed volume" above, and raise the `tenant-volumes` disk size in
 
 A `tenant-local` claim stays Pending, and the provisioner's helper pod logs
 `refusing ...: /mnt/tenant-volumes is not the mounted tenant-volumes zvol`,
-when the root lacks `lost+found` or the `.tenant-volumes-zvol` marker. Either
-the zvol is not mounted (the claim would otherwise land on the VM's boot disk,
-outside every backup) or the marker was never written. On the NAS agent:
+when the root lacks `lost+found` or its `.tenant-volumes-zvol` marker does not
+name the zvol in `cluster_tenant_volumes_zvol`. Either the zvol is not mounted
+(the claim would otherwise land on the VM's boot disk, outside every backup), the
+marker was never written, or `hosts.yml` and cluster-config name different zvols.
+On the NAS agent:
 
 ```bash
 mountpoint /mnt/tenant-volumes
-cat /mnt/tenant-volumes/.tenant-volumes-zvol   # the zvol name, ssd/appdata/tenant-volumes/data
+cat /mnt/tenant-volumes/.tenant-volumes-zvol   # must read {{ tenant_volumes_zvol }}
 ```
 
 If it is not a mount point, fix the mount first (the k3s role mounts it from
@@ -1405,7 +1408,7 @@ restic_offsite_sources:
 # The tenant-local root is a zvol, empty in the appdata walk: restic clones its
 # newest snapshot and walks the clone.
 restic_offsite_zvol_sources:
-  - {name: tenant-volumes, zvol: ssd/appdata/tenant-volumes/data, fstype: ext4, mount_opts: ro}
+  - {name: tenant-volumes, zvol: {{ tenant_volumes_zvol }}, fstype: ext4, mount_opts: ro}
 {%- endif %}
 ```
 

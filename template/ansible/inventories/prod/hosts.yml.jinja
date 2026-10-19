@@ -2,6 +2,7 @@
 {%- from "partials/roster.jinja" import n_compute, nas_name, smtp_name, resolvers,
     pve_hosts, n_srv, gpu_host, k3s_server_names, k3s_server_ips, k3s_agent_names,
     k3s_agent_ips with context %}
+{%- from "partials/tenant-volumes.jinja" import tenant_volumes_zvol %}
 # Starter roster for {{ cluster_name }}: one NAS host, {{ n_compute }} compute host(s),
 # {{ resolvers | length }} DNS resolver(s), one SMTP relay, and a {{ n_srv }}-server /
 # {{ pve_hosts | length }}-agent k3s cluster. Guest vmid = 100 + last octet.
@@ -232,7 +233,7 @@ all:
             # replicated with ssd/appdata like the zvols above.
             - name: tenant-volumes
               size: 100G
-              zvol: ssd/appdata/tenant-volumes/data
+              zvol: {{ tenant_volumes_zvol }}
               mount_point: /mnt/tenant-volumes
               fstype: ext4
               scsi_slot: 4

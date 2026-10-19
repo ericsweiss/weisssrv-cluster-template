@@ -81,9 +81,17 @@ def _runbook_yaml(heading: str) -> dict:
     return yaml.safe_load(match.group(1))
 
 
+ZVOL_KEY = "cluster_tenant_volumes_zvol"
+
+
+def _zvol_answer() -> str:
+    return _one(CLUSTER_CONFIG, "ConfigMap")["data"][ZVOL_KEY]
+
+
 def _setup(tmp_path: Path, vol_dir: Path) -> subprocess.CompletedProcess:
+    """The setup script as Flux delivers it: cluster-config substituted in."""
     script = tmp_path / "setup"
-    script.write_text(_config()["setup"])
+    script.write_text(_config()["setup"].replace("${" + ZVOL_KEY + "}", _zvol_answer()))
     env = {**os.environ, "VOL_DIR": str(vol_dir)}
     return subprocess.run(["sh", str(script)], env=env, capture_output=True,
                           text=True, check=False)
@@ -126,6 +134,13 @@ def test_the_provisioner_writes_only_under_the_tenant_root():
         ":${local_path_provisioner_helper_version}")
 
 
+def test_the_helper_pod_carries_no_api_token():
+    """setup and teardown only touch the host path, so the root helper pod gets
+    no service-account token to misuse."""
+    helper = yaml.safe_load(_config()["helperPod.yaml"])
+    assert helper["spec"]["automountServiceAccountToken"] is False
+
+
 def test_both_images_are_pinned_in_the_inventory():
     pins = yaml.safe_load(ALL_VARS.read_text())
     assert pins["local_path_provisioner_version"].startswith("v")
@@ -136,6 +151,13 @@ def test_the_tenant_root_is_a_zvol_on_the_nas_node():
     disk = _root_disk()
     assert disk["zvol"].startswith("ssd/appdata/")
     assert disk["fstype"] == "ext4"
+
+
+def test_setup_checks_the_marker_against_the_inventory_zvol():
+    """The marker must name the zvol the inventory mounts, the same string k3s.yml
+    writes, delivered to the script through cluster-config."""
+    assert _zvol_answer() == _root_disk()["zvol"]
+    assert '"${' + ZVOL_KEY + '}"' in _config()["setup"]
 
 
 def test_the_tenant_root_rides_the_documented_archive_and_offsite_backups():
@@ -162,8 +184,13 @@ def _root(tmp_path: Path, lost_found: bool, marker: str | None) -> Path:
 
 @pytest.mark.parametrize(
     ("lost_found", "marker"),
-    [(False, None), (True, None), (False, "ssd/appdata/tenant-volumes/data"), (True, "")],
-    ids=["bare", "stray-lost-found", "marker-only", "empty-marker"],
+    [
+        (False, None), (True, None), (False, "ssd/appdata/tenant-volumes/data"), (True, ""),
+        (True, "ssd/appdata/other/data\n"), (True, "ssd/appdata/tenant-volumes/data/x\n"),
+        (True, "yes\n"),
+    ],
+    ids=["bare", "stray-lost-found", "marker-only", "empty-marker", "other-zvol",
+         "longer-name", "any-content"],
 )
 def test_setup_refuses_a_root_that_is_not_the_zvol_filesystem(tmp_path, lost_found, marker):
     """A stray lost+found on the VM's own filesystem is not proof the zvol is

@@ -1,7 +1,7 @@
 ---
 # Every tenant claim becomes a directory under /mnt/tenant-volumes, the
 # tenant-volumes zvol on the NAS agent. setup refuses a root without lost+found
-# and the .tenant-volumes-zvol marker k3s.yml writes onto the mounted zvol.
+# or whose .tenant-volumes-zvol marker (k3s.yml) is not cluster_tenant_volumes_zvol.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -20,7 +20,8 @@ data:
     #!/bin/sh
     set -eu
     base=$(dirname "$VOL_DIR")
-    if [ ! -d "$base/lost+found" ] || [ ! -s "$base/.tenant-volumes-zvol" ]; then
+    marker=$(cat "$base/.tenant-volumes-zvol" 2>/dev/null || true)
+    if [ ! -d "$base/lost+found" ] || [ "$marker" != "${cluster_tenant_volumes_zvol}" ]; then
       echo "refusing $VOL_DIR: $base is not the mounted tenant-volumes zvol" >&2
       exit 1
     fi
@@ -35,6 +36,7 @@ data:
     metadata:
       name: helper-pod
     spec:
+      automountServiceAccountToken: false
       priorityClassName: system-node-critical
       tolerations:
         - key: node.kubernetes.io/disk-pressure

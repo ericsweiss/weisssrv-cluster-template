@@ -85,6 +85,7 @@ OPTIONAL_KEYS = frozenset(
         "cluster_tailnet_dns_suffix",  # vpn_tailscale
         "cluster_upstream_dns_servers",  # vpn_tailscale
         "cluster_ddns_records",  # dns_backend: cloudflare
+        "cluster_tenant_volumes_zvol",  # tenant_storage
     }
 )
 
