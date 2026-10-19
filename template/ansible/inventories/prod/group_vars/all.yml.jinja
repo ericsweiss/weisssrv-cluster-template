@@ -197,15 +197,15 @@ nvidia_cuda_keyring_sha256: "d0d4ef986a44400f9db33c600ef33a985175e7cc63d805a10e1
 helm_chart_versions:
   cert_manager: "v1.21.2"
   external_dns: "1.23.0"
-  external_secrets: "2.12.0"
+  external_secrets: "2.13.0"
   metallb: "0.15.3"
-  traefik: "41.7.1"
+  traefik: "42.0.0"
   # Owns the monitoring.coreos.com CRDs; bump in lockstep with
   # kube_prometheus_stack so the CRDs match the operator.
   prometheus_operator_crds: "32.0.1"
-  kube_prometheus_stack: "92.3.0"
-  loki: "18.15.1"
-  alloy: "1.13.1"
+  kube_prometheus_stack: "92.10.1"
+  loki: "18.17.1"
+  alloy: "1.14.0"
   prometheus_blackbox_exporter: "11.20.0"
   onepassword_connect: "2.4.2"
   vpa: "5.1.0"
@@ -218,7 +218,7 @@ helm_chart_versions:
   plugin_barman_cloud: "0.8.1"
 {%- endif %}
 {%- if vpn_tailscale %}
-  tailscale_operator: "1.102.4"
+  tailscale_operator: "1.104.1"
 {%- endif %}
 {%- if gpu == 'nvidia' %}
   nvidia_device_plugin: "0.20.1"
@@ -228,7 +228,7 @@ helm_chart_versions:
 
 # SSO provider + its bundled database. postgresql_version is also what the
 # pg_dump CronJob runs, so the client major matches the server.
-authentik_version: "2026.8.3"
+authentik_version: "2026.8.4"
 postgresql_version: "18.6-trixie"
 
 # Pull-through registry cache: the CNCF distribution `registry` image, bare tag.
@@ -255,5 +255,5 @@ coredns_tailnet_version: "1.14.7"
 {%- if git_backend == 'gitlab_selfhosted' %}
 
 # GitLab Runner chart, shared by both runner tiers.
-gitlab_runner_helm_version: "0.93.0"
+gitlab_runner_helm_version: "0.94.0"
 {%- endif %}
