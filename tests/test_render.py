@@ -3756,6 +3756,25 @@ def test_the_example_tenant_quota_caps_tenant_local_only_with_tenant_storage(clu
         assert "persistentvolumeclaims:" not in quota, quota
 
 
+def test_the_example_tenant_namespace_and_caps_are_kept_out_of_flux_pruning(cluster):
+    """A pruned tenant Namespace cascades through every object and PVC in it, and
+    the db Kustomization's `deletionPolicy: Orphan` cannot stop that, so the
+    example Namespace and the caps beside it opt out of pruning."""
+    readme = next((cluster.path / "kubernetes/clusters").glob("*/tenants/README.md")).read_text()
+    example = readme.split("## Example", 1)[1].split("```yaml\n", 1)[1].split("```", 1)[0]
+    docs = {
+        d["kind"]: d
+        for d in yaml.safe_load_all(example)
+        if isinstance(d, dict) and d.get("kind") in {"Namespace", "ResourceQuota", "LimitRange"}
+    }
+    assert set(docs) == {"Namespace", "ResourceQuota", "LimitRange"}, docs
+    for kind, doc in docs.items():
+        annotations = doc["metadata"].get("annotations") or {}
+        assert annotations.get("kustomize.toolkit.fluxcd.io/prune") == "disabled", (kind, doc)
+    teardown = readme.split("## Example", 1)[0]
+    assert "by hand" in teardown, teardown
+
+
 def test_the_example_database_kustomization_orphans_on_deletion(cluster):
     """Deleting the database wiring must never half-dismantle a database: the
     default policy prunes its policies, ExternalSecrets and ScheduledBackup while

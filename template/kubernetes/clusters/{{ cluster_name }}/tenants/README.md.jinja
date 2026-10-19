@@ -7,10 +7,24 @@ reconciliation `ServiceAccount` + RoleBindings, and top-level `Kustomization`.
 
 Removal is the inverse: delete the file and its `kustomization.yaml` line. Flux
 prunes the Kustomization (and everything it created, including ESO-owned
-Secrets), the GitRepository, the secret store and the namespace — in that order.
+Secrets), the GitRepository and the secret store — in that order.
 `creationPolicy: Owner` puts an ownerReference from each ExternalSecret onto its
 Secret, so the Secrets go with the ExternalSecrets; deleting a store on its own
 removes nothing and only pushes its ExternalSecrets into `SecretSyncError`.
+
+The Namespace, its ResourceQuota and its LimitRange carry
+`kustomize.toolkit.fluxcd.io/prune: disabled` and outlive the wiring. A pruned
+Namespace cascades through every tenant object and PVC in it, and
+`deletionPolicy: Orphan` on a db Kustomization cannot protect against that.
+Delete the Namespace by hand once nothing in it is wanted.
+{%- if postgres_operator %}
+
+A tenant that runs a database comes down in this order, one step per change:
+remove the app Kustomization, so nothing writes; remove the db Kustomization,
+which orphans the Cluster, its policies and its backups in place; confirm the
+last base backup and WAL archive in the object store; delete the CNPG
+`Cluster` by hand; then delete the Namespace by hand.
+{%- endif %}
 
 ## The tenant side of the contract
 
@@ -239,6 +253,10 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: example-app
+  annotations:
+    # Never pruned: a pruned Namespace takes every tenant object and PVC with
+    # it, which the db Kustomization's `deletionPolicy: Orphan` cannot stop.
+    kustomize.toolkit.fluxcd.io/prune: disabled
   labels:
     app.kubernetes.io/managed-by: flux
     fluxcd.io/tenant: example-app
@@ -257,6 +275,9 @@ kind: ResourceQuota
 metadata:
   name: example-app-quota
   namespace: example-app
+  annotations:
+    # Kept with the Namespace, which is never pruned (see Removal above).
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   hard:
     pods: "10"
@@ -278,6 +299,9 @@ kind: LimitRange
 metadata:
   name: example-app-limits
   namespace: example-app
+  annotations:
+    # Kept with the Namespace, which is never pruned (see Removal above).
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   limits:
     - type: Container
