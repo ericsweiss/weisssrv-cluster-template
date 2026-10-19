@@ -237,9 +237,11 @@ copy passes `task lint:comment-length`. The longer reasons live here:
   alone, with that ConfigMap as its parameter. Every route must open with
   `Host()` on a granted hostname and may not use `||`, `HostRegexp` or any
   other `Host`; split an OR into one route per hostname. A route may set
-  `priority` only when the grant carries `maxPriority`, and at most that. An
-  Ingress needs a granted `host` on every rule, granted TLS hosts and no
-  default backend. Grant a hostname no platform route serves.
+  `priority` only when the grant carries `maxPriority`, and at most that, and
+  may list only granted names in `tls.domains`. An Ingress needs a granted
+  `host` on every rule, granted TLS hosts and
+  `router.tls.domains.*` annotations, and no default backend. Grant a hostname
+  no platform route serves.
 - **Impersonation.** Without `serviceAccountName`, kustomize-controller applies
   tenant manifests with its own cluster-admin credentials. The ServiceAccount
   must live in the Kustomization's own namespace (`flux-system`), because

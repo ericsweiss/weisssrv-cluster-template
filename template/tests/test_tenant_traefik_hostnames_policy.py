@@ -16,6 +16,8 @@ WRITES = ["CREATE", "UPDATE"]
 # The leading matcher, and every Host matcher, in a tenant route rule.
 LEADING_HOST = "^Host[(]`[^`]+`[)]( && .*)?$"
 ANY_HOST = "Host[(]`[^`]*`[)]"
+# The Traefik Ingress annotations that name the domains a router's certificate covers.
+TLS_DOMAINS = "traefik.ingress.kubernetes.io/router.tls.domains."
 VARIABLES = [
     {"name": "isRoute", "expression": "request.resource.resource == 'ingressroutes'"},
     {
@@ -50,6 +52,16 @@ VALIDATIONS = [
     },
     {
         "expression": (
+            "!variables.isRoute || !has(object.spec.tls) || !has(object.spec.tls.domains)"
+            " || object.spec.tls.domains.all(d, (!has(d.main) || d.main in variables.hosts)"
+            " && (!has(d.sans) || d.sans.all(s, s in variables.hosts)))"
+        ),
+        "message": (
+            "a tenant route may list only TLS domains the platform granted this namespace"
+        ),
+    },
+    {
+        "expression": (
             "variables.isRoute || !has(object.spec) || !has(object.spec.defaultBackend)"
         ),
         "message": "a tenant Ingress may not set a default backend (it answers every hostname)",
@@ -67,6 +79,17 @@ VALIDATIONS = [
             " || object.spec.tls.all(t, !has(t.hosts) || t.hosts.all(h, h in variables.hosts))"
         ),
         "message": "a tenant Ingress may list only TLS hosts the platform granted this namespace",
+    },
+    {
+        "expression": (
+            "variables.isRoute || !has(object.metadata.annotations)"
+            " || object.metadata.annotations.all(k,"
+            f" !k.startsWith('{TLS_DOMAINS}')"
+            " || object.metadata.annotations[k].split(',').all(d, d.trim() in variables.hosts))"
+        ),
+        "message": (
+            "a tenant Ingress may list only router.tls.domains the platform granted this namespace"
+        ),
     },
 ]
 GRANT = {"hosts": "demo.apps.test\n  demo.home.test \n\n"}
@@ -120,8 +143,13 @@ def hosts(grant: dict) -> list[str]:
 
 
 def route_allowed(spec: dict, grant: dict = GRANT) -> bool:
-    """The two IngressRoute validations, evaluated on `grant`."""
+    """The three IngressRoute validations, evaluated on `grant`."""
     matchers = [f"Host(`{h}`)" for h in hosts(grant)]
+    for domain in spec.get("tls", {}).get("domains", []):
+        if "main" in domain and domain["main"] not in hosts(grant):
+            return False
+        if not all(s in hosts(grant) for s in domain.get("sans", [])):
+            return False
     for route in spec.get("routes", []):
         rule = route["match"]
         # CEL matches() is an unanchored RE2 search; the pattern anchors itself.
@@ -136,11 +164,16 @@ def route_allowed(spec: dict, grant: dict = GRANT) -> bool:
     return True
 
 
-def ingress_allowed(spec: dict, grant: dict = GRANT) -> bool:
-    """The three Ingress validations, evaluated on `grant`."""
+def ingress_allowed(spec: dict, grant: dict = GRANT, annotations: dict | None = None) -> bool:
+    """The four Ingress validations, evaluated on `grant`."""
     granted = hosts(grant)
     return (
-        "defaultBackend" not in spec
+        all(
+            d.strip() in granted
+            for k, v in (annotations or {}).items() if k.startswith(TLS_DOMAINS)
+            for d in v.split(",")
+        )
+        and "defaultBackend" not in spec
         and all("host" in r and r["host"] in granted for r in spec.get("rules", []))
         and all(h in granted for t in spec.get("tls", []) for h in t.get("hosts", []))
     )
@@ -189,6 +222,31 @@ def test_one_shadowing_route_refuses_the_whole_object():
     )
 
 
+ROUTE = {"match": "Host(`demo.apps.test`)"}
+
+
+def test_granted_route_tls_domains_are_admitted():
+    assert route_allowed(
+        {"routes": [ROUTE],
+         "tls": {"domains": [{"main": "demo.apps.test", "sans": ["demo.home.test"]}]}}
+    )
+
+
+@pytest.mark.parametrize(
+    "domain",
+    [
+        {"main": "auth.apps.test"},
+        {"main": "*.apps.test"},
+        {"main": "demo.apps.test", "sans": ["auth.apps.test"]},
+        {"sans": ["*.home.test"]},
+    ],
+    ids=["ungranted-main", "wildcard-main", "ungranted-san", "wildcard-san"],
+)
+def test_an_ungranted_route_tls_domain_is_refused(domain):
+    """A domain on the route asks Traefik for a certificate on that name."""
+    assert not route_allowed({"routes": [ROUTE], "tls": {"domains": [domain]}})
+
+
 def test_a_priority_needs_a_granted_ceiling():
     route = {"match": "Host(`demo.apps.test`)", "priority": 10}
     assert not route_allowed({"routes": [route]})
@@ -218,6 +276,33 @@ def test_a_granted_host_ingress_is_admitted():
 )
 def test_an_ungranted_or_hostless_ingress_is_refused(spec):
     assert not ingress_allowed(spec)
+
+
+def test_granted_ingress_tls_domain_annotations_are_admitted():
+    assert ingress_allowed(
+        {"rules": [{"host": "demo.apps.test"}]},
+        annotations={
+            f"{TLS_DOMAINS}0.main": "demo.apps.test",
+            f"{TLS_DOMAINS}0.sans": "demo.home.test, demo.apps.test",
+            "traefik.ingress.kubernetes.io/router.entrypoints": "websecure",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("0.main", "auth.apps.test"),
+        ("0.main", "*.apps.test"),
+        ("0.sans", "demo.home.test,auth.apps.test"),
+        ("1.sans", ""),
+    ],
+    ids=["ungranted-main", "wildcard-main", "ungranted-san", "empty"],
+)
+def test_an_ungranted_ingress_tls_domain_annotation_is_refused(key, value):
+    assert not ingress_allowed(
+        {"rules": [{"host": "demo.apps.test"}]}, annotations={f"{TLS_DOMAINS}{key}": value}
+    )
 
 
 def test_tenant_tcp_and_udp_routes_are_refused_outright():

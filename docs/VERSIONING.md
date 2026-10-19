@@ -319,8 +319,9 @@ What a tenant can no longer create or update:
 - an IngressRoute or Ingress on a hostname its grant does not list; a route
   that does not open with `Host()` on a granted hostname, or that uses `||`,
   `HostRegexp` or a second `Host`; a `priority` when the grant carries no
-  `maxPriority`, or above it; an Ingress rule with no host, a TLS host not
-  granted, or a default backend;
+  `maxPriority`, or above it; a route `tls.domains` name not granted; an
+  Ingress rule with no host, a TLS host or `router.tls.domains.*` annotation
+  name not granted, or a default backend;
 - an IngressRouteTCP or IngressRouteUDP;
 - a TLSOption or TLSStore named `default`;
 - an ExternalName Service or a Service with no selector;

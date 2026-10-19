@@ -277,6 +277,11 @@ REQUIRED_POLICIES = {
                 "!has(r.priority) || ('maxPriority' in params.data && "
                 "r.priority <= int(params.data.maxPriority)))"
             ),
+            (
+                "!variables.isRoute || !has(object.spec.tls) || !has(object.spec.tls.domains) || "
+                "object.spec.tls.domains.all(d, (!has(d.main) || d.main in variables.hosts) && "
+                "(!has(d.sans) || d.sans.all(s, s in variables.hosts)))"
+            ),
             "variables.isRoute || !has(object.spec) || !has(object.spec.defaultBackend)",
             (
                 "variables.isRoute || !has(object.spec) || !has(object.spec.rules) || "
@@ -285,6 +290,12 @@ REQUIRED_POLICIES = {
             (
                 "variables.isRoute || !has(object.spec) || !has(object.spec.tls) || "
                 "object.spec.tls.all(t, !has(t.hosts) || t.hosts.all(h, h in variables.hosts))"
+            ),
+            (
+                "variables.isRoute || !has(object.metadata.annotations) || "
+                "object.metadata.annotations.all(k, "
+                "!k.startsWith('traefik.ingress.kubernetes.io/router.tls.domains.') || "
+                "object.metadata.annotations[k].split(',').all(d, d.trim() in variables.hosts))"
             ),
         ],
     },

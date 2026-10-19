@@ -324,6 +324,12 @@ spec:
         !has(r.priority) || ('maxPriority' in params.data
         && r.priority <= int(params.data.maxPriority)))
       message: "a tenant route may set a priority only up to the maxPriority the platform granted this namespace"
+    # A TLS domain asks Traefik for a certificate on that name, so it is a host too.
+    - expression: >-
+        !variables.isRoute || !has(object.spec.tls) || !has(object.spec.tls.domains)
+        || object.spec.tls.domains.all(d, (!has(d.main) || d.main in variables.hosts)
+        && (!has(d.sans) || d.sans.all(s, s in variables.hosts)))
+      message: "a tenant route may list only TLS domains the platform granted this namespace"
     - expression: >-
         variables.isRoute || !has(object.spec) || !has(object.spec.defaultBackend)
       message: "a tenant Ingress may not set a default backend (it answers every hostname)"
@@ -335,6 +341,12 @@ spec:
         variables.isRoute || !has(object.spec) || !has(object.spec.tls)
         || object.spec.tls.all(t, !has(t.hosts) || t.hosts.all(h, h in variables.hosts))
       message: "a tenant Ingress may list only TLS hosts the platform granted this namespace"
+    - expression: >-
+        variables.isRoute || !has(object.metadata.annotations)
+        || object.metadata.annotations.all(k,
+        !k.startsWith('traefik.ingress.kubernetes.io/router.tls.domains.')
+        || object.metadata.annotations[k].split(',').all(d, d.trim() in variables.hosts))
+      message: "a tenant Ingress may list only router.tls.domains the platform granted this namespace"
 ---
 # A TCP or UDP router on a shared entryPoint can claim HostSNI(`*`) or the whole
 # port and intercept platform traffic, so tenants get none of their own.
