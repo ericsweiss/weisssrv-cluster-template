@@ -1,8 +1,6 @@
-"""A tenant forwardAuth Middleware may call only its own namespace's Services or
-the Authentik outpost, a tenant TraefikService may not fail over, and every
-service reference and per-service middleware stays in the tenant's namespace or
-the platform allowlist. No CEL engine ships here, so the mirrors are pinned to
-the expressions they assume."""
+"""Tenant forwardAuth, failover, highestRandomWeight and per-service middleware
+refs stay in the tenant's namespace or the platform allowlist. No CEL engine
+ships here, so the mirrors are pinned to the expressions they assume."""
 
 from __future__ import annotations
 
