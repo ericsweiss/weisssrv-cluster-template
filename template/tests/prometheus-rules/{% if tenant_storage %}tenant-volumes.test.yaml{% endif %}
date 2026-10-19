@@ -1,7 +1,7 @@
 ---
-# promtool unit tests for TenantVolumesFilling and TenantVolumesNearlyFull. Each
-# fixture sits one point either side of a threshold; another mount and the host
-# exporter's view of the same mount stay silent.
+# promtool unit tests for the TenantVolumes alerts. Each fixture sits one point
+# either side of a threshold; another mount and the host exporter's view stay
+# silent, and MountMissing fires only once the DaemonSet stops reporting the mount.
 rule_files:
   - rules.yaml
 evaluation_interval: 1m
@@ -61,4 +61,26 @@ tests:
               severity: critical
               job: node-exporter
               instance: '10.42.1.8:9100'
+              mountpoint: /mnt/tenant-volumes
+      - eval_time: 20m
+        alertname: TenantVolumesMountMissing
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      # The DaemonSet reports only the root filesystem: the zvol is not mounted.
+      - series: 'node_filesystem_size_bytes{job="node-exporter", instance="10.42.1.7:9100", mountpoint="/"}'
+        values: '100+0x30'
+      # The host exporter still sees a tenant-volumes mount; it does not count.
+      - series: 'node_filesystem_size_bytes{job="node-exporter-host", instance="192.0.2.11:9101", mountpoint="/mnt/tenant-volumes"}'
+        values: '100+0x30'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: TenantVolumesMountMissing
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: TenantVolumesMountMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter
               mountpoint: /mnt/tenant-volumes

@@ -89,6 +89,7 @@ to read on:
 | `LocalPathPVExists` | a PV landed on the local-path class instead of {% if tenant_storage %}a static volume or `tenant-local`{% else %}a static volume{% endif %} | Storage |
 | `KubeletImageGCIneffective` | a node root filesystem is above the kubelet image-gc watermark | Storage, "Kubelet image store" |
 {% if tenant_storage %}| `TenantVolumesFilling` / `TenantVolumesNearlyFull` | the shared tenant-volumes zvol is under 20% / 10% free | Storage, "Tenant volumes filling" |
+| `TenantVolumesMountMissing` | no node-exporter reports `/mnt/tenant-volumes`, so the zvol is not mounted | Storage, "Tenant claim refused: not the mounted tenant-volumes zvol" |
 {% endif %}| `ZFSPoolNotOnline` / `ZFSPoolDataErrors` | a pool is DEGRADED or has unrecoverable data | Storage, "A degraded pool" |
 | `ZFSPoolDeviceErrors` / `ZFSPoolScrubStale` | checksum errors on an ONLINE pool, or no scrub in 35 days | Storage, "A degraded pool" |
 | `SMARTDeviceUnhealthy` / `SMARTPendingSectorsGrowing` / `SMARTOfflineUncorrectableGrowing` / `SMARTMediaErrors` / `SMARTReallocatedSectorsGrowing` | a drive's own SMART attributes say it is failing | Storage, "A failing drive" |
@@ -1239,6 +1240,11 @@ zvol-backed volume" above, and raise the `tenant-volumes` disk size in
 `hosts.yml` with it.
 
 ### Tenant claim refused: not the mounted tenant-volumes zvol
+
+`TenantVolumesMountMissing` fires when no node-exporter has reported a
+`/mnt/tenant-volumes` filesystem for 10 minutes: the zvol is not mounted, or the
+NAS agent's node-exporter is down. While the zvol is unmounted, every new claim
+is refused as below.
 
 A `tenant-local` claim stays Pending, and the provisioner's helper pod logs
 `refusing ...: /mnt/tenant-volumes is not the mounted tenant-volumes zvol`,

@@ -740,6 +740,22 @@ spec:
                     {{ $value | humanizePercentage }} of /mnt/tenant-volumes is
                     free. When it fills, every tenant volume on it, database
                     instances included, stops accepting writes.
+
+              # The two alerts above go silent when the mount is gone, the state
+              # in which the provisioner refuses every tenant claim.
+              - alert: TenantVolumesMountMissing
+                expr: >-
+                  absent(node_filesystem_size_bytes{job="node-exporter", mountpoint="/mnt/tenant-volumes"})
+                for: 10m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#tenant-claim-refused-not-the-mounted-tenant-volumes-zvol'
+                  summary: 'No node-exporter reports a /mnt/tenant-volumes filesystem'
+                  description: >-
+                    The tenant-volumes zvol is not mounted on the NAS agent, or
+                    its node-exporter is down. New tenant-local claims are
+                    refused, and the TenantVolumes fill alerts cannot fire.
 {% endraw %}{% endif %}{% if storage_backend == 'zfs' %}{% raw %}
 
               # Pool integrity, from the node_exporter_host zpool textfile
