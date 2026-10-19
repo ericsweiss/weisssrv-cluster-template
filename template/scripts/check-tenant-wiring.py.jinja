@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Assert every tenant wiring file carries the confinement it is supposed to.
 Each omitted piece fails OPEN: PSS labels, namespace caps, SA and RoleBindings,
-store conditions, landing namespace, and the Namespace and cap prune guards.
+store conditions, landing namespace, the Namespace and cap prune guards, and
+the database Kustomization's deletionPolicy: Orphan.
 """
 from __future__ import annotations
 
@@ -313,6 +314,11 @@ def _kustomization_problems(docs: list, label: str, kustomization: dict,
         )
     if spec.get("prune") is not True:
         problems.append(f"{label}: Kustomization does not set prune: true")
+    if _is_database_tree(kustomization) and spec.get("deletionPolicy") != "Orphan":
+        problems.append(
+            f"{label}: database Kustomization does not set deletionPolicy: Orphan — "
+            "deleting it would garbage-collect the database Cluster and its PVCs"
+        )
     target = spec.get("targetNamespace")
     if not target:
         problems.append(f"{label}: Kustomization has no targetNamespace")

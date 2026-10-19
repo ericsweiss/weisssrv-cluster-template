@@ -508,7 +508,7 @@ def test_every_kustomization_in_a_tenant_file_is_checked(repo: Path) -> None:
 
 CONFINED_SECOND = SECOND.replace(
     "  dependsOn:\n", "  serviceAccountName: demo-app-flux\n  dependsOn:\n"
-)
+).replace("  prune: true\n", "  prune: true\n  deletionPolicy: Orphan\n")
 GUARD = "  annotations:\n    kustomize.toolkit.fluxcd.io/prune: disabled\n"
 
 
@@ -550,11 +550,36 @@ def test_a_tenant_object_without_the_prune_guard_fails(
 def test_a_database_kustomization_that_orphans_on_deletion_passes(repo: Path) -> None:
     """The database Kustomization carries `deletionPolicy: Orphan`, so deleting its
     wiring leaves the database whole; the gate must accept the field."""
-    second = CONFINED_SECOND.replace(
-        "  prune: true\n", "  prune: true\n  deletionPolicy: Orphan\n"
-    )
-    assert "deletionPolicy: Orphan" in second
+    assert "deletionPolicy: Orphan" in CONFINED_SECOND
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + CONFINED_SECOND)
+    assert gate.check(repo) == []
+
+
+@pytest.mark.parametrize(
+    "policy", [None, "Delete", "MirrorPrune", "WaitForTermination"],
+    ids=["absent", "delete", "mirror-prune", "wait"],
+)
+@pytest.mark.parametrize("by", ["name", "path"])
+def test_a_database_kustomization_without_orphan_fails(
+    repo: Path, policy: str | None, by: str
+) -> None:
+    """Without `deletionPolicy: Orphan`, deleting the db Kustomization garbage
+    collects the database Cluster and its PVCs with it."""
+    replacement = "" if policy is None else f"  deletionPolicy: {policy}\n"
+    second = CONFINED_SECOND.replace("  deletionPolicy: Orphan\n", replacement)
+    if by == "path":
+        second = second.replace("name: demo-app-db\n", "name: demo-app-data\n")
     write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
+    problems = gate.check(repo)
+    assert len(problems) == 1, problems
+    assert "deletionPolicy: Orphan" in problems[0], problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_an_app_kustomization_needs_no_orphan(repo: Path) -> None:
+    """Only the database tree is held to Orphan; the app tree prunes normally."""
+    assert "deletionPolicy" not in TENANT
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT)
     assert gate.check(repo) == []
 
 

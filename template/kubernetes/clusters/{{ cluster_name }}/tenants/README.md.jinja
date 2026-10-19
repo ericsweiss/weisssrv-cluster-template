@@ -28,6 +28,8 @@ place; then the rest (this directory's tenant file and its `kustomization.yaml`
 line, as above). Confirm the last base backup and WAL archive in the object
 store, delete the CNPG `Cluster` by hand, and delete the Namespace by hand last:
 while the tenant file that declares it is in Git, Flux recreates it.
+`scripts/check-tenant-wiring.py` refuses a db Kustomization (named `*-db`, or
+reconciling `./kubernetes/db`) that does not set `deletionPolicy: Orphan`.
 {%- endif %}
 
 ## The tenant side of the contract
