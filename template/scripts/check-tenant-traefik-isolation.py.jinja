@@ -299,11 +299,49 @@ REQUIRED_POLICIES = {
             ),
         ],
     },
+    "tenant-certificates": {
+        "paramKind": {"apiVersion": "v1", "kind": "ConfigMap"},
+        "resourceRules": [
+            {
+                "apiGroups": ["cert-manager.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["certificates"],
+            },
+        ],
+        "variables": [
+            ("hosts", "params.data.hosts.split('\\n').map(h, h.trim()).filter(h, h != '')"),
+            ("platformIssuers", "['letsencrypt-prod', 'letsencrypt-staging']"),
+        ],
+        "validations": [
+            (
+                "(!has(object.spec.dnsNames) || object.spec.dnsNames.all(n, "
+                "!n.contains('*') && n in variables.hosts)) && "
+                "(!has(object.spec.commonName) || (!object.spec.commonName.contains('*') && "
+                "object.spec.commonName in variables.hosts))"
+            ),
+            (
+                "!has(object.spec.literalSubject) && !has(object.spec.ipAddresses) && "
+                "!has(object.spec.uris) && !has(object.spec.emailAddresses) && "
+                "!has(object.spec.otherNames)"
+            ),
+            (
+                "(!has(object.spec.issuerRef.group) || object.spec.issuerRef.group in "
+                "['', 'cert-manager.io']) && (has(object.spec.issuerRef.kind) && "
+                "object.spec.issuerRef.kind == 'ClusterIssuer' ? "
+                "object.spec.issuerRef.name in variables.platformIssuers : "
+                "!has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind in "
+                "['', 'Issuer'])"
+            ),
+        ],
+    },
 }
 # Bound once per tenant, in its wiring file, to the hostnames the platform
 # granted that namespace in flux-system/tenant-routing-<ns>; every other
 # required policy is bound once, here, on the tenant label.
 HOSTNAME_POLICY = "tenant-traefik-hostnames"
+CERTIFICATE_POLICY = "tenant-certificates"
+PER_TENANT_POLICIES = (HOSTNAME_POLICY, CERTIFICATE_POLICY)
 FLUX_NAMESPACE = "flux-system"
 ROUTING_PREFIX = "tenant-routing-"
 TENANT_LABEL = "fluxcd.io/tenant"
@@ -390,7 +428,7 @@ def enforces(spec: object, required: dict) -> bool:
 def policies_pin_tenants(path: Path, root: Path) -> bool:
     """True when the configs kustomization applies the policy file, every
     required policy exists in its pinned shape, and each but the per-tenant
-    hostname policy has a binding whose whole spec is Deny on the tenant label."""
+    grant policies has a binding whose whole spec is Deny on the tenant label."""
     if not path.is_file():
         return False
     configs = root / CONFIGS_KUSTOMIZATION
@@ -422,18 +460,19 @@ def policies_pin_tenants(path: Path, root: Path) -> bool:
         }:
             bound.add(name)
     return all(
-        (name in bound or name == HOSTNAME_POLICY)
+        (name in bound or name in PER_TENANT_POLICIES)
         and len(policies.get(name, [])) == 1
         and enforces(policies[name][0], required)
         for name, required in REQUIRED_POLICIES.items()
     )
 
 
-def routing_binding_spec(namespace: str) -> dict:
-    """The whole spec of a tenant's hostname binding: Deny, on that namespace
-    alone, reading its platform-owned grant and refusing when the grant is gone."""
+def routing_binding_spec(namespace: str, policy: str = HOSTNAME_POLICY) -> dict:
+    """The whole spec of a tenant's binding of a grant policy: Deny, on that
+    namespace alone, reading its platform-owned grant and refusing when the
+    grant is gone."""
     return {
-        "policyName": HOSTNAME_POLICY,
+        "policyName": policy,
         "validationActions": ["Deny"],
         "paramRef": {
             "name": ROUTING_PREFIX + namespace,
@@ -460,8 +499,9 @@ def _grant_problem(data: object) -> str | None:
 
 
 def routing_problems(root: Path, tenants: list[str]) -> list[str]:
-    """Every tenant namespace a tenant file declares has its own Deny binding of
-    the hostname policy and a non-empty hostname grant in flux-system."""
+    """Every tenant namespace a tenant file declares has its own Deny bindings of
+    the hostname and certificate policies and a non-empty hostname grant in
+    flux-system that both read."""
     base = (root / TENANTS_KUSTOMIZATION).parent
     docs: dict[str, list[dict]] = {}
     problems = []
@@ -501,13 +541,17 @@ def routing_problems(root: Path, tenants: list[str]) -> list[str]:
             )
         for namespace in namespaces:
             grant = ROUTING_PREFIX + str(namespace)
-            if routing_binding_spec(str(namespace)) not in specs:
-                problems.append(
-                    f"tenant namespace {namespace} has no binding of {HOSTNAME_POLICY} "
-                    "whose whole spec is Deny on that namespace alone with paramRef "
-                    f"{FLUX_NAMESPACE}/{grant} and parameterNotFoundAction Deny — "
-                    "its routes could match any hostname"
-                )
+            for policy, risk in (
+                (HOSTNAME_POLICY, "its routes could match any hostname"),
+                (CERTIFICATE_POLICY, "it could be issued a certificate for any hostname"),
+            ):
+                if routing_binding_spec(str(namespace), policy) not in specs:
+                    problems.append(
+                        f"tenant namespace {namespace} has no binding of {policy} "
+                        "whose whole spec is Deny on that namespace alone with paramRef "
+                        f"{FLUX_NAMESPACE}/{grant} and parameterNotFoundAction Deny — "
+                        f"{risk}"
+                    )
             if grant not in grants:
                 problems.append(
                     f"tenant namespace {namespace} has no ConfigMap {FLUX_NAMESPACE}/"

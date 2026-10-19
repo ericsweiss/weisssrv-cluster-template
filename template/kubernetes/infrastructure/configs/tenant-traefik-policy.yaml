@@ -348,6 +348,52 @@ spec:
         || object.metadata.annotations[k].split(',').all(d, d.trim() in variables.hosts))
       message: "a tenant Ingress may list only router.tls.domains the platform granted this namespace"
 ---
+# The ClusterIssuers solve DNS-01 for the whole zone, so a tenant Certificate is
+# held to the same grant as its routes. Each tenant's wiring file binds this
+# beside tenant-traefik-hostnames with the same paramRef; none is bound here.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-certificates
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["cert-manager.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["certificates"]
+  variables:
+    - name: hosts
+      expression: >-
+        params.data.hosts.split('\n').map(h, h.trim()).filter(h, h != '')
+    # The ClusterIssuers in cluster-issuer.yaml.
+    - name: platformIssuers
+      expression: "['letsencrypt-prod', 'letsencrypt-staging']"
+  validations:
+    - expression: >-
+        (!has(object.spec.dnsNames) || object.spec.dnsNames.all(n,
+        !n.contains('*') && n in variables.hosts))
+        && (!has(object.spec.commonName) || (!object.spec.commonName.contains('*')
+        && object.spec.commonName in variables.hosts))
+      message: "a tenant may request certificates only for hostnames granted this namespace"
+    # literalSubject carries its own CN, which an ACME CA issues as a name too.
+    - expression: >-
+        !has(object.spec.literalSubject) && !has(object.spec.ipAddresses)
+        && !has(object.spec.uris) && !has(object.spec.emailAddresses)
+        && !has(object.spec.otherNames)
+      message: "a tenant certificate may name only DNS hostnames (no literalSubject, IP, URI, email or otherName)"
+    # A namespaced Issuer resolves in the Certificate's own namespace.
+    - expression: >-
+        (!has(object.spec.issuerRef.group) || object.spec.issuerRef.group in ['', 'cert-manager.io'])
+        && (has(object.spec.issuerRef.kind) && object.spec.issuerRef.kind == 'ClusterIssuer'
+        ? object.spec.issuerRef.name in variables.platformIssuers
+        : !has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind in ['', 'Issuer'])
+      message: "a tenant certificate may use only a platform ClusterIssuer or an Issuer in its own namespace"
+---
 # A TCP or UDP router on a shared entryPoint can claim HostSNI(`*`) or the whole
 # port and intercept platform traffic, so tenants get none of their own.
 apiVersion: admissionregistration.k8s.io/v1

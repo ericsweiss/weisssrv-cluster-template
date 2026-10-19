@@ -26,14 +26,14 @@ RELEASE_WITH_VALUES = textwrap.dedent(
 )
 
 
-def routing_binding(ns: str) -> dict:
-    """The per-tenant hostname binding the platform writes into the wiring file."""
+def routing_binding(ns: str, policy: str = "tenant-traefik-hostnames") -> dict:
+    """A per-tenant binding of `policy` the platform writes into the wiring file."""
     return {
         "apiVersion": "admissionregistration.k8s.io/v1",
         "kind": "ValidatingAdmissionPolicyBinding",
-        "metadata": {"name": f"tenant-traefik-hostnames-{ns}"},
+        "metadata": {"name": f"{policy}-{ns}"},
         "spec": {
-            "policyName": "tenant-traefik-hostnames",
+            "policyName": policy,
             "validationActions": ["Deny"],
             "paramRef": {
                 "name": f"tenant-routing-{ns}",
@@ -57,7 +57,8 @@ def routing_configmap(ns: str, hosts: str = "demo.example.com\n") -> dict:
 
 
 def wiring(ns: str) -> list[dict]:
-    """A tenant file's routing part: its Namespace, hostname grant and binding."""
+    """A tenant file's routing part: its Namespace, hostname grant and the
+    hostname and certificate bindings that read it."""
     return [
         {
             "apiVersion": "v1",
@@ -66,6 +67,7 @@ def wiring(ns: str) -> list[dict]:
         },
         routing_configmap(ns),
         routing_binding(ns),
+        routing_binding(ns, "tenant-certificates"),
     ]
 
 
@@ -288,7 +290,8 @@ def test_a_policy_file_without_a_service_refusal_keeps_the_gate_closed(tmp_path,
     assert len(gate.check(root)) == 1
 
 
-def test_a_policy_file_without_the_hostname_policy_keeps_the_gate_closed(tmp_path):
+@pytest.mark.parametrize("name", ["tenant-traefik-hostnames", "tenant-certificates"])
+def test_a_policy_file_without_a_per_tenant_policy_keeps_the_gate_closed(tmp_path, name):
     """The per-tenant bindings name a policy; without it they enforce nothing."""
     root = build(
         tmp_path,
@@ -296,21 +299,23 @@ def test_a_policy_file_without_the_hostname_policy_keeps_the_gate_closed(tmp_pat
         RELEASE_WITH_VALUES.format(allow="true"),
     )
     docs = policy().split("---\n")
-    kept = [d for d in docs if "name: tenant-traefik-hostnames\n" not in d]
+    kept = [d for d in docs if f"name: {name}\n" not in d]
     assert len(kept) == len(docs) - 1
     write_policy(root, "---\n".join(kept))
     assert len(gate.check(root)) == 1
 
 
-def test_the_hostname_policy_is_bound_per_tenant_not_by_label():
+def test_the_grant_policies_are_bound_per_tenant_not_by_label():
     """A tenant-label binding would need one paramRef for every tenant; the
-    hostname grant is per tenant, so its bindings live in the wiring files."""
+    hostname grant is per tenant, so the bindings that read it live in the
+    wiring files."""
     bound = {
         d["spec"]["policyName"]
         for d in yaml.safe_load_all(SHIPPED_POLICY)
         if d and d["kind"] == "ValidatingAdmissionPolicyBinding"
     }
-    assert bound == set(gate.REQUIRED_POLICIES) - {gate.HOSTNAME_POLICY}
+    assert gate.PER_TENANT_POLICIES == ("tenant-traefik-hostnames", "tenant-certificates")
+    assert bound == set(gate.REQUIRED_POLICIES) - set(gate.PER_TENANT_POLICIES)
 
 
 def test_a_policy_file_the_configs_kustomization_does_not_list_keeps_the_gate_closed(tmp_path):
@@ -525,7 +530,9 @@ BINDING_WEAKENINGS = {
 
 
 @pytest.mark.parametrize("weakening", sorted(BINDING_WEAKENINGS))
-@pytest.mark.parametrize("name", sorted(set(gate.REQUIRED_POLICIES) - {gate.HOSTNAME_POLICY}))
+@pytest.mark.parametrize(
+    "name", sorted(set(gate.REQUIRED_POLICIES) - set(gate.PER_TENANT_POLICIES))
+)
 def test_a_binding_with_more_than_the_required_spec_keeps_the_gate_closed(
     tmp_path, name, weakening
 ):
@@ -548,14 +555,15 @@ def test_the_unmutated_binding_round_trip_still_opens_the_gate(tmp_path):
     assert gate.check(root) == []
 
 
-def test_a_hostname_policy_without_its_param_kind_keeps_the_gate_closed(tmp_path):
+@pytest.mark.parametrize("name", ["tenant-traefik-hostnames", "tenant-certificates"])
+def test_a_grant_policy_without_its_param_kind_keeps_the_gate_closed(tmp_path, name):
     """Without paramKind the per-tenant paramRef is never read."""
     root = build(
         tmp_path,
         ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
         RELEASE_WITH_VALUES.format(allow="true"),
     )
-    write_policy(root, _mutated(gate.HOSTNAME_POLICY, lambda spec: spec.pop("paramKind")))
+    write_policy(root, _mutated(name, lambda spec: spec.pop("paramKind")))
     assert len(gate.check(root)) == 1
 
 
@@ -575,10 +583,14 @@ def test_a_wired_tenant_passes(tmp_path):
     assert _routed(tmp_path, wiring("demo")) == []
 
 
-def _binding(mutate) -> list[dict]:
+def _binding(mutate, index: int = 2) -> list[dict]:
     docs = wiring("demo")
-    mutate(docs[2]["spec"])
+    mutate(docs[index]["spec"])
     return docs
+
+
+def _certificate_binding(mutate) -> list[dict]:
+    return _binding(mutate, 3)
 
 
 def _configmap(mutate) -> list[dict]:
@@ -590,7 +602,34 @@ def _configmap(mutate) -> list[dict]:
 # Each mutation leaves the tenant `demo` without a Deny binding that reads its
 # own platform-owned hostname grant, or without a usable grant.
 ROUTING_GAPS = {
-    "binding-missing": lambda: [d for d in wiring("demo") if d["kind"] != "ValidatingAdmissionPolicyBinding"],
+    "binding-missing": lambda: [
+        d for d in wiring("demo")
+        if d.get("spec", {}).get("policyName") != "tenant-traefik-hostnames"
+    ],
+    "certificates-binding-missing": lambda: [
+        d for d in wiring("demo")
+        if d.get("spec", {}).get("policyName") != "tenant-certificates"
+    ],
+    "certificates-binding-warn": lambda: _certificate_binding(
+        lambda s: s.__setitem__("validationActions", ["Warn"])
+    ),
+    "certificates-binding-other-namespace": lambda: _certificate_binding(
+        lambda s: s["matchResources"]["namespaceSelector"]["matchLabels"].__setitem__(
+            "kubernetes.io/metadata.name", "other"
+        )
+    ),
+    "certificates-paramRef-other-grant": lambda: _certificate_binding(
+        lambda s: s["paramRef"].__setitem__("name", "tenant-routing-other")
+    ),
+    "certificates-paramRef-allow": lambda: _certificate_binding(
+        lambda s: s["paramRef"].__setitem__("parameterNotFoundAction", "Allow")
+    ),
+    "certificates-binding-label-selector": lambda: _certificate_binding(
+        lambda s: s["matchResources"].__setitem__(
+            "namespaceSelector",
+            {"matchExpressions": [{"key": "fluxcd.io/tenant", "operator": "Exists"}]},
+        )
+    ),
     "binding-warn": lambda: _binding(lambda s: s.__setitem__("validationActions", ["Warn"])),
     "binding-extra-action": lambda: _binding(
         lambda s: s.__setitem__("validationActions", ["Deny", "Audit"])
@@ -671,10 +710,12 @@ def test_another_tenants_binding_does_not_cover_a_tenant(tmp_path):
     beta = wiring("beta")
     beta[2] = routing_binding("alpha")
     beta[2]["metadata"]["name"] = "tenant-traefik-hostnames-beta"
+    beta[3] = routing_binding("alpha", "tenant-certificates")
+    beta[3]["metadata"]["name"] = "tenant-certificates-beta"
     write_tenant(root, "beta.yaml", beta)
     problems = gate.check(root)
-    assert len(problems) == 1
-    assert "beta" in problems[0]
+    assert len(problems) == 2
+    assert all("beta" in p for p in problems)
 
 
 def test_a_listed_tenant_file_that_is_missing_fails(tmp_path):
@@ -692,7 +733,7 @@ def test_a_listed_tenant_file_that_is_missing_fails(tmp_path):
 
 def test_the_readme_example_wires_its_hostnames(tmp_path):
     """The onboarding example is what an operator copies, so it must carry the
-    hostname grant and binding the gate requires."""
+    hostname grant and both bindings the gate requires."""
     readme = (REPO / gate.TENANTS_KUSTOMIZATION).with_name("README.md").read_text()
     example = next(
         b for b in re.findall(r"```yaml\n(.*?)```", readme, re.S)

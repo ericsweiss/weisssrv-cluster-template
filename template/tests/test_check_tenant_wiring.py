@@ -581,11 +581,28 @@ ROUTING = textwrap.dedent(
         namespaceSelector:
           matchLabels:
             kubernetes.io/metadata.name: demo-app
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicyBinding
+    metadata:
+      name: tenant-certificates-demo-app
+    spec:
+      policyName: tenant-certificates
+      validationActions: [Deny]
+      paramRef:
+        name: tenant-routing-demo-app
+        namespace: flux-system
+        parameterNotFoundAction: Deny
+      matchResources:
+        namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: demo-app
     """
 )
 
 
 def test_the_hostname_binding_is_cluster_scoped(repo: Path) -> None:
-    """The per-tenant hostname binding names no namespace because it has none."""
+    """The per-tenant hostname and certificate bindings name no namespace
+    because they have none."""
     write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + ROUTING)
     assert gate.check(repo) == []

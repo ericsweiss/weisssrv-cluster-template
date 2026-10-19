@@ -286,7 +286,7 @@ notes for the tag that ships an entry repeat it under **Breaking changes**.
 ### Tenant isolation policies render unconditionally
 
 The tenant isolation set renders whatever the answers are:
-`infrastructure/configs/tenant-traefik-policy.yaml` with its eight
+`infrastructure/configs/tenant-traefik-policy.yaml` with its nine
 ValidatingAdmissionPolicies and their Deny bindings on every `fluxcd.io/tenant`
 namespace, Traefik's `defaultTLSResourcesNamespace: traefik`, and the CNPG kinds
 in `tenant-crd-editor`. An update with default answers therefore installs them,
@@ -303,10 +303,12 @@ before it merges:
    hand-written Endpoints or EndpointSlice it lists; the next reconcile of each
    is refused.
 2. For each tenant, add a `tenant-routing-<ns>` ConfigMap in `flux-system`
-   granting its hostnames, and the Deny binding of `tenant-traefik-hostnames`
-   that reads it, before that tenant's routes reconcile again. The tenants
-   README § Example carries both ("Hostname grant");
-   `task lint:tenant-traefik-isolation` fails until every tenant has them.
+   granting its hostnames, and the Deny bindings of `tenant-traefik-hostnames`
+   and `tenant-certificates` that read it, before that tenant's routes and
+   Certificates reconcile again. The tenants README § Example carries all three
+   ("Hostname grant"); `task lint:tenant-traefik-isolation` fails until every
+   tenant has them. A tenant Certificate whose names are not in the grant, or
+   that names another ClusterIssuer, is refused on its next apply.
 3. Remove any tenant TLSOption or TLSStore named `default`; Traefik already
    ignores it once `defaultTLSResourcesNamespace` is set.
 
@@ -322,6 +324,10 @@ What a tenant can no longer create or update:
   `maxPriority`, or above it; a route `tls.domains` name not granted; an
   Ingress rule with no host, a TLS host or `router.tls.domains.*` annotation
   name not granted, or a default backend;
+- a cert-manager Certificate naming a hostname its grant does not list, a
+  wildcard, an IP, URI, email, otherName or `literalSubject`, or an issuer
+  other than `letsencrypt-prod`, `letsencrypt-staging` or an Issuer in its own
+  namespace;
 - an IngressRouteTCP or IngressRouteUDP;
 - a TLSOption or TLSStore named `default`;
 - an ExternalName Service or a Service with no selector;

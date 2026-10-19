@@ -232,16 +232,21 @@ copy passes `task lint:comment-length`. The longer reasons live here:
   `flux-system`, alongside the GitRepository, because `secretRef` is
   namespace-local.
 - **Hostname grant.** `tenant-routing-example-app` lists the exact hostnames
-  the tenant may route; the platform decides them, never the tenant. The
-  binding beside it applies `tenant-traefik-hostnames` to the tenant namespace
-  alone, with that ConfigMap as its parameter. Every route must open with
+  the tenant may route; the platform decides them, never the tenant. The two
+  bindings beside it apply `tenant-traefik-hostnames` and
+  `tenant-certificates` to the tenant namespace alone, with that ConfigMap as
+  their parameter. Every route must open with
   `Host()` on a granted hostname and may not use `||`, `HostRegexp` or any
   other `Host`; split an OR into one route per hostname. A route may set
   `priority` only when the grant carries `maxPriority`, and at most that, and
   may list only granted names in `tls.domains`. An Ingress needs a granted
   `host` on every rule, granted TLS hosts and
   `router.tls.domains.*` annotations, and no default backend. Grant a hostname
-  no platform route serves.
+  no platform route serves. A Certificate may name only granted hostnames in
+  `dnsNames` and `commonName`, no wildcard, IP, URI, email, otherName or
+  `literalSubject`, and may use only the platform ClusterIssuers
+  (`letsencrypt-prod`, `letsencrypt-staging`) or an Issuer in its own
+  namespace.
 - **Impersonation.** Without `serviceAccountName`, kustomize-controller applies
   tenant manifests with its own cluster-admin credentials. The ServiceAccount
   must live in the Kustomization's own namespace (`flux-system`), because
@@ -386,6 +391,24 @@ metadata:
   name: tenant-traefik-hostnames-example-app
 spec:
   policyName: tenant-traefik-hostnames
+  validationActions: [Deny]
+  paramRef:
+    name: tenant-routing-example-app
+    namespace: flux-system
+    parameterNotFoundAction: Deny
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: example-app
+---
+# Holds this namespace's cert-manager Certificates to the same grant, from a
+# platform ClusterIssuer or the tenant's own Issuer.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-certificates-example-app
+spec:
+  policyName: tenant-certificates
   validationActions: [Deny]
   paramRef:
     name: tenant-routing-example-app
@@ -556,9 +579,11 @@ spec:
   labels.
 - **Hostnames are granted by the platform.** Decide the tenant's hostnames at
   onboarding review and write them into its `tenant-routing-<ns>` ConfigMap,
-  with the per-tenant binding of `tenant-traefik-hostnames`, as the example
-  does. A namespace without both refuses every IngressRoute and Ingress, and
-  `task lint:tenant-traefik-isolation` fails. Never grant a hostname a
+  with the per-tenant bindings of `tenant-traefik-hostnames` and
+  `tenant-certificates`, as the example does. A namespace whose grant is
+  missing refuses every IngressRoute, Ingress and Certificate, and
+  `task lint:tenant-traefik-isolation` fails without the grant and both
+  bindings. Never grant a hostname a
   platform route serves.
 - **Add the tenant's hostnames to the blackbox targets.** A tenant's own
   `PrometheusRule` covers replica availability and certificate readiness. A
@@ -600,9 +625,12 @@ spec:
   `default`: Traefik's CRD provider drops a `default` defined in two namespaces,
   which would return every platform route to Traefik's built-in TLS defaults,
   and a lone tenant `default` TLSStore would set every route's default
-  certificate. In full, the set is eight: `tenant-traefik-route-refs`,
+  certificate. Certificates are issued only for granted hostnames:
+  the ClusterIssuers solve DNS-01 for the whole zone, so `tenant-certificates`
+  holds every tenant Certificate to the same grant as its routes. In full, the
+  set is nine: `tenant-traefik-route-refs`,
   `tenant-traefik-object-refs`, `tenant-traefik-ingress-refs`,
-  `tenant-traefik-hostnames`, `tenant-no-tcp-udp-routes`,
+  `tenant-traefik-hostnames`, `tenant-certificates`, `tenant-no-tcp-udp-routes`,
   `tenant-traefik-tls-defaults`, `tenant-no-externalname-services` and
   `tenant-no-manual-endpoints`.
   Once any tenant is onboarded, `task lint:tenant-traefik-isolation` fails if
@@ -610,8 +638,9 @@ spec:
   below every tenant namespace, or if a policy fails open, narrows its resources,
   or changes, drops or adds a variable or validation expression, even with
   `allowCrossNamespace: false`. It also fails unless each tenant namespace has
-  its own Deny binding of `tenant-traefik-hostnames` reading
-  `flux-system/tenant-routing-<ns>` with `parameterNotFoundAction: Deny`, and
+  its own Deny bindings of `tenant-traefik-hostnames` and
+  `tenant-certificates`, both reading `flux-system/tenant-routing-<ns>` with
+  `parameterNotFoundAction: Deny`, and
   that ConfigMap grants at least one hostname. The gate carries each
   expression verbatim, so a deliberate policy edit changes the gate's table in
   the same commit.
