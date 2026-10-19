@@ -156,11 +156,15 @@ def test_a_granted_certificate_is_admitted(spec):
         {"dnsNames": ["demo.apps.test"], "issuerRef": {**ISSUER, "name": "other-ca"}},
         {"dnsNames": ["demo.apps.test"], "issuerRef": {**ISSUER, "group": "example.io"}},
         {"dnsNames": ["demo.apps.test"], "issuerRef": {"name": "x", "kind": "AwsPCAIssuer"}},
+        {"dnsNames": ["demo.apps.test"], "issuerRef": {
+            "name": "pca", "kind": "AWSPCAClusterIssuer", "group": "awspca.cert-manager.io"}},
+        {"dnsNames": ["demo.apps.test"], "issuerRef": {
+            "name": "own-ca", "kind": "Issuer", "group": "example.io"}},
     ],
     ids=[
         "ungranted", "one-ungranted", "wildcard", "ungranted-cn", "wildcard-cn",
         "literal-subject", "ip", "uri", "email", "other-cluster-issuer", "external-group",
-        "other-kind",
+        "other-kind", "external-cluster-issuer", "issuer-external-group",
     ],
 )
 def test_an_ungranted_certificate_is_refused(spec):

@@ -435,11 +435,14 @@ spec:
         operations: ["CREATE", "UPDATE"]
         resources: ["orders"]
   validations:
+    # An empty kind or group is cert-manager's core Issuer; any other kind, an
+    # external plugin's ClusterIssuer included, would sign outside the grant.
     - expression: >-
         request.resource.group == 'acme.cert-manager.io'
-        || !has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind != 'ClusterIssuer'
         || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'
-      message: "tenant CertificateRequests to platform ClusterIssuers are created by cert-manager from a validated Certificate only"
+        || ((!has(object.spec.issuerRef.group) || object.spec.issuerRef.group in ['', 'cert-manager.io'])
+        && (!has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind in ['', 'Issuer']))
+      message: "tenant certificate requests may use a platform ClusterIssuer (via a validated Certificate) or a cert-manager.io Issuer in their own namespace only"
     # Defence in depth, not a live bypass: cert-manager-edit grants no Order create or
     # update. The garbage collector removes foregroundDeletion finalizers on Orders.
     - expression: >-

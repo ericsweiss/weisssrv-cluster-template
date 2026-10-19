@@ -372,10 +372,11 @@ REQUIRED_POLICIES = {
         "validations": [
             (
                 "request.resource.group == 'acme.cert-manager.io' || "
-                "!has(object.spec.issuerRef.kind) || "
-                "object.spec.issuerRef.kind != 'ClusterIssuer' || "
                 "request.userInfo.username == "
-                "'system:serviceaccount:cert-manager:cert-manager'"
+                "'system:serviceaccount:cert-manager:cert-manager' || "
+                "((!has(object.spec.issuerRef.group) || object.spec.issuerRef.group in "
+                "['', 'cert-manager.io']) && (!has(object.spec.issuerRef.kind) || "
+                "object.spec.issuerRef.kind in ['', 'Issuer']))"
             ),
             (
                 "request.resource.group != 'acme.cert-manager.io' || "

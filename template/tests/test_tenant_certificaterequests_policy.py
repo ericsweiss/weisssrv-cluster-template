@@ -1,5 +1,5 @@
-"""Only cert-manager's controller may send a tenant CertificateRequest to a
-ClusterIssuer or write an ACME Order or Challenge; only Orders, whose spec the
+"""Only cert-manager's controller may send a tenant CertificateRequest to any
+issuer but a core cert-manager.io Issuer, or write an ACME Order or Challenge; only Orders, whose spec the
 webhook leaves mutable, match UPDATE. `allowed()` mirrors the policy."""
 
 from __future__ import annotations
@@ -16,10 +16,12 @@ GARBAGE_COLLECTOR = "system:serviceaccount:kube-system:generic-garbage-collector
 VALIDATIONS = [
     (
         "request.resource.group == 'acme.cert-manager.io'"
-        " || !has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind != 'ClusterIssuer'"
-        " || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'",
-        "tenant CertificateRequests to platform ClusterIssuers are created by cert-manager"
-        " from a validated Certificate only",
+        " || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'"
+        " || ((!has(object.spec.issuerRef.group)"
+        " || object.spec.issuerRef.group in ['', 'cert-manager.io'])"
+        " && (!has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind in ['', 'Issuer']))",
+        "tenant certificate requests may use a platform ClusterIssuer (via a validated"
+        " Certificate) or a cert-manager.io Issuer in their own namespace only",
     ),
     (
         "request.resource.group != 'acme.cert-manager.io'"
@@ -129,7 +131,10 @@ def allowed(
     resource = resource or ("orders" if acme else "certificaterequests")
     if operation not in MATCHED[(group, resource)]:
         return True
-    return (acme or issuer_ref.get("kind") != "ClusterIssuer" or username == CONTROLLER) and (
+    core_issuer = issuer_ref.get("group", "") in ("", "cert-manager.io") and issuer_ref.get(
+        "kind", ""
+    ) in ("", "Issuer")
+    return (acme or username == CONTROLLER or core_issuer) and (
         not acme or username in (CONTROLLER, GARBAGE_COLLECTOR)
     )
 
@@ -147,6 +152,23 @@ def test_a_tenant_authored_request_to_a_cluster_issuer_is_refused():
 
 def test_the_controllers_request_to_a_cluster_issuer_is_admitted():
     assert allowed(PROD, CONTROLLER)
+
+
+@pytest.mark.parametrize(
+    "issuer_ref",
+    [
+        {"name": "pca", "kind": "AWSPCAClusterIssuer", "group": "awspca.cert-manager.io"},
+        {"name": "pca", "kind": "AWSPCAIssuer", "group": "awspca.cert-manager.io"},
+        {"name": "own-ca", "kind": "Issuer", "group": "example.io"},
+        {"name": "x", "kind": "SomeClusterIssuer"},
+    ],
+    ids=["external-cluster-issuer", "external-issuer", "external-group", "other-kind"],
+)
+def test_a_tenant_request_to_an_external_issuer_kind_is_refused(issuer_ref):
+    """An external issuer plugin's own kinds, cluster-scoped ones in particular,
+    would sign a tenant CSR outside its hostname grant, so only cert-manager's
+    core namespaced Issuer is open to a tenant-authored request."""
+    assert not allowed(issuer_ref, TENANT)
 
 
 @pytest.mark.parametrize(
