@@ -97,3 +97,28 @@ tests:
               severity: critical
               namespace: fresh
               pod: fresh-db-1
+
+  # A missing or broken Barman plugin exports no barman_cloud_* series at all,
+  # which silences every backup alert; the instance must still be up to count.
+  - interval: 1m
+    input_series:
+      - series: 'cnpg_collector_up{namespace="app", pod="app-db-1", job="app/app-db"}'
+        values: '1x45'
+      - series: 'cnpg_collector_up{namespace="other-app", pod="other-app-db-1", job="other-app/other-app-db"}'
+        values: '1x45'
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="other-app", pod="other-app-db-1", job="other-app/other-app-db"}'
+        values: '1000x45'
+      - series: 'cnpg_collector_up{namespace="down", pod="down-db-1", job="down/down-db"}'
+        values: '0x45'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CNPGBackupMetricsAbsent
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: CNPGBackupMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: app
+              pod: app-db-1
+              job: app/app-db

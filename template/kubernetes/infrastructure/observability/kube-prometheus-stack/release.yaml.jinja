@@ -2022,6 +2022,24 @@ spec:
                     A failed base backup is newer than the last good one; the
                     recovery window shrinks every night this repeats.
 
+              # A missing or broken Barman plugin exports no barman_cloud_* series,
+              # which silences every base-backup alert. Both exporters
+              # share the instance pod's target labels, so the join is per pod.
+              - alert: CNPGBackupMetricsAbsent
+                expr: >-
+                  cnpg_collector_up == 1
+                  unless on (namespace, pod)
+                  barman_cloud_cloudnative_pg_io_last_available_backup_timestamp
+                for: 30m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#backup-metrics-absent'
+                  summary: '{{ $labels.namespace }}/{{ $labels.pod }} is up but exports no Barman backup metrics'
+                  description: >-
+                    The instance reports PostgreSQL up, but no barman_cloud_*
+                    series has arrived for 30 minutes, so no base-backup alert can fire.
+
               # 30h is one nightly cycle plus margin. A timestamp of 0 is no backup
               # ever, which CNPGNeverBackedUp covers; the age alerts skip it.
               - alert: CNPGBaseBackupStale

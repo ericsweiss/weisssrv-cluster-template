@@ -192,6 +192,24 @@ none of the platform rules above can fire.
    the app-template) admits `observability` on 9187.
 4. Once the pod runs, continue with [Postgres down](#postgres-down).
 
+### Backup metrics absent
+
+Alerts: `CNPGBackupMetricsAbsent` (warning). The instance reports
+`cnpg_collector_up == 1` but has exported no
+`barman_cloud_cloudnative_pg_io_last_available_backup_timestamp` series for 30
+minutes. Every base-backup alert reads that family, so none of them can fire.
+
+1. Check that the Cluster names the plugin and that the sidecar runs:
+   `kubectl -n <ns> get cluster.postgresql.cnpg.io <cluster> -o jsonpath='{.spec.plugins}'`
+   and `kubectl -n <ns> get pod <cluster>-1 -o jsonpath='{.spec.initContainers[*].name} {.spec.containers[*].name}'`
+   (expect `plugin-barman-cloud`).
+2. Read `kubectl -n <ns> logs <cluster>-1 -c plugin-barman-cloud --tail=200`
+   and `kubectl -n cnpg-system logs -l app.kubernetes.io/name=plugin-barman-cloud --tail=200`.
+3. Check that the `ObjectStore` the plugin parameters name exists in `<ns>`.
+
+A recovery side cluster runs with no `plugins:` section on purpose, so it raises
+this warning until its scratch namespace is deleted.
+
 ### WAL archiving failing
 
 Alerts: `CNPGWALArchivingFailing`. Read
