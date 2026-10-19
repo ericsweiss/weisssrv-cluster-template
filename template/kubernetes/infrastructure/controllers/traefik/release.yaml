@@ -124,6 +124,9 @@ spec:
         # Tenant routes stay pinned to their own namespace by the admission
         # policies in infrastructure/configs/tenant-traefik-policy.yaml.
         allowCrossNamespace: true
+        # A `default` TLSOption or TLSStore outside this namespace is ignored;
+        # backs the tenant-traefik-tls-defaults admission policy that refuses one.
+        defaultTLSResourcesNamespace: traefik
       kubernetesIngress:
         enabled: true
         publishedService:

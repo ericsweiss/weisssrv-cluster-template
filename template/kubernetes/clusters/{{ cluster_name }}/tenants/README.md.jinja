@@ -541,7 +541,9 @@ spec:
   where the tenant carries a second route.
 - **Traefik cross-namespace refs.** The platform runs the Traefik CRD provider
   with `allowCrossNamespace: true` so app IngressRoutes can use the shared
-  middlewares in the `traefik` namespace.
+  middlewares in the `traefik` namespace, and with
+  `defaultTLSResourcesNamespace: traefik` so it ignores a `default` TLSOption
+  or TLSStore defined anywhere else.
   `infrastructure/configs/tenant-traefik-policy.yaml` holds tenants to their own
   namespace: its ValidatingAdmissionPolicies, Deny-bound on every
   `fluxcd.io/tenant` namespace, pin each Service, Middleware, TLS and

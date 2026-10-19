@@ -13,6 +13,7 @@ from conftest import REPO
 
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
 AUTHENTIK = REPO / "kubernetes" / "apps" / "authentik" / "middleware.yaml"
+TRAEFIK = REPO / "kubernetes" / "infrastructure" / "controllers" / "traefik" / "release.yaml"
 MESSAGE = "a tenant forwardAuth middleware may call only a Service in its own namespace"
 EXPRESSION = (
     "!has(object.spec.forwardAuth)"
@@ -106,3 +107,11 @@ def test_another_namespace_or_outside_address_is_refused(address):
 
 def test_a_middleware_without_forward_auth_is_untouched():
     assert allowed({"headers": {"customResponseHeaders": {"X-Frame-Options": "DENY"}}}, "demo")
+
+
+def test_traefik_reads_default_tls_objects_only_from_its_own_namespace():
+    """Second layer behind tenant-traefik-tls-defaults: a `default` TLSOption or
+    TLSStore outside `traefik` is ignored even if the policy goes missing."""
+    release = yaml.safe_load(TRAEFIK.read_text())
+    crd = release["spec"]["values"]["providers"]["kubernetesCRD"]
+    assert crd.get("defaultTLSResourcesNamespace") == "traefik"
