@@ -4,7 +4,7 @@
 
 # Tenants hold full traefik.io write while Traefik allows cross-namespace refs
 # for the platform. These policies pin every reference a tenant route makes to
-# its own namespace, except the platform middlewares listed below.
+# its own namespace, and what it matches to the hostnames the platform grants.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -270,6 +270,96 @@ metadata:
   name: tenant-no-manual-endpoints
 spec:
   policyName: tenant-no-manual-endpoints
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
+# A tenant route may match only hostnames the platform granted it, so it cannot
+# shadow a platform route. Each tenant's wiring file binds this policy to its
+# namespace with paramRef flux-system/tenant-routing-<ns>; none is bound here.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-traefik-hostnames
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingressroutes"]
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingresses"]
+  variables:
+    - name: isRoute
+      expression: "request.resource.resource == 'ingressroutes'"
+    # data.hosts: one exact hostname per line.
+    - name: hosts
+      expression: >-
+        params.data.hosts.split('\n').map(h, h.trim()).filter(h, h != '')
+    - name: hostMatchers
+      expression: "variables.hosts.map(h, 'Host(`' + h + '`)')"
+  validations:
+    # Leading Host() and no ||, so every rule is a conjunction that pins the
+    # host: a PathPrefix-only, ClientIP-only or OR-ed rule would match any host.
+    - expression: >-
+        !variables.isRoute || !has(object.spec.routes) || object.spec.routes.all(r,
+        r.match.matches('^Host[(]`[^`]+`[)]( && .*)?$') && !r.match.contains('||')
+        && !r.match.contains('HostRegexp(')
+        && r.match.findAll('Host[(]`[^`]*`[)]').all(h, h in variables.hostMatchers))
+      message: "a tenant route must open with Host() on a hostname the platform granted this namespace, and may not use ||, HostRegexp or any other Host"
+    # data.maxPriority, when the platform sets it, is the highest route priority
+    # the tenant may claim; without it a tenant route keeps Traefik's default.
+    - expression: >-
+        !variables.isRoute || !has(object.spec.routes) || object.spec.routes.all(r,
+        !has(r.priority) || ('maxPriority' in params.data
+        && r.priority <= int(params.data.maxPriority)))
+      message: "a tenant route may set a priority only up to the maxPriority the platform granted this namespace"
+    - expression: >-
+        variables.isRoute || !has(object.spec) || !has(object.spec.defaultBackend)
+      message: "a tenant Ingress may not set a default backend (it answers every hostname)"
+    - expression: >-
+        variables.isRoute || !has(object.spec) || !has(object.spec.rules)
+        || object.spec.rules.all(r, has(r.host) && r.host in variables.hosts)
+      message: "every tenant Ingress rule must name a host the platform granted this namespace"
+    - expression: >-
+        variables.isRoute || !has(object.spec) || !has(object.spec.tls)
+        || object.spec.tls.all(t, !has(t.hosts) || t.hosts.all(h, h in variables.hosts))
+      message: "a tenant Ingress may list only TLS hosts the platform granted this namespace"
+---
+# A TCP or UDP router on a shared entryPoint can claim HostSNI(`*`) or the whole
+# port and intercept platform traffic, so tenants get none of their own.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-no-tcp-udp-routes
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingressroutetcps", "ingressrouteudps"]
+  validations:
+    - expression: "false"
+      message: "tenants serve HTTP only; ask the platform for a TCP route"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-no-tcp-udp-routes
+spec:
+  policyName: tenant-no-tcp-udp-routes
   validationActions: [Deny]
   matchResources:
     namespaceSelector:
