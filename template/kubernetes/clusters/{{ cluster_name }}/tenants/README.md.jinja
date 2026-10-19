@@ -182,6 +182,47 @@ nothing in git changes.
 
 ## Example
 
+The comments in the file below stay within the three-line comment rule, so a
+copy passes `task lint:comment-length`. The longer reasons live here:
+
+- **No platform-store label.** The Namespace deliberately omits
+  `{{ internal_domain }}/cluster-secrets: "true"`. That label is what the
+  platform `ClusterSecretStore`'s `spec.conditions` admit, and it would give
+  the tenant read access to every item in the platform vault. The tenant gets
+  its own store instead.
+- **Per-tenant vault.** Each tenant gets its own 1Password vault, named after
+  the tenant, and a Connect token scoped to that vault alone, so a compromised
+  tenant namespace cannot read platform items. The token Secret is bootstrap
+  state (not Flux-managed) and scoped to this tenant, so revoking it is
+  independent of every other tenant. Creating it and rotating it are the same
+  commands:
+
+  ```bash
+  op vault create example-app
+  op connect vault grant --server <EXISTING_SERVER_ID> --vault example-app
+  op connect token create {{ cluster_name }}-example-app-eso \
+    --server <EXISTING_SERVER_ID> --vaults example-app
+  kubectl -n example-app create secret generic onepassword-connect-token \
+    --from-literal=token=<CONNECT_TOKEN> --dry-run=client -o yaml \
+    | kubectl apply -f -
+  ```
+
+  The Secret has no controller owner, so the unmanaged-secrets gate must
+  allowlist `example-app/onepassword-connect-token` in the same change as the
+  tenant file, and lose the entry when the tenant goes.
+- **Private repository.** Add `secretRef: {name: example-app-git-auth}` to the
+  GitRepository and create that Secret with `flux create secret git`, as in
+  "Private tenant repositories" above. It is bootstrap state and lives in
+  `flux-system`, alongside the GitRepository, because `secretRef` is
+  namespace-local.
+- **Impersonation.** Without `serviceAccountName`, kustomize-controller applies
+  tenant manifests with its own cluster-admin credentials. The ServiceAccount
+  must live in the Kustomization's own namespace (`flux-system`), because
+  kustomize-controller impersonates
+  `system:serviceaccount:<Kustomization namespace>:<name>`. The RoleBindings
+  then grant that ServiceAccount rights in the tenant namespace and nowhere
+  else.
+
 ```yaml
 # {{ cluster_name }}/tenants/example-app.yaml
 ---
@@ -195,10 +236,9 @@ metadata:
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/audit: restricted
-    # DELIBERATELY ABSENT: {{ internal_domain }}/cluster-secrets: "true".
-    # That label is what the PLATFORM ClusterSecretStore's spec.conditions admit,
-    # and it would give this tenant read access to every item in the platform
-    # vault. The tenant gets its own store, below.
+    # DELIBERATELY ABSENT: {{ internal_domain }}/cluster-secrets: "true" would
+    # admit this tenant to the platform store and its whole vault. The tenant
+    # gets its own store, below (see "No platform-store label" in the README).
 ---
 # Cap the namespace: `admin` places no ceiling on what a tenant may request.
 # `pods:` must exceed the tenant's replica count, which surges by one on
@@ -240,21 +280,9 @@ spec:
       max:
         memory: 2Gi
 ---
-# Each tenant gets its own 1Password vault, named after the tenant, and a
-# Connect token scoped to that vault alone: a compromised tenant namespace must
-# not be able to read platform items. Bootstrap (NOT Flux-managed), scoped to
-# this tenant so revocation is independent. The apply form is also the rotation
-# procedure:
-#   op vault create example-app
-#   op connect vault grant --server <EXISTING_SERVER_ID> --vault example-app
-#   op connect token create {{ cluster_name }}-example-app-eso \
-#     --server <EXISTING_SERVER_ID> --vaults example-app
-#   kubectl -n example-app create secret generic onepassword-connect-token \
-#     --from-literal=token=<CONNECT_TOKEN> --dry-run=client -o yaml \
-#     | kubectl apply -f -
-# The Secret has no controller owner, so an unmanaged-secrets gate must
-# allowlist example-app/onepassword-connect-token in the same change as this
-# file, and lose the entry when the tenant goes.
+# The tenant's own 1Password vault and a Connect token granted that vault
+# alone. Bootstrap the token Secret and allowlist it as "Per-tenant vault" in
+# the tenants README describes; the same commands rotate it.
 apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
 metadata:
@@ -296,16 +324,13 @@ spec:
   url: https://{{ git_host }}/{{ git_namespace }}/example-app
   ref:
     branch: main
-  # Private repo: add `secretRef: {name: example-app-git-auth}` and create that
-  # Secret with `flux create secret git` — see "Private tenant repositories"
-  # above. It is bootstrap state and lives in flux-system, alongside this
-  # GitRepository, because secretRef is namespace-local.
+  # Private repo: add `secretRef: {name: example-app-git-auth}` and create
+  # that Secret in flux-system with `flux create secret git` — see "Private
+  # repository" in the tenants README.
 ---
-# Without serviceAccountName, kustomize-controller applies tenant manifests with
-# its own cluster-admin credentials. The SA must live in the Kustomization's OWN
-# namespace (flux-system) — kustomize-controller impersonates
-# system:serviceaccount:<Kustomization namespace>:<name>. The RoleBindings then
-# grant that SA rights in the tenant namespace and nowhere else.
+# kustomize-controller impersonates this SA instead of using cluster-admin, so
+# it lives in the Kustomization's own namespace (flux-system); the RoleBindings
+# grant it rights in the tenant namespace only (README: "Impersonation").
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -507,6 +532,11 @@ spec:
   `fluxcd.io/tenant` namespace, ExternalName and selectorless Services,
   EndpointSlices not managed by `endpointslice-controller.k8s.io`, and
   Endpoints with no selector Service, and exits non-zero while any remain.
+  It does not trust labels, which a tenant can write: every EndpointSlice must
+  name an existing selector Service through `kubernetes.io/service-name`, and
+  every EndpointSlice and Endpoints address must be the IP of a live (not
+  Succeeded or Failed) Pod in the same namespace that the Service's selector
+  picks.
   Fix each one before the tenant's wiring merges.
 - **Namespace ownership** is cooperative: nothing stops a tenant manifest from
   targeting a platform namespace today. An admission policy engine
