@@ -447,6 +447,11 @@ POLICY_CASES = {
         _with("ingressroutes", _route(middlewares=[{"name": "mw@kubernetescrd"}])),
         "demo IngressRoute/bad: middleware mw@kubernetescrd uses a name@provider reference",
     ),
+    "route-parent-refs": (
+        _with("ingressroutes", named("bad", {
+            "routes": [ROUTE], "parentRefs": [{"name": "edge", "namespace": "traefik"}]})),
+        "demo IngressRoute/bad: parentRefs attach to parent routes, which is platform-owned",
+    ),
     "route-cross-namespace-tls-options": (
         _with("ingressroutes", named("bad", {
             "routes": [ROUTE], "tls": {"options": {"name": "default", "namespace": "traefik"}}})),

@@ -62,6 +62,11 @@ spec:
         || object.spec.tls.store.namespace == variables.ns)
         && !object.spec.tls.store.name.contains('@'))))
       message: "a tenant route may reference TLS options and stores only in its own namespace"
+    # Traefik v3.7 IngressRoute spec.parentRefs attach a route under another
+    # router (multi-layer routing), so a tenant route may name none.
+    - expression: >-
+        !has(object.spec.parentRefs) || size(object.spec.parentRefs) == 0
+      message: "tenant routes may not attach to parent routes; multi-layer routing is platform-owned"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

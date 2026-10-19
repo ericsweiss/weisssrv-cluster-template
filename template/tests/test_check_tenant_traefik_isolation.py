@@ -326,10 +326,12 @@ def test_the_gate_pins_ten_policies():
         ("tenant-traefik-object-refs",
          "object.spec.mirroring.mirrors.all(s, !has(s.middlewares)"),
         ("tenant-traefik-route-refs", "r.services.all(s, !has(s.middlewares)"),
+        ("tenant-traefik-route-refs", "!has(object.spec.parentRefs)"),
     ],
     ids=["service-tailscale", "ingress-class", "ingress-tailscale", "ingress-legacy-class",
          "traefikservice-failover", "highest-random-weight", "errors-service-middlewares",
-         "mirroring-middlewares", "mirror-middlewares", "route-service-middlewares"],
+         "mirroring-middlewares", "mirror-middlewares", "route-service-middlewares",
+         "route-parent-refs"],
 )
 def test_the_gate_pins_the_other_operator_and_failover_refusals(name, needle):
     """Another ingress operator (Tailscale's), a TraefikService failover or an

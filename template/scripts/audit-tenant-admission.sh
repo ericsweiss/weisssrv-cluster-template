@@ -73,7 +73,9 @@ def tailscale($o): (.metadata.annotations // {}) | keys[] | select(startswith("t
               ((.middlewares // [])[] | mwref($o; "middleware"))),
         ((.spec.tls // {}) | (.options // empty | ["options", .]), (.store // empty | ["store", .])
             | .[0] as $w | .[1] | select(own and (.name | at | not) | not)
-            | "\($o): TLS \($w) \(.namespace // $ns)/\(.name) outside its namespace")'
+            | "\($o): TLS \($w) \(.namespace // $ns)/\(.name) outside its namespace"),
+        (if (.spec.parentRefs // []) | length > 0
+         then "\($o): parentRefs attach to parent routes, which is platform-owned" else empty end)'
     INGRESS_CHECKS=$UNGRANTED'
         (if .spec.defaultBackend != null then "\($o): default backend answers every hostname" else empty end),
         ((.spec.rules // [])[] | if (.host // "") == "" then "\($o): rule without a host"

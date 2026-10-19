@@ -1,6 +1,6 @@
-"""Tenant forwardAuth, failover, highestRandomWeight and per-service middleware
-refs stay in the tenant's namespace or the platform allowlist. No CEL engine
-ships here, so the mirrors are pinned to the expressions they assume."""
+"""Tenant forwardAuth, failover, highestRandomWeight, per-service middleware and
+parentRefs stay in the tenant's namespace, the platform allowlist or absent.
+No CEL engine ships here, so the mirrors are pinned to the expressions they assume."""
 
 from __future__ import annotations
 
@@ -328,3 +328,35 @@ def test_own_and_platform_route_service_middlewares_are_admitted():
     spec = {"routes": [{"match": "Host(`demo.apps.test`)", "services": [
         {"name": "web", "port": 80, "middlewares": OWN_OR_PLATFORM}]}]}
     assert route_service_middlewares_allowed(spec, "demo")
+
+
+# Traefik v3.7 IngressRoute spec.parentRefs attach a route under another one
+# (multi-layer routing), so a tenant route may name none.
+PARENT_REFS_EXPRESSION = "!has(object.spec.parentRefs) || size(object.spec.parentRefs) == 0"
+PARENT_REFS_MESSAGE = (
+    "tenant routes may not attach to parent routes; multi-layer routing is platform-owned"
+)
+
+
+def parent_refs_allowed(spec: dict) -> bool:
+    """The parentRefs validation."""
+    return "parentRefs" not in spec or len(spec["parentRefs"]) == 0
+
+
+def test_the_parent_refs_refusal_is_the_shape_the_mirror_evaluates():
+    assert _pinned("tenant-traefik-route-refs", PARENT_REFS_MESSAGE) == PARENT_REFS_EXPRESSION
+
+
+@pytest.mark.parametrize(
+    "refs",
+    [[{"name": "edge", "namespace": "traefik"}], [{"name": "own"}],
+     [{"name": "own", "namespace": "demo"}]],
+    ids=["platform-parent", "own-parent", "own-namespace-parent"],
+)
+def test_a_tenant_route_with_parent_refs_is_refused_whatever_it_names(refs):
+    assert not parent_refs_allowed({"routes": [], "parentRefs": refs})
+
+
+def test_a_tenant_route_without_parent_refs_is_admitted():
+    assert parent_refs_allowed({"routes": []})
+    assert parent_refs_allowed({"routes": [], "parentRefs": []})
