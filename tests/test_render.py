@@ -3754,3 +3754,22 @@ def test_the_example_tenant_quota_caps_tenant_local_only_with_tenant_storage(clu
     else:
         assert key not in readme
         assert "persistentvolumeclaims:" not in quota, quota
+
+
+def test_the_example_database_kustomization_orphans_on_deletion(cluster):
+    """Deleting the database wiring must never half-dismantle a database: the
+    default policy prunes its policies, ExternalSecrets and ScheduledBackup while
+    the prune-guarded Cluster keeps running isolated and stops archiving."""
+    readme = next((cluster.path / "kubernetes/clusters").glob("*/tenants/README.md")).read_text()
+    example = readme.split("## Example", 1)[1].split("```yaml\n", 1)[1].split("```", 1)[0]
+    flux = {
+        d["metadata"]["name"]: d["spec"]
+        for d in yaml.safe_load_all(example)
+        if isinstance(d, dict) and d.get("kind") == "Kustomization"
+    }
+    assert "deletionPolicy" not in flux["example-app"], flux["example-app"]
+    if cluster.answers["postgres_operator"]:
+        assert flux["example-app-db"]["deletionPolicy"] == "Orphan", flux
+        assert flux["example-app-db"]["path"] == "./kubernetes/db", flux
+    else:
+        assert set(flux) == {"example-app"}, flux

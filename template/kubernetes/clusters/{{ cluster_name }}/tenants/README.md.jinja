@@ -371,6 +371,38 @@ spec:
       - kind: ConfigMap
         name: cluster-config
         optional: false
+{%- if postgres_operator %}
+---
+# The database tree, for a tenant that runs one (docs/postgres.md).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: example-app-db
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 10m
+  dependsOn:
+    - name: infrastructure-configs
+  serviceAccountName: example-app-flux
+  sourceRef:
+    kind: GitRepository
+    name: example-app
+  path: ./kubernetes/db
+  prune: true
+  # Flux >= 2.3. Deleting the wiring must never half-dismantle a database: the
+  # default prunes its policies, ExternalSecrets and ScheduledBackup while the
+  # prune-guarded Cluster runs on isolated, no longer archiving. Orphan keeps all.
+  deletionPolicy: Orphan
+  targetNamespace: example-app
+  wait: true
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: cluster-config
+        optional: false
+{%- endif %}
 ```
 
 ## Before onboarding the first tenant
