@@ -1,6 +1,7 @@
 """Tests that check-tenant-traefik-isolation.py fails when a tenant lands without the full Deny-bound policies."""
 from __future__ import annotations
 
+import re
 import textwrap
 from pathlib import Path
 
@@ -25,12 +26,65 @@ RELEASE_WITH_VALUES = textwrap.dedent(
 )
 
 
+def routing_binding(ns: str) -> dict:
+    """The per-tenant hostname binding the platform writes into the wiring file."""
+    return {
+        "apiVersion": "admissionregistration.k8s.io/v1",
+        "kind": "ValidatingAdmissionPolicyBinding",
+        "metadata": {"name": f"tenant-traefik-hostnames-{ns}"},
+        "spec": {
+            "policyName": "tenant-traefik-hostnames",
+            "validationActions": ["Deny"],
+            "paramRef": {
+                "name": f"tenant-routing-{ns}",
+                "namespace": "flux-system",
+                "parameterNotFoundAction": "Deny",
+            },
+            "matchResources": {
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": ns}}
+            },
+        },
+    }
+
+
+def routing_configmap(ns: str, hosts: str = "demo.example.com\n") -> dict:
+    return {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": f"tenant-routing-{ns}", "namespace": "flux-system"},
+        "data": {"hosts": hosts},
+    }
+
+
+def wiring(ns: str) -> list[dict]:
+    """A tenant file's routing part: its Namespace, hostname grant and binding."""
+    return [
+        {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {"name": ns, "labels": {"fluxcd.io/tenant": ns}},
+        },
+        routing_configmap(ns),
+        routing_binding(ns),
+    ]
+
+
+def write_tenant(root: Path, resource: str, docs: list[dict]) -> None:
+    path = (root / gate.TENANTS_KUSTOMIZATION).parent / resource
+    path.write_text(yaml.safe_dump_all(docs, sort_keys=False))
+
+
 def build(tmp_path: Path, resources: list[str], release: str) -> Path:
+    """The tenants kustomization, each listed tenant file wired for routing
+    (namespace = file stem), and the Traefik release."""
     kustomization = tmp_path / gate.TENANTS_KUSTOMIZATION
     kustomization.parent.mkdir(parents=True, exist_ok=True)
     kustomization.write_text(
         "resources:\n" + "".join(f"  - {r}\n" for r in resources)
     )
+    for resource in resources:
+        if resource not in gate.BASELINE:
+            write_tenant(tmp_path, resource, wiring(Path(resource).stem))
     path = tmp_path / gate.TRAEFIK_RELEASE
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(release)
@@ -209,7 +263,10 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
 # send Traefik into another namespace past the forwardAuth pin, so the gate
 # needs both refusals too.
 @pytest.mark.parametrize("kind", ["ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"])
-@pytest.mark.parametrize("name", ["tenant-no-externalname-services", "tenant-no-manual-endpoints"])
+@pytest.mark.parametrize(
+    "name",
+    ["tenant-no-externalname-services", "tenant-no-manual-endpoints", "tenant-no-tcp-udp-routes"],
+)
 def test_a_policy_file_without_a_service_refusal_keeps_the_gate_closed(tmp_path, kind, name):
     root = build(
         tmp_path,
@@ -224,6 +281,31 @@ def test_a_policy_file_without_a_service_refusal_keeps_the_gate_closed(tmp_path,
     assert len(kept) == len(docs) - 1
     write_policy(root, "---\n".join(kept))
     assert len(gate.check(root)) == 1
+
+
+def test_a_policy_file_without_the_hostname_policy_keeps_the_gate_closed(tmp_path):
+    """The per-tenant bindings name a policy; without it they enforce nothing."""
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    docs = policy().split("---\n")
+    kept = [d for d in docs if "name: tenant-traefik-hostnames\n" not in d]
+    assert len(kept) == len(docs) - 1
+    write_policy(root, "---\n".join(kept))
+    assert len(gate.check(root)) == 1
+
+
+def test_the_hostname_policy_is_bound_per_tenant_not_by_label():
+    """A tenant-label binding would need one paramRef for every tenant; the
+    hostname grant is per tenant, so its bindings live in the wiring files."""
+    bound = {
+        d["spec"]["policyName"]
+        for d in yaml.safe_load_all(SHIPPED_POLICY)
+        if d and d["kind"] == "ValidatingAdmissionPolicyBinding"
+    }
+    assert bound == set(gate.REQUIRED_POLICIES) - {gate.HOSTNAME_POLICY}
 
 
 def test_a_policy_file_the_configs_kustomization_does_not_list_keeps_the_gate_closed(tmp_path):
@@ -339,6 +421,9 @@ WEAKENINGS = {
     "matchConditions-added": lambda spec: spec.__setitem__(
         "matchConditions", [{"name": "never", "expression": "false"}]
     ),
+    "paramKind-secret": lambda spec: spec.__setitem__(
+        "paramKind", {"apiVersion": "v1", "kind": "Secret"}
+    ),
 }
 
 
@@ -435,7 +520,7 @@ BINDING_WEAKENINGS = {
 
 
 @pytest.mark.parametrize("weakening", sorted(BINDING_WEAKENINGS))
-@pytest.mark.parametrize("name", sorted(gate.REQUIRED_POLICIES))
+@pytest.mark.parametrize("name", sorted(set(gate.REQUIRED_POLICIES) - {gate.HOSTNAME_POLICY}))
 def test_a_binding_with_more_than_the_required_spec_keeps_the_gate_closed(
     tmp_path, name, weakening
 ):
@@ -455,4 +540,164 @@ def test_the_unmutated_binding_round_trip_still_opens_the_gate(tmp_path):
         RELEASE_WITH_VALUES.format(allow="true"),
     )
     write_policy(root, _mutated_binding("tenant-no-manual-endpoints", lambda spec: None))
+    assert gate.check(root) == []
+
+
+def test_a_hostname_policy_without_its_param_kind_keeps_the_gate_closed(tmp_path):
+    """Without paramKind the per-tenant paramRef is never read."""
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, _mutated(gate.HOSTNAME_POLICY, lambda spec: spec.pop("paramKind")))
+    assert len(gate.check(root)) == 1
+
+
+def _routed(tmp_path: Path, docs: list[dict]) -> list[str]:
+    """The gate's findings for one tenant `demo` whose file holds `docs`."""
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo.yaml"],
+        RELEASE_WITH_VALUES.format(allow="false"),
+    )
+    write_policy(root, policy())
+    write_tenant(root, "demo.yaml", docs)
+    return gate.check(root)
+
+
+def test_a_wired_tenant_passes(tmp_path):
+    assert _routed(tmp_path, wiring("demo")) == []
+
+
+def _binding(mutate) -> list[dict]:
+    docs = wiring("demo")
+    mutate(docs[2]["spec"])
+    return docs
+
+
+def _configmap(mutate) -> list[dict]:
+    docs = wiring("demo")
+    mutate(docs[1])
+    return docs
+
+
+# Each mutation leaves the tenant `demo` without a Deny binding that reads its
+# own platform-owned hostname grant, or without a usable grant.
+ROUTING_GAPS = {
+    "binding-missing": lambda: [d for d in wiring("demo") if d["kind"] != "ValidatingAdmissionPolicyBinding"],
+    "binding-warn": lambda: _binding(lambda s: s.__setitem__("validationActions", ["Warn"])),
+    "binding-extra-action": lambda: _binding(
+        lambda s: s.__setitem__("validationActions", ["Deny", "Audit"])
+    ),
+    "binding-other-policy": lambda: _binding(
+        lambda s: s.__setitem__("policyName", "tenant-traefik-route-refs")
+    ),
+    "binding-other-namespace": lambda: _binding(
+        lambda s: s["matchResources"]["namespaceSelector"]["matchLabels"].__setitem__(
+            "kubernetes.io/metadata.name", "other"
+        )
+    ),
+    "binding-label-selector": lambda: _binding(
+        lambda s: s["matchResources"].__setitem__(
+            "namespaceSelector",
+            {"matchExpressions": [{"key": "fluxcd.io/tenant", "operator": "Exists"}]},
+        )
+    ),
+    "binding-object-selector": lambda: _binding(
+        lambda s: s["matchResources"].__setitem__(
+            "objectSelector", {"matchLabels": {"protected": "true"}}
+        )
+    ),
+    "paramRef-other-name": lambda: _binding(
+        lambda s: s["paramRef"].__setitem__("name", "tenant-routing-other")
+    ),
+    "paramRef-tenant-namespace": lambda: _binding(
+        lambda s: s["paramRef"].__setitem__("namespace", "demo")
+    ),
+    "paramRef-no-namespace": lambda: _binding(lambda s: s["paramRef"].pop("namespace")),
+    "paramRef-allow": lambda: _binding(
+        lambda s: s["paramRef"].__setitem__("parameterNotFoundAction", "Allow")
+    ),
+    "paramRef-selector": lambda: _binding(
+        lambda s: s.__setitem__(
+            "paramRef",
+            {"selector": {}, "namespace": "flux-system", "parameterNotFoundAction": "Deny"},
+        )
+    ),
+    "paramRef-missing": lambda: _binding(lambda s: s.pop("paramRef")),
+    "configmap-missing": lambda: [d for d in wiring("demo") if d["kind"] != "ConfigMap"],
+    "configmap-tenant-namespace": lambda: _configmap(
+        lambda d: d["metadata"].__setitem__("namespace", "demo")
+    ),
+    "configmap-other-name": lambda: _configmap(
+        lambda d: d["metadata"].__setitem__("name", "tenant-routing-other")
+    ),
+    "hosts-empty": lambda: _configmap(lambda d: d["data"].__setitem__("hosts", "")),
+    "hosts-blank-lines": lambda: _configmap(lambda d: d["data"].__setitem__("hosts", "\n  \n")),
+    "data-missing": lambda: _configmap(lambda d: d.pop("data")),
+    "maxPriority-not-a-number": lambda: _configmap(
+        lambda d: d["data"].__setitem__("maxPriority", "high")
+    ),
+    "namespace-missing": lambda: [d for d in wiring("demo") if d["kind"] != "Namespace"],
+}
+
+
+@pytest.mark.parametrize("gap", sorted(ROUTING_GAPS))
+def test_a_tenant_without_its_hostname_grant_fails(tmp_path, gap):
+    problems = _routed(tmp_path, ROUTING_GAPS[gap]())
+    assert len(problems) == 1
+    assert "demo" in problems[0]
+
+
+def test_a_max_priority_number_is_accepted(tmp_path):
+    docs = _configmap(lambda d: d["data"].__setitem__("maxPriority", "100"))
+    assert _routed(tmp_path, docs) == []
+
+
+def test_another_tenants_binding_does_not_cover_a_tenant(tmp_path):
+    """Each tenant namespace needs its own binding and grant."""
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "alpha.yaml", "beta.yaml"],
+        RELEASE_WITH_VALUES.format(allow="false"),
+    )
+    write_policy(root, policy())
+    beta = wiring("beta")
+    beta[2] = routing_binding("alpha")
+    beta[2]["metadata"]["name"] = "tenant-traefik-hostnames-beta"
+    write_tenant(root, "beta.yaml", beta)
+    problems = gate.check(root)
+    assert len(problems) == 1
+    assert "beta" in problems[0]
+
+
+def test_a_listed_tenant_file_that_is_missing_fails(tmp_path):
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo.yaml"],
+        RELEASE_WITH_VALUES.format(allow="false"),
+    )
+    write_policy(root, policy())
+    ((root / gate.TENANTS_KUSTOMIZATION).parent / "demo.yaml").unlink()
+    problems = gate.check(root)
+    assert len(problems) == 1
+    assert "demo.yaml" in problems[0]
+
+
+def test_the_readme_example_wires_its_hostnames(tmp_path):
+    """The onboarding example is what an operator copies, so it must carry the
+    hostname grant and binding the gate requires."""
+    readme = (REPO / gate.TENANTS_KUSTOMIZATION).with_name("README.md").read_text()
+    example = next(
+        b for b in re.findall(r"```yaml\n(.*?)```", readme, re.S)
+        if "kind: Kustomization" in b and "serviceAccountName" in b
+    )
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "example-app.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, policy())
+    ((root / gate.TENANTS_KUSTOMIZATION).parent / "example-app.yaml").write_text(example)
     assert gate.check(root) == []

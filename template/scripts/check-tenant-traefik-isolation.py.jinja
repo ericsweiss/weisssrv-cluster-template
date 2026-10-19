@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail tenant onboarding without the Deny-bound, shape-pinned tenant policies,
-whatever allowCrossNamespace says: Ingress annotations, forwardAuth and endpoints
-cross namespaces without them. Exit 0 clean, 1 findings, 2 vacuous.
+whatever allowCrossNamespace says, or without each tenant's hostname grant.
+Exit 0 clean, 1 findings, 2 vacuous.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ CONFIGS_KUSTOMIZATION = "kubernetes/infrastructure/configs/kustomization.yaml"
 WRITES = ["CREATE", "UPDATE"]
 REQUIRED_POLICIES = {
     "tenant-traefik-route-refs": {
+        "paramKind": None,
         "resourceRules": [
             {
                 "apiGroups": ["traefik.io"],
@@ -75,6 +76,7 @@ REQUIRED_POLICIES = {
         ],
     },
     "tenant-traefik-object-refs": {
+        "paramKind": None,
         "resourceRules": [
             {
                 "apiGroups": ["traefik.io"],
@@ -140,6 +142,7 @@ REQUIRED_POLICIES = {
         ],
     },
     "tenant-traefik-ingress-refs": {
+        "paramKind": None,
         "resourceRules": [
             {
                 "apiGroups": ["networking.k8s.io"],
@@ -173,6 +176,7 @@ REQUIRED_POLICIES = {
         ],
     },
     "tenant-no-externalname-services": {
+        "paramKind": None,
         "resourceRules": [
             {
                 "apiGroups": [""],
@@ -188,6 +192,7 @@ REQUIRED_POLICIES = {
         ],
     },
     "tenant-no-manual-endpoints": {
+        "paramKind": None,
         "resourceRules": [
             {
                 "apiGroups": [""],
@@ -213,7 +218,70 @@ REQUIRED_POLICIES = {
             ),
         ],
     },
+    "tenant-no-tcp-udp-routes": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": ["traefik.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["ingressroutetcps", "ingressrouteudps"],
+            },
+        ],
+        "variables": [],
+        "validations": ["false"],
+    },
+    "tenant-traefik-hostnames": {
+        "paramKind": {"apiVersion": "v1", "kind": "ConfigMap"},
+        "resourceRules": [
+            {
+                "apiGroups": ["traefik.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["ingressroutes"],
+            },
+            {
+                "apiGroups": ["networking.k8s.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["ingresses"],
+            },
+        ],
+        "variables": [
+            ("isRoute", "request.resource.resource == 'ingressroutes'"),
+            ("hosts", "params.data.hosts.split('\\n').map(h, h.trim()).filter(h, h != '')"),
+            ("hostMatchers", "variables.hosts.map(h, 'Host(`' + h + '`)')"),
+        ],
+        "validations": [
+            (
+                "!variables.isRoute || !has(object.spec.routes) || object.spec.routes.all(r, "
+                "r.match.matches('^Host[(]`[^`]+`[)]( && .*)?$') && "
+                "!r.match.contains('||') && !r.match.contains('HostRegexp(') && "
+                "r.match.findAll('Host[(]`[^`]*`[)]').all(h, h in variables.hostMatchers))"
+            ),
+            (
+                "!variables.isRoute || !has(object.spec.routes) || object.spec.routes.all(r, "
+                "!has(r.priority) || ('maxPriority' in params.data && "
+                "r.priority <= int(params.data.maxPriority)))"
+            ),
+            "variables.isRoute || !has(object.spec) || !has(object.spec.defaultBackend)",
+            (
+                "variables.isRoute || !has(object.spec) || !has(object.spec.rules) || "
+                "object.spec.rules.all(r, has(r.host) && r.host in variables.hosts)"
+            ),
+            (
+                "variables.isRoute || !has(object.spec) || !has(object.spec.tls) || "
+                "object.spec.tls.all(t, !has(t.hosts) || t.hosts.all(h, h in variables.hosts))"
+            ),
+        ],
+    },
 }
+# Bound once per tenant, in its wiring file, to the hostnames the platform
+# granted that namespace in flux-system/tenant-routing-<ns>; every other
+# required policy is bound once, here, on the tenant label.
+HOSTNAME_POLICY = "tenant-traefik-hostnames"
+FLUX_NAMESPACE = "flux-system"
+ROUTING_PREFIX = "tenant-routing-"
 TENANT_LABEL = "fluxcd.io/tenant"
 TENANT_MATCH = {
     "namespaceSelector": {
@@ -275,9 +343,9 @@ def _entries(items: object) -> list[dict] | None:
 
 
 def enforces(spec: object, required: dict) -> bool:
-    """The policy fails closed, matches exactly the required resources with no
-    match conditions, and carries exactly the required variables and the
-    required validation expressions, in order."""
+    """The policy fails closed, reads exactly the required paramKind, matches
+    exactly the required resources with no match conditions, and carries exactly
+    the required variables and the required validation expressions, in order."""
     if not isinstance(spec, dict):
         return False
     variables = _entries(spec.get("variables") or [])
@@ -286,6 +354,7 @@ def enforces(spec: object, required: dict) -> bool:
         return False
     return (
         spec.get("failurePolicy") == "Fail"
+        and spec.get("paramKind") == required["paramKind"]
         and spec.get("matchConstraints") == {"resourceRules": required["resourceRules"]}
         and not spec.get("matchConditions")
         and [(v.get("name"), _cel(v.get("expression"))) for v in variables]
@@ -296,8 +365,8 @@ def enforces(spec: object, required: dict) -> bool:
 
 def policies_pin_tenants(path: Path, root: Path) -> bool:
     """True when the configs kustomization applies the policy file, every
-    required policy exists in its pinned shape, and a binding whose whole spec is
-    Deny on every namespace carrying the tenant label applies it."""
+    required policy exists in its pinned shape, and each but the per-tenant
+    hostname policy has a binding whose whole spec is Deny on the tenant label."""
     if not path.is_file():
         return False
     configs = root / CONFIGS_KUSTOMIZATION
@@ -329,11 +398,100 @@ def policies_pin_tenants(path: Path, root: Path) -> bool:
         }:
             bound.add(name)
     return all(
-        name in bound
+        (name in bound or name == HOSTNAME_POLICY)
         and len(policies.get(name, [])) == 1
         and enforces(policies[name][0], required)
         for name, required in REQUIRED_POLICIES.items()
     )
+
+
+def routing_binding_spec(namespace: str) -> dict:
+    """The whole spec of a tenant's hostname binding: Deny, on that namespace
+    alone, reading its platform-owned grant and refusing when the grant is gone."""
+    return {
+        "policyName": HOSTNAME_POLICY,
+        "validationActions": ["Deny"],
+        "paramRef": {
+            "name": ROUTING_PREFIX + namespace,
+            "namespace": FLUX_NAMESPACE,
+            "parameterNotFoundAction": "Deny",
+        },
+        "matchResources": {
+            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": namespace}}
+        },
+    }
+
+
+def _grant_problem(data: object) -> str | None:
+    """Why a tenant-routing ConfigMap's data grants nothing usable, or None."""
+    if not isinstance(data, dict):
+        return "has no data"
+    hosts = data.get("hosts")
+    if not isinstance(hosts, str) or not [h for h in hosts.split("\n") if h.strip()]:
+        return "grants no hosts (data.hosts: one hostname per line)"
+    ceiling = data.get("maxPriority")
+    if ceiling is not None and not (isinstance(ceiling, str) and ceiling.strip().isdigit()):
+        return "has a maxPriority that is not a whole number"
+    return None
+
+
+def routing_problems(root: Path, tenants: list[str]) -> list[str]:
+    """Every tenant namespace a tenant file declares has its own Deny binding of
+    the hostname policy and a non-empty hostname grant in flux-system."""
+    base = (root / TENANTS_KUSTOMIZATION).parent
+    docs: dict[str, list[dict]] = {}
+    problems = []
+    for tenant in tenants:
+        path = base / tenant
+        if not path.is_file():
+            problems.append(
+                f"{TENANTS_KUSTOMIZATION} lists {tenant}, which does not exist — "
+                "its hostname grant cannot be checked"
+            )
+            continue
+        try:
+            loaded = list(yaml.safe_load_all(_read(path, root)))
+        except yaml.YAMLError as exc:
+            raise Vacuous(f"{path.relative_to(root)}: {exc}") from exc
+        docs[tenant] = [d for d in loaded if isinstance(d, dict)]
+    every = [d for file_docs in docs.values() for d in file_docs]
+    specs = [
+        d.get("spec") for d in every if d.get("kind") == "ValidatingAdmissionPolicyBinding"
+    ]
+    grants = {
+        (d.get("metadata") or {}).get("name"): d
+        for d in every
+        if d.get("kind") == "ConfigMap"
+        and (d.get("metadata") or {}).get("namespace") == FLUX_NAMESPACE
+    }
+    for tenant, file_docs in docs.items():
+        namespaces = [
+            (d.get("metadata") or {}).get("name")
+            for d in file_docs
+            if d.get("kind") == "Namespace"
+        ]
+        if not namespaces:
+            problems.append(
+                f"{tenant} declares no Namespace, so the hostnames it may serve "
+                "cannot be checked"
+            )
+        for namespace in namespaces:
+            grant = ROUTING_PREFIX + str(namespace)
+            if routing_binding_spec(str(namespace)) not in specs:
+                problems.append(
+                    f"tenant namespace {namespace} has no binding of {HOSTNAME_POLICY} "
+                    "whose whole spec is Deny on that namespace alone with paramRef "
+                    f"{FLUX_NAMESPACE}/{grant} and parameterNotFoundAction Deny — "
+                    "its routes could match any hostname"
+                )
+            if grant not in grants:
+                problems.append(
+                    f"tenant namespace {namespace} has no ConfigMap {FLUX_NAMESPACE}/"
+                    f"{grant} in the tenants tree granting its hostnames"
+                )
+            elif (why := _grant_problem(grants[grant].get("data"))) is not None:
+                problems.append(f"{FLUX_NAMESPACE}/{grant} for tenant namespace {namespace} {why}")
+    return problems
 
 
 def check(root: Path = REPO) -> list[str]:
@@ -357,8 +515,9 @@ def check(root: Path = REPO) -> list[str]:
     tenants = [r for r in resources if r not in BASELINE]
     if not tenants:
         return []
+    problems = routing_problems(root, tenants)
     if policies_pin_tenants(root / TENANT_POLICY, root):
-        return []
+        return problems
 
     return [
         f"{TENANTS_KUSTOMIZATION} onboards {', '.join(tenants)} without "
@@ -367,7 +526,7 @@ def check(root: Path = REPO) -> list[str]:
         "providers.kubernetesCRD.allowCrossNamespace is false: plain Ingress "
         "annotations, forwardAuth addresses, and Service endpoint resolution "
         "can otherwise make Traefik cross the tenant boundary."
-    ]
+    ] + problems
 
 
 def main(argv: list[str] | None = None) -> int:
