@@ -46,13 +46,32 @@ def service(name: str, selector: dict | None = None, kind: str = "ClusterIP") ->
     return {"metadata": {"name": name}, "spec": spec}
 
 
-def slice_(name: str, managed_by: str | None = CONTROLLER) -> dict:
+def slice_(
+    name: str,
+    managed_by: str | None = CONTROLLER,
+    service_name: str | None = "web",
+    addresses: tuple[str, ...] = ("10.42.0.5",),
+) -> dict:
     labels = {} if managed_by is None else {"endpointslice.kubernetes.io/managed-by": managed_by}
-    return {"metadata": {"name": name, "labels": labels}}
+    if service_name is not None:
+        labels["kubernetes.io/service-name"] = service_name
+    return {
+        "metadata": {"name": name, "labels": labels},
+        "addressType": "IPv4",
+        "endpoints": [{"addresses": [a]} for a in addresses],
+    }
 
 
-def endpoints(name: str) -> dict:
-    return {"metadata": {"name": name}}
+def endpoints(name: str, addresses: tuple[str, ...] = ()) -> dict:
+    subsets = [{"addresses": [{"ip": a} for a in addresses]}] if addresses else []
+    return {"metadata": {"name": name}, "subsets": subsets}
+
+
+def pod(name: str, labels: dict, ip: str, phase: str = "Running") -> dict:
+    return {
+        "metadata": {"name": name, "labels": labels},
+        "status": {"phase": phase, "podIP": ip, "podIPs": [{"ip": ip}]},
+    }
 
 
 def run(tmp_path: Path, fixture: dict) -> subprocess.CompletedProcess:
@@ -76,7 +95,8 @@ def run(tmp_path: Path, fixture: dict) -> subprocess.CompletedProcess:
 CLEAN_APP = {
     "services": [service("web", {"app": "web"})],
     "endpointslices": [slice_("web-abc12")],
-    "endpoints": [endpoints("web")],
+    "endpoints": [endpoints("web", ("10.42.0.5",))],
+    "pods": [pod("web-0", {"app": "web", "pod-template-hash": "x"}, "10.42.0.5")],
 }
 
 
@@ -114,6 +134,36 @@ def test_no_tenant_namespace_passes_and_says_so(tmp_path):
             "demo EndpointSlice/bare-x: managed-by endpointslicemirroring-controller.k8s.io",
         ),
         (
+            {"endpointslices": [slice_("evil", addresses=("192.168.1.10",))]},
+            "demo EndpointSlice/evil: address 192.168.1.10 is not a Pod selected by Service/web",
+        ),
+        (
+            {"endpointslices": [slice_("nameless", service_name=None)]},
+            "demo EndpointSlice/nameless: no kubernetes.io/service-name label",
+        ),
+        (
+            {"endpointslices": [slice_("stray", service_name="ghost")]},
+            "demo EndpointSlice/stray: no Service ghost with a selector",
+        ),
+        (
+            {"endpoints": [endpoints("web", ("192.168.1.10",))]},
+            "demo Endpoints/web: address 192.168.1.10 is not a Pod selected by Service/web",
+        ),
+        (
+            {
+                "pods": [pod("other", {"app": "other"}, "10.42.0.9")],
+                "endpointslices": [slice_("sideways", addresses=("10.42.0.9",))],
+            },
+            "demo EndpointSlice/sideways: address 10.42.0.9 is not a Pod selected by Service/web",
+        ),
+        (
+            {
+                "pods": [pod("done", {"app": "web"}, "10.42.0.7", phase="Succeeded")],
+                "endpointslices": [slice_("stale", addresses=("10.42.0.7",))],
+            },
+            "demo EndpointSlice/stale: address 10.42.0.7 is not a Pod selected by Service/web",
+        ),
+        (
             {"endpoints": [endpoints("orphan")]},
             "demo Endpoints/orphan: no Service with a selector",
         ),
@@ -129,6 +179,12 @@ def test_no_tenant_namespace_passes_and_says_so(tmp_path):
         "foreign-slice",
         "unlabelled-slice",
         "mirrored-slice",
+        "labelled-but-foreign-slice",
+        "slice-without-service-name",
+        "slice-for-missing-service",
+        "foreign-endpoints-address",
+        "slice-to-unselected-pod",
+        "slice-to-finished-pod",
         "orphan-endpoints",
         "selectorless-endpoints",
     ],
@@ -137,8 +193,23 @@ def test_each_pre_policy_object_is_reported(tmp_path, objects, finding):
     merged = {k: CLEAN_APP[k] + objects.get(k, []) for k in CLEAN_APP}
     result = run(tmp_path, {"tenants": ["demo"], "objects": {"demo": merged}})
     assert result.returncode == 1, result.stdout + result.stderr
-    assert finding in result.stdout.splitlines()
-    assert "web" not in result.stdout.replace("web-", "")
+    lines = result.stdout.splitlines()
+    assert finding in lines
+    assert not [line for line in lines if line != finding and "web" in line.replace("web-", "")]
+
+
+def test_a_controller_slice_whose_addresses_are_selected_pods_passes(tmp_path):
+    objects = {
+        "services": [service("web", {"app": "web"})],
+        "endpointslices": [slice_("web-abc12", addresses=("10.42.0.5", "10.42.1.6"))],
+        "endpoints": [endpoints("web", ("10.42.0.5", "10.42.1.6"))],
+        "pods": [
+            pod("web-0", {"app": "web"}, "10.42.0.5"),
+            pod("web-1", {"app": "web", "extra": "y"}, "10.42.1.6"),
+        ],
+    }
+    result = run(tmp_path, {"tenants": ["demo"], "objects": {"demo": objects}})
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_every_tenant_namespace_is_audited(tmp_path):
