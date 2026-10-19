@@ -19,11 +19,13 @@ Namespace cascades through every tenant object and PVC in it, and
 Delete the Namespace by hand once nothing in it is wanted.
 {%- if postgres_operator %}
 
-A tenant that runs a database comes down in this order, one step per change:
-remove the app Kustomization, so nothing writes; remove the db Kustomization,
-which orphans the Cluster, its policies and its backups in place; confirm the
-last base backup and WAL archive in the object store; delete the CNPG
-`Cluster` by hand; then delete the Namespace by hand.
+A tenant that runs a database comes down in this order, one step per change.
+Remove the wiring from Git first: the app Kustomization, so nothing writes; then
+the db Kustomization, which orphans the Cluster, its policies and its backups in
+place; then the rest (this directory's tenant file and its `kustomization.yaml`
+line, as above). Confirm the last base backup and WAL archive in the object
+store, delete the CNPG `Cluster` by hand, and delete the Namespace by hand last:
+while the tenant file that declares it is in Git, Flux recreates it.
 {%- endif %}
 
 ## The tenant side of the contract
@@ -632,7 +634,11 @@ spec:
   every EndpointSlice and Endpoints address must be the IP of a live (not
   Succeeded or Failed) Pod in the same namespace that the Service's selector
   picks.
-  Fix each one before the tenant's wiring merges.
+  Fix each one before the tenant's wiring merges. A cluster that takes the
+  policies through `copier update` follows the migration in the template's
+  [VERSIONING.md § Upgrade notes](https://github.com/ericsweiss/weisssrv-cluster-template/blob/main/docs/VERSIONING.md#upgrade-notes):
+  the audit, then each tenant's hostname grant and binding before its routes
+  reconcile, and the list of what tenants can no longer create.
 - **Namespace ownership** is cooperative: nothing stops a tenant manifest from
   targeting a platform namespace today. An admission policy engine
   (Kyverno/OPA) is the durable fix.
