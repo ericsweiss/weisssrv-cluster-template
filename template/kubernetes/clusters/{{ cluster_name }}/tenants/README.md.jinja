@@ -565,11 +565,16 @@ spec:
   and Ingress to the hostnames granted in the tenant's `tenant-routing-<ns>`
   ConfigMap, with no raised priority unless granted ("Hostname grant" above),
   and `tenant-no-tcp-udp-routes` refuses IngressRouteTCP and IngressRouteUDP,
-  whose catch-all `HostSNI` or whole-port routers would take platform traffic. In
-  full, the set is seven: `tenant-traefik-route-refs`,
+  whose catch-all `HostSNI` or whole-port routers would take platform traffic.
+  `tenant-traefik-tls-defaults` refuses a tenant TLSOption or TLSStore named
+  `default`: Traefik's CRD provider drops a `default` defined in two namespaces,
+  which would return every platform route to Traefik's built-in TLS defaults,
+  and a lone tenant `default` TLSStore would set every route's default
+  certificate. In full, the set is eight: `tenant-traefik-route-refs`,
   `tenant-traefik-object-refs`, `tenant-traefik-ingress-refs`,
   `tenant-traefik-hostnames`, `tenant-no-tcp-udp-routes`,
-  `tenant-no-externalname-services` and `tenant-no-manual-endpoints`.
+  `tenant-traefik-tls-defaults`, `tenant-no-externalname-services` and
+  `tenant-no-manual-endpoints`.
   Once any tenant is onboarded, `task lint:tenant-traefik-isolation` fails if
   the policies or their bindings go missing, if a binding narrows its match
   below every tenant namespace, or if a policy fails open, narrows its resources,
