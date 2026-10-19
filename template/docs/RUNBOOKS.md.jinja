@@ -1237,6 +1237,25 @@ declared sizes have simply outgrown the zvol, grow it as in "Expanding a
 zvol-backed volume" above, and raise the `tenant-volumes` disk size in
 `hosts.yml` with it.
 
+### Tenant claim refused: not the mounted tenant-volumes zvol
+
+A `tenant-local` claim stays Pending, and the provisioner's helper pod logs
+`refusing ...: /mnt/tenant-volumes is not the mounted tenant-volumes zvol`,
+when the root lacks `lost+found` or the `.tenant-volumes-zvol` marker. Either
+the zvol is not mounted (the claim would otherwise land on the VM's boot disk,
+outside every backup) or the marker was never written. On the NAS agent:
+
+```bash
+mountpoint /mnt/tenant-volumes
+cat /mnt/tenant-volumes/.tenant-volumes-zvol   # the zvol name, ssd/appdata/tenant-volumes/data
+```
+
+If it is not a mount point, fix the mount first (the k3s role mounts it from
+`vm_additional_disks`); never create the marker by hand on an unmounted
+directory. Then run `task k3s:deploy -- --limit <nas agent>`, whose
+`k3s.yml` re-confirms the mount and writes the marker; the claim binds on its
+next retry.
+
 {% endif %}### Encrypted swap
 
 Every `encrypted_swap` fallback branch exits 0 so the host keeps booting, so the

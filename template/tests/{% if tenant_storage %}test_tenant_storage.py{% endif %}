@@ -9,6 +9,7 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 from conftest import REPO
 
@@ -20,6 +21,8 @@ RUNBOOKS = REPO / "docs" / "RUNBOOKS.md"
 CLASS = "tenant-local"
 PROVISIONER = "rancher.io/tenant-local"
 ROOT = "/mnt/tenant-volumes"
+MARKER = ".tenant-volumes-zvol"
+K3S_PLAYBOOK = REPO / "ansible" / "playbooks" / "k3s.yml"
 
 
 def _docs(path: Path) -> list[dict]:
@@ -147,10 +150,25 @@ def test_the_tenant_root_rides_the_documented_archive_and_offsite_backups():
     assert zvol in {z["zvol"] for z in offsite["restic_offsite_zvol_sources"]}
 
 
-def test_setup_refuses_a_root_that_is_not_the_zvol_filesystem(tmp_path):
+def _root(tmp_path: Path, lost_found: bool, marker: str | None) -> Path:
     root = tmp_path / "root"
     root.mkdir()
-    vol = root / "pvc-1_ns_claim"
+    if lost_found:
+        (root / "lost+found").mkdir()
+    if marker is not None:
+        (root / MARKER).write_text(marker)
+    return root
+
+
+@pytest.mark.parametrize(
+    ("lost_found", "marker"),
+    [(False, None), (True, None), (False, "ssd/appdata/tenant-volumes/data"), (True, "")],
+    ids=["bare", "stray-lost-found", "marker-only", "empty-marker"],
+)
+def test_setup_refuses_a_root_that_is_not_the_zvol_filesystem(tmp_path, lost_found, marker):
+    """A stray lost+found on the VM's own filesystem is not proof the zvol is
+    mounted; the marker the k3s playbook writes onto the mounted zvol is."""
+    vol = _root(tmp_path, lost_found, marker) / "pvc-1_ns_claim"
     result = _setup(tmp_path, vol)
     assert result.returncode == 1
     assert "refusing" in result.stderr
@@ -158,12 +176,30 @@ def test_setup_refuses_a_root_that_is_not_the_zvol_filesystem(tmp_path):
 
 
 def test_setup_creates_the_claim_directory_on_the_zvol_root(tmp_path):
-    root = tmp_path / "root"
-    (root / "lost+found").mkdir(parents=True)
-    vol = root / "pvc-1_ns_claim"
+    vol = _root(tmp_path, True, _root_disk()["zvol"] + "\n") / "pvc-1_ns_claim"
     result = _setup(tmp_path, vol)
     assert result.returncode == 0, result.stderr
     assert stat.S_IMODE(vol.stat().st_mode) == 0o777
+
+
+def test_the_k3s_playbook_marks_the_mounted_tenant_zvol():
+    """The marker is written only after the mount is confirmed, with the zvol's
+    name, on the host whose inventory mounts the tenant root."""
+    plays = yaml.safe_load(K3S_PLAYBOOK.read_text())
+    names = [p["name"] for p in plays]
+    play = next(p for p in plays if p["name"] == "Mark the mounted tenant-volumes zvol")
+    assert names.index(play["name"]) > names.index("Deploy k3s agents")
+    assert play["hosts"] == "k3s_agents"
+    assert play["become"] is True
+    text = yaml.safe_dump(play)
+    assert f"mountpoint -q {ROOT}" in text
+    tasks = play["tasks"]
+    probe = next(t for t in tasks if "ansible.builtin.command" in t)
+    write = next(t for t in tasks if "ansible.builtin.copy" in t)
+    assert tasks.index(probe) < tasks.index(write)
+    assert write["ansible.builtin.copy"]["dest"] == f"{ROOT}/{MARKER}"
+    assert ".zvol" in write["ansible.builtin.copy"]["content"]
+    assert ROOT in play["vars"]["tenant_volumes_disks"]
 
 
 def _rules(kind: str) -> dict[str, set[str]]:

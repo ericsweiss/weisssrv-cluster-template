@@ -617,6 +617,10 @@ zvol, `ssd/appdata/tenant-volumes/data`, to the NAS-colocated agent's
 `vm_additional_disks` (SCSI slot 4, mounted at `/mnt/tenant-volumes`) and
 serves StorageClass `tenant-local` from it with Rancher local-path-provisioner.
 Every claim is a directory on that one zvol, so no claim has a size of its own.
+`ansible/playbooks/k3s.yml` confirms the zvol is mounted and writes the marker
+`/mnt/tenant-volumes/.tenant-volumes-zvol` (the zvol's name) onto it; the
+provisioner refuses a claim on a root without that marker and `lost+found`, so
+an unmounted zvol fails the claim instead of filling the VM's boot disk.
 `postgres_operator` requires it.
 
 ### Tenant databases (`postgres_operator`)

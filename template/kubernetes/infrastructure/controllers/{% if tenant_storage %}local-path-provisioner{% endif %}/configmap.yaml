@@ -1,7 +1,7 @@
 ---
 # Every tenant claim becomes a directory under /mnt/tenant-volumes, the
-# tenant-volumes zvol on the NAS agent. setup refuses a root without lost+found,
-# so an unmounted zvol fails the claim instead of filling the VM boot disk.
+# tenant-volumes zvol on the NAS agent. setup refuses a root without lost+found
+# and the .tenant-volumes-zvol marker k3s.yml writes onto the mounted zvol.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -20,8 +20,8 @@ data:
     #!/bin/sh
     set -eu
     base=$(dirname "$VOL_DIR")
-    if [ ! -d "$base/lost+found" ]; then
-      echo "refusing $VOL_DIR: $base is not the tenant-volumes root" >&2
+    if [ ! -d "$base/lost+found" ] || [ ! -s "$base/.tenant-volumes-zvol" ]; then
+      echo "refusing $VOL_DIR: $base is not the mounted tenant-volumes zvol" >&2
       exit 1
     fi
     mkdir -m 0777 -p "$VOL_DIR"

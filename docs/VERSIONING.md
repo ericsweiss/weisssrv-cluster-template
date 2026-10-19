@@ -362,6 +362,15 @@ the annotation to those three objects in each existing tenant file, as the
 tenants README § Example shows; `task lint:invariants` fails until every
 tenant carries all three.
 
+### Tenant volumes need the zvol marker
+
+With `tenant_storage`, the `tenant-local` provisioner now refuses a claim unless
+`/mnt/tenant-volumes` carries both `lost+found` and the `.tenant-volumes-zvol`
+marker, which `ansible/playbooks/k3s.yml` writes after confirming the zvol is
+mounted. Run it on the NAS-colocated agent (`task k3s:deploy -- --limit
+<nas agent>`) before the updated provisioner ConfigMap reconciles, or new
+tenant claims stay Pending until it runs; existing volumes are unaffected.
+
 ## Related
 
 - [RUNBOOKS.md](RUNBOOKS.md) § Updating the template — the operator-side procedure

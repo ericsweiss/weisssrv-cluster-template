@@ -43,6 +43,47 @@
   roles:
     - weisssrv.infra.k3s
 
+# The tenant-local provisioner refuses a root without this marker, so a claim
+# fails rather than landing on the boot disk when the zvol is not mounted.
+- name: Mark the mounted tenant-volumes zvol
+  hosts: k3s_agents
+  become: true
+  gather_facts: false
+  vars:
+    tenant_volumes_disks: >-
+      {{ vm_additional_disks | default([])
+         | selectattr('mount_point', 'equalto', '/mnt/tenant-volumes') | list }}
+  tasks:
+    - name: Probe the tenant-volumes mount
+      ansible.builtin.command: mountpoint -q /mnt/tenant-volumes
+      register: tenant_volumes_mount
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: tenant_volumes_disks | length > 0
+
+    # --check on a fresh VM runs before the k3s role has mounted anything.
+    - name: Assert the tenant-volumes zvol is mounted
+      ansible.builtin.assert:
+        that:
+          - tenant_volumes_mount.rc == 0 or ansible_check_mode
+        fail_msg: >-
+          /mnt/tenant-volumes is not a mount point; the k3s role mounts the
+          tenant-volumes zvol there. Refusing to mark the VM's own filesystem.
+        quiet: true
+      when: tenant_volumes_disks | length > 0
+
+    - name: Write the tenant-volumes marker
+      ansible.builtin.copy:
+        dest: /mnt/tenant-volumes/.tenant-volumes-zvol
+        content: "{{ tenant_volumes_disks[0].zvol }}\n"
+        owner: root
+        group: root
+        mode: "0644"
+      when:
+        - tenant_volumes_disks | length > 0
+        - tenant_volumes_mount.rc == 0
+
 - name: Deploy guest firewall rules
   hosts: k3s
   gather_facts: false
