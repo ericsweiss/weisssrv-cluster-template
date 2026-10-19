@@ -320,6 +320,9 @@ before it merges:
    cert-manager chart's default `aggregateClusterRoles` extends with
    CertificateRequest write. Delete it, and revoke the certificate in its
    `status.certificate` if that names a hostname the tenant was never granted.
+5. Remove any `traefik.ingress.kubernetes.io/router.rule`, `router.priority`
+   or `router.rulesyntax` annotation from tenant Ingresses; the next apply of
+   one that still carries it is refused.
 
 What a tenant can no longer create or update:
 
@@ -332,7 +335,8 @@ What a tenant can no longer create or update:
   `HostRegexp` or a second `Host`; a `priority` when the grant carries no
   `maxPriority`, or above it; a route `tls.domains` name not granted; an
   Ingress rule with no host, a TLS host or `router.tls.domains.*` annotation
-  name not granted, or a default backend;
+  name not granted, a default backend, or a `router.rule`, `router.priority`
+  or `router.rulesyntax` annotation in any letter case;
 - a cert-manager Certificate naming a hostname its grant does not list, a
   wildcard, an IP, URI, email, otherName or `literalSubject`, or an issuer
   other than `letsencrypt-prod`, `letsencrypt-staging` or an Issuer in its own

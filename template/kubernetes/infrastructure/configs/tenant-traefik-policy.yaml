@@ -345,12 +345,22 @@ spec:
         variables.isRoute || !has(object.spec) || !has(object.spec.tls)
         || object.spec.tls.all(t, !has(t.hosts) || t.hosts.all(h, h in variables.hosts))
       message: "a tenant Ingress may list only TLS hosts the platform granted this namespace"
+    # Traefik decodes annotation fields case-insensitively, so keys are lowercased.
     - expression: >-
         variables.isRoute || !has(object.metadata.annotations)
         || object.metadata.annotations.all(k,
-        !k.startsWith('traefik.ingress.kubernetes.io/router.tls.domains.')
+        !k.lowerAscii().startsWith('traefik.ingress.kubernetes.io/router.tls.domains.')
         || object.metadata.annotations[k].split(',').all(d, d.trim() in variables.hosts))
       message: "a tenant Ingress may list only router.tls.domains the platform granted this namespace"
+    # Traefik v3 builds the rule from spec.rules; these would reshape or outrank it.
+    # The other router.* annotations stay open: see the tenants README.
+    - expression: >-
+        variables.isRoute || !has(object.metadata.annotations)
+        || object.metadata.annotations.all(k, !(k.lowerAscii() in
+        ['traefik.ingress.kubernetes.io/router.rule',
+        'traefik.ingress.kubernetes.io/router.priority',
+        'traefik.ingress.kubernetes.io/router.rulesyntax']))
+      message: "tenant Ingresses may not override the routing rule or priority by annotation; use spec.rules with granted hosts"
 ---
 # The ClusterIssuers solve DNS-01 for the whole zone, so a tenant Certificate is
 # held to the same grant as its routes. Each tenant's wiring file binds this

@@ -298,8 +298,15 @@ REQUIRED_POLICIES = {
             (
                 "variables.isRoute || !has(object.metadata.annotations) || "
                 "object.metadata.annotations.all(k, "
-                "!k.startsWith('traefik.ingress.kubernetes.io/router.tls.domains.') || "
-                "object.metadata.annotations[k].split(',').all(d, d.trim() in variables.hosts))"
+                "!k.lowerAscii().startsWith('traefik.ingress.kubernetes.io/router.tls.domains.') "
+                "|| object.metadata.annotations[k].split(',').all(d, d.trim() in variables.hosts))"
+            ),
+            (
+                "variables.isRoute || !has(object.metadata.annotations) || "
+                "object.metadata.annotations.all(k, !(k.lowerAscii() in "
+                "['traefik.ingress.kubernetes.io/router.rule', "
+                "'traefik.ingress.kubernetes.io/router.priority', "
+                "'traefik.ingress.kubernetes.io/router.rulesyntax']))"
             ),
         ],
     },

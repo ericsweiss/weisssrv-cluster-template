@@ -241,12 +241,18 @@ copy passes `task lint:comment-length`. The longer reasons live here:
   `priority` only when the grant carries `maxPriority`, and at most that, and
   may list only granted names in `tls.domains`. An Ingress needs a granted
   `host` on every rule, granted TLS hosts and
-  `router.tls.domains.*` annotations, and no default backend. Grant a hostname
-  no platform route serves. A Certificate may name only granted hostnames in
-  `dnsNames` and `commonName`, no wildcard, IP, URI, email, otherName or
-  `literalSubject`, and may use only the platform ClusterIssuers
-  (`letsencrypt-prod`, `letsencrypt-staging`) or an Issuer in its own
-  namespace. The tenant does not write CertificateRequests to those
+  `router.tls.domains.*` annotations, and no default backend. Traefik builds an
+  Ingress router's rule from `spec.rules`, so the `router.rule`,
+  `router.priority` and `router.rulesyntax` annotations, which would reshape or
+  outrank it, are refused in any letter case. Of Traefik v3's other `router.*`
+  annotations, `entrypoints`, `pathmatcher`, `middlewares` (held to the
+  allowlist below), `tls`, `tls.certresolver`, `tls.options` and
+  `observability.*` stay open: none changes the host the rule matches or its
+  priority. Grant a hostname no platform route serves. A Certificate may name
+  only granted hostnames in `dnsNames` and `commonName`, no wildcard, IP, URI,
+  email, otherName or `literalSubject`, and may use only the platform
+  ClusterIssuers (`letsencrypt-prod`, `letsencrypt-staging`) or an Issuer in
+  its own namespace. The tenant does not write CertificateRequests to those
   ClusterIssuers itself: cert-manager creates them from the Certificate.
 - **Impersonation.** Without `serviceAccountName`, kustomize-controller applies
   tenant manifests with its own cluster-admin credentials. The ServiceAccount

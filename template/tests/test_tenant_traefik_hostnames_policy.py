@@ -18,6 +18,14 @@ LEADING_HOST = "^Host[(]`[^`]+`[)]( && .*)?$"
 ANY_HOST = "Host[(]`[^`]*`[)]"
 # The Traefik Ingress annotations that name the domains a router's certificate covers.
 TLS_DOMAINS = "traefik.ingress.kubernetes.io/router.tls.domains."
+# Traefik decodes annotation fields case-insensitively, so the policy lowercases keys.
+# The Ingress annotations that would reshape the routing rule Traefik builds from
+# spec.rules, or raise its priority over a platform route.
+ROUTING = [
+    "traefik.ingress.kubernetes.io/router.rule",
+    "traefik.ingress.kubernetes.io/router.priority",
+    "traefik.ingress.kubernetes.io/router.rulesyntax",
+]
 VARIABLES = [
     {"name": "isRoute", "expression": "request.resource.resource == 'ingressroutes'"},
     {
@@ -84,11 +92,22 @@ VALIDATIONS = [
         "expression": (
             "variables.isRoute || !has(object.metadata.annotations)"
             " || object.metadata.annotations.all(k,"
-            f" !k.startsWith('{TLS_DOMAINS}')"
+            f" !k.lowerAscii().startsWith('{TLS_DOMAINS}')"
             " || object.metadata.annotations[k].split(',').all(d, d.trim() in variables.hosts))"
         ),
         "message": (
             "a tenant Ingress may list only router.tls.domains the platform granted this namespace"
+        ),
+    },
+    {
+        "expression": (
+            "variables.isRoute || !has(object.metadata.annotations)"
+            " || object.metadata.annotations.all(k,"
+            " !(k.lowerAscii() in ['" + "', '".join(ROUTING) + "']))"
+        ),
+        "message": (
+            "tenant Ingresses may not override the routing rule or priority by annotation;"
+            " use spec.rules with granted hosts"
         ),
     },
 ]
@@ -165,14 +184,15 @@ def route_allowed(spec: dict, grant: dict = GRANT) -> bool:
 
 
 def ingress_allowed(spec: dict, grant: dict = GRANT, annotations: dict | None = None) -> bool:
-    """The four Ingress validations, evaluated on `grant`."""
+    """The five Ingress validations, evaluated on `grant`."""
     granted = hosts(grant)
     return (
         all(
             d.strip() in granted
-            for k, v in (annotations or {}).items() if k.startswith(TLS_DOMAINS)
+            for k, v in (annotations or {}).items() if k.lower().startswith(TLS_DOMAINS)
             for d in v.split(",")
         )
+        and not any(k.lower() in ROUTING for k in annotations or {})
         and "defaultBackend" not in spec
         and all("host" in r and r["host"] in granted for r in spec.get("rules", []))
         and all(h in granted for t in spec.get("tls", []) for h in t.get("hosts", []))
@@ -302,6 +322,38 @@ def test_granted_ingress_tls_domain_annotations_are_admitted():
 def test_an_ungranted_ingress_tls_domain_annotation_is_refused(key, value):
     assert not ingress_allowed(
         {"rules": [{"host": "demo.apps.test"}]}, annotations={f"{TLS_DOMAINS}{key}": value}
+    )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [*ROUTING, "traefik.ingress.kubernetes.io/Router.Priority"],
+    ids=["rule", "priority", "rulesyntax", "mixed-case-priority"],
+)
+def test_an_ingress_routing_override_annotation_is_refused(key):
+    """Each would let a granted-host Ingress outrank or reshape a platform route."""
+    assert not ingress_allowed(
+        {"rules": [{"host": "demo.apps.test"}]}, annotations={key: "1000"}
+    )
+
+
+def test_a_mixed_case_ingress_tls_domain_annotation_is_still_held_to_the_grant():
+    assert not ingress_allowed(
+        {"rules": [{"host": "demo.apps.test"}]},
+        annotations={"traefik.ingress.kubernetes.io/Router.TLS.Domains.0.main": "auth.apps.test"},
+    )
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["router.entrypoints", "router.pathmatcher", "router.middlewares", "router.tls",
+     "router.tls.certresolver", "router.tls.options", "router.observability.accesslogs"],
+)
+def test_the_remaining_router_annotations_are_admitted(key):
+    """None of these changes the Host the rule is built from or its priority."""
+    assert ingress_allowed(
+        {"rules": [{"host": "demo.apps.test"}]},
+        annotations={f"traefik.ingress.kubernetes.io/{key}": "x"},
     )
 
 
