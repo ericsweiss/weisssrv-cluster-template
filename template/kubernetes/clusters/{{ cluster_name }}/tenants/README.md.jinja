@@ -631,7 +631,8 @@ spec:
   namespace: its ValidatingAdmissionPolicies, Deny-bound on every
   `fluxcd.io/tenant` namespace, pin each Service, Middleware, TLS and
   TraefikService reference to the tenant's namespace apart from the platform
-  middlewares they allowlist, and refuse `name@provider` references. That
+  middlewares they allowlist, refuse `name@provider` references, and refuse
+  any IngressRoute `parentRefs` (multi-layer routing is platform-owned). That
   covers `highestRandomWeight` services and every per-service `middlewares`
   list (on route services, `errors`, `weighted`, `highestRandomWeight`,
   `mirroring` and its mirrors), held to the route-level middleware rule. A tenant
@@ -752,7 +753,7 @@ spec:
   Endpoints with no selector Service; IngressRoutes and Ingresses whose hosts
   are not all in the namespace's `flux-system/tenant-routing-<ns>` grant, or
   that carry a refused annotation, a `name@provider` or cross-namespace
-  reference, `HostRegexp` or a priority above the grant; Middlewares whose
+  reference, `parentRefs`, `HostRegexp` or a priority above the grant; Middlewares whose
   forwardAuth address is neither a Service in the namespace nor the platform
   outpost; TraefikServices with cross-namespace or `@` references, including
   per-service middlewares outside the namespace and the platform allowlist, or a
