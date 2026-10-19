@@ -57,10 +57,13 @@ for ns in $namespaces; do
     while IFS= read -r line; do
         [ -n "$line" ] && findings+=("$line")
     done < <(
-        jq -r --arg ns "$ns" '.items[] | .metadata.name as $n
-            | if (.spec.type // "") == "ExternalName" then "\($ns) Service/\($n): type ExternalName"
-              elif ((.spec.selector // {}) | length) == 0 then "\($ns) Service/\($n): no selector"
-              else empty end' <<<"$services" || echo "!services"
+        jq -r --arg ns "$ns" '.items[] | .metadata.name as $n | (.spec.type // "ClusterIP") as $t
+            | (if $t != "ClusterIP" then "\($ns) Service/\($n): type \($t)" else empty end),
+              (if $t != "ExternalName" and ((.spec.selector // {}) | length) == 0
+               then "\($ns) Service/\($n): no selector" else empty end),
+              (if ((.spec.externalIPs // []) | length) > 0
+               then "\($ns) Service/\($n): externalIPs \(.spec.externalIPs | join(","))"
+               else empty end)' <<<"$services" || echo "!services"
         jq -r --arg ns "$ns" --arg c "$CONTROLLER" '.items[]
             | (.metadata.labels // {})["endpointslice.kubernetes.io/managed-by"] as $m
             | select($m != $c)
@@ -94,7 +97,7 @@ done
 if [ "${#findings[@]}" -gt 0 ]; then
     printf '%s\n' "${findings[@]}"
     echo "audit-tenant-services: ${#findings[@]} object(s) the tenant policies would refuse." >&2
-    echo "    Fix: give each Service a selector, drop ExternalName, delete hand-written endpoints." >&2
+    echo "    Fix: give each Service a selector, make it a plain ClusterIP without externalIPs, delete hand-written endpoints." >&2
     exit 1
 fi
 echo "audit-tenant-services: OK ($count tenant namespace(s))"

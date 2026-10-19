@@ -39,10 +39,17 @@ STUB = textwrap.dedent(
 )
 
 
-def service(name: str, selector: dict | None = None, kind: str = "ClusterIP") -> dict:
+def service(
+    name: str,
+    selector: dict | None = None,
+    kind: str = "ClusterIP",
+    external_ips: list[str] | None = None,
+) -> dict:
     spec: dict = {"type": kind}
     if selector is not None:
         spec["selector"] = selector
+    if external_ips is not None:
+        spec["externalIPs"] = external_ips
     return {"metadata": {"name": name}, "spec": spec}
 
 
@@ -119,6 +126,18 @@ def test_no_tenant_namespace_passes_and_says_so(tmp_path):
             {"services": [service("ext", {"app": "x"}, kind="ExternalName")]},
             "demo Service/ext: type ExternalName",
         ),
+        (
+            {"services": [service("np", {"app": "x"}, kind="NodePort")]},
+            "demo Service/np: type NodePort",
+        ),
+        (
+            {"services": [service("lb", {"app": "x"}, kind="LoadBalancer")]},
+            "demo Service/lb: type LoadBalancer",
+        ),
+        (
+            {"services": [service("eip", {"app": "x"}, external_ips=["1.1.1.1", "8.8.8.8"])]},
+            "demo Service/eip: externalIPs 1.1.1.1,8.8.8.8",
+        ),
         ({"services": [service("bare")]}, "demo Service/bare: no selector"),
         ({"services": [service("empty", {})]}, "demo Service/empty: no selector"),
         (
@@ -174,6 +193,9 @@ def test_no_tenant_namespace_passes_and_says_so(tmp_path):
     ],
     ids=[
         "externalname",
+        "node-port",
+        "load-balancer",
+        "external-ips",
         "selectorless",
         "empty-selector",
         "foreign-slice",
@@ -208,6 +230,16 @@ def test_a_controller_slice_whose_addresses_are_selected_pods_passes(tmp_path):
             pod("web-1", {"app": "web", "extra": "y"}, "10.42.1.6"),
         ],
     }
+    result = run(tmp_path, {"tenants": ["demo"], "objects": {"demo": objects}})
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_headless_or_default_type_service_passes(tmp_path):
+    headless = service("web-headless", {"app": "web"}, external_ips=[])
+    headless["spec"]["clusterIP"] = "None"
+    untyped = service("web-untyped", {"app": "web"})
+    del untyped["spec"]["type"]
+    objects = {**CLEAN_APP, "services": CLEAN_APP["services"] + [headless, untyped]}
     result = run(tmp_path, {"tenants": ["demo"], "objects": {"demo": objects}})
     assert result.returncode == 0, result.stdout + result.stderr
 

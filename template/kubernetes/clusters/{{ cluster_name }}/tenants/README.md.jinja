@@ -612,7 +612,11 @@ spec:
   Service name is only safe while that Service resolves to the tenant's own
   pods, so `tenant-no-externalname-services` refuses an ExternalName Service
   (it would CNAME Traefik into another namespace) and a Service with no
-  selector, and `tenant-no-manual-endpoints` refuses any Endpoints or
+  selector. The same policy admits only internal ClusterIP Services, headless
+  ones included, with no `externalIPs`: a NodePort or LoadBalancer Service
+  reaches the tenant's pods through kube-proxy or a MetalLB VIP without
+  Traefik, and `externalIPs` let kube-proxy capture traffic for any address
+  in the cluster (the CVE-2020-8554 class). `tenant-no-manual-endpoints` refuses any Endpoints or
   EndpointSlice not written by the control plane (hand-written ones could name
   another namespace's pod or Service IP). An off-cluster backend a tenant needs
   is fronted from the platform `vm-ingress` namespace instead. What a route
@@ -657,7 +661,8 @@ spec:
   namespace before it carried the `fluxcd.io/tenant` label, stays in place.
   Run `scripts/audit-tenant-services.sh` (needs `kubectl` against this cluster
   and `jq`) once at rollout and before each onboarding: it lists, in every
-  `fluxcd.io/tenant` namespace, ExternalName and selectorless Services,
+  `fluxcd.io/tenant` namespace, ExternalName, NodePort and LoadBalancer
+  Services, Services with `externalIPs`, selectorless Services,
   EndpointSlices not managed by `endpointslice-controller.k8s.io`, and
   Endpoints with no selector Service, and exits non-zero while any remain.
   It does not trust labels, which a tenant can write: every EndpointSlice must

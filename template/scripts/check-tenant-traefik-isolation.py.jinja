@@ -189,6 +189,10 @@ REQUIRED_POLICIES = {
         "validations": [
             "!has(object.spec.type) || object.spec.type != 'ExternalName'",
             "has(object.spec.selector) && size(object.spec.selector) > 0",
+            (
+                "(!has(object.spec.type) || object.spec.type == 'ClusterIP') && "
+                "(!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0)"
+            ),
         ],
     },
     "tenant-no-manual-endpoints": {

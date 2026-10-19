@@ -299,9 +299,10 @@ stays until its next apply, which they then refuse. On the update branch,
 before it merges:
 
 1. Run `scripts/audit-tenant-services.sh` (it arrives with the update) against
-   the cluster, and fix every ExternalName Service, selectorless Service and
-   hand-written Endpoints or EndpointSlice it lists; the next reconcile of each
-   is refused.
+   the cluster, and fix every ExternalName, NodePort or LoadBalancer Service,
+   Service with `externalIPs`, selectorless Service and hand-written Endpoints
+   or EndpointSlice it lists; the next reconcile of each is refused. A tenant
+   that needs a port outside Traefik asks the platform to expose it.
 2. For each tenant, add a `tenant-routing-<ns>` ConfigMap in `flux-system`
    granting its hostnames, and the Deny bindings of `tenant-traefik-hostnames`
    and `tenant-certificates` that read it, before that tenant's routes and
@@ -330,7 +331,9 @@ What a tenant can no longer create or update:
   namespace;
 - an IngressRouteTCP or IngressRouteUDP;
 - a TLSOption or TLSStore named `default`;
-- an ExternalName Service or a Service with no selector;
+- an ExternalName, NodePort or LoadBalancer Service, a Service with
+  `externalIPs`, or a Service with no selector (internal ClusterIP Services,
+  headless ones included, stay allowed);
 - an Endpoints or EndpointSlice the control plane did not write.
 
 ## Related
