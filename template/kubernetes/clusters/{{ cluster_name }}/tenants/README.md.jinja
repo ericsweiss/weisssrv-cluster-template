@@ -652,7 +652,13 @@ spec:
   (`system:serviceaccount:cert-manager:cert-manager`, the chart's
   `serviceAccountName` for the `cert-manager` release) writes it from a
   Certificate `tenant-certificates` has already admitted. A request to an
-  Issuer in the tenant's own namespace stays allowed. Setting
+  Issuer in the tenant's own namespace stays allowed. The same policy admits
+  only that controller to create or update an ACME Order or Challenge
+  (`acme.cert-manager.io`) in a tenant namespace. That is defence in depth,
+  not a live bypass: `cert-manager-edit` grants no create on `orders`, only
+  delete, and the cert-manager webhook refuses a change to a Challenge's spec;
+  the policy holds if a future RBAC change widens either.
+  Setting
   `global.rbac.aggregateClusterRoles: false` on the cert-manager release, and
   granting tenants Certificate and Issuer rights explicitly, would close the
   same path by authorization instead; the platform keeps the chart default and

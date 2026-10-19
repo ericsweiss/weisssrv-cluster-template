@@ -344,6 +344,10 @@ What a tenant can no longer create or update:
 - a cert-manager CertificateRequest to a ClusterIssuer, which cert-manager
   now creates from a validated Certificate only (a request to an Issuer in the
   tenant's own namespace stays allowed);
+- an ACME Order or Challenge (`acme.cert-manager.io`), which only
+  cert-manager's controller writes; tenant RBAC already grants no Order create
+  and the cert-manager webhook refuses Challenge spec changes, so this is
+  defence in depth and refuses nothing a tenant does today;
 - an IngressRouteTCP or IngressRouteUDP;
 - a TLSOption or TLSStore named `default`;
 - an ExternalName, NodePort or LoadBalancer Service, a Service with
