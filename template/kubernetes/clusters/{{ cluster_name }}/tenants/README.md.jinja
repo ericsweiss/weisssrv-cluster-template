@@ -463,8 +463,10 @@ spec:
   `tenant-no-manual-endpoints`.
   Once any tenant is onboarded, `task lint:tenant-traefik-isolation` fails if
   the policies or their bindings go missing, if a binding narrows its match
-  below every tenant namespace, or if a policy fails open, narrows its resources
-  or loses a validation, even with `allowCrossNamespace: false`.
+  below every tenant namespace, or if a policy fails open, narrows its resources,
+  or changes, drops or adds a variable or validation expression, even with
+  `allowCrossNamespace: false`. The gate carries each expression verbatim, so a
+  deliberate policy edit changes the gate's table in the same commit.
 - **Namespace ownership** is cooperative: nothing stops a tenant manifest from
   targeting a platform namespace today. An admission policy engine
   (Kyverno/OPA) is the durable fix.

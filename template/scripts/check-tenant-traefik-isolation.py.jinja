@@ -23,9 +23,9 @@ TRAEFIK_RELEASE = "kubernetes/infrastructure/controllers/traefik/release.yaml"
 # The one resource that is always present: the shared tenant RBAC, not a tenant.
 BASELINE = {"tenant-crd-editor.yaml"}
 
-# The policies pinning tenant Traefik refs to the tenant's namespace. Each must
-# fail closed, match exactly these resources and keep this many validations, or
-# a weakened copy passes by name. Change together with tenant-traefik-policy.yaml.
+# The tenant policies, pinned whole: fail closed, these resources, and exactly
+# these variables and validation expressions (whitespace-normalized), or a
+# weakened copy passes by name. Change together with tenant-traefik-policy.yaml.
 TENANT_POLICY = "kubernetes/infrastructure/configs/tenant-traefik-policy.yaml"
 CONFIGS_KUSTOMIZATION = "kubernetes/infrastructure/configs/kustomization.yaml"
 WRITES = ["CREATE", "UPDATE"]
@@ -39,7 +39,40 @@ REQUIRED_POLICIES = {
                 "resources": ["ingressroutes", "ingressroutetcps", "ingressrouteudps"],
             },
         ],
-        "validations": 4,
+        "variables": [
+            ("ns", "object.metadata.namespace"),
+            ("platformMiddlewares", (
+                "['traefik/lan-tailscale-only', 'traefik/lan-tailscale-strict', "
+                "'traefik/hsts-header', 'traefik/security-headers', "
+                "'authentik/authentik-auth']"
+            )),
+        ],
+        "validations": [
+            (
+                "!has(object.spec.routes) || object.spec.routes.all(r, !has(r.services) ||"
+                " r.services.all(s, !has(s.namespace) || s.namespace == variables.ns))"
+            ),
+            (
+                "!has(object.spec.routes) || object.spec.routes.all(r, !has(r.middlewares)"
+                " || r.middlewares.all(m, !has(m.namespace) || m.namespace == variables.ns"
+                " || (m.namespace + '/' + m.name) in variables.platformMiddlewares))"
+            ),
+            (
+                "!has(object.spec.routes) || object.spec.routes.all(r, "
+                "(!has(r.middlewares) || r.middlewares.all(m, !m.name.contains('@'))) && "
+                "(!has(r.services) || r.services.all(s, !s.name.contains('@') && "
+                "(!has(s.serversTransport) || !s.serversTransport.contains('@')))))"
+            ),
+            (
+                "!has(object.spec.tls) || ((!has(object.spec.tls.options) || "
+                "((!has(object.spec.tls.options.namespace) || "
+                "object.spec.tls.options.namespace == variables.ns) && "
+                "!object.spec.tls.options.name.contains('@'))) && "
+                "(!has(object.spec.tls.store) || ((!has(object.spec.tls.store.namespace) "
+                "|| object.spec.tls.store.namespace == variables.ns) && "
+                "!object.spec.tls.store.name.contains('@'))))"
+            ),
+        ],
     },
     "tenant-traefik-object-refs": {
         "resourceRules": [
@@ -50,7 +83,61 @@ REQUIRED_POLICIES = {
                 "resources": ["middlewares", "traefikservices"],
             },
         ],
-        "validations": 6,
+        "variables": [
+            ("ns", "object.metadata.namespace"),
+            ("platformForwardAuth", (
+                "['http://authentik-server.authentik.svc.cluster.local/outpost.goauthentik.io/auth/traefik']"
+            )),
+            ("ownServiceAddress", (
+                "'^https?://[a-z]([-a-z0-9]*[a-z0-9])?[.]' + variables.ns + "
+                "'[.]svc([.]cluster[.]local)?(:[0-9]{1,5})?(/.*)?$'"
+            )),
+        ],
+        "validations": [
+            (
+                "!has(object.spec.chain) || !has(object.spec.chain.middlewares) || "
+                "object.spec.chain.middlewares.all(m, !m.name.contains('@') && "
+                "(!has(m.namespace) || m.namespace == variables.ns))"
+            ),
+            (
+                "!has(object.spec.errors) || !has(object.spec.errors.service) || "
+                "!has(object.spec.errors.service.namespace) || "
+                "object.spec.errors.service.namespace == variables.ns"
+            ),
+            (
+                "!has(object.spec.forwardAuth) || object.spec.forwardAuth.address in "
+                "variables.platformForwardAuth || "
+                "object.spec.forwardAuth.address.matches(variables.ownServiceAddress)"
+            ),
+            (
+                "!has(object.spec.weighted) || !has(object.spec.weighted.services) || "
+                "object.spec.weighted.services.all(s, !has(s.namespace) || s.namespace == "
+                "variables.ns)"
+            ),
+            (
+                "!has(object.spec.mirroring) || ((!has(object.spec.mirroring.namespace) ||"
+                " object.spec.mirroring.namespace == variables.ns) && "
+                "(!has(object.spec.mirroring.mirrors) || "
+                "object.spec.mirroring.mirrors.all(s, !has(s.namespace) || s.namespace == "
+                "variables.ns)))"
+            ),
+            (
+                "(!has(object.spec.errors) || !has(object.spec.errors.service) || "
+                "(!object.spec.errors.service.name.contains('@') && "
+                "(!has(object.spec.errors.service.serversTransport) || "
+                "!object.spec.errors.service.serversTransport.contains('@')))) && "
+                "(!has(object.spec.weighted) || !has(object.spec.weighted.services) || "
+                "object.spec.weighted.services.all(s, !s.name.contains('@') && "
+                "(!has(s.serversTransport) || !s.serversTransport.contains('@')))) && "
+                "(!has(object.spec.mirroring) || "
+                "(!object.spec.mirroring.name.contains('@') && "
+                "(!has(object.spec.mirroring.serversTransport) || "
+                "!object.spec.mirroring.serversTransport.contains('@')) && "
+                "(!has(object.spec.mirroring.mirrors) || "
+                "object.spec.mirroring.mirrors.all(s, !s.name.contains('@') && "
+                "(!has(s.serversTransport) || !s.serversTransport.contains('@'))))))"
+            ),
+        ],
     },
     "tenant-traefik-ingress-refs": {
         "resourceRules": [
@@ -67,7 +154,23 @@ REQUIRED_POLICIES = {
                 "resources": ["services"],
             },
         ],
-        "validations": 1,
+        "variables": [
+            ("platformRefs", (
+                "['traefik-lan-tailscale-only@kubernetescrd', "
+                "'traefik-lan-tailscale-strict@kubernetescrd', "
+                "'traefik-hsts-header@kubernetescrd', "
+                "'traefik-security-headers@kubernetescrd', "
+                "'authentik-authentik-auth@kubernetescrd']"
+            )),
+        ],
+        "validations": [
+            (
+                "!has(object.metadata.annotations) || object.metadata.annotations.all(k, "
+                "!k.startsWith('traefik.ingress.kubernetes.io/') || "
+                "object.metadata.annotations[k].split(',').all(v, !v.contains('@') || "
+                "v.trim() in variables.platformRefs))"
+            ),
+        ],
     },
     "tenant-no-externalname-services": {
         "resourceRules": [
@@ -78,7 +181,11 @@ REQUIRED_POLICIES = {
                 "resources": ["services"],
             },
         ],
-        "validations": 2,
+        "variables": [],
+        "validations": [
+            "!has(object.spec.type) || object.spec.type != 'ExternalName'",
+            "has(object.spec.selector) && size(object.spec.selector) > 0",
+        ],
     },
     "tenant-no-manual-endpoints": {
         "resourceRules": [
@@ -95,7 +202,16 @@ REQUIRED_POLICIES = {
                 "resources": ["endpointslices"],
             },
         ],
-        "validations": 1,
+        "variables": [],
+        "validations": [
+            (
+                "request.userInfo.username == 'system:kube-controller-manager' || "
+                "request.userInfo.username in "
+                "['system:serviceaccount:kube-system:endpoint-controller', "
+                "'system:serviceaccount:kube-system:endpointslice-controller', "
+                "'system:serviceaccount:kube-system:endpointslicemirroring-controller']"
+            ),
+        ],
     },
 }
 TENANT_LABEL = "fluxcd.io/tenant"
@@ -147,19 +263,34 @@ def allows_cross_namespace(path: Path, root: Path) -> bool | None:
     return False if answered else None
 
 
+def _cel(text: object) -> str:
+    """A CEL expression with its whitespace normalized: YAML folding is not a change."""
+    return " ".join(str(text).split())
+
+
+def _entries(items: object) -> list[dict] | None:
+    if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
+        return None
+    return items
+
+
 def enforces(spec: object, required: dict) -> bool:
     """The policy fails closed, matches exactly the required resources with no
-    match conditions, and keeps the required number of validations."""
+    match conditions, and carries exactly the required variables and the
+    required validation expressions, in order."""
     if not isinstance(spec, dict):
         return False
-    validations = spec.get("validations")
+    variables = _entries(spec.get("variables") or [])
+    validations = _entries(spec.get("validations"))
+    if variables is None or validations is None:
+        return False
     return (
         spec.get("failurePolicy") == "Fail"
         and spec.get("matchConstraints") == {"resourceRules": required["resourceRules"]}
         and not spec.get("matchConditions")
-        and isinstance(validations, list)
-        and len(validations) == required["validations"]
-        and all(isinstance(v, dict) and v.get("expression") for v in validations)
+        and [(v.get("name"), _cel(v.get("expression"))) for v in variables]
+        == required["variables"]
+        and [_cel(v.get("expression")) for v in validations] == required["validations"]
     )
 
 

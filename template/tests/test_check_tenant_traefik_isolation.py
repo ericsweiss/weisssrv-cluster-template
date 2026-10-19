@@ -315,9 +315,18 @@ def _narrow_operations(spec):
     spec["matchConstraints"]["resourceRules"][0]["operations"] = ["CREATE"]
 
 
+def _expression_true(index: int):
+    def mutate(spec):
+        spec["validations"][index]["expression"] = "true"
+    return mutate
+
+
 # Each mutation weakens one policy while its name and Deny binding still read
-# true: errors fail open, a validation is dropped, or the match narrows.
+# true: errors fail open, a validation is dropped or made vacuous, or the match
+# narrows.
 WEAKENINGS = {
+    "first-expression-true": _expression_true(0),
+    "last-expression-true": _expression_true(-1),
     "failurePolicy-Ignore": lambda spec: spec.__setitem__("failurePolicy", "Ignore"),
     "failurePolicy-absent": lambda spec: spec.pop("failurePolicy"),
     "validation-dropped": lambda spec: spec["validations"].pop(),
@@ -343,6 +352,49 @@ def test_a_weakened_policy_keeps_the_gate_closed(tmp_path, name, weakening):
     )
     write_policy(root, _mutated(name, WEAKENINGS[weakening]))
     assert len(gate.check(root)) == 1
+
+
+SHIPPED_VARIABLES = sorted(
+    (d["metadata"]["name"], v["name"])
+    for d in yaml.safe_load_all(SHIPPED_POLICY)
+    if d and d["kind"] == "ValidatingAdmissionPolicy"
+    for v in d["spec"].get("variables") or []
+)
+
+
+# A widened variable vacates every validation that reads it while each
+# expression string stays the same: an allowlist that admits anything, or a
+# pattern that matches any address.
+@pytest.mark.parametrize(("name", "variable"), SHIPPED_VARIABLES)
+def test_a_widened_variable_keeps_the_gate_closed(tmp_path, name, variable):
+    def widen(spec):
+        for v in spec["variables"]:
+            if v["name"] == variable:
+                v["expression"] = "'.*'"
+
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, _mutated(name, widen))
+    assert len(gate.check(root)) == 1
+
+
+def test_whitespace_in_an_expression_does_not_close_the_gate(tmp_path):
+    """The pin compares whitespace-normalized CEL, so reflowing a folded
+    expression is not a weakening."""
+    def reflow(spec):
+        for v in spec["validations"]:
+            v["expression"] = v["expression"].replace(" ", "\n  ", 1)
+
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, _mutated("tenant-traefik-object-refs", reflow))
+    assert gate.check(root) == []
 
 
 def test_the_unmutated_round_trip_still_opens_the_gate(tmp_path):
