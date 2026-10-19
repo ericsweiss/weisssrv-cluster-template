@@ -227,6 +227,13 @@ spec:
         (!has(object.spec.type) || object.spec.type == 'ClusterIP')
         && (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0)
       message: "tenant Services must be internal ClusterIP Services without externalIPs"
+    # Tailscale's operator publishes a Service with any tailscale.com/ key, no Traefik.
+    # Also checked: metallb.io/* acts only on LoadBalancer (refused above), and
+    # external-dns publishes DNS, not traffic (see the tenants README).
+    - expression: >-
+        !has(object.metadata.annotations)
+        || object.metadata.annotations.all(k, !k.startsWith('tailscale.com/'))
+      message: "tenant Services may not bypass Traefik through the Tailscale operator"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -364,6 +371,15 @@ spec:
         'traefik.ingress.kubernetes.io/router.priority',
         'traefik.ingress.kubernetes.io/router.rulesyntax']))
       message: "tenant Ingresses may not override the routing rule or priority by annotation; use spec.rules with granted hosts"
+    # Another ingress operator (Tailscale's: class tailscale, tailscale.com/ keys)
+    # would publish the Ingress with no Traefik, installed today or later.
+    - expression: >-
+        variables.isRoute || ((!has(object.spec) || !has(object.spec.ingressClassName)
+        || object.spec.ingressClassName == 'traefik')
+        && (!has(object.metadata.annotations) || object.metadata.annotations.all(k,
+        !k.startsWith('tailscale.com/')
+        && (k != 'kubernetes.io/ingress.class' || object.metadata.annotations[k] == 'traefik'))))
+      message: "tenant Ingresses may be handled only by Traefik, not another ingress operator"
 ---
 # The ClusterIssuers solve DNS-01 for the whole zone, so a tenant Certificate is
 # held to the same grant as its routes. Each tenant's wiring file binds this

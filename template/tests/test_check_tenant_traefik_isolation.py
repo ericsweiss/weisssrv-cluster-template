@@ -311,6 +311,22 @@ def test_the_gate_pins_ten_policies():
     assert "tenant-certificaterequests" in gate.REQUIRED_POLICIES
 
 
+@pytest.mark.parametrize(
+    ("name", "needle"),
+    [
+        ("tenant-no-externalname-services", "!k.startsWith('tailscale.com/')"),
+        ("tenant-traefik-hostnames", "object.spec.ingressClassName == 'traefik'"),
+        ("tenant-traefik-hostnames", "!k.startsWith('tailscale.com/')"),
+        ("tenant-traefik-hostnames", "k != 'kubernetes.io/ingress.class'"),
+    ],
+    ids=["service-tailscale", "ingress-class", "ingress-tailscale", "ingress-legacy-class"],
+)
+def test_the_gate_pins_the_other_operator_refusals(name, needle):
+    """Another ingress operator (Tailscale's) would route around the other
+    pins, so the gate carries each refusal."""
+    assert [v for v in gate.REQUIRED_POLICIES[name]["validations"] if needle in v]
+
+
 def _drop_acme_writes(spec):
     spec["matchConstraints"]["resourceRules"] = spec["matchConstraints"]["resourceRules"][:1]
     spec["validations"] = spec["validations"][:1]

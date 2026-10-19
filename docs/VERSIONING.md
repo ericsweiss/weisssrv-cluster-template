@@ -306,7 +306,9 @@ before it merges:
    the grant or carrying a refused annotation, `name@provider` or
    cross-namespace reference, `HostRegexp` or priority; Middlewares with a
    forwardAuth address outside the allowed forms; TraefikServices with
-   cross-namespace or `@` references; any IngressRouteTCP or IngressRouteUDP;
+   cross-namespace or `@` references; Services and Ingresses
+   carrying a `tailscale.com/*` annotation, and Ingresses of a class other
+   than `traefik`; any IngressRouteTCP or IngressRouteUDP;
    Certificates off the grant or naming another issuer; tenant-written
    CertificateRequests to anything but a core Issuer; and a TLSOption or
    TLSStore named `default`. The next reconcile of each is refused. It does
@@ -338,6 +340,10 @@ before it merges:
 5. Remove any `traefik.ingress.kubernetes.io/router.rule`, `router.priority`
    or `router.rulesyntax` annotation from tenant Ingresses; the next apply of
    one that still carries it is refused.
+6. Move anything the audit lists as published by the Tailscale operator (a
+   `tailscale.com/*` annotation or a non-`traefik` Ingress class) behind a
+   granted Traefik route, or to a platform-owned object; the next apply of
+   one that still carries it is refused.
 
 What a tenant can no longer create or update:
 
@@ -368,6 +374,12 @@ What a tenant can no longer create or update:
   cert-manager's webhook refuses their spec changes after creation, which
   keeps a finalizer removal from wedging their deletion;
 - an IngressRouteTCP or IngressRouteUDP;
+- a Service or Ingress carrying any `tailscale.com/*` annotation, or an
+  Ingress whose `spec.ingressClassName` or `kubernetes.io/ingress.class`
+  annotation is set to anything but `traefik`. The Tailscale operator would
+  publish it with no Traefik in the path, and the refusal holds whether or not
+  the cluster runs that operator: tenants cannot publish through the Tailscale
+  operator; ask the platform;
 - a TLSOption or TLSStore named `default`;
 - an ExternalName, NodePort or LoadBalancer Service, a Service with
   `externalIPs`, or a Service with no selector (internal ClusterIP Services,

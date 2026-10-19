@@ -42,6 +42,8 @@ def refs($o): (.metadata.annotations // {}) | to_entries[]
     | .value | split(",")[] | trimmed as $v
     | select(($v | contains("@")) and (any($c.refs[]; . == $v) | not))
     | "\($o): annotation \($k) names \($v), outside the platform allowlist";
+def tailscale($o): (.metadata.annotations // {}) | keys[] | select(startswith("tailscale.com/"))
+    | "\($o): annotation \(.) publishes through the Tailscale operator";
 '
 
 # One program per policy-covered kind, each evaluated per object with $o its
@@ -84,7 +86,11 @@ def refs($o): (.metadata.annotations // {}) | to_entries[]
         ((.metadata.annotations // {}) | keys[] | select(ascii_downcase | IN(
             "traefik.ingress.kubernetes.io/router.rule", "traefik.ingress.kubernetes.io/router.priority",
             "traefik.ingress.kubernetes.io/router.rulesyntax")) | "\($o): annotation \(.) is refused"),
-        refs($o)'
+        (.spec.ingressClassName // "traefik" | select(. != "traefik")
+            | "\($o): ingressClassName \(.) is not traefik"),
+        ((.metadata.annotations // {})["kubernetes.io/ingress.class"] // "traefik" | select(. != "traefik")
+            | "\($o): annotation kubernetes.io/ingress.class \(.) is not traefik"),
+        tailscale($o), refs($o)'
     CERTIFICATE_CHECKS='.spec as $s
         | (if $g.problem != null then "\($o): \($g.problem)" else
             (($s.dnsNames // [])[], ($s.commonName // empty)
@@ -111,7 +117,7 @@ def refs($o): (.metadata.annotations // {}) | to_entries[]
         | "\($o): \($u) asked \(.kind)/\(.name), not a core Issuer in its namespace"'
     TCP_UDP_CHECKS='"\($o): tenants may not route TCP or UDP"'
     DEFAULT_TLS_CHECKS='select($n == "default") | "\($o): the default \($kind) is platform-owned"'
-    SERVICE_CHECKS='refs($o)'
+    SERVICE_CHECKS='tailscale($o), refs($o)'
 }
 
 die() {

@@ -194,6 +194,10 @@ REQUIRED_POLICIES = {
                 "(!has(object.spec.type) || object.spec.type == 'ClusterIP') && "
                 "(!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0)"
             ),
+            (
+                "!has(object.metadata.annotations) || "
+                "object.metadata.annotations.all(k, !k.startsWith('tailscale.com/'))"
+            ),
         ],
     },
     "tenant-no-manual-endpoints": {
@@ -309,6 +313,13 @@ REQUIRED_POLICIES = {
                 "['traefik.ingress.kubernetes.io/router.rule', "
                 "'traefik.ingress.kubernetes.io/router.priority', "
                 "'traefik.ingress.kubernetes.io/router.rulesyntax']))"
+            ),
+            (
+                "variables.isRoute || ((!has(object.spec) || !has(object.spec.ingressClassName) "
+                "|| object.spec.ingressClassName == 'traefik') && "
+                "(!has(object.metadata.annotations) || object.metadata.annotations.all(k, "
+                "!k.startsWith('tailscale.com/') && (k != 'kubernetes.io/ingress.class' || "
+                "object.metadata.annotations[k] == 'traefik'))))"
             ),
         ],
     },

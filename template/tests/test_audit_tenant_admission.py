@@ -148,8 +148,10 @@ CLEAN_APP = {
     "ingresses": [
         named(
             "web",
-            {"rules": [{"host": "demo.home.test"}], "tls": [{"hosts": ["demo.home.test"]}]},
+            {"ingressClassName": "traefik", "rules": [{"host": "demo.home.test"}],
+             "tls": [{"hosts": ["demo.home.test"]}]},
             {
+                "kubernetes.io/ingress.class": "traefik",
                 "traefik.ingress.kubernetes.io/router.middlewares":
                     "traefik-hsts-header@kubernetescrd, authentik-authentik-auth@kubernetescrd",
                 "traefik.ingress.kubernetes.io/Router.TLS.Domains.0.main": "demo.apps.test",
@@ -480,6 +482,26 @@ POLICY_CASES = {
                 "traefik.ingress.kubernetes.io/service.serverstransport": "t@file"}}}),
         "demo Service/svc: annotation traefik.ingress.kubernetes.io/service.serverstransport"
         " names t@file, outside the platform allowlist",
+    ),
+    "service-tailscale-annotation": (
+        _with("services", {**service("svc", {"app": "web"}), "metadata": {
+            "name": "svc", "annotations": {"tailscale.com/expose": "true"}}}),
+        "demo Service/svc: annotation tailscale.com/expose publishes through the Tailscale"
+        " operator",
+    ),
+    "ingress-tailscale-class": (
+        _with("ingresses", _ingress({"ingressClassName": "tailscale",
+                                     "rules": [{"host": "demo.apps.test"}]})),
+        "demo Ingress/bad: ingressClassName tailscale is not traefik",
+    ),
+    "ingress-legacy-class-annotation": (
+        _with("ingresses", _ingress(annotations={"kubernetes.io/ingress.class": "tailscale"})),
+        "demo Ingress/bad: annotation kubernetes.io/ingress.class tailscale is not traefik",
+    ),
+    "ingress-tailscale-annotation": (
+        _with("ingresses", _ingress(annotations={"tailscale.com/funnel": "true"})),
+        "demo Ingress/bad: annotation tailscale.com/funnel publishes through the Tailscale"
+        " operator",
     ),
     "middleware-forward-auth-external": (
         _with("middlewares", named("bad", {"forwardAuth": {"address": "http://evil.test/"}})),

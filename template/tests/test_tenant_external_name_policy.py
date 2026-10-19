@@ -23,6 +23,14 @@ SHAPE_EXPRESSION = (
     " && (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0)"
 )
 SHAPE_MESSAGE = "tenant Services must be internal ClusterIP Services without externalIPs"
+# The Tailscale operator publishes any Service carrying one of its annotations,
+# with no Traefik in the path, whether or not this cluster installs it today.
+TAILSCALE = "tailscale.com/"
+ANNOTATION_EXPRESSION = (
+    "!has(object.metadata.annotations)"
+    f" || object.metadata.annotations.all(k, !k.startsWith('{TAILSCALE}'))"
+)
+ANNOTATION_MESSAGE = "tenant Services may not bypass Traefik through the Tailscale operator"
 TENANT_MATCH = {
     "namespaceSelector": {
         "matchExpressions": [{"key": "fluxcd.io/tenant", "operator": "Exists"}]
@@ -38,7 +46,7 @@ def _docs(kind: str) -> list[dict]:
     ]
 
 
-def allowed(spec: dict) -> bool:
+def allowed(spec: dict, annotations: dict | None = None) -> bool:
     """The validations; an omitted type defaults to ClusterIP before admission."""
     kind = spec.get("type", "ClusterIP")
     return (
@@ -46,6 +54,7 @@ def allowed(spec: dict) -> bool:
         and bool(spec.get("selector"))
         and kind == "ClusterIP"
         and not spec.get("externalIPs")
+        and not any(k.startswith(TAILSCALE) for k in annotations or {})
     )
 
 
@@ -69,6 +78,7 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
         {"expression": EXPRESSION, "message": MESSAGE},
         {"expression": SELECTOR_EXPRESSION, "message": SELECTOR_MESSAGE},
         {"expression": SHAPE_EXPRESSION, "message": SHAPE_MESSAGE},
+        {"expression": ANNOTATION_EXPRESSION, "message": ANNOTATION_MESSAGE},
     ]
 
 
@@ -134,3 +144,36 @@ def test_a_service_reachable_without_traefik_is_refused(spec):
 )
 def test_an_internal_cluster_ip_service_is_admitted(spec):
     assert allowed(spec)
+
+
+INTERNAL = {"type": "ClusterIP", "selector": SELECTOR, "ports": [{"port": 80}]}
+
+
+@pytest.mark.parametrize(
+    "annotations",
+    [
+        {"tailscale.com/expose": "true"},
+        {"tailscale.com/hostname": "demo"},
+        {"tailscale.com/tailnet-fqdn": "db.tailnet.ts.net"},
+        {"tailscale.com/proxy-class": "default"},
+        {"app.kubernetes.io/part-of": "demo", "tailscale.com/tags": "tag:k8s"},
+    ],
+    ids=["expose", "hostname", "tailnet-fqdn", "proxy-class", "beside-another"],
+)
+def test_a_tailscale_operator_annotation_is_refused(annotations):
+    """The operator would publish the Service to the tailnet with no Traefik."""
+    assert not allowed(INTERNAL, annotations)
+
+
+@pytest.mark.parametrize(
+    "annotations",
+    [
+        None,
+        {},
+        {"traefik.ingress.kubernetes.io/service.sticky.cookie": "true"},
+        {"example.com/tailscale.com": "x"},
+    ],
+    ids=["none", "empty", "traefik", "tailscale-not-a-prefix"],
+)
+def test_an_internal_service_without_tailscale_annotations_is_admitted(annotations):
+    assert allowed(INTERNAL, annotations)

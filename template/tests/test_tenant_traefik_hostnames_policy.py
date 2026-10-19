@@ -26,6 +26,11 @@ ROUTING = [
     "traefik.ingress.kubernetes.io/router.priority",
     "traefik.ingress.kubernetes.io/router.rulesyntax",
 ]
+# Another ingress operator, such as Tailscale's, publishes an Ingress of its own
+# class without Traefik, so a tenant Ingress is Traefik's or nobody's.
+TRAEFIK_CLASS = "traefik"
+LEGACY_CLASS = "kubernetes.io/ingress.class"
+TAILSCALE = "tailscale.com/"
 VARIABLES = [
     {"name": "isRoute", "expression": "request.resource.resource == 'ingressroutes'"},
     {
@@ -116,6 +121,18 @@ VALIDATIONS = [
             " use spec.rules with granted hosts"
         ),
     },
+    {
+        "expression": (
+            "variables.isRoute || ((!has(object.spec) || !has(object.spec.ingressClassName)"
+            f" || object.spec.ingressClassName == '{TRAEFIK_CLASS}')"
+            " && (!has(object.metadata.annotations) || object.metadata.annotations.all(k,"
+            f" !k.startsWith('{TAILSCALE}')"
+            f" && (k != '{LEGACY_CLASS}' || object.metadata.annotations[k] == '{TRAEFIK_CLASS}'))))"
+        ),
+        "message": (
+            "tenant Ingresses may be handled only by Traefik, not another ingress operator"
+        ),
+    },
 ]
 GRANT = {"hosts": "demo.apps.test\n  demo.home.test \n\n"}
 
@@ -192,17 +209,21 @@ def route_allowed(spec: dict, grant: dict = GRANT) -> bool:
 
 
 def ingress_allowed(spec: dict, grant: dict = GRANT, annotations: dict | None = None) -> bool:
-    """The grant check and the five Ingress validations, evaluated on `grant`."""
+    """The grant check and the six Ingress validations, evaluated on `grant`."""
     granted = hosts(grant)
+    annotations = annotations or {}
     return (
-        not any("*" in h for h in granted)
+        spec.get("ingressClassName", TRAEFIK_CLASS) == TRAEFIK_CLASS
+        and annotations.get(LEGACY_CLASS, TRAEFIK_CLASS) == TRAEFIK_CLASS
+        and not any(k.startswith(TAILSCALE) for k in annotations)
+        and not any("*" in h for h in granted)
         and
         all(
             d.strip() in granted
-            for k, v in (annotations or {}).items() if k.lower().startswith(TLS_DOMAINS)
+            for k, v in annotations.items() if k.lower().startswith(TLS_DOMAINS)
             for d in v.split(",")
         )
-        and not any(k.lower() in ROUTING for k in annotations or {})
+        and not any(k.lower() in ROUTING for k in annotations)
         and "defaultBackend" not in spec
         and all("host" in r and r["host"] in granted for r in spec.get("rules", []))
         and all(h in granted for t in spec.get("tls", []) for h in t.get("hosts", []))
@@ -383,6 +404,41 @@ def test_the_remaining_router_annotations_are_admitted(key):
         {"rules": [{"host": "demo.apps.test"}]},
         annotations={f"traefik.ingress.kubernetes.io/{key}": "x"},
     )
+
+
+GRANTED_RULES = {"rules": [{"host": "demo.apps.test"}]}
+
+
+@pytest.mark.parametrize(
+    ("spec", "annotations"),
+    [
+        ({**GRANTED_RULES, "ingressClassName": "tailscale"}, None),
+        ({**GRANTED_RULES, "ingressClassName": "nginx"}, None),
+        (GRANTED_RULES, {LEGACY_CLASS: "tailscale"}),
+        ({**GRANTED_RULES, "ingressClassName": "traefik"}, {LEGACY_CLASS: "nginx"}),
+        (GRANTED_RULES, {"tailscale.com/funnel": "true"}),
+        ({**GRANTED_RULES, "ingressClassName": "traefik"}, {"tailscale.com/tags": "tag:k8s"}),
+    ],
+    ids=["class-tailscale", "class-other", "legacy-annotation-tailscale",
+         "legacy-annotation-other", "tailscale-annotation", "tailscale-annotation-on-traefik"],
+)
+def test_an_ingress_for_another_operator_is_refused(spec, annotations):
+    """Tailscale's operator would publish it to the tailnet with no Traefik."""
+    assert not ingress_allowed(spec, annotations=annotations)
+
+
+@pytest.mark.parametrize(
+    ("spec", "annotations"),
+    [
+        (GRANTED_RULES, None),
+        ({**GRANTED_RULES, "ingressClassName": "traefik"}, None),
+        (GRANTED_RULES, {LEGACY_CLASS: "traefik"}),
+        ({**GRANTED_RULES, "ingressClassName": "traefik"}, {LEGACY_CLASS: "traefik"}),
+    ],
+    ids=["class-absent", "class-traefik", "legacy-annotation-traefik", "both-traefik"],
+)
+def test_a_traefik_or_default_class_ingress_is_admitted(spec, annotations):
+    assert ingress_allowed(spec, annotations=annotations)
 
 
 def test_tenant_tcp_and_udp_routes_are_refused_outright():

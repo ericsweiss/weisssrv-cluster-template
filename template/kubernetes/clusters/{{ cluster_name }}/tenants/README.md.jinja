@@ -646,7 +646,19 @@ spec:
   ones included, with no `externalIPs`: a NodePort or LoadBalancer Service
   reaches the tenant's pods through kube-proxy or a MetalLB VIP without
   Traefik, and `externalIPs` let kube-proxy capture traffic for any address
-  in the cluster (the CVE-2020-8554 class). `tenant-no-manual-endpoints` refuses any Endpoints or
+  in the cluster (the CVE-2020-8554 class). It also refuses a Service carrying
+  any `tailscale.com/*` annotation, and `tenant-traefik-hostnames` admits a
+  tenant Ingress only for Traefik: `spec.ingressClassName` and the legacy
+  `kubernetes.io/ingress.class` annotation absent or `traefik`, and no
+  `tailscale.com/*` annotation. The Tailscale operator publishes such a
+  Service or Ingress to the tailnet itself, with no Traefik in the path, so
+  every policy here would be bypassed. Both refusals hold whether or not this
+  cluster runs that operator, so installing one later does not reopen them:
+  tenants cannot publish through the Tailscale operator; ask the platform.
+  MetalLB's `metallb.io/*` annotations act only on LoadBalancer Services,
+  already refused, and external-dns publishes DNS records, not traffic (see
+  "What remains cooperative in routing" below).
+  `tenant-no-manual-endpoints` refuses any Endpoints or
   EndpointSlice not written by the control plane (hand-written ones could name
   another namespace's pod or Service IP). An off-cluster backend a tenant needs
   is fronted from the platform `vm-ingress` namespace instead. What a route
@@ -736,7 +748,10 @@ spec:
   that carry a refused annotation, a `name@provider` or cross-namespace
   reference, `HostRegexp` or a priority above the grant; Middlewares whose
   forwardAuth address is neither a Service in the namespace nor the platform
-  outpost; TraefikServices with cross-namespace or `@` references; any
+  outpost; TraefikServices with cross-namespace or `@` references;
+  Services and Ingresses carrying a `tailscale.com/*` annotation,
+  and Ingresses whose `ingressClassName` or `kubernetes.io/ingress.class`
+  annotation names a class other than `traefik`; any
   IngressRouteTCP or IngressRouteUDP; Certificates whose names are not all
   granted or whose issuer is not a platform ClusterIssuer or a core Issuer;
   tenant-written CertificateRequests to anything but a core Issuer; and a
