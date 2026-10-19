@@ -1,4 +1,7 @@
 ---
+# These policies bound future writes only; run scripts/audit-tenant-services.sh
+# once at rollout and before each onboarding for objects that predate them.
+
 # Tenants hold full traefik.io write while Traefik allows cross-namespace refs
 # for the platform. These policies pin every reference a tenant route makes to
 # its own namespace, except the platform middlewares listed below.
