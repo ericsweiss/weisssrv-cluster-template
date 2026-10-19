@@ -34,7 +34,13 @@ VARIABLES = [
     },
     {"name": "hostMatchers", "expression": "variables.hosts.map(h, 'Host(`' + h + '`)')"},
 ]
+# A wildcard in the grant would let one Ingress rule or TLS host cover many names.
+EXACT_GRANT = {
+    "expression": "variables.hosts.all(h, !h.contains('*'))",
+    "message": "the platform grant must list exact hostnames, no wildcards",
+}
 VALIDATIONS = [
+    EXACT_GRANT,
     {
         "expression": (
             "!variables.isRoute || !has(object.spec.routes) || object.spec.routes.all(r,"
@@ -162,7 +168,9 @@ def hosts(grant: dict) -> list[str]:
 
 
 def route_allowed(spec: dict, grant: dict = GRANT) -> bool:
-    """The three IngressRoute validations, evaluated on `grant`."""
+    """The grant check and the three IngressRoute validations, on `grant`."""
+    if any("*" in h for h in hosts(grant)):
+        return False
     matchers = [f"Host(`{h}`)" for h in hosts(grant)]
     for domain in spec.get("tls", {}).get("domains", []):
         if "main" in domain and domain["main"] not in hosts(grant):
@@ -184,9 +192,11 @@ def route_allowed(spec: dict, grant: dict = GRANT) -> bool:
 
 
 def ingress_allowed(spec: dict, grant: dict = GRANT, annotations: dict | None = None) -> bool:
-    """The five Ingress validations, evaluated on `grant`."""
+    """The grant check and the five Ingress validations, evaluated on `grant`."""
     granted = hosts(grant)
     return (
+        not any("*" in h for h in granted)
+        and
         all(
             d.strip() in granted
             for k, v in (annotations or {}).items() if k.lower().startswith(TLS_DOMAINS)
@@ -272,6 +282,24 @@ def test_a_priority_needs_a_granted_ceiling():
     assert not route_allowed({"routes": [route]})
     assert route_allowed({"routes": [route]}, {**GRANT, "maxPriority": "10"})
     assert not route_allowed({"routes": [route]}, {**GRANT, "maxPriority": "9"})
+
+
+WILDCARD_GRANTS = {
+    "wildcard-only": {"hosts": "*.apps.test\n"},
+    "wildcard-beside-exact": {"hosts": "demo.apps.test\n*.apps.test\n"},
+    "bare-star": {"hosts": "demo.apps.test\n *\n"},
+}
+
+
+@pytest.mark.parametrize("grant", sorted(WILDCARD_GRANTS))
+def test_a_wildcard_grant_refuses_every_route_and_ingress(grant):
+    """An operator-written wildcard must not let an Ingress `*.apps.test` rule
+    route every name under it, so a grant with one admits nothing."""
+    granted = WILDCARD_GRANTS[grant]
+    assert not route_allowed({"routes": [ROUTE]}, granted)
+    for host in ("demo.apps.test", "*.apps.test", "*"):
+        assert not ingress_allowed({"rules": [{"host": host}]}, granted)
+        assert not ingress_allowed({"tls": [{"hosts": [host]}]}, granted)
 
 
 def test_a_granted_host_ingress_is_admitted():

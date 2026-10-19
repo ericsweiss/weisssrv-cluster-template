@@ -313,6 +313,9 @@ spec:
     - name: hostMatchers
       expression: "variables.hosts.map(h, 'Host(`' + h + '`)')"
   validations:
+    # A wildcard grant would let one Ingress rule route every name under it.
+    - expression: "variables.hosts.all(h, !h.contains('*'))"
+      message: "the platform grant must list exact hostnames, no wildcards"
     # Leading Host() and no ||, so every rule is a conjunction that pins the
     # host: a PathPrefix-only, ClientIP-only or OR-ed rule would match any host.
     - expression: >-
@@ -388,6 +391,8 @@ spec:
     - name: platformIssuers
       expression: "['letsencrypt-prod', 'letsencrypt-staging']"
   validations:
+    - expression: "variables.hosts.all(h, !h.contains('*'))"
+      message: "the platform grant must list exact hostnames, no wildcards"
     - expression: >-
         (!has(object.spec.dnsNames) || object.spec.dnsNames.all(n,
         !n.contains('*') && n in variables.hosts))

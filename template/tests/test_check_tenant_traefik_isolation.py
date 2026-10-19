@@ -721,8 +721,34 @@ ROUTING_GAPS = {
     "hosts-empty": lambda: _configmap(lambda d: d["data"].__setitem__("hosts", "")),
     "hosts-blank-lines": lambda: _configmap(lambda d: d["data"].__setitem__("hosts", "\n  \n")),
     "data-missing": lambda: _configmap(lambda d: d.pop("data")),
+    "hosts-wildcard": lambda: _configmap(
+        lambda d: d["data"].__setitem__("hosts", "*.example.com\n")
+    ),
+    "hosts-wildcard-beside-exact": lambda: _configmap(
+        lambda d: d["data"].__setitem__("hosts", d["data"]["hosts"] + "*.demo.example.com\n")
+    ),
     "maxPriority-not-a-number": lambda: _configmap(
         lambda d: d["data"].__setitem__("maxPriority", "high")
+    ),
+    # str.isdigit() admits these; CEL int() does not, and under failurePolicy Fail
+    # the policy would then refuse every route that sets a priority.
+    "maxPriority-non-ascii-digits": lambda: _configmap(
+        lambda d: d["data"].__setitem__("maxPriority", "\u0661\u0660\u0660")
+    ),
+    "maxPriority-superscript": lambda: _configmap(
+        lambda d: d["data"].__setitem__("maxPriority", "\u00b2")
+    ),
+    "maxPriority-overflow": lambda: _configmap(
+        lambda d: d["data"].__setitem__("maxPriority", "2147483648")
+    ),
+    "maxPriority-int64-overflow": lambda: _configmap(
+        lambda d: d["data"].__setitem__("maxPriority", "99999999999999999999")
+    ),
+    "maxPriority-negative": lambda: _configmap(
+        lambda d: d["data"].__setitem__("maxPriority", "-1")
+    ),
+    "maxPriority-padded": lambda: _configmap(
+        lambda d: d["data"].__setitem__("maxPriority", " 100\n")
     ),
     "namespace-missing": lambda: [d for d in wiring("demo") if d["kind"] != "Namespace"],
 }
@@ -735,8 +761,9 @@ def test_a_tenant_without_its_hostname_grant_fails(tmp_path, gap):
     assert "demo" in problems[0]
 
 
-def test_a_max_priority_number_is_accepted(tmp_path):
-    docs = _configmap(lambda d: d["data"].__setitem__("maxPriority", "100"))
+@pytest.mark.parametrize("ceiling", ["0", "100", "2147483647"])
+def test_a_max_priority_number_is_accepted(tmp_path, ceiling):
+    docs = _configmap(lambda d: d["data"].__setitem__("maxPriority", ceiling))
     assert _routed(tmp_path, docs) == []
 
 

@@ -22,6 +22,10 @@ VARIABLES = [
 ]
 VALIDATIONS = [
     {
+        "expression": "variables.hosts.all(h, !h.contains('*'))",
+        "message": "the platform grant must list exact hostnames, no wildcards",
+    },
+    {
         "expression": (
             "(!has(object.spec.dnsNames) || object.spec.dnsNames.all(n,"
             " !n.contains('*') && n in variables.hosts))"
@@ -109,8 +113,10 @@ def test_the_platform_issuers_are_the_cluster_issuers_shipped():
 
 
 def allowed(spec: dict, grant: dict = GRANT) -> bool:
-    """The three validations, evaluated on `grant`."""
+    """The four validations, evaluated on `grant`."""
     granted = [h.strip() for h in grant["hosts"].split("\n") if h.strip()]
+    if any("*" in h for h in granted):
+        return False
     names = spec.get("dnsNames", []) + ([spec["commonName"]] if "commonName" in spec else [])
     if not all("*" not in n and n in granted for n in names):
         return False
@@ -169,3 +175,12 @@ def test_a_granted_certificate_is_admitted(spec):
 )
 def test_an_ungranted_certificate_is_refused(spec):
     assert not allowed(spec)
+
+
+@pytest.mark.parametrize(
+    "hosts", ["*.apps.test\n", "demo.apps.test\n*.apps.test\n", "demo.apps.test\n *\n"],
+    ids=["wildcard-only", "wildcard-beside-exact", "bare-star"],
+)
+def test_a_wildcard_grant_refuses_every_certificate(hosts):
+    """A wildcard grant admits nothing, even an exact name it would cover."""
+    assert not allowed({"dnsNames": ["demo.apps.test"], "issuerRef": ISSUER}, {"hosts": hosts})

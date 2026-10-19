@@ -304,7 +304,8 @@ before it merges:
    or EndpointSlice it lists; the next reconcile of each is refused. A tenant
    that needs a port outside Traefik asks the platform to expose it.
 2. For each tenant, add a `tenant-routing-<ns>` ConfigMap in `flux-system`
-   granting its hostnames, and the Deny bindings of `tenant-traefik-hostnames`
+   granting its exact hostnames (no wildcards: a grant with `*` refuses every
+   route, Ingress and Certificate in the namespace), and the Deny bindings of `tenant-traefik-hostnames`
    and `tenant-certificates` that read it, before that tenant's routes and
    Certificates reconcile again. The tenants README § Example carries all three
    ("Hostname grant"); `task lint:tenant-traefik-isolation` fails until every

@@ -236,7 +236,11 @@ copy passes `task lint:comment-length`. The longer reasons live here:
   `flux-system`, alongside the GitRepository, because `secretRef` is
   namespace-local.
 - **Hostname grant.** `tenant-routing-example-app` lists the exact hostnames
-  the tenant may route; the platform decides them, never the tenant. The two
+  the tenant may route, one per line; the platform decides them, never the
+  tenant. A `*` anywhere in the grant makes both policies refuse every write
+  they cover in the namespace, and the isolation gate refuses the grant, so a
+  wildcard can never let one Ingress rule route many names. `maxPriority`, when
+  set, is a plain ASCII whole number from 0 to 2147483647. The two
   bindings beside it apply `tenant-traefik-hostnames` and
   `tenant-certificates` to the tenant namespace alone, with that ConfigMap as
   their parameter. Every route must open with

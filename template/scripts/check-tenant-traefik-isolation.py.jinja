@@ -7,6 +7,7 @@ Exit 0 clean, 1 findings, 2 vacuous.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -270,6 +271,7 @@ REQUIRED_POLICIES = {
             ("hostMatchers", "variables.hosts.map(h, 'Host(`' + h + '`)')"),
         ],
         "validations": [
+            "variables.hosts.all(h, !h.contains('*'))",
             (
                 "!variables.isRoute || !has(object.spec.routes) || object.spec.routes.all(r, "
                 "r.match.matches('^Host[(]`[^`]+`[)]( && .*)?$') && "
@@ -325,6 +327,7 @@ REQUIRED_POLICIES = {
             ("platformIssuers", "['letsencrypt-prod', 'letsencrypt-staging']"),
         ],
         "validations": [
+            "variables.hosts.all(h, !h.contains('*'))",
             (
                 "(!has(object.spec.dnsNames) || object.spec.dnsNames.all(n, "
                 "!n.contains('*') && n in variables.hosts)) && "
@@ -397,6 +400,9 @@ PER_TENANT_POLICIES = (HOSTNAME_POLICY, CERTIFICATE_POLICY)
 FLUX_NAMESPACE = "flux-system"
 ROUTING_PREFIX = "tenant-routing-"
 TENANT_LABEL = "fluxcd.io/tenant"
+# CEL int() reads only plain ASCII decimals; anything else errors the policy.
+MAX_PRIORITY = re.compile(r"[0-9]+", re.ASCII)
+MAX_PRIORITY_CEILING = 2147483647
 TENANT_MATCH = {
     "namespaceSelector": {
         "matchExpressions": [{"key": TENANT_LABEL, "operator": "Exists"}]
@@ -544,9 +550,18 @@ def _grant_problem(data: object) -> str | None:
     hosts = data.get("hosts")
     if not isinstance(hosts, str) or not [h for h in hosts.split("\n") if h.strip()]:
         return "grants no hosts (data.hosts: one hostname per line)"
+    if any("*" in h for h in hosts.split("\n")):
+        return "grants a wildcard host; the platform grant must list exact hostnames"
     ceiling = data.get("maxPriority")
-    if ceiling is not None and not (isinstance(ceiling, str) and ceiling.strip().isdigit()):
-        return "has a maxPriority that is not a whole number"
+    if ceiling is not None and not (
+        isinstance(ceiling, str)
+        and MAX_PRIORITY.fullmatch(ceiling)
+        and int(ceiling) <= MAX_PRIORITY_CEILING
+    ):
+        return (
+            "has a maxPriority that is not an ASCII whole number from 0 to "
+            f"{MAX_PRIORITY_CEILING} (the policy's CEL int() must parse it)"
+        )
     return None
 
 
