@@ -246,7 +246,8 @@ copy passes `task lint:comment-length`. The longer reasons live here:
   `dnsNames` and `commonName`, no wildcard, IP, URI, email, otherName or
   `literalSubject`, and may use only the platform ClusterIssuers
   (`letsencrypt-prod`, `letsencrypt-staging`) or an Issuer in its own
-  namespace.
+  namespace. The tenant does not write CertificateRequests to those
+  ClusterIssuers itself: cert-manager creates them from the Certificate.
 - **Impersonation.** Without `serviceAccountName`, kustomize-controller applies
   tenant manifests with its own cluster-admin credentials. The ServiceAccount
   must live in the Kustomization's own namespace (`flux-system`), because
@@ -631,10 +632,26 @@ spec:
   and a lone tenant `default` TLSStore would set every route's default
   certificate. Certificates are issued only for granted hostnames:
   the ClusterIssuers solve DNS-01 for the whole zone, so `tenant-certificates`
-  holds every tenant Certificate to the same grant as its routes. In full, the
-  set is nine: `tenant-traefik-route-refs`,
+  holds every tenant Certificate to the same grant as its routes. A raw
+  CertificateRequest would skip that check, and tenants can write one: every
+  tenant Flux ServiceAccount is bound to the built-in `admin` ClusterRole, and
+  the cert-manager chart's default `global.rbac.aggregateClusterRoles: true`
+  aggregates `cert-manager-edit`, which carries create and update on
+  `certificaterequests` and `issuers`, into `admin`. cert-manager's internal
+  approver approves every request, and the names sit inside the CSR PEM, which
+  admission cannot read. So `tenant-certificaterequests` refuses any tenant
+  CertificateRequest to a ClusterIssuer unless cert-manager's controller
+  (`system:serviceaccount:cert-manager:cert-manager`, the chart's
+  `serviceAccountName` for the `cert-manager` release) writes it from a
+  Certificate `tenant-certificates` has already admitted. A request to an
+  Issuer in the tenant's own namespace stays allowed. Setting
+  `global.rbac.aggregateClusterRoles: false` on the cert-manager release, and
+  granting tenants Certificate and Issuer rights explicitly, would close the
+  same path by authorization instead; the platform keeps the chart default and
+  the policy. In full, the set is ten: `tenant-traefik-route-refs`,
   `tenant-traefik-object-refs`, `tenant-traefik-ingress-refs`,
-  `tenant-traefik-hostnames`, `tenant-certificates`, `tenant-no-tcp-udp-routes`,
+  `tenant-traefik-hostnames`, `tenant-certificates`,
+  `tenant-certificaterequests`, `tenant-no-tcp-udp-routes`,
   `tenant-traefik-tls-defaults`, `tenant-no-externalname-services` and
   `tenant-no-manual-endpoints`.
   Once any tenant is onboarded, `task lint:tenant-traefik-isolation` fails if

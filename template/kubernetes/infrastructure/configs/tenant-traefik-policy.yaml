@@ -398,6 +398,40 @@ spec:
         : !has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind in ['', 'Issuer'])
       message: "a tenant certificate may use only a platform ClusterIssuer or an Issuer in its own namespace"
 ---
+# Tenants hold `admin`, which cert-manager's aggregateClusterRoles grows with
+# certificaterequests write, and admission cannot read a CSR's names: only the
+# controller SA (chart deployment.yaml serviceAccountName) may ask a ClusterIssuer.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-certificaterequests
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["cert-manager.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["certificaterequests"]
+  validations:
+    - expression: >-
+        !has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind != 'ClusterIssuer'
+        || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'
+      message: "tenant CertificateRequests to platform ClusterIssuers are created by cert-manager from a validated Certificate only"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-certificaterequests
+spec:
+  policyName: tenant-certificaterequests
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
 # A TCP or UDP router on a shared entryPoint can claim HostSNI(`*`) or the whole
 # port and intercept platform traffic, so tenants get none of their own.
 apiVersion: admissionregistration.k8s.io/v1

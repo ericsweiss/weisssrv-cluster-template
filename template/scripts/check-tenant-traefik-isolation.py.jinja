@@ -339,6 +339,26 @@ REQUIRED_POLICIES = {
             ),
         ],
     },
+    "tenant-certificaterequests": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": ["cert-manager.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["certificaterequests"],
+            },
+        ],
+        "variables": [],
+        "validations": [
+            (
+                "!has(object.spec.issuerRef.kind) || "
+                "object.spec.issuerRef.kind != 'ClusterIssuer' || "
+                "request.userInfo.username == "
+                "'system:serviceaccount:cert-manager:cert-manager'"
+            ),
+        ],
+    },
 }
 # Bound once per tenant, in its wiring file, to the hostnames the platform
 # granted that namespace in flux-system/tenant-routing-<ns>; every other

@@ -286,7 +286,7 @@ notes for the tag that ships an entry repeat it under **Breaking changes**.
 ### Tenant isolation policies render unconditionally
 
 The tenant isolation set renders whatever the answers are:
-`infrastructure/configs/tenant-traefik-policy.yaml` with its nine
+`infrastructure/configs/tenant-traefik-policy.yaml` with its ten
 ValidatingAdmissionPolicies and their Deny bindings on every `fluxcd.io/tenant`
 namespace, Traefik's `defaultTLSResourcesNamespace: traefik`, and the CNPG kinds
 in `tenant-crd-editor`. An update with default answers therefore installs them,
@@ -312,6 +312,14 @@ before it merges:
    that names another ClusterIssuer, is refused on its next apply.
 3. Remove any tenant TLSOption or TLSStore named `default`; Traefik already
    ignores it once `defaultTLSResourcesNamespace` is set.
+4. List the CertificateRequests in tenant namespaces that name a ClusterIssuer
+   (`kubectl get certificaterequests -A -o json`, filtered on
+   `spec.issuerRef.kind` and `spec.username`). One whose `spec.username` is not
+   `system:serviceaccount:cert-manager:cert-manager` was written by hand before
+   `tenant-certificaterequests` applied: tenants hold `admin`, which the
+   cert-manager chart's default `aggregateClusterRoles` extends with
+   CertificateRequest write. Delete it, and revoke the certificate in its
+   `status.certificate` if that names a hostname the tenant was never granted.
 
 What a tenant can no longer create or update:
 
@@ -329,6 +337,9 @@ What a tenant can no longer create or update:
   wildcard, an IP, URI, email, otherName or `literalSubject`, or an issuer
   other than `letsencrypt-prod`, `letsencrypt-staging` or an Issuer in its own
   namespace;
+- a cert-manager CertificateRequest to a ClusterIssuer, which cert-manager
+  now creates from a validated Certificate only (a request to an Issuer in the
+  tenant's own namespace stays allowed);
 - an IngressRouteTCP or IngressRouteUDP;
 - a TLSOption or TLSStore named `default`;
 - an ExternalName, NodePort or LoadBalancer Service, a Service with

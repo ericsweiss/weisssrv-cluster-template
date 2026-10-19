@@ -262,8 +262,8 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
 
 
 # An ExternalName or selectorless Service, or hand-written endpoints, would
-# send Traefik into another namespace past the forwardAuth pin, so the gate
-# needs both refusals too.
+# send Traefik into another namespace past the forwardAuth pin, and a raw
+# CertificateRequest skips tenant-certificates, so the gate needs each refusal.
 @pytest.mark.parametrize("kind", ["ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"])
 @pytest.mark.parametrize(
     "name",
@@ -272,6 +272,7 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
         "tenant-no-manual-endpoints",
         "tenant-no-tcp-udp-routes",
         "tenant-traefik-tls-defaults",
+        "tenant-certificaterequests",
     ],
 )
 def test_a_policy_file_without_a_service_refusal_keeps_the_gate_closed(tmp_path, kind, name):
@@ -303,6 +304,11 @@ def test_a_policy_file_without_a_per_tenant_policy_keeps_the_gate_closed(tmp_pat
     assert len(kept) == len(docs) - 1
     write_policy(root, "---\n".join(kept))
     assert len(gate.check(root)) == 1
+
+
+def test_the_gate_pins_ten_policies():
+    assert len(gate.REQUIRED_POLICIES) == 10
+    assert "tenant-certificaterequests" in gate.REQUIRED_POLICIES
 
 
 def test_the_grant_policies_are_bound_per_tenant_not_by_label():
