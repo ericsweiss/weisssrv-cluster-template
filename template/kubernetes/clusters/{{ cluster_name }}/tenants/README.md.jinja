@@ -14,11 +14,15 @@ removes nothing and only pushes its ExternalSecrets into `SecretSyncError`.
 
 Every tenant's Namespace, ResourceQuota and LimitRange carry
 `kustomize.toolkit.fluxcd.io/prune: disabled` and outlive the wiring, database
-or not; `scripts/check-tenant-wiring.py` refuses a tenant file whose Namespace
-or either cap lacks the annotation. A pruned
+or not. So do its `tenant-routing-<ns>` hostname grant and the two bindings
+that read it: the Namespace outlives the wiring, so admission for it must too,
+until the Namespace is deleted by hand. `scripts/check-tenant-wiring.py`
+refuses a tenant file whose Namespace, either cap, grant or grant binding lacks
+the annotation. A pruned
 Namespace cascades through every tenant object and PVC in it, and
 `deletionPolicy: Orphan` on a db Kustomization cannot protect against that.
-Delete the Namespace by hand once nothing in it is wanted.
+Delete the Namespace by hand once nothing in it is wanted, then the grant
+ConfigMap and both bindings, which no longer admit anything.
 {%- if postgres_operator %}
 
 A tenant that runs a database comes down in this order, one step per change.
@@ -395,6 +399,9 @@ kind: ConfigMap
 metadata:
   name: tenant-routing-example-app
   namespace: flux-system
+  annotations:
+    # The Namespace outlives the wiring, so admission for it must too.
+    kustomize.toolkit.fluxcd.io/prune: disabled
 data:
   hosts: |
     example-app.{{ external_domain }}
@@ -406,6 +413,9 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
   name: tenant-traefik-hostnames-example-app
+  annotations:
+    # The Namespace outlives the wiring, so admission for it must too.
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   policyName: tenant-traefik-hostnames
   validationActions: [Deny]
@@ -424,6 +434,9 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
   name: tenant-certificates-example-app
+  annotations:
+    # The Namespace outlives the wiring, so admission for it must too.
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   policyName: tenant-certificates
   validationActions: [Deny]

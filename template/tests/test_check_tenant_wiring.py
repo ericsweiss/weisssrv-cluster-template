@@ -591,6 +591,8 @@ ROUTING = textwrap.dedent(
     metadata:
       name: tenant-routing-demo-app
       namespace: flux-system
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
     data:
       hosts: |
         demo-app.example.com
@@ -599,6 +601,8 @@ ROUTING = textwrap.dedent(
     kind: ValidatingAdmissionPolicyBinding
     metadata:
       name: tenant-traefik-hostnames-demo-app
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
     spec:
       policyName: tenant-traefik-hostnames
       validationActions: [Deny]
@@ -615,6 +619,8 @@ ROUTING = textwrap.dedent(
     kind: ValidatingAdmissionPolicyBinding
     metadata:
       name: tenant-certificates-demo-app
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
     spec:
       policyName: tenant-certificates
       validationActions: [Deny]
@@ -634,4 +640,43 @@ def test_the_hostname_binding_is_cluster_scoped(repo: Path) -> None:
     """The per-tenant hostname and certificate bindings name no namespace
     because they have none."""
     write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + ROUTING)
+    assert gate.check(repo) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "tenant-routing-demo-app",
+        "tenant-traefik-hostnames-demo-app",
+        "tenant-certificates-demo-app",
+    ],
+)
+@pytest.mark.parametrize("value", [None, "enabled"], ids=["absent", "enabled"])
+def test_a_hostname_grant_or_binding_without_the_prune_guard_fails(
+    repo: Path, name: str, value: str | None
+) -> None:
+    """The Namespace outlives the wiring, so the grant and both bindings that
+    admit writes in it must too, until the Namespace is deleted by hand."""
+    docs = ROUTING.split("\n---\n")
+    hit = [i for i, d in enumerate(docs) if f"metadata:\n  name: {name}\n" in d]
+    assert len(hit) == 1 and GUARD in docs[hit[0]]
+    docs[hit[0]] = docs[hit[0]].replace(
+        GUARD, "" if value is None else GUARD.replace("disabled", value)
+    )
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + "\n---\n".join(docs))
+    problems = gate.check(repo)
+    assert len(problems) == 1, problems
+    assert name in problems[0] and "kustomize.toolkit.fluxcd.io/prune: disabled" in problems[0]
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_an_unrelated_configmap_or_binding_needs_no_prune_guard(repo: Path) -> None:
+    """Only the hostname grant and its two bindings are held to the guard."""
+    other = (
+        ROUTING.replace(GUARD, "")
+        .replace("tenant-routing-demo-app", "demo-app-settings")
+        .replace("policyName: tenant-traefik-hostnames", "policyName: demo-app-other")
+        .replace("policyName: tenant-certificates", "policyName: demo-app-another")
+    )
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + other)
     assert gate.check(repo) == []

@@ -46,6 +46,10 @@ REQUIRED_CAPS = ("ResourceQuota", "LimitRange")
 # Kustomization's `deletionPolicy: Orphan` cannot stop; its caps stay with it.
 PRUNE_ANNOTATION = "kustomize.toolkit.fluxcd.io/prune"
 PRUNE_GUARDED_KINDS = ("Namespace", *REQUIRED_CAPS)
+# The Namespace outlives the wiring, so the hostname grant and the bindings that
+# admit writes in it must too, until the Namespace is deleted by hand.
+GRANT_PREFIX = "tenant-routing-"
+GRANT_POLICIES = ("tenant-traefik-hostnames", "tenant-certificates")
 DATABASE_PATH = "kubernetes/db"
 # Kinds with no namespace of their own; everything else lands somewhere.
 CLUSTER_SCOPED_KINDS = frozenset(
@@ -197,7 +201,8 @@ def _is_database_tree(kustomization: dict) -> bool:
 
 
 def _prune_guard_problems(docs: list, rel: str) -> list[str]:
-    """Every tenant's Namespace and caps outlive its wiring, one rule for all."""
+    """A tenant's Namespace, caps, hostname grant and grant bindings outlive its
+    wiring, one rule for all."""
     flux = [
         k for k in _of_kind(docs, "Kustomization")
         if "kustomize.toolkit" in str(k.get("apiVersion"))
@@ -222,6 +227,22 @@ def _prune_guard_problems(docs: list, rel: str) -> list[str]:
             problems.append(
                 f"{rel}: {kind} {metadata.get('name')} lacks "
                 f"{PRUNE_ANNOTATION}: disabled — {why}"
+            )
+    admission = [
+        d for d in _of_kind(docs, "ConfigMap")
+        if str((d.get("metadata") or {}).get("name") or "").startswith(GRANT_PREFIX)
+    ] + [
+        d for d in _of_kind(docs, "ValidatingAdmissionPolicyBinding")
+        if (d.get("spec") or {}).get("policyName") in GRANT_POLICIES
+    ]
+    for doc in admission:
+        metadata = doc.get("metadata") or {}
+        if (metadata.get("annotations") or {}).get(PRUNE_ANNOTATION) != "disabled":
+            problems.append(
+                f"{rel}: {doc.get('kind')} {metadata.get('name')} lacks "
+                f"{PRUNE_ANNOTATION}: disabled — removing the wiring would prune it "
+                "while the Namespace survives, and admission for the Namespace must "
+                "outlive the wiring until the Namespace is deleted by hand"
             )
     return problems
 

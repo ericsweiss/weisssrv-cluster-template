@@ -372,16 +372,19 @@ What a tenant can no longer create or update:
   headless ones included, stay allowed);
 - an Endpoints or EndpointSlice the control plane did not write.
 
-### Every tenant's Namespace and caps carry the prune guard
+### Every tenant's Namespace, caps and hostname grant carry the prune guard
 
 `scripts/check-tenant-wiring.py` now requires
 `kustomize.toolkit.fluxcd.io/prune: disabled` on every tenant file's Namespace,
 ResourceQuota and LimitRange, whether or not the tenant runs a database, so
 removing a tenant's wiring never prunes its Namespace (which cascades through
-every object and PVC in it) or strips its caps. Before the update merges, add
-the annotation to those three objects in each existing tenant file, as the
-tenants README § Example shows; `task lint:invariants` fails until every
-tenant carries all three.
+every object and PVC in it) or strips its caps. It requires the same on the
+tenant's `tenant-routing-<ns>` ConfigMap and its `tenant-traefik-hostnames`
+and `tenant-certificates` bindings: the Namespace outlives the wiring, so
+admission for it must too, until the Namespace is deleted by hand. Before the
+update merges, add the annotation to those six objects in each existing
+tenant file, as the tenants README § Example shows; `task lint:invariants`
+fails until every tenant carries all six.
 
 ### Tenant volumes need the zvol marker
 
