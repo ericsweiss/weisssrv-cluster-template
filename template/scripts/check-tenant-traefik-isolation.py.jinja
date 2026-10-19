@@ -352,14 +352,20 @@ REQUIRED_POLICIES = {
             {
                 "apiGroups": ["cert-manager.io"],
                 "apiVersions": ["*"],
-                "operations": WRITES,
+                "operations": ["CREATE"],
                 "resources": ["certificaterequests"],
             },
             {
                 "apiGroups": ["acme.cert-manager.io"],
                 "apiVersions": ["*"],
+                "operations": ["CREATE"],
+                "resources": ["challenges"],
+            },
+            {
+                "apiGroups": ["acme.cert-manager.io"],
+                "apiVersions": ["*"],
                 "operations": WRITES,
-                "resources": ["orders", "challenges"],
+                "resources": ["orders"],
             },
         ],
         "variables": [],
@@ -374,7 +380,9 @@ REQUIRED_POLICIES = {
             (
                 "request.resource.group != 'acme.cert-manager.io' || "
                 "request.userInfo.username == "
-                "'system:serviceaccount:cert-manager:cert-manager'"
+                "'system:serviceaccount:cert-manager:cert-manager' || "
+                "request.userInfo.username == "
+                "'system:serviceaccount:kube-system:generic-garbage-collector'"
             ),
         ],
     },

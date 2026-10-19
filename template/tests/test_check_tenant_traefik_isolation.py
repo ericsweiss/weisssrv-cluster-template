@@ -330,6 +330,19 @@ def test_a_certificaterequests_policy_without_acme_writes_keeps_the_gate_closed(
     assert len(gate.check(root)) == 1
 
 
+def test_the_gate_matches_update_only_where_the_webhook_leaves_spec_mutable():
+    """cert-manager's webhook freezes CertificateRequest and Challenge spec but
+    Order spec only in spec.request, so UPDATE is matched on Orders alone and a
+    garbage-collector finalizer removal elsewhere is not refused."""
+    rules = gate.REQUIRED_POLICIES["tenant-certificaterequests"]["resourceRules"]
+    ops = {r: tuple(rule["operations"]) for rule in rules for r in rule["resources"]}
+    assert ops == {
+        "certificaterequests": ("CREATE",),
+        "challenges": ("CREATE",),
+        "orders": ("CREATE", "UPDATE"),
+    }
+
+
 def test_the_grant_policies_are_bound_per_tenant_not_by_label():
     """A tenant-label binding would need one paramRef for every tenant; the
     hostname grant is per tenant, so the bindings that read it live in the
@@ -429,7 +442,10 @@ def _narrow_resources(spec):
 
 
 def _narrow_operations(spec):
-    spec["matchConstraints"]["resourceRules"][0]["operations"] = ["CREATE"]
+    rule = next(
+        r for r in spec["matchConstraints"]["resourceRules"] if "UPDATE" in r["operations"]
+    )
+    rule["operations"] = ["CREATE"]
 
 
 def _expression_true(index: int):

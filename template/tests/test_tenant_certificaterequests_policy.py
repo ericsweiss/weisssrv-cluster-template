@@ -1,6 +1,6 @@
 """Only cert-manager's controller may send a tenant CertificateRequest to a
-ClusterIssuer (admission cannot read the CSR) or write an ACME Order or
-Challenge. `allowed()` mirrors the validations; the first tests pin its shape."""
+ClusterIssuer or write an ACME Order or Challenge; only Orders, whose spec the
+webhook leaves mutable, match UPDATE. `allowed()` mirrors the policy."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-po
 CERT_MANAGER = REPO / "kubernetes" / "infrastructure" / "controllers" / "cert-manager"
 NAME = "tenant-certificaterequests"
 CONTROLLER = "system:serviceaccount:cert-manager:cert-manager"
+GARBAGE_COLLECTOR = "system:serviceaccount:kube-system:generic-garbage-collector"
 VALIDATIONS = [
     (
         "request.resource.group == 'acme.cert-manager.io'"
@@ -22,7 +23,9 @@ VALIDATIONS = [
     ),
     (
         "request.resource.group != 'acme.cert-manager.io'"
-        " || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'",
+        " || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'"
+        " || request.userInfo.username"
+        " == 'system:serviceaccount:kube-system:generic-garbage-collector'",
         "tenant ACME Orders and Challenges are written by cert-manager's controller only",
     ),
 ]
@@ -56,14 +59,20 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
             {
                 "apiGroups": ["cert-manager.io"],
                 "apiVersions": ["*"],
-                "operations": ["CREATE", "UPDATE"],
+                "operations": ["CREATE"],
                 "resources": ["certificaterequests"],
             },
             {
                 "apiGroups": ["acme.cert-manager.io"],
                 "apiVersions": ["*"],
+                "operations": ["CREATE"],
+                "resources": ["challenges"],
+            },
+            {
+                "apiGroups": ["acme.cert-manager.io"],
+                "apiVersions": ["*"],
                 "operations": ["CREATE", "UPDATE"],
-                "resources": ["orders", "challenges"],
+                "resources": ["orders"],
             },
         ]
     }
@@ -100,11 +109,28 @@ def test_the_controller_identity_is_the_release_the_platform_ships():
     assert CONTROLLER == "system:serviceaccount:cert-manager:cert-manager"
 
 
-def allowed(issuer_ref: dict, username: str, group: str = "cert-manager.io") -> bool:
-    """The validations, evaluated on a request's API group, issuerRef and requester."""
+MATCHED = {
+    ("cert-manager.io", "certificaterequests"): {"CREATE"},
+    ("acme.cert-manager.io", "challenges"): {"CREATE"},
+    ("acme.cert-manager.io", "orders"): {"CREATE", "UPDATE"},
+}
+
+
+def allowed(
+    issuer_ref: dict,
+    username: str,
+    group: str = "cert-manager.io",
+    resource: str | None = None,
+    operation: str = "CREATE",
+) -> bool:
+    """The policy, evaluated on a request's API group, resource, operation,
+    issuerRef and requester; an unmatched operation is admitted untouched."""
     acme = group == "acme.cert-manager.io"
+    resource = resource or ("orders" if acme else "certificaterequests")
+    if operation not in MATCHED[(group, resource)]:
+        return True
     return (acme or issuer_ref.get("kind") != "ClusterIssuer" or username == CONTROLLER) and (
-        not acme or username == CONTROLLER
+        not acme or username in (CONTROLLER, GARBAGE_COLLECTOR)
     )
 
 
@@ -147,7 +173,32 @@ def test_a_tenant_authored_acme_order_or_challenge_is_refused(issuer_ref):
     """Defence in depth: cert-manager-edit grants no create on orders and the
     cert-manager webhook refuses Challenge spec changes, so this is not a live
     bypass; the policy holds if a future RBAC change widens either."""
-    assert not allowed(issuer_ref, TENANT, ACME)
+    assert not allowed(issuer_ref, TENANT, ACME, "orders")
+    assert not allowed(issuer_ref, TENANT, ACME, "challenges")
+
+
+def test_a_tenant_order_update_is_refused():
+    """Order spec is frozen only in spec.request by the cert-manager webhook
+    (internal/apis/acme/validation/order.go), so Order UPDATE stays matched."""
+    assert not allowed(PROD, TENANT, ACME, "orders", "UPDATE")
+
+
+@pytest.mark.parametrize(
+    "group,resource",
+    [("cert-manager.io", "certificaterequests"), (ACME, "challenges")],
+    ids=["certificaterequest", "challenge"],
+)
+def test_a_non_controller_update_of_a_frozen_spec_kind_is_admitted(group, resource):
+    """The cert-manager webhook refuses spec changes on CertificateRequests and
+    Challenges after creation, so the policy matches CREATE only and a
+    finalizer removal by the garbage collector or a tenant is not refused."""
+    for username in (TENANT, GARBAGE_COLLECTOR):
+        assert allowed(PROD, username, group, resource, "UPDATE")
+
+
+def test_the_garbage_collector_may_update_an_order():
+    """foregroundDeletion finalizer removal must not wedge an Order's deletion."""
+    assert allowed(PROD, GARBAGE_COLLECTOR, ACME, "orders", "UPDATE")
 
 
 def test_the_controllers_acme_order_and_challenge_writes_are_admitted():
