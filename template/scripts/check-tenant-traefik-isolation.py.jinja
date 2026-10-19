@@ -30,6 +30,16 @@ BASELINE = {"tenant-crd-editor.yaml"}
 TENANT_POLICY = "kubernetes/infrastructure/configs/tenant-traefik-policy.yaml"
 CONFIGS_KUSTOMIZATION = "kubernetes/infrastructure/configs/kustomization.yaml"
 WRITES = ["CREATE", "UPDATE"]
+# The route-level middleware rule, held on every per-service middlewares list too.
+MIDDLEWARE_REF = (
+    "!m.name.contains('@') && (!has(m.namespace) || m.namespace == variables.ns || "
+    "(m.namespace + '/' + m.name) in variables.platformMiddlewares)"
+)
+PLATFORM_MIDDLEWARES = (
+    "['traefik/lan-tailscale-only', 'traefik/lan-tailscale-strict', "
+    "'traefik/hsts-header', 'traefik/security-headers', "
+    "'authentik/authentik-auth']"
+)
 REQUIRED_POLICIES = {
     "tenant-traefik-route-refs": {
         "paramKind": None,
@@ -43,11 +53,7 @@ REQUIRED_POLICIES = {
         ],
         "variables": [
             ("ns", "object.metadata.namespace"),
-            ("platformMiddlewares", (
-                "['traefik/lan-tailscale-only', 'traefik/lan-tailscale-strict', "
-                "'traefik/hsts-header', 'traefik/security-headers', "
-                "'authentik/authentik-auth']"
-            )),
+            ("platformMiddlewares", PLATFORM_MIDDLEWARES),
         ],
         "validations": [
             (
@@ -64,6 +70,11 @@ REQUIRED_POLICIES = {
                 "(!has(r.middlewares) || r.middlewares.all(m, !m.name.contains('@'))) && "
                 "(!has(r.services) || r.services.all(s, !s.name.contains('@') && "
                 "(!has(s.serversTransport) || !s.serversTransport.contains('@')))))"
+            ),
+            (
+                "!has(object.spec.routes) || object.spec.routes.all(r, !has(r.services) || "
+                "r.services.all(s, !has(s.middlewares) || "
+                f"s.middlewares.all(m, {MIDDLEWARE_REF})))"
             ),
             (
                 "!has(object.spec.tls) || ((!has(object.spec.tls.options) || "
@@ -95,6 +106,7 @@ REQUIRED_POLICIES = {
                 "'^https?://[a-z]([-a-z0-9]*[a-z0-9])?[.]' + variables.ns + "
                 "'[.]svc([.]cluster[.]local)?(:[0-9]{1,5})?(/.*)?$'"
             )),
+            ("platformMiddlewares", PLATFORM_MIDDLEWARES),
         ],
         "validations": [
             (
@@ -139,6 +151,29 @@ REQUIRED_POLICIES = {
                 "(!has(object.spec.mirroring.mirrors) || "
                 "object.spec.mirroring.mirrors.all(s, !s.name.contains('@') && "
                 "(!has(s.serversTransport) || !s.serversTransport.contains('@'))))))"
+            ),
+            (
+                "!has(object.spec.highestRandomWeight) || "
+                "!has(object.spec.highestRandomWeight.services) || "
+                "object.spec.highestRandomWeight.services.all(s, (!has(s.namespace) || "
+                "s.namespace == variables.ns) && !s.name.contains('@') && "
+                "(!has(s.serversTransport) || !s.serversTransport.contains('@')))"
+            ),
+            (
+                "(!has(object.spec.errors) || !has(object.spec.errors.service) || "
+                "!has(object.spec.errors.service.middlewares) || "
+                f"object.spec.errors.service.middlewares.all(m, {MIDDLEWARE_REF})) && "
+                "(!has(object.spec.weighted) || !has(object.spec.weighted.services) || "
+                "object.spec.weighted.services.all(s, !has(s.middlewares) || "
+                f"s.middlewares.all(m, {MIDDLEWARE_REF}))) && "
+                "(!has(object.spec.highestRandomWeight) || "
+                "!has(object.spec.highestRandomWeight.services) || "
+                "object.spec.highestRandomWeight.services.all(s, !has(s.middlewares) || "
+                f"s.middlewares.all(m, {MIDDLEWARE_REF}))) && "
+                "(!has(object.spec.mirroring) || ((!has(object.spec.mirroring.middlewares) || "
+                f"object.spec.mirroring.middlewares.all(m, {MIDDLEWARE_REF})) && "
+                "(!has(object.spec.mirroring.mirrors) || object.spec.mirroring.mirrors.all(s, "
+                f"!has(s.middlewares) || s.middlewares.all(m, {MIDDLEWARE_REF})))))"
             ),
             "!has(object.spec.failover)",
         ],

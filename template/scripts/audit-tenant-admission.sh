@@ -33,10 +33,15 @@ def own: (has("namespace") | not) or .namespace == $ns;
 def at: (. // "") | tostring | contains("@");
 def trimmed: gsub("^\\s+|\\s+$"; "");
 def granted: . as $h | any($g.hosts[]; . == $h);
+def mwref($o; $what): "\(.namespace)/\(.name)" as $k
+    | (if own or any($c.middlewares[]; . == $k) then empty
+       else "\($o): \($what) \(.namespace)/\(.name) outside its namespace and the platform allowlist" end),
+      (if .name | at then "\($o): \($what) \(.name) uses a name@provider reference" else empty end);
 def svcref($o; $what):
     (if own then empty else "\($o): \($what) \(.namespace)/\(.name) in another namespace" end),
     (if (.name | at) or (.serversTransport | at)
-     then "\($o): \($what) \(.name) uses a name@provider reference" else empty end);
+     then "\($o): \($what) \(.name) uses a name@provider reference" else empty end),
+    ((.middlewares // [])[] | mwref($o; "\($what) middleware"));
 def refs($o): (.metadata.annotations // {}) | to_entries[]
     | select(.key | startswith("traefik.ingress.kubernetes.io/")) | .key as $k
     | .value | split(",")[] | trimmed as $v
@@ -65,11 +70,7 @@ def tailscale($o): (.metadata.annotations // {}) | keys[] | select(startswith("t
         end,
         ((.spec.routes // [])[]
             | ((.services // [])[] | svcref($o; "service")),
-              ((.middlewares // [])[]
-                | "\(.namespace)/\(.name)" as $k
-                | (if own or any($c.middlewares[]; . == $k) then empty
-                   else "\($o): middleware \(.namespace)/\(.name) outside its namespace and the platform allowlist" end),
-                  (if .name | at then "\($o): middleware \(.name) uses a name@provider reference" else empty end))),
+              ((.middlewares // [])[] | mwref($o; "middleware"))),
         ((.spec.tls // {}) | (.options // empty | ["options", .]), (.store // empty | ["store", .])
             | .[0] as $w | .[1] | select(own and (.name | at | not) | not)
             | "\($o): TLS \($w) \(.namespace // $ns)/\(.name) outside its namespace")'
@@ -109,6 +110,7 @@ def tailscale($o): (.metadata.annotations // {}) | keys[] | select(startswith("t
           ($s.errors.service // empty | svcref($o; "errors service"))'
     TRAEFIKSERVICE_CHECKS='.spec as $s
         | (($s.weighted.services // [])[] | svcref($o; "weighted service")),
+          (($s.highestRandomWeight.services // [])[] | svcref($o; "highestRandomWeight service")),
           ($s.mirroring // empty | svcref($o; "mirroring service"),
             ((.mirrors // [])[] | svcref($o; "mirror service"))),
           ($s.failover // empty | "\($o): failover services are not supported")'

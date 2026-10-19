@@ -44,6 +44,14 @@ spec:
         && (!has(r.services) || r.services.all(s, !s.name.contains('@')
         && (!has(s.serversTransport) || !s.serversTransport.contains('@')))))
       message: "a tenant route may not use a name@provider middleware, service or transport reference"
+    # Traefik v3.7 IngressRoute routes[].services[].middlewares: the route-level rule.
+    - expression: >-
+        !has(object.spec.routes) || object.spec.routes.all(r,
+        !has(r.services) || r.services.all(s, !has(s.middlewares)
+        || s.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares))))
+      message: "a tenant route service may apply only its own middlewares or the platform allowlist, never a name@provider one"
     - expression: >-
         !has(object.spec.tls) || ((!has(object.spec.tls.options)
         || ((!has(object.spec.tls.options.namespace)
@@ -68,8 +76,9 @@ spec:
         - key: fluxcd.io/tenant
           operator: Exists
 ---
-# Middlewares and TraefikServices can point across namespaces too: a chain, an
-# errors page service, a forwardAuth address, weighted, mirrored or failover services.
+# Middlewares and TraefikServices can point across namespaces too: a chain, an errors
+# page service, a forwardAuth address, weighted, highestRandomWeight, mirrored or
+# failover services, and the middlewares each service applies.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -93,6 +102,11 @@ spec:
       expression: >-
         '^https?://[a-z]([-a-z0-9]*[a-z0-9])?[.]' + variables.ns
         + '[.]svc([.]cluster[.]local)?(:[0-9]{1,5})?(/.*)?$'
+    # The route-level allowlist in tenant-traefik-route-refs, verbatim.
+    - name: platformMiddlewares
+      expression: >-
+        ['traefik/lan-tailscale-only', 'traefik/lan-tailscale-strict',
+        'traefik/hsts-header', 'traefik/security-headers', 'authentik/authentik-auth']
   validations:
     - expression: >-
         !has(object.spec.chain) || !has(object.spec.chain.middlewares)
@@ -143,6 +157,44 @@ spec:
         || object.spec.mirroring.mirrors.all(s, !s.name.contains('@')
         && (!has(s.serversTransport) || !s.serversTransport.contains('@'))))))
       message: "a tenant errors, weighted or mirroring service may not use a name@provider service or transport reference"
+    - expression: >-
+        !has(object.spec.highestRandomWeight)
+        || !has(object.spec.highestRandomWeight.services)
+        || object.spec.highestRandomWeight.services.all(s,
+        (!has(s.namespace) || s.namespace == variables.ns)
+        && !s.name.contains('@')
+        && (!has(s.serversTransport) || !s.serversTransport.contains('@')))
+      message: "a tenant highestRandomWeight service may reference only its own namespace, never a name@provider service or transport"
+    # Every per-service middlewares list the Traefik v3.7 CRDs define: errors.service,
+    # weighted and highestRandomWeight services[], mirroring and mirroring.mirrors[].
+    - expression: >-
+        (!has(object.spec.errors) || !has(object.spec.errors.service)
+        || !has(object.spec.errors.service.middlewares)
+        || object.spec.errors.service.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares)))
+        && (!has(object.spec.weighted) || !has(object.spec.weighted.services)
+        || object.spec.weighted.services.all(s, !has(s.middlewares)
+        || s.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares))))
+        && (!has(object.spec.highestRandomWeight)
+        || !has(object.spec.highestRandomWeight.services)
+        || object.spec.highestRandomWeight.services.all(s, !has(s.middlewares)
+        || s.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares))))
+        && (!has(object.spec.mirroring)
+        || ((!has(object.spec.mirroring.middlewares)
+        || object.spec.mirroring.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares)))
+        && (!has(object.spec.mirroring.mirrors)
+        || object.spec.mirroring.mirrors.all(s,
+        !has(s.middlewares) || s.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares))))))
+      message: "a tenant errors, weighted, highestRandomWeight or mirroring service may apply only its own middlewares or the platform allowlist, never a name@provider one"
     # A failover service and fallback each take a full service reference, per-service
     # middlewares included; refusing the form whole leaves no field unpinned.
     - expression: "!has(object.spec.failover)"

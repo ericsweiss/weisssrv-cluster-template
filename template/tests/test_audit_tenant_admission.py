@@ -123,7 +123,8 @@ PROD = {"name": "letsencrypt-prod", "kind": "ClusterIssuer", "group": "cert-mana
 ROUTE = {
     "match": "Host(`demo.apps.test`) && PathPrefix(`/`)",
     "priority": 100,
-    "services": [{"name": "web", "port": 80}],
+    "services": [{"name": "web", "port": 80, "middlewares": [
+        {"name": "own-auth"}, {"name": "hsts-header", "namespace": "traefik"}]}],
     "middlewares": [
         {"name": "own-auth"},
         {"name": "own-chain", "namespace": "demo"},
@@ -169,8 +170,12 @@ CLEAN_APP = {
         named("pages", {"errors": {"service": {"name": "web", "port": 80}}}),
     ],
     "traefikservices": [
-        named("split", {"weighted": {"services": [{"name": "web", "port": 80}]}}),
-        named("shadow", {"mirroring": {"name": "web", "mirrors": [{"name": "web"}]}}),
+        named("split", {"weighted": {"services": [{"name": "web", "port": 80, "middlewares": [
+            {"name": "own-chain"}, {"name": "security-headers", "namespace": "traefik"}]}]}}),
+        named("hash", {"highestRandomWeight": {"services": [
+            {"name": "web", "port": 80, "middlewares": [{"name": "own-chain"}]}]}}),
+        named("shadow", {"mirroring": {"name": "web", "middlewares": [{"name": "own-chain"}],
+                                       "mirrors": [{"name": "web"}]}}),
     ],
     "ingressroutetcps": [],
     "ingressrouteudps": [],
@@ -422,6 +427,17 @@ POLICY_CASES = {
         _with("ingressroutes", _route(services=[{"name": "web", "serversTransport": "t@file"}])),
         "demo IngressRoute/bad: service web uses a name@provider reference",
     ),
+    "route-cross-namespace-service-middleware": (
+        _with("ingressroutes", _route(services=[{"name": "web", "middlewares": [
+            {"name": "mw", "namespace": "other"}]}])),
+        "demo IngressRoute/bad: service middleware other/mw outside its namespace and the"
+        " platform allowlist",
+    ),
+    "route-provider-service-middleware": (
+        _with("ingressroutes", _route(services=[{"name": "web", "middlewares": [
+            {"name": "mw@file"}]}])),
+        "demo IngressRoute/bad: service middleware mw@file uses a name@provider reference",
+    ),
     "route-cross-namespace-middleware": (
         _with("ingressroutes", _route(middlewares=[{"name": "mw", "namespace": "other"}])),
         "demo IngressRoute/bad: middleware other/mw outside its namespace and the platform"
@@ -542,6 +558,47 @@ POLICY_CASES = {
         _with("traefikservices", named("bad", {"mirroring": {"name": "web", "mirrors": [
             {"name": "x", "namespace": "other"}]}})),
         "demo TraefikService/bad: mirror service other/x in another namespace",
+    ),
+    "traefikservice-cross-namespace-highest-random-weight": (
+        _with("traefikservices", named("bad", {"highestRandomWeight": {"services": [
+            {"name": "x", "namespace": "other"}]}})),
+        "demo TraefikService/bad: highestRandomWeight service other/x in another namespace",
+    ),
+    "traefikservice-provider-highest-random-weight": (
+        _with("traefikservices", named("bad", {"highestRandomWeight": {"services": [
+            {"name": "web", "serversTransport": "t@file"}]}})),
+        "demo TraefikService/bad: highestRandomWeight service web uses a name@provider"
+        " reference",
+    ),
+    "traefikservice-weighted-service-middleware": (
+        _with("traefikservices", named("bad", {"weighted": {"services": [
+            {"name": "web", "middlewares": [{"name": "mw", "namespace": "other"}]}]}})),
+        "demo TraefikService/bad: weighted service middleware other/mw outside its namespace"
+        " and the platform allowlist",
+    ),
+    "traefikservice-highest-random-weight-service-middleware": (
+        _with("traefikservices", named("bad", {"highestRandomWeight": {"services": [
+            {"name": "web", "middlewares": [{"name": "mw@file"}]}]}})),
+        "demo TraefikService/bad: highestRandomWeight service middleware mw@file uses a"
+        " name@provider reference",
+    ),
+    "traefikservice-mirroring-middleware": (
+        _with("traefikservices", named("bad", {"mirroring": {"name": "web", "middlewares": [
+            {"name": "mw", "namespace": "other"}]}})),
+        "demo TraefikService/bad: mirroring service middleware other/mw outside its namespace"
+        " and the platform allowlist",
+    ),
+    "traefikservice-mirror-middleware": (
+        _with("traefikservices", named("bad", {"mirroring": {"name": "web", "mirrors": [
+            {"name": "web", "middlewares": [{"name": "mw", "namespace": "other"}]}]}})),
+        "demo TraefikService/bad: mirror service middleware other/mw outside its namespace"
+        " and the platform allowlist",
+    ),
+    "middleware-errors-service-middleware": (
+        _with("middlewares", named("bad", {"errors": {"service": {
+            "name": "pages", "middlewares": [{"name": "mw", "namespace": "other"}]}}})),
+        "demo Middleware/bad: errors service middleware other/mw outside its namespace"
+        " and the platform allowlist",
     ),
     "traefikservice-failover": (
         _with("traefikservices", named("bad", {"failover": {

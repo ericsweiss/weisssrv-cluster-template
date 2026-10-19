@@ -319,13 +319,22 @@ def test_the_gate_pins_ten_policies():
         ("tenant-traefik-hostnames", "!k.startsWith('tailscale.com/')"),
         ("tenant-traefik-hostnames", "k != 'kubernetes.io/ingress.class'"),
         ("tenant-traefik-object-refs", "!has(object.spec.failover)"),
+        ("tenant-traefik-object-refs",
+         "object.spec.highestRandomWeight.services.all(s, (!has(s.namespace)"),
+        ("tenant-traefik-object-refs", "object.spec.errors.service.middlewares.all(m,"),
+        ("tenant-traefik-object-refs", "object.spec.mirroring.middlewares.all(m,"),
+        ("tenant-traefik-object-refs",
+         "object.spec.mirroring.mirrors.all(s, !has(s.middlewares)"),
+        ("tenant-traefik-route-refs", "r.services.all(s, !has(s.middlewares)"),
     ],
     ids=["service-tailscale", "ingress-class", "ingress-tailscale", "ingress-legacy-class",
-         "traefikservice-failover"],
+         "traefikservice-failover", "highest-random-weight", "errors-service-middlewares",
+         "mirroring-middlewares", "mirror-middlewares", "route-service-middlewares"],
 )
 def test_the_gate_pins_the_other_operator_and_failover_refusals(name, needle):
-    """Another ingress operator (Tailscale's) or a TraefikService failover would
-    route around the other pins, so the gate carries each refusal."""
+    """Another ingress operator (Tailscale's), a TraefikService failover or an
+    unpinned service reference would route around the other pins, so the gate
+    carries each refusal."""
     assert [v for v in gate.REQUIRED_POLICIES[name]["validations"] if needle in v]
 
 

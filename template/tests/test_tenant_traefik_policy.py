@@ -1,6 +1,8 @@
 """A tenant forwardAuth Middleware may call only its own namespace's Services or
-the Authentik outpost, and a tenant TraefikService may not fail over. No CEL
-engine ships here, so the mirrors are pinned to the expressions they assume."""
+the Authentik outpost, a tenant TraefikService may not fail over, and every
+service reference and per-service middleware stays in the tenant's namespace or
+the platform allowlist. No CEL engine ships here, so the mirrors are pinned to
+the expressions they assume."""
 
 from __future__ import annotations
 
@@ -153,3 +155,178 @@ def test_a_tenant_failover_service_is_refused_whatever_it_names(failover):
 def test_a_weighted_or_mirroring_service_is_untouched_by_the_failover_refusal():
     assert failover_allowed({"weighted": {"services": [{"name": "web", "port": 80}]}})
     assert failover_allowed({"mirroring": {"name": "web", "mirrors": [{"name": "web"}]}})
+
+
+# Every per-service middlewares[] list the pinned Traefik CRDs (v3.7) define, and
+# highestRandomWeight.services[], held to the route-level rule.
+MIDDLEWARE_REF = (
+    "!m.name.contains('@') && (!has(m.namespace) || m.namespace == variables.ns"
+    " || (m.namespace + '/' + m.name) in variables.platformMiddlewares)"
+)
+HRW_EXPRESSION = (
+    "!has(object.spec.highestRandomWeight) || !has(object.spec.highestRandomWeight.services)"
+    " || object.spec.highestRandomWeight.services.all(s,"
+    " (!has(s.namespace) || s.namespace == variables.ns) && !s.name.contains('@')"
+    " && (!has(s.serversTransport) || !s.serversTransport.contains('@')))"
+)
+HRW_MESSAGE = (
+    "a tenant highestRandomWeight service may reference only its own namespace,"
+    " never a name@provider service or transport"
+)
+SERVICE_MIDDLEWARES_EXPRESSION = (
+    "(!has(object.spec.errors) || !has(object.spec.errors.service)"
+    " || !has(object.spec.errors.service.middlewares)"
+    f" || object.spec.errors.service.middlewares.all(m, {MIDDLEWARE_REF}))"
+    " && (!has(object.spec.weighted) || !has(object.spec.weighted.services)"
+    " || object.spec.weighted.services.all(s, !has(s.middlewares)"
+    f" || s.middlewares.all(m, {MIDDLEWARE_REF})))"
+    " && (!has(object.spec.highestRandomWeight) || !has(object.spec.highestRandomWeight.services)"
+    " || object.spec.highestRandomWeight.services.all(s, !has(s.middlewares)"
+    f" || s.middlewares.all(m, {MIDDLEWARE_REF})))"
+    " && (!has(object.spec.mirroring) || ((!has(object.spec.mirroring.middlewares)"
+    f" || object.spec.mirroring.middlewares.all(m, {MIDDLEWARE_REF}))"
+    " && (!has(object.spec.mirroring.mirrors) || object.spec.mirroring.mirrors.all(s,"
+    f" !has(s.middlewares) || s.middlewares.all(m, {MIDDLEWARE_REF})))))"
+)
+SERVICE_MIDDLEWARES_MESSAGE = (
+    "a tenant errors, weighted, highestRandomWeight or mirroring service may apply"
+    " only its own middlewares or the platform allowlist, never a name@provider one"
+)
+ROUTE_SERVICE_MIDDLEWARES_EXPRESSION = (
+    "!has(object.spec.routes) || object.spec.routes.all(r, !has(r.services)"
+    " || r.services.all(s, !has(s.middlewares)"
+    f" || s.middlewares.all(m, {MIDDLEWARE_REF})))"
+)
+ROUTE_SERVICE_MIDDLEWARES_MESSAGE = (
+    "a tenant route service may apply only its own middlewares or the platform"
+    " allowlist, never a name@provider one"
+)
+PLATFORM_MW = "traefik/security-headers"
+
+
+def _policy(name: str) -> dict:
+    docs = [d for d in yaml.safe_load_all(POLICY.read_text()) if isinstance(d, dict)]
+    found = [d for d in docs if d.get("kind") == "ValidatingAdmissionPolicy"
+             and d["metadata"]["name"] == name]
+    assert len(found) == 1
+    return found[0]["spec"]
+
+
+def _pinned(policy: str, message: str) -> str:
+    found = [v for v in _policy(policy)["validations"] if v["message"] == message]
+    assert len(found) == 1, message
+    return " ".join(found[0]["expression"].split())
+
+
+def _platform_middlewares(policy: str) -> list[str]:
+    variables = {v["name"]: v["expression"] for v in _policy(policy).get("variables") or []}
+    return ast.literal_eval(" ".join(variables["platformMiddlewares"].split()))
+
+
+def _mw_ok(m: dict, ns: str) -> bool:
+    if "@" in m["name"]:
+        return False
+    if "namespace" not in m or m["namespace"] == ns:
+        return True
+    return f"{m['namespace']}/{m['name']}" in _platform_middlewares("tenant-traefik-object-refs")
+
+
+def _service_lists(spec: dict) -> list[list[dict]]:
+    """Each middlewares list the object-refs mirror walks, as the CEL does."""
+    lists = [(spec.get("errors", {}).get("service") or {}).get("middlewares") or []]
+    for key in ("weighted", "highestRandomWeight"):
+        lists += [s.get("middlewares") or [] for s in (spec.get(key) or {}).get("services") or []]
+    mirroring = spec.get("mirroring") or {}
+    lists.append(mirroring.get("middlewares") or [])
+    lists += [s.get("middlewares") or [] for s in mirroring.get("mirrors") or []]
+    return lists
+
+
+def service_middlewares_allowed(spec: dict, ns: str) -> bool:
+    return all(_mw_ok(m, ns) for mws in _service_lists(spec) for m in mws)
+
+
+def route_service_middlewares_allowed(spec: dict, ns: str) -> bool:
+    return all(_mw_ok(m, ns) for r in spec.get("routes") or []
+               for s in r.get("services") or [] for m in s.get("middlewares") or [])
+
+
+def hrw_allowed(spec: dict, ns: str) -> bool:
+    return all(
+        s.get("namespace", ns) == ns and "@" not in s["name"]
+        and "@" not in s.get("serversTransport", "")
+        for s in (spec.get("highestRandomWeight") or {}).get("services") or []
+    )
+
+
+def test_the_service_reference_validations_are_the_shapes_the_mirrors_evaluate():
+    assert _pinned("tenant-traefik-object-refs", HRW_MESSAGE) == HRW_EXPRESSION
+    assert (_pinned("tenant-traefik-object-refs", SERVICE_MIDDLEWARES_MESSAGE)
+            == SERVICE_MIDDLEWARES_EXPRESSION)
+    assert (_pinned("tenant-traefik-route-refs", ROUTE_SERVICE_MIDDLEWARES_MESSAGE)
+            == ROUTE_SERVICE_MIDDLEWARES_EXPRESSION)
+
+
+def test_both_policies_allow_the_same_platform_middlewares():
+    assert (_platform_middlewares("tenant-traefik-object-refs")
+            == _platform_middlewares("tenant-traefik-route-refs"))
+    assert PLATFORM_MW in _platform_middlewares("tenant-traefik-object-refs")
+
+
+@pytest.mark.parametrize(
+    "service",
+    [{"name": "web", "namespace": "observability"}, {"name": "api@internal"},
+     {"name": "web", "serversTransport": "insecure@file"}],
+    ids=["cross-namespace", "provider-service", "provider-transport"],
+)
+def test_a_foreign_highest_random_weight_service_is_refused(service):
+    assert not hrw_allowed({"highestRandomWeight": {"services": [service]}}, "demo")
+
+
+def test_an_own_highest_random_weight_service_is_admitted():
+    assert hrw_allowed({"highestRandomWeight": {"services": [
+        {"name": "web", "port": 80}, {"name": "web-b", "namespace": "demo"}]}}, "demo")
+
+
+def _placed(where: str, middlewares: list[dict]) -> dict:
+    """A TraefikService or Middleware spec carrying `middlewares` at `where`."""
+    service = {"name": "web", "port": 80, "middlewares": middlewares}
+    return {
+        "errors": {"errors": {"service": service}},
+        "weighted": {"weighted": {"services": [service]}},
+        "highestRandomWeight": {"highestRandomWeight": {"services": [service]}},
+        "mirroring": {"mirroring": {"name": "web", "middlewares": middlewares}},
+        "mirrors": {"mirroring": {"name": "web", "mirrors": [service]}},
+    }[where]
+
+
+PLACES = ["errors", "weighted", "highestRandomWeight", "mirroring", "mirrors"]
+FOREIGN = [{"name": "mw", "namespace": "other"}, {"name": "mw@file"},
+           {"name": "mw@kubernetescrd", "namespace": "demo"},
+           {"name": "lan-tailscale-only", "namespace": "authentik"}]
+OWN_OR_PLATFORM = [{"name": "mw"}, {"name": "mw", "namespace": "demo"},
+                   {"name": "security-headers", "namespace": "traefik"}]
+
+
+@pytest.mark.parametrize("middleware", FOREIGN, ids=lambda m: m["name"] + "/" + m.get("namespace", "-"))
+@pytest.mark.parametrize("where", PLACES)
+def test_a_foreign_per_service_middleware_is_refused(where, middleware):
+    assert not service_middlewares_allowed(_placed(where, [middleware]), "demo")
+
+
+@pytest.mark.parametrize("where", PLACES)
+def test_own_and_platform_per_service_middlewares_are_admitted(where):
+    assert service_middlewares_allowed(_placed(where, OWN_OR_PLATFORM), "demo")
+
+
+@pytest.mark.parametrize("middleware", FOREIGN, ids=lambda m: m["name"] + "/" + m.get("namespace", "-"))
+def test_a_foreign_route_service_middleware_is_refused(middleware):
+    spec = {"routes": [{"match": "Host(`demo.apps.test`)", "services": [
+        {"name": "web", "port": 80, "middlewares": [middleware]}]}]}
+    assert not route_service_middlewares_allowed(spec, "demo")
+
+
+def test_own_and_platform_route_service_middlewares_are_admitted():
+    spec = {"routes": [{"match": "Host(`demo.apps.test`)", "services": [
+        {"name": "web", "port": 80, "middlewares": OWN_OR_PLATFORM}]}]}
+    assert route_service_middlewares_allowed(spec, "demo")
