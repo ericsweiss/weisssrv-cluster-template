@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tenant admission policies refuse only later writes: run at rollout and before
-# each onboarding to list tenant objects of every covered kind that predate them.
+# each onboarding to list the tenant objects they would refuse that predate them.
 # Exit 0 clean, 1 findings, 2 kubectl or jq failed. Was audit-tenant-services.sh.
 
 # Labels are tenant-writable, so they are never the proof: every EndpointSlice
@@ -167,17 +167,21 @@ for ns in $namespaces; do
     certificates=$(kget -n "$ns" get certificates.cert-manager.io)
     requests=$(kget -n "$ns" get certificaterequests.cert-manager.io)
 
-    # The namespace's grant: its hosts, a maxPriority CEL can parse, and why it
-    # is unusable, if it is (the grant policies then refuse every write).
+    # The grant: hosts, maxPriority as the isolation gate takes it (ASCII digits
+    # to 2^31-1; \A..\z, as $ matches before a final newline), and any problem.
     # shellcheck disable=SC2016 # a jq program, expanded by jq
     grant=$(jq -c --arg name "$GRANT_PREFIX$ns" --arg where "$FLUX_NAMESPACE" '
         (first(.items[] | select(.metadata.name == $name)) // null) as $cm
         | (($cm.data.hosts // "") | split("\n") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $h
         | ($cm.data.maxPriority // null) as $m
+        | (($m | type) == "string" and ($m | test("\\A[0-9]+\\z"))
+            and ($m | tonumber) <= 2147483647) as $ok
         | {hosts: $h,
-           max: (if ($m | type) == "string" and ($m | test("^[0-9]+$")) then ($m | tonumber) else null end),
+           max: (if $ok then ($m | tonumber) else null end),
            problem: (if $cm == null then "no hostname grant \($where)/\($name)"
                      elif any($h[]; contains("*")) then "grant \($where)/\($name) lists a wildcard host"
+                     elif $m != null and ($ok | not)
+                     then "grant \($where)/\($name) has an unparseable maxPriority \($m | tojson)"
                      else null end)}' <<<"$grants") || die "unreadable ConfigMaps in $FLUX_NAMESPACE"
 
     # Services the endpoint controller fills, name to selector.

@@ -728,8 +728,7 @@ spec:
   before it carried the `fluxcd.io/tenant` label, stays in place. Run
   `scripts/audit-tenant-admission.sh` (formerly `audit-tenant-services.sh`;
   needs `kubectl` against this cluster and `jq`) once at rollout and before
-  each onboarding. It covers every kind the policies cover and lists, in every
-  `fluxcd.io/tenant` namespace: ExternalName, NodePort and LoadBalancer
+  each onboarding. It lists, in every `fluxcd.io/tenant` namespace: ExternalName, NodePort and LoadBalancer
   Services, Services with `externalIPs`, selectorless Services,
   EndpointSlices not managed by `endpointslice-controller.k8s.io`, and
   Endpoints with no selector Service; IngressRoutes and Ingresses whose hosts
@@ -741,8 +740,11 @@ spec:
   IngressRouteTCP or IngressRouteUDP; Certificates whose names are not all
   granted or whose issuer is not a platform ClusterIssuer or a core Issuer;
   tenant-written CertificateRequests to anything but a core Issuer; and a
-  TLSOption or TLSStore named `default`. A missing or wildcard grant is one
-  line per route, Ingress and Certificate. It exits non-zero while any remain.
+  TLSOption or TLSStore named `default`. It does not audit ACME Orders or
+  Challenges: tenant RBAC grants no create on them, so that policy is defence
+  in depth only. A missing or wildcard grant, or one whose `maxPriority` is not
+  a plain whole number up to 2147483647, is one line per route, Ingress and
+  Certificate. It exits non-zero while any remain.
   It does not trust labels, which a tenant can write: every EndpointSlice must
   name an existing selector Service through `kubernetes.io/service-name`, and
   every EndpointSlice and Endpoints address must be the IP of a live (not

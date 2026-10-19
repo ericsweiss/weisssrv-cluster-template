@@ -613,6 +613,30 @@ def test_every_host_bearing_object_is_reported_without_a_usable_grant(tmp_path, 
     )
 
 
+@pytest.mark.parametrize(
+    "ceiling",
+    ["100\n", "99999999999999999999", "2147483648", " 100", "-1", "high", "\u0661\u0660\u0660"],
+    ids=["trailing-newline", "int64-overflow", "int32-overflow", "padded", "negative",
+         "word", "non-ascii-digits"],
+)
+def test_an_unparseable_max_priority_is_a_grant_problem(tmp_path, ceiling):
+    """CEL's int() and the isolation gate take only ASCII digits up to 2^31-1, so
+    any other maxPriority is reported on every object that reads the grant."""
+    result = run(tmp_path, fixture({"demo": CLEAN_APP}, [grant(max_priority=ceiling)]))
+    assert result.returncode == 1, result.stdout + result.stderr
+    why = (f"grant flux-system/tenant-routing-demo has an unparseable maxPriority "
+           f"{json.dumps(ceiling, ensure_ascii=False)}")
+    assert sorted(result.stdout.splitlines()) == sorted(
+        f"demo {o}: {why}" for o in GRANT_OBJECTS
+    )
+
+
+@pytest.mark.parametrize("ceiling", ["100", "2147483647"])
+def test_a_plain_max_priority_up_to_the_int32_bound_is_fine(tmp_path, ceiling):
+    result = run(tmp_path, fixture({"demo": CLEAN_APP}, [grant(max_priority=ceiling)]))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_a_tenant_without_host_bearing_objects_needs_no_grant(tmp_path):
     bare = {k: v for k, v in CLEAN_APP.items()
             if k not in ("ingressroutes", "ingresses", "certificates")}

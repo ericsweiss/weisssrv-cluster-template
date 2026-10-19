@@ -299,8 +299,8 @@ stays until its next apply, which they then refuse. On the update branch,
 before it merges:
 
 1. Run `scripts/audit-tenant-admission.sh` (it arrives with the update; it was
-   `audit-tenant-services.sh`) against the cluster. It covers every kind the
-   policies cover, so fix each object it lists: ExternalName, NodePort or
+   `audit-tenant-services.sh`) against the cluster and fix each object it
+   lists: ExternalName, NodePort or
    LoadBalancer Services, Services with `externalIPs`, selectorless Services,
    hand-written Endpoints or EndpointSlices; IngressRoutes and Ingresses off
    the grant or carrying a refused annotation, `name@provider` or
@@ -309,7 +309,9 @@ before it merges:
    cross-namespace or `@` references; any IngressRouteTCP or IngressRouteUDP;
    Certificates off the grant or naming another issuer; tenant-written
    CertificateRequests to anything but a core Issuer; and a TLSOption or
-   TLSStore named `default`. The next reconcile of each is refused. Routes,
+   TLSStore named `default`. The next reconcile of each is refused. It does
+   not audit ACME Orders or Challenges: tenant RBAC grants no create on them,
+   so that policy is defence in depth only. Routes,
    Ingresses and Certificates read as ungranted until step 2's grants are in
    the cluster, so run it again after step 2. A tenant that needs a port
    outside Traefik asks the platform to expose it.
