@@ -164,3 +164,34 @@ def test_setup_creates_the_claim_directory_on_the_zvol_root(tmp_path):
     result = _setup(tmp_path, vol)
     assert result.returncode == 0, result.stderr
     assert stat.S_IMODE(vol.stat().st_mode) == 0o777
+
+
+def _rules(kind: str) -> dict[str, set[str]]:
+    """resource -> verbs granted by the one `kind` in rbac.yaml."""
+    granted: dict[str, set[str]] = {}
+    for rule in _one(LPP / "rbac.yaml", kind)["rules"]:
+        assert rule["apiGroups"] in ([""], ["storage.k8s.io"]), rule
+        for resource in rule["resources"]:
+            granted.setdefault(resource, set()).update(rule["verbs"])
+    return granted
+
+
+def test_the_provisioner_reads_pods_and_their_logs_only_in_its_own_namespace():
+    """Helper pods run only in local-path-storage, so pod and log access is a
+    namespaced Role, a deliberate narrowing of upstream's cluster-wide grant."""
+    assert _rules("Role") == {
+        "pods": {"get", "list", "watch", "create", "patch", "update", "delete"},
+        "pods/log": {"get"},
+    }
+    assert _rules("ClusterRole") == {
+        "nodes": {"get", "list", "watch"},
+        "persistentvolumeclaims": {"get", "list", "watch"},
+        "configmaps": {"get", "list", "watch"},
+        "persistentvolumes": {"get", "list", "watch", "create", "patch", "update", "delete"},
+        "events": {"create", "patch"},
+        "storageclasses": {"get", "list", "watch"},
+    }
+    kustomization = yaml.safe_load((LPP / "kustomization.yaml").read_text())
+    binding = _one(LPP / "rbac.yaml", "RoleBinding")
+    assert binding["roleRef"]["kind"] == "Role"
+    assert binding["subjects"][0]["namespace"] == kustomization["namespace"]

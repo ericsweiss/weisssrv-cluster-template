@@ -79,6 +79,13 @@ bounds what all tenant volumes together can fill, and `TenantVolumesFilling`
 warns before they do. Until a backend that enforces sizes replaces this one,
 the class is for trusted tenants only.
 
+The provisioner's RBAC is upstream's with one deliberate deviation: `pods`
+and `pods/log` are granted by a Role in `local-path-storage`, where its helper
+pods run, not by the ClusterRole, so it cannot read pods or logs in a tenant
+namespace. Nodes, claims, PersistentVolumes, StorageClasses, ConfigMaps and
+events stay cluster-wide, as upstream needs. Re-apply the narrowing when
+upgrading from upstream's `local-path-storage.yaml`.
+
 {% endif -%}
 {% if postgres_operator -%}
 ### PostgreSQL
