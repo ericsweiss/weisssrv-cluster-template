@@ -12,8 +12,10 @@ Secrets), the GitRepository and the secret store — in that order.
 Secret, so the Secrets go with the ExternalSecrets; deleting a store on its own
 removes nothing and only pushes its ExternalSecrets into `SecretSyncError`.
 
-The Namespace, its ResourceQuota and its LimitRange carry
-`kustomize.toolkit.fluxcd.io/prune: disabled` and outlive the wiring. A pruned
+Every tenant's Namespace, ResourceQuota and LimitRange carry
+`kustomize.toolkit.fluxcd.io/prune: disabled` and outlive the wiring, database
+or not; `scripts/check-tenant-wiring.py` refuses a tenant file whose Namespace
+or either cap lacks the annotation. A pruned
 Namespace cascades through every tenant object and PVC in it, and
 `deletionPolicy: Orphan` on a db Kustomization cannot protect against that.
 Delete the Namespace by hand once nothing in it is wanted.

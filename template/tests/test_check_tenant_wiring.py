@@ -22,6 +22,8 @@ TENANT = textwrap.dedent(
     kind: Namespace
     metadata:
       name: demo-app
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
       labels:
         fluxcd.io/tenant: demo-app
         pod-security.kubernetes.io/enforce: baseline
@@ -33,6 +35,8 @@ TENANT = textwrap.dedent(
     metadata:
       name: demo-app-quota
       namespace: demo-app
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
     spec:
       hard:
         pods: "10"
@@ -42,6 +46,8 @@ TENANT = textwrap.dedent(
     metadata:
       name: demo-app-limits
       namespace: demo-app
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
     spec:
       limits:
         - type: Container
@@ -503,44 +509,42 @@ def test_every_kustomization_in_a_tenant_file_is_checked(repo: Path) -> None:
 CONFINED_SECOND = SECOND.replace(
     "  dependsOn:\n", "  serviceAccountName: demo-app-flux\n  dependsOn:\n"
 )
-# A tenant that runs a database keeps its Namespace out of Flux pruning.
-GUARDED_TENANT = TENANT.replace(
-    "  name: demo-app\n  labels:\n",
-    "  name: demo-app\n  annotations:\n"
-    "    kustomize.toolkit.fluxcd.io/prune: disabled\n  labels:\n",
-    1,
-)
+GUARD = "  annotations:\n    kustomize.toolkit.fluxcd.io/prune: disabled\n"
 
 
 def test_a_confined_second_kustomization_passes(repo: Path) -> None:
-    assert GUARDED_TENANT != TENANT
-    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", GUARDED_TENANT + CONFINED_SECOND)
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + CONFINED_SECOND)
     assert gate.check(repo) == []
 
 
-@pytest.mark.parametrize(
-    "body",
-    [TENANT, GUARDED_TENANT.replace(": disabled", ": enabled")],
-    ids=["absent", "enabled"],
-)
-def test_a_database_tenant_namespace_without_the_prune_guard_fails(
-    repo: Path, body: str
+def _unguarded(kind: str, value: str | None) -> str:
+    """TENANT with `kind`'s prune guard removed (None) or set to `value`."""
+    docs = TENANT.split("\n---\n")
+    hit = [i for i, d in enumerate(docs) if f"kind: {kind}\n" in d]
+    assert len(hit) == 1 and GUARD in docs[hit[0]]
+    docs[hit[0]] = docs[hit[0]].replace(
+        GUARD, "" if value is None else GUARD.replace("disabled", value)
+    )
+    return "\n---\n".join(docs)
+
+
+@pytest.mark.parametrize("kind", ["Namespace", "ResourceQuota", "LimitRange"])
+@pytest.mark.parametrize("value", [None, "enabled"], ids=["absent", "enabled"])
+@pytest.mark.parametrize("second", ["", CONFINED_SECOND], ids=["app-only", "database"])
+def test_a_tenant_object_without_the_prune_guard_fails(
+    repo: Path, kind: str, value: str | None, second: str
 ) -> None:
-    """Pruning the Namespace cascades through every object and PVC in it, which
-    the db Kustomization's `deletionPolicy: Orphan` cannot stop."""
-    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body + CONFINED_SECOND)
+    """Every tenant's Namespace and caps outlive its wiring: a pruned Namespace
+    cascades through every object and PVC in it, which `deletionPolicy: Orphan`
+    cannot stop, and a pruned cap leaves the surviving namespace unbounded."""
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", _unguarded(kind, value) + second)
     problems = gate.check(repo)
     assert any(
-        "demo-app" in p and "kustomize.toolkit.fluxcd.io/prune: disabled" in p
+        kind in p and "kustomize.toolkit.fluxcd.io/prune: disabled" in p
         for p in problems
     ), problems
+    assert len(problems) == 1, problems
     assert gate.main(["--repo-root", str(repo)]) == 1
-
-
-def test_a_database_tree_named_by_path_alone_needs_the_prune_guard(repo: Path) -> None:
-    second = CONFINED_SECOND.replace("name: demo-app-db", "name: demo-app-data")
-    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
-    assert any("prune: disabled" in p for p in gate.check(repo))
 
 
 def test_a_database_kustomization_that_orphans_on_deletion_passes(repo: Path) -> None:
@@ -550,7 +554,7 @@ def test_a_database_kustomization_that_orphans_on_deletion_passes(repo: Path) ->
         "  prune: true\n", "  prune: true\n  deletionPolicy: Orphan\n"
     )
     assert "deletionPolicy: Orphan" in second
-    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", GUARDED_TENANT + second)
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
     assert gate.check(repo) == []
 
 

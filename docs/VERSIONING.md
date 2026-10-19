@@ -351,6 +351,17 @@ What a tenant can no longer create or update:
   headless ones included, stay allowed);
 - an Endpoints or EndpointSlice the control plane did not write.
 
+### Every tenant's Namespace and caps carry the prune guard
+
+`scripts/check-tenant-wiring.py` now requires
+`kustomize.toolkit.fluxcd.io/prune: disabled` on every tenant file's Namespace,
+ResourceQuota and LimitRange, whether or not the tenant runs a database, so
+removing a tenant's wiring never prunes its Namespace (which cascades through
+every object and PVC in it) or strips its caps. Before the update merges, add
+the annotation to those three objects in each existing tenant file, as the
+tenants README § Example shows; `task lint:invariants` fails until every
+tenant carries all three.
+
 ## Related
 
 - [RUNBOOKS.md](RUNBOOKS.md) § Updating the template — the operator-side procedure
