@@ -1,9 +1,6 @@
-"""A tenant Service may not be ExternalName or selectorless: Traefik would follow
-its CNAME or hand-written endpoints past the forwardAuth pin. Nor may it be a
-NodePort, a LoadBalancer or carry externalIPs, which bypass Traefik through
-kube-proxy or a MetalLB VIP and, with externalIPs, can intercept traffic for any
-address (the CVE-2020-8554 class). No CEL engine ships here, so `allowed()`
-mirrors the validations; the first test pins their shape."""
+"""A tenant Service must be an internal ClusterIP with a selector and no
+externalIPs, so Traefik reaches only the tenant's pods and nothing bypasses it.
+No CEL engine ships here, so `allowed()` mirrors the validations."""
 
 from __future__ import annotations
 
@@ -107,8 +104,8 @@ def test_a_selectorless_service_is_refused(spec):
 SELECTOR = {"app.kubernetes.io/name": "demo"}
 
 
-# Each reaches the tenant's pods without Traefik: a port on every node, a
-# MetalLB VIP, or an address kube-proxy captures for the whole cluster.
+# Each reaches the tenant's pods without Traefik: a port on every node, a MetalLB
+# VIP, or an address kube-proxy captures cluster-wide (the CVE-2020-8554 class).
 @pytest.mark.parametrize(
     "spec",
     [
