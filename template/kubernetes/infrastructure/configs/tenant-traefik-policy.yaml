@@ -1,5 +1,5 @@
 ---
-# These policies bound future writes only; run scripts/audit-tenant-services.sh
+# These policies bound future writes only; run scripts/audit-tenant-admission.sh
 # once at rollout and before each onboarding for objects that predate them.
 
 # Tenants hold full traefik.io write while Traefik allows cross-namespace refs

@@ -298,11 +298,21 @@ The policies act on CREATE and UPDATE, so an object a tenant already holds
 stays until its next apply, which they then refuse. On the update branch,
 before it merges:
 
-1. Run `scripts/audit-tenant-services.sh` (it arrives with the update) against
-   the cluster, and fix every ExternalName, NodePort or LoadBalancer Service,
-   Service with `externalIPs`, selectorless Service and hand-written Endpoints
-   or EndpointSlice it lists; the next reconcile of each is refused. A tenant
-   that needs a port outside Traefik asks the platform to expose it.
+1. Run `scripts/audit-tenant-admission.sh` (it arrives with the update; it was
+   `audit-tenant-services.sh`) against the cluster. It covers every kind the
+   policies cover, so fix each object it lists: ExternalName, NodePort or
+   LoadBalancer Services, Services with `externalIPs`, selectorless Services,
+   hand-written Endpoints or EndpointSlices; IngressRoutes and Ingresses off
+   the grant or carrying a refused annotation, `name@provider` or
+   cross-namespace reference, `HostRegexp` or priority; Middlewares with a
+   forwardAuth address outside the allowed forms; TraefikServices with
+   cross-namespace or `@` references; any IngressRouteTCP or IngressRouteUDP;
+   Certificates off the grant or naming another issuer; tenant-written
+   CertificateRequests to anything but a core Issuer; and a TLSOption or
+   TLSStore named `default`. The next reconcile of each is refused. Routes,
+   Ingresses and Certificates read as ungranted until step 2's grants are in
+   the cluster, so run it again after step 2. A tenant that needs a port
+   outside Traefik asks the platform to expose it.
 2. For each tenant, add a `tenant-routing-<ns>` ConfigMap in `flux-system`
    granting its exact hostnames (no wildcards: a grant with `*` refuses every
    route, Ingress and Certificate in the namespace), and the Deny bindings of `tenant-traefik-hostnames`
