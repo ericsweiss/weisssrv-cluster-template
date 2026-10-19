@@ -506,3 +506,14 @@ def test_a_confined_second_kustomization_passes(repo: Path) -> None:
     )
     write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
     assert gate.check(repo) == []
+
+
+def test_a_database_kustomization_that_orphans_on_deletion_passes(repo: Path) -> None:
+    """The database Kustomization carries `deletionPolicy: Orphan`, so deleting its
+    wiring leaves the database whole; the gate must accept the field."""
+    second = SECOND.replace(
+        "  dependsOn:\n", "  serviceAccountName: demo-app-flux\n  dependsOn:\n"
+    ).replace("  prune: true\n", "  prune: true\n  deletionPolicy: Orphan\n")
+    assert "deletionPolicy: Orphan" in second
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
+    assert gate.check(repo) == []
