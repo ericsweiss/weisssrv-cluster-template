@@ -106,7 +106,7 @@ section — read it before running `copier update`.
 
 `lib_ref` is an answer, so a generated cluster can pin any library tag it likes —
 but exactly **one** pair is ever proved to work: the `lib_ref` default in
-`copier.yml`, currently weisssrv-lib `v0.21.1`. `validate-rendered-cluster`
+`copier.yml`, currently weisssrv-lib `v0.22.0`. `validate-rendered-cluster`
 renders the template with the answer fixtures — which do not answer `lib_ref`,
 so they inherit that default — and runs the real toolchain over the output
 against a checkout of the library at that ref.
@@ -272,11 +272,6 @@ output shape, so its call sites in `template/.pre-commit-config.yaml`,
 template's CLI. Each is a declared `forked:` entry carrying the difference in
 its `reason:`, held to the library by `reconciled_sha256` so a library-side
 change forces a review.
-
-`check-scrape-wiring.py` is an interim fork: its `CLUSTER_SCOPED_KINDS` also
-names `ValidatingAdmissionPolicyBinding`, which the tenant Traefik policy brings
-into every render. It returns to `vendored:` in both manifests once the library
-ships the same line and `lib_ref` takes it.
 
 ## Upgrade notes
 

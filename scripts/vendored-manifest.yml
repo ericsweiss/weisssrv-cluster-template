@@ -70,6 +70,8 @@ vendored:
     consumer: template/scripts/check-role-inputs.py
   - lib: scripts/check-scrape-netpol.py
     consumer: template/scripts/check-scrape-netpol.py
+  - lib: scripts/check-scrape-wiring.py
+    consumer: template/scripts/check-scrape-wiring.py
   - lib: scripts/check-secretstore-scope.py
     consumer: template/scripts/check-secretstore-scope.py
   - lib: scripts/check-taskfile.sh
@@ -205,13 +207,6 @@ forked:
       child_kustomizations() rather than the library's name<TAB>path output,
       --exclude/--allow-missing-paths flags and child_kustomization_paths().
     reconciled_sha256: 965d08702267f3f03d3213fdb623038178d874f89ef0486fe8b03fe2a37ded4b
-  - lib: scripts/check-scrape-wiring.py
-    consumer: template/scripts/check-scrape-wiring.py
-    reason: >-
-      Interim: CLUSTER_SCOPED_KINDS also names ValidatingAdmissionPolicyBinding,
-      which the tenant Traefik policy brings into the tree. Return the file to
-      `vendored:` once the library ships the same line and lib_ref takes it.
-    reconciled_sha256: 4d6b3e4edca05618de8129848bf3905339af7fa5f6d47db95294c817c053d7f1
   # The tenant-side lint profiles; the root copies above are what this
   # repository lints itself with. Both halves are listed so a library change
   # cannot reconcile one and leave generated clusters on the old profile.

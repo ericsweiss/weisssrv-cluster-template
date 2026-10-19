@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assert every claim pins a storageClassName.
+"""Assert every claim, CNPG Cluster storage included, pins a storageClassName.
 
 An unset field is rewritten by the DefaultStorageClass admission plugin at
 create time; a pinned static bind is not growable. Both: docs/SCRIPTS.md.
@@ -32,6 +32,15 @@ _CLASS_PIN_KEYS = ("storageClass", "storageClassName")
 _VOLUME_PIN_KEYS = ("existingClaim", "existingVolume")
 
 
+def _cnpg_claim_spec(block: dict) -> dict:
+    """A CNPG storage block as the claim spec CNPG renders from it: `storageClass`
+    wins, else the pvcTemplate's own storageClassName."""
+    if block.get("storageClass") is not None:
+        return {"storageClassName": block["storageClass"]}
+    template = block.get("pvcTemplate") or {}
+    return {"storageClassName": template.get("storageClassName")}
+
+
 def _claim_violations(docs: list[dict]) -> tuple[list[str], int]:
     """-> (violations, claims inspected). The count feeds the vacuity guard."""
     out: list[str] = []
@@ -42,6 +51,15 @@ def _claim_violations(docs: list[dict]) -> tuple[list[str], int]:
         claims: list[tuple[str, dict]] = []
         if kind == "PersistentVolumeClaim":
             claims.append((where, d.get("spec") or {}))
+        elif kind == "Cluster" and str(d.get("apiVersion", "")).startswith("postgresql.cnpg.io/"):
+            spec = d.get("spec") or {}
+            for field in ("storage", "walStorage"):
+                if isinstance(spec.get(field), dict):
+                    claims.append((f"{where} spec.{field}", _cnpg_claim_spec(spec[field])))
+            for tablespace in spec.get("tablespaces") or []:
+                if isinstance(tablespace, dict) and isinstance(tablespace.get("storage"), dict):
+                    label = f"{where} tablespace {tablespace.get('name', '?')!r}"
+                    claims.append((label, _cnpg_claim_spec(tablespace["storage"])))
         elif kind == "StatefulSet":
             templates = ((d.get("spec") or {}).get("volumeClaimTemplates") or [])
             for t in templates:
@@ -57,7 +75,8 @@ def _claim_violations(docs: list[dict]) -> tuple[list[str], int]:
             if not isinstance(spec, dict) or spec.get("storageClassName") is None:
                 out.append(
                     f"  {label}: no storageClassName — the default StorageClass "
-                    f'would capture this claim (use "" to bind a static PV)'
+                    f"would capture this claim (name the provisioner's class, "
+                    f'or "" to bind a static PV)'
                 )
     return out, seen
 

@@ -32,6 +32,7 @@ vendored:
   - scripts/check-pvc-storageclass.py
   - scripts/check-role-inputs.py
   - scripts/check-scrape-netpol.py
+  - scripts/check-scrape-wiring.py
   - scripts/check-secretstore-scope.py
   - scripts/check-taskfile.sh
   - scripts/check-version-checksums.py
@@ -107,13 +108,6 @@ forked:
       child_kustomizations() rather than the library's name<TAB>path output,
       --exclude/--allow-missing-paths flags and child_kustomization_paths().
     reconciled_sha256: 965d08702267f3f03d3213fdb623038178d874f89ef0486fe8b03fe2a37ded4b
-  - lib: scripts/check-scrape-wiring.py
-    consumer: scripts/check-scrape-wiring.py
-    reason: >-
-      Interim: CLUSTER_SCOPED_KINDS also names ValidatingAdmissionPolicyBinding,
-      which the tenant Traefik policy brings into the tree. Return the file to
-      `vendored:` once the library ships the same line and lib_ref takes it.
-    reconciled_sha256: 4d6b3e4edca05618de8129848bf3905339af7fa5f6d47db95294c817c053d7f1
   - lib: lint/ruff.toml
     consumer: ruff.toml
     reason: >-
