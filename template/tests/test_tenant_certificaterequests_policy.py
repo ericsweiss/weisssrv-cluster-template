@@ -1,6 +1,5 @@
-"""Only cert-manager's controller may send a tenant CertificateRequest to any
-issuer but a core cert-manager.io Issuer, or create an ACME Order or Challenge;
-only Orders, whose spec the webhook leaves mutable, match UPDATE, where the
+"""Only cert-manager's controller may send a tenant CertificateRequest past a core
+Issuer or create an ACME Order or Challenge; Orders alone match UPDATE, where the
 garbage collector is admitted too. `allowed()` mirrors the policy."""
 
 from __future__ import annotations

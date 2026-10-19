@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Assert every tenant wiring file carries the confinement it is supposed to.
-Each omitted piece fails OPEN: PSS labels, namespace caps, SA and RoleBindings,
-store conditions, landing namespace, the Namespace and cap prune guards, and
-the database Kustomization's deletionPolicy: Orphan.
+Each omitted piece fails OPEN: PSS labels, caps, SA and RoleBindings, stores,
+landing namespace, prune guards, and the db Kustomization's Orphan policy.
 """
 from __future__ import annotations
 
