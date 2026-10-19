@@ -231,6 +231,19 @@ REQUIRED_POLICIES = {
         "variables": [],
         "validations": ["false"],
     },
+    "tenant-traefik-tls-defaults": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": ["traefik.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["tlsoptions", "tlsstores"],
+            },
+        ],
+        "variables": [],
+        "validations": ["object.metadata.name != 'default'"],
+    },
     "tenant-traefik-hostnames": {
         "paramKind": {"apiVersion": "v1", "kind": "ConfigMap"},
         "resourceRules": [

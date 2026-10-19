@@ -265,7 +265,12 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
 @pytest.mark.parametrize("kind", ["ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"])
 @pytest.mark.parametrize(
     "name",
-    ["tenant-no-externalname-services", "tenant-no-manual-endpoints", "tenant-no-tcp-udp-routes"],
+    [
+        "tenant-no-externalname-services",
+        "tenant-no-manual-endpoints",
+        "tenant-no-tcp-udp-routes",
+        "tenant-traefik-tls-defaults",
+    ],
 )
 def test_a_policy_file_without_a_service_refusal_keeps_the_gate_closed(tmp_path, kind, name):
     root = build(

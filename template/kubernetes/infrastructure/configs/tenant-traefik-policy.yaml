@@ -366,3 +366,35 @@ spec:
       matchExpressions:
         - key: fluxcd.io/tenant
           operator: Exists
+---
+# Traefik v3.7 crd provider (buildTLSOptions/buildTLSStores) drops a `default`
+# TLSOption or TLSStore defined in two namespaces, so a tenant `default` would
+# void the platform's TLS floor for every route; the defaults are platform-owned.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-traefik-tls-defaults
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["tlsoptions", "tlsstores"]
+  validations:
+    - expression: "object.metadata.name != 'default'"
+      message: "the Traefik default TLSOption/TLSStore is platform-owned"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-traefik-tls-defaults
+spec:
+  policyName: tenant-traefik-tls-defaults
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
