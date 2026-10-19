@@ -631,7 +631,10 @@ spec:
   namespace: its ValidatingAdmissionPolicies, Deny-bound on every
   `fluxcd.io/tenant` namespace, pin each Service, Middleware, TLS and
   TraefikService reference to the tenant's namespace apart from the platform
-  middlewares they allowlist, and refuse `name@provider` references. On a plain
+  middlewares they allowlist, and refuse `name@provider` references. A tenant
+  TraefikService may not use `failover` at all: its service and fallback each
+  take a full service reference, per-service middlewares included, so the form
+  is refused whole; use weighted services. On a plain
   Ingress or Service, a `traefik.ingress.kubernetes.io/*` annotation may use
   `name@provider` only for an allowlisted platform middleware. Add any shared
   middleware a tenant needs to both allowlists. A tenant `forwardAuth`
@@ -748,8 +751,8 @@ spec:
   that carry a refused annotation, a `name@provider` or cross-namespace
   reference, `HostRegexp` or a priority above the grant; Middlewares whose
   forwardAuth address is neither a Service in the namespace nor the platform
-  outpost; TraefikServices with cross-namespace or `@` references;
-  Services and Ingresses carrying a `tailscale.com/*` annotation,
+  outpost; TraefikServices with cross-namespace or `@` references or a
+  `failover`; Services and Ingresses carrying a `tailscale.com/*` annotation,
   and Ingresses whose `ingressClassName` or `kubernetes.io/ingress.class`
   annotation names a class other than `traefik`; any
   IngressRouteTCP or IngressRouteUDP; Certificates whose names are not all

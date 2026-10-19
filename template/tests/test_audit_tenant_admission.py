@@ -543,6 +543,11 @@ POLICY_CASES = {
             {"name": "x", "namespace": "other"}]}})),
         "demo TraefikService/bad: mirror service other/x in another namespace",
     ),
+    "traefikservice-failover": (
+        _with("traefikservices", named("bad", {"failover": {
+            "service": {"name": "web", "port": 80}, "fallback": {"name": "web", "port": 80}}})),
+        "demo TraefikService/bad: failover services are not supported",
+    ),
     "ingressroutetcp": (
         _with("ingressroutetcps", named("bad")),
         "demo IngressRouteTCP/bad: tenants may not route TCP or UDP",

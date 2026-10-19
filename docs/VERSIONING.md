@@ -306,7 +306,7 @@ before it merges:
    the grant or carrying a refused annotation, `name@provider` or
    cross-namespace reference, `HostRegexp` or priority; Middlewares with a
    forwardAuth address outside the allowed forms; TraefikServices with
-   cross-namespace or `@` references; Services and Ingresses
+   cross-namespace or `@` references or a `failover`; Services and Ingresses
    carrying a `tailscale.com/*` annotation, and Ingresses of a class other
    than `traefik`; any IngressRouteTCP or IngressRouteUDP;
    Certificates off the grant or naming another issuer; tenant-written
@@ -342,8 +342,9 @@ before it merges:
    one that still carries it is refused.
 6. Move anything the audit lists as published by the Tailscale operator (a
    `tailscale.com/*` annotation or a non-`traefik` Ingress class) behind a
-   granted Traefik route, or to a platform-owned object; the next apply of
-   one that still carries it is refused.
+   granted Traefik route, or to a platform-owned object, and replace any
+   tenant TraefikService `failover` with a weighted service; the next apply of
+   either is refused.
 
 What a tenant can no longer create or update:
 
@@ -374,6 +375,8 @@ What a tenant can no longer create or update:
   cert-manager's webhook refuses their spec changes after creation, which
   keeps a finalizer removal from wedging their deletion;
 - an IngressRouteTCP or IngressRouteUDP;
+- a TraefikService with `failover` (its service and fallback carry full
+  references, per-service middlewares included); use weighted services;
 - a Service or Ingress carrying any `tailscale.com/*` annotation, or an
   Ingress whose `spec.ingressClassName` or `kubernetes.io/ingress.class`
   annotation is set to anything but `traefik`. The Tailscale operator would

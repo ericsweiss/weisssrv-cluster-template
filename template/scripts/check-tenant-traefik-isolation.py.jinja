@@ -140,6 +140,7 @@ REQUIRED_POLICIES = {
                 "object.spec.mirroring.mirrors.all(s, !s.name.contains('@') && "
                 "(!has(s.serversTransport) || !s.serversTransport.contains('@'))))))"
             ),
+            "!has(object.spec.failover)",
         ],
     },
     "tenant-traefik-ingress-refs": {

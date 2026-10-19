@@ -69,7 +69,7 @@ spec:
           operator: Exists
 ---
 # Middlewares and TraefikServices can point across namespaces too: a chain, an
-# errors page service, a forwardAuth address, and weighted or mirrored services.
+# errors page service, a forwardAuth address, weighted, mirrored or failover services.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -143,6 +143,10 @@ spec:
         || object.spec.mirroring.mirrors.all(s, !s.name.contains('@')
         && (!has(s.serversTransport) || !s.serversTransport.contains('@'))))))
       message: "a tenant errors, weighted or mirroring service may not use a name@provider service or transport reference"
+    # A failover service and fallback each take a full service reference, per-service
+    # middlewares included; refusing the form whole leaves no field unpinned.
+    - expression: "!has(object.spec.failover)"
+      message: "tenant failover services are not supported; use weighted services"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

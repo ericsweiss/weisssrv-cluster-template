@@ -318,12 +318,14 @@ def test_the_gate_pins_ten_policies():
         ("tenant-traefik-hostnames", "object.spec.ingressClassName == 'traefik'"),
         ("tenant-traefik-hostnames", "!k.startsWith('tailscale.com/')"),
         ("tenant-traefik-hostnames", "k != 'kubernetes.io/ingress.class'"),
+        ("tenant-traefik-object-refs", "!has(object.spec.failover)"),
     ],
-    ids=["service-tailscale", "ingress-class", "ingress-tailscale", "ingress-legacy-class"],
+    ids=["service-tailscale", "ingress-class", "ingress-tailscale", "ingress-legacy-class",
+         "traefikservice-failover"],
 )
-def test_the_gate_pins_the_other_operator_refusals(name, needle):
-    """Another ingress operator (Tailscale's) would route around the other
-    pins, so the gate carries each refusal."""
+def test_the_gate_pins_the_other_operator_and_failover_refusals(name, needle):
+    """Another ingress operator (Tailscale's) or a TraefikService failover would
+    route around the other pins, so the gate carries each refusal."""
     assert [v for v in gate.REQUIRED_POLICIES[name]["validations"] if needle in v]
 
 

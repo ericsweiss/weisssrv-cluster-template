@@ -1,6 +1,6 @@
 """A tenant forwardAuth Middleware may call only its own namespace's Services or
-the Authentik outpost. No CEL engine ships here, so `allowed()` mirrors the
-validation, and the first test pins the expression to the shape it assumes."""
+the Authentik outpost, and a tenant TraefikService may not fail over. No CEL
+engine ships here, so the mirrors are pinned to the expressions they assume."""
 
 from __future__ import annotations
 
@@ -20,6 +20,10 @@ EXPRESSION = (
     " || object.spec.forwardAuth.address in variables.platformForwardAuth"
     " || object.spec.forwardAuth.address.matches(variables.ownServiceAddress)"
 )
+# Traefik v3's failover service and fallback each carry a full service reference
+# (name, namespace, serversTransport, middlewares), so tenants get none.
+FAILOVER_EXPRESSION = "!has(object.spec.failover)"
+FAILOVER_MESSAGE = "tenant failover services are not supported; use weighted services"
 OUTPOST = "http://authentik-server.authentik.svc.cluster.local/outpost.goauthentik.io/auth/traefik"
 
 
@@ -115,3 +119,37 @@ def test_traefik_reads_default_tls_objects_only_from_its_own_namespace():
     release = yaml.safe_load(TRAEFIK.read_text())
     crd = release["spec"]["values"]["providers"]["kubernetesCRD"]
     assert crd.get("defaultTLSResourcesNamespace") == "traefik"
+
+
+def failover_allowed(spec: dict) -> bool:
+    """The failover validation."""
+    return "failover" not in spec
+
+
+def test_the_failover_refusal_is_the_shape_the_mirror_evaluates():
+    found = [v for v in _object_refs()["validations"] if v["message"] == FAILOVER_MESSAGE]
+    assert len(found) == 1
+    assert " ".join(found[0]["expression"].split()) == FAILOVER_EXPRESSION
+
+
+@pytest.mark.parametrize(
+    "failover",
+    [
+        {"service": {"name": "web", "port": 80}, "fallback": {"name": "web-b", "port": 80}},
+        {"service": {"name": "web", "port": 80},
+         "fallback": {"name": "grafana", "namespace": "observability", "port": 3000}},
+        {"service": {"name": "api@internal", "kind": "TraefikService"},
+         "fallback": {"name": "web", "port": 80}},
+        {"service": {"name": "web", "port": 80, "middlewares": [
+            {"name": "mw", "namespace": "other"}]}, "fallback": {"name": "web", "port": 80}},
+    ],
+    ids=["own-namespace", "cross-namespace-fallback", "provider-service", "foreign-middleware"],
+)
+def test_a_tenant_failover_service_is_refused_whatever_it_names(failover):
+    """Refused whole, so no field of either reference can reach outside."""
+    assert not failover_allowed({"failover": failover})
+
+
+def test_a_weighted_or_mirroring_service_is_untouched_by_the_failover_refusal():
+    assert failover_allowed({"weighted": {"services": [{"name": "web", "port": 80}]}})
+    assert failover_allowed({"mirroring": {"name": "web", "mirrors": [{"name": "web"}]}})

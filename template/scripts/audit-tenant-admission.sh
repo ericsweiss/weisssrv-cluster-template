@@ -110,7 +110,8 @@ def tailscale($o): (.metadata.annotations // {}) | keys[] | select(startswith("t
     TRAEFIKSERVICE_CHECKS='.spec as $s
         | (($s.weighted.services // [])[] | svcref($o; "weighted service")),
           ($s.mirroring // empty | svcref($o; "mirroring service"),
-            ((.mirrors // [])[] | svcref($o; "mirror service")))'
+            ((.mirrors // [])[] | svcref($o; "mirror service"))),
+          ($s.failover // empty | "\($o): failover services are not supported")'
     REQUEST_CHECKS='select((.spec.username // "") != $c.sa) | (.spec.username // "(no username)") as $u
         | .spec.issuerRef // {} | select(((.group // "") | IN("", "cert-manager.io"))
             and ((.kind // "") | IN("", "Issuer")) | not)
