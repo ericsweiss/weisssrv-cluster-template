@@ -413,7 +413,10 @@ With `tenant_storage`, the `tenant-local` provisioner now refuses a claim unless
 marker, which `ansible/playbooks/k3s.yml` writes after confirming the zvol is
 mounted. Run it on the NAS-colocated agent (`task k3s:deploy -- --limit
 <nas agent>`) before the updated provisioner ConfigMap reconciles, or new
-tenant claims stay Pending until it runs; existing volumes are unaffected.
+tenant claims stay Pending until it runs; existing volumes are unaffected. The
+teardown helper applies the same check, so deleting a claim while the zvol is
+unmounted fails closed instead of removing a same-named directory from the
+boot disk.
 
 ## Related
 

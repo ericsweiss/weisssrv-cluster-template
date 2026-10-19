@@ -97,6 +97,15 @@ def _setup(tmp_path: Path, vol_dir: Path) -> subprocess.CompletedProcess:
                           text=True, check=False)
 
 
+def _teardown(tmp_path: Path, vol_dir: Path) -> subprocess.CompletedProcess:
+    """The teardown script as Flux delivers it: cluster-config substituted in."""
+    script = tmp_path / "teardown"
+    script.write_text(_config()["teardown"].replace("${" + ZVOL_KEY + "}", _zvol_answer()))
+    env = {**os.environ, "VOL_DIR": str(vol_dir)}
+    return subprocess.run(["sh", str(script)], env=env, capture_output=True,
+                          text=True, check=False)
+
+
 def test_the_tenant_class_is_retained_late_bound_and_not_default():
     sc = _one(LPP / "storageclass.yaml", "StorageClass")
     assert sc["metadata"]["name"] == CLASS
@@ -207,6 +216,33 @@ def test_setup_creates_the_claim_directory_on_the_zvol_root(tmp_path):
     result = _setup(tmp_path, vol)
     assert result.returncode == 0, result.stderr
     assert stat.S_IMODE(vol.stat().st_mode) == 0o777
+
+
+@pytest.mark.parametrize(
+    ("lost_found", "marker"),
+    [(False, None), (True, None), (True, ""), (True, "ssd/appdata/other/data\n")],
+    ids=["bare", "stray-lost-found", "empty-marker", "other-zvol"],
+)
+def test_teardown_refuses_a_root_that_is_not_the_zvol_filesystem(tmp_path, lost_found, marker):
+    """With the zvol unmounted, a same-named directory on the VM's own filesystem
+    is not the claim: the helper fails closed and the claim's data on the zvol
+    waits for the mount to come back instead of being mistaken for deleted."""
+    vol = _root(tmp_path, lost_found, marker) / "pvc-1_ns_claim"
+    vol.mkdir()
+    (vol / "keep").write_text("x")
+    result = _teardown(tmp_path, vol)
+    assert result.returncode == 1
+    assert "refusing teardown" in result.stderr
+    assert (vol / "keep").exists()
+
+
+def test_teardown_removes_the_claim_directory_on_the_zvol_root(tmp_path):
+    vol = _root(tmp_path, True, _root_disk()["zvol"] + "\n") / "pvc-1_ns_claim"
+    vol.mkdir()
+    (vol / "data").write_text("x")
+    result = _teardown(tmp_path, vol)
+    assert result.returncode == 0, result.stderr
+    assert not vol.exists()
 
 
 def test_the_k3s_playbook_marks_the_mounted_tenant_zvol():

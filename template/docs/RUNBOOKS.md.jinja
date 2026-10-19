@@ -1247,7 +1247,9 @@ NAS agent's node-exporter is down. While the zvol is unmounted, every new claim
 is refused as below.
 
 A `tenant-local` claim stays Pending, and the provisioner's helper pod logs
-`refusing ...: /mnt/tenant-volumes is not the mounted tenant-volumes zvol`,
+`refusing ...: /mnt/tenant-volumes is not the mounted tenant-volumes zvol`
+(or `refusing teardown of ...` when a claim is deleted on such a root; the
+volume's directory then waits for the zvol instead of being removed),
 when the root lacks `lost+found` or its `.tenant-volumes-zvol` marker does not
 name the zvol in `cluster_tenant_volumes_zvol`. Either the zvol is not mounted
 (the claim would otherwise land on the VM's boot disk, outside every backup), the

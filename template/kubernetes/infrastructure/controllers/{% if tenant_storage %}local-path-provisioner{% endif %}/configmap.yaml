@@ -29,6 +29,12 @@ data:
   teardown: |-
     #!/bin/sh
     set -eu
+    base=$(dirname "$VOL_DIR")
+    marker=$(cat "$base/.tenant-volumes-zvol" 2>/dev/null || true)
+    if [ ! -d "$base/lost+found" ] || [ "$marker" != "${cluster_tenant_volumes_zvol}" ]; then
+      echo "refusing teardown of $VOL_DIR: $base is not the mounted tenant-volumes zvol" >&2
+      exit 1
+    fi
     rm -rf "$VOL_DIR"
   helperPod.yaml: |-
     apiVersion: v1
