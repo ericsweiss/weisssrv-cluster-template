@@ -255,7 +255,9 @@ copy passes `task lint:comment-length`. The longer reasons live here:
   email, otherName or `literalSubject`, and may use only the platform
   ClusterIssuers (`letsencrypt-prod`, `letsencrypt-staging`) or an Issuer in
   its own namespace. The tenant does not write CertificateRequests to those
-  ClusterIssuers itself: cert-manager creates them from the Certificate.
+  ClusterIssuers itself: cert-manager creates them from the Certificate. A
+  tenant-written CertificateRequest may name only a `cert-manager.io` Issuer
+  in its own namespace; no external issuer kind is open to it.
 - **Impersonation.** Without `serviceAccountName`, kustomize-controller applies
   tenant manifests with its own cluster-admin credentials. The ServiceAccount
   must live in the Kustomization's own namespace (`flux-system`), because
@@ -648,11 +650,16 @@ spec:
   `certificaterequests` and `issuers`, into `admin`. cert-manager's internal
   approver approves every request, and the names sit inside the CSR PEM, which
   admission cannot read. So `tenant-certificaterequests` refuses any tenant
-  CertificateRequest to a ClusterIssuer unless cert-manager's controller
+  CertificateRequest to an issuer other than a core `cert-manager.io` Issuer
+  in the tenant's own namespace unless cert-manager's controller
   (`system:serviceaccount:cert-manager:cert-manager`, the chart's
   `serviceAccountName` for the `cert-manager` release) writes it from a
-  Certificate `tenant-certificates` has already admitted. A request to an
-  Issuer in the tenant's own namespace stays allowed. The same policy admits
+  Certificate `tenant-certificates` has already admitted. That covers the
+  platform ClusterIssuers and any kind an external issuer plugin adds, such as
+  `AWSPCAClusterIssuer`, which would sign outside the grant; an empty kind or
+  group counts as the core Issuer, as cert-manager reads it. A Certificate is
+  held to the same issuers: a platform ClusterIssuer or a core Issuer in its
+  own namespace, nothing else. The same policy admits
   only that controller to create an ACME Order or Challenge
   (`acme.cert-manager.io`) in a tenant namespace. That is defence in depth,
   not a live bypass: `cert-manager-edit` grants no create or update on

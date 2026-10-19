@@ -312,9 +312,11 @@ before it merges:
    that names another ClusterIssuer, is refused on its next apply.
 3. Remove any tenant TLSOption or TLSStore named `default`; Traefik already
    ignores it once `defaultTLSResourcesNamespace` is set.
-4. List the CertificateRequests in tenant namespaces that name a ClusterIssuer
+4. List the CertificateRequests in tenant namespaces that name anything but a
+   core `cert-manager.io` Issuer: a ClusterIssuer or an external issuer kind
    (`kubectl get certificaterequests -A -o json`, filtered on
-   `spec.issuerRef.kind` and `spec.username`). One whose `spec.username` is not
+   `spec.issuerRef.kind`, `spec.issuerRef.group` and `spec.username`). One
+   whose `spec.username` is not
    `system:serviceaccount:cert-manager:cert-manager` was written by hand before
    `tenant-certificaterequests` applied: tenants hold `admin`, which the
    cert-manager chart's default `aggregateClusterRoles` extends with
@@ -341,9 +343,10 @@ What a tenant can no longer create or update:
   wildcard, an IP, URI, email, otherName or `literalSubject`, or an issuer
   other than `letsencrypt-prod`, `letsencrypt-staging` or an Issuer in its own
   namespace;
-- a cert-manager CertificateRequest to a ClusterIssuer, which cert-manager
-  now creates from a validated Certificate only (a request to an Issuer in the
-  tenant's own namespace stays allowed);
+- a cert-manager CertificateRequest to a ClusterIssuer or to any external
+  issuer kind or group, which cert-manager now creates from a validated
+  Certificate only (a request to a `cert-manager.io` Issuer in the tenant's
+  own namespace stays allowed);
 - an ACME Order or Challenge (`acme.cert-manager.io`) created by anyone but
   cert-manager's controller, or an Order updated by anyone but that controller
   or the garbage collector; tenant RBAC already grants no Order create or
