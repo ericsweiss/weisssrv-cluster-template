@@ -423,11 +423,22 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["certificaterequests"]
+      - apiGroups: ["acme.cert-manager.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["orders", "challenges"]
   validations:
     - expression: >-
-        !has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind != 'ClusterIssuer'
+        request.resource.group == 'acme.cert-manager.io'
+        || !has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind != 'ClusterIssuer'
         || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'
       message: "tenant CertificateRequests to platform ClusterIssuers are created by cert-manager from a validated Certificate only"
+    # Defence in depth, not a live bypass: cert-manager-edit grants no Order create
+    # and the cert-manager webhook refuses Challenge spec changes (tenants README.md).
+    - expression: >-
+        request.resource.group != 'acme.cert-manager.io'
+        || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'
+      message: "tenant ACME Orders and Challenges are written by cert-manager's controller only"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

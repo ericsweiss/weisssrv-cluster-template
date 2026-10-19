@@ -1,6 +1,6 @@
 """Only cert-manager's controller may send a tenant CertificateRequest to a
-ClusterIssuer: admission cannot read the CSR's names. `allowed()` mirrors the
-validation; the first tests pin the shape it assumes."""
+ClusterIssuer (admission cannot read the CSR) or write an ACME Order or
+Challenge. `allowed()` mirrors the validations; the first tests pin its shape."""
 
 from __future__ import annotations
 
@@ -12,14 +12,20 @@ POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-po
 CERT_MANAGER = REPO / "kubernetes" / "infrastructure" / "controllers" / "cert-manager"
 NAME = "tenant-certificaterequests"
 CONTROLLER = "system:serviceaccount:cert-manager:cert-manager"
-EXPRESSION = (
-    "!has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind != 'ClusterIssuer'"
-    " || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'"
-)
-MESSAGE = (
-    "tenant CertificateRequests to platform ClusterIssuers are created by cert-manager"
-    " from a validated Certificate only"
-)
+VALIDATIONS = [
+    (
+        "request.resource.group == 'acme.cert-manager.io'"
+        " || !has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind != 'ClusterIssuer'"
+        " || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'",
+        "tenant CertificateRequests to platform ClusterIssuers are created by cert-manager"
+        " from a validated Certificate only",
+    ),
+    (
+        "request.resource.group != 'acme.cert-manager.io'"
+        " || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'",
+        "tenant ACME Orders and Challenges are written by cert-manager's controller only",
+    ),
+]
 TENANT_MATCH = {
     "namespaceSelector": {
         "matchExpressions": [{"key": "fluxcd.io/tenant", "operator": "Exists"}]
@@ -52,12 +58,18 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
                 "apiVersions": ["*"],
                 "operations": ["CREATE", "UPDATE"],
                 "resources": ["certificaterequests"],
-            }
+            },
+            {
+                "apiGroups": ["acme.cert-manager.io"],
+                "apiVersions": ["*"],
+                "operations": ["CREATE", "UPDATE"],
+                "resources": ["orders", "challenges"],
+            },
         ]
     }
     assert [
         (" ".join(v["expression"].split()), v["message"]) for v in spec["validations"]
-    ] == [(EXPRESSION, MESSAGE)]
+    ] == VALIDATIONS
 
 
 def test_the_policy_is_deny_bound_on_every_tenant_namespace():
@@ -88,9 +100,12 @@ def test_the_controller_identity_is_the_release_the_platform_ships():
     assert CONTROLLER == "system:serviceaccount:cert-manager:cert-manager"
 
 
-def allowed(issuer_ref: dict, username: str) -> bool:
-    """The validation, evaluated on a request's issuerRef and requester."""
-    return issuer_ref.get("kind") != "ClusterIssuer" or username == CONTROLLER
+def allowed(issuer_ref: dict, username: str, group: str = "cert-manager.io") -> bool:
+    """The validations, evaluated on a request's API group, issuerRef and requester."""
+    acme = group == "acme.cert-manager.io"
+    return (acme or issuer_ref.get("kind") != "ClusterIssuer" or username == CONTROLLER) and (
+        not acme or username == CONTROLLER
+    )
 
 
 TENANT = "system:serviceaccount:example-app:example-app-flux"
@@ -118,3 +133,23 @@ def test_the_controllers_request_to_a_cluster_issuer_is_admitted():
 )
 def test_a_tenant_request_to_its_own_issuer_is_admitted(issuer_ref):
     assert allowed(issuer_ref, TENANT)
+
+
+ACME = "acme.cert-manager.io"
+
+
+@pytest.mark.parametrize(
+    "issuer_ref",
+    [PROD, {"name": "own-ca", "kind": "Issuer", "group": "cert-manager.io"}, {"name": "own-ca"}],
+    ids=["cluster-issuer", "issuer", "default-kind"],
+)
+def test_a_tenant_authored_acme_order_or_challenge_is_refused(issuer_ref):
+    """Defence in depth: cert-manager-edit grants no create on orders and the
+    cert-manager webhook refuses Challenge spec changes, so this is not a live
+    bypass; the policy holds if a future RBAC change widens either."""
+    assert not allowed(issuer_ref, TENANT, ACME)
+
+
+def test_the_controllers_acme_order_and_challenge_writes_are_admitted():
+    assert allowed(PROD, CONTROLLER, ACME)
+    assert allowed({"name": "own-ca", "kind": "Issuer"}, CONTROLLER, ACME)

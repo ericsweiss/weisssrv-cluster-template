@@ -355,12 +355,24 @@ REQUIRED_POLICIES = {
                 "operations": WRITES,
                 "resources": ["certificaterequests"],
             },
+            {
+                "apiGroups": ["acme.cert-manager.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["orders", "challenges"],
+            },
         ],
         "variables": [],
         "validations": [
             (
+                "request.resource.group == 'acme.cert-manager.io' || "
                 "!has(object.spec.issuerRef.kind) || "
                 "object.spec.issuerRef.kind != 'ClusterIssuer' || "
+                "request.userInfo.username == "
+                "'system:serviceaccount:cert-manager:cert-manager'"
+            ),
+            (
+                "request.resource.group != 'acme.cert-manager.io' || "
                 "request.userInfo.username == "
                 "'system:serviceaccount:cert-manager:cert-manager'"
             ),

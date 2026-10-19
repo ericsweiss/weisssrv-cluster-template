@@ -311,6 +311,25 @@ def test_the_gate_pins_ten_policies():
     assert "tenant-certificaterequests" in gate.REQUIRED_POLICIES
 
 
+def _drop_acme_writes(spec):
+    spec["matchConstraints"]["resourceRules"] = spec["matchConstraints"]["resourceRules"][:1]
+    spec["validations"] = spec["validations"][:1]
+
+
+def test_a_certificaterequests_policy_without_acme_writes_keeps_the_gate_closed(tmp_path):
+    """Orders and Challenges are controller-only too: a copy that covers
+    CertificateRequests alone drops that defence in depth."""
+    rules = gate.REQUIRED_POLICIES["tenant-certificaterequests"]["resourceRules"]
+    assert {"orders", "challenges"} <= {r for rule in rules for r in rule["resources"]}
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, _mutated("tenant-certificaterequests", _drop_acme_writes))
+    assert len(gate.check(root)) == 1
+
+
 def test_the_grant_policies_are_bound_per_tenant_not_by_label():
     """A tenant-label binding would need one paramRef for every tenant; the
     hostname grant is per tenant, so the bindings that read it live in the
