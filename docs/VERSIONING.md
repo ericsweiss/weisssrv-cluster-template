@@ -278,6 +278,54 @@ names `ValidatingAdmissionPolicyBinding`, which the tenant Traefik policy brings
 into every render. It returns to `vendored:` in both manifests once the library
 ships the same line and `lib_ref` takes it.
 
+## Upgrade notes
+
+Hand work a `copier update` brings with it that no question gates. The release
+notes for the tag that ships an entry repeat it under **Breaking changes**.
+
+### Tenant isolation policies render unconditionally
+
+The tenant isolation set renders whatever the answers are:
+`infrastructure/configs/tenant-traefik-policy.yaml` with its eight
+ValidatingAdmissionPolicies and their Deny bindings on every `fluxcd.io/tenant`
+namespace, Traefik's `defaultTLSResourcesNamespace: traefik`, and the CNPG kinds
+in `tenant-crd-editor`. An update with default answers therefore installs them,
+and a render with `tenant_storage` and `postgres_operator` both `false` is
+identical to the previous release apart from that set and the docs, gates and
+audit script that go with it. It is not byte-identical.
+
+The policies act on CREATE and UPDATE, so an object a tenant already holds
+stays until its next apply, which they then refuse. On the update branch,
+before it merges:
+
+1. Run `scripts/audit-tenant-services.sh` (it arrives with the update) against
+   the cluster, and fix every ExternalName Service, selectorless Service and
+   hand-written Endpoints or EndpointSlice it lists; the next reconcile of each
+   is refused.
+2. For each tenant, add a `tenant-routing-<ns>` ConfigMap in `flux-system`
+   granting its hostnames, and the Deny binding of `tenant-traefik-hostnames`
+   that reads it, before that tenant's routes reconcile again. The tenants
+   README § Example carries both ("Hostname grant");
+   `task lint:tenant-traefik-isolation` fails until every tenant has them.
+3. Remove any tenant TLSOption or TLSStore named `default`; Traefik already
+   ignores it once `defaultTLSResourcesNamespace` is set.
+
+What a tenant can no longer create or update:
+
+- an IngressRoute, Middleware, TraefikService or TLS reference to another
+  namespace, other than the allowlisted platform middlewares, and any
+  `name@provider` reference outside that allowlist, in a CRD or a
+  `traefik.ingress.kubernetes.io/*` annotation;
+- an IngressRoute or Ingress on a hostname its grant does not list; a route
+  that does not open with `Host()` on a granted hostname, or that uses `||`,
+  `HostRegexp` or a second `Host`; a `priority` when the grant carries no
+  `maxPriority`, or above it; an Ingress rule with no host, a TLS host not
+  granted, or a default backend;
+- an IngressRouteTCP or IngressRouteUDP;
+- a TLSOption or TLSStore named `default`;
+- an ExternalName Service or a Service with no selector;
+- an Endpoints or EndpointSlice the control plane did not write.
+
 ## Related
 
 - [RUNBOOKS.md](RUNBOOKS.md) § Updating the template — the operator-side procedure
