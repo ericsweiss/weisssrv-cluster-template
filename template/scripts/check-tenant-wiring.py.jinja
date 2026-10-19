@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Assert every tenant wiring file carries the confinement it is supposed to.
-Each omitted piece fails OPEN: Pod Security labels, namespace caps, the
-ServiceAccount and RoleBindings, the store conditions, the landing namespace.
+Each omitted piece fails OPEN: PSS labels, namespace caps, SA and RoleBindings,
+store conditions, landing namespace, a database tenant's Namespace prune guard.
 """
 from __future__ import annotations
 
@@ -42,6 +42,10 @@ REQUIRED_NS_LABELS = (
 # The tenant's `admin` RoleBinding places no ceiling on what it may request, so
 # both caps are part of the wiring rather than a nicety.
 REQUIRED_CAPS = ("ResourceQuota", "LimitRange")
+# A pruned Namespace cascades through every object and PVC in it, which the db
+# Kustomization's `deletionPolicy: Orphan` cannot stop.
+PRUNE_ANNOTATION = "kustomize.toolkit.fluxcd.io/prune"
+DATABASE_PATH = "kubernetes/db"
 # Kinds with no namespace of their own; everything else lands somewhere.
 CLUSTER_SCOPED_KINDS = frozenset(
     {
@@ -184,6 +188,32 @@ def _caps_problems(docs: list, rel: str) -> list[str]:
     return problems
 
 
+def _is_database_tree(kustomization: dict) -> bool:
+    """A `-db` Kustomization, or one reconciling the database tree by path."""
+    name = str((kustomization.get("metadata") or {}).get("name") or "")
+    path = posixpath.normpath(str((kustomization.get("spec") or {}).get("path") or "."))
+    return name.endswith("-db") or path.lstrip("/") == DATABASE_PATH
+
+
+def _prune_guard_problems(docs: list, rel: str, namespaces: list) -> list[str]:
+    """A tenant that runs a database keeps its Namespace out of Flux pruning."""
+    flux = [
+        k for k in _of_kind(docs, "Kustomization")
+        if "kustomize.toolkit" in str(k.get("apiVersion"))
+    ]
+    if not namespaces or not any(_is_database_tree(k) for k in flux):
+        return []
+    metadata = namespaces[0].get("metadata") or {}
+    if (metadata.get("annotations") or {}).get(PRUNE_ANNOTATION) == "disabled":
+        return []
+    return [
+        f"{rel}: namespace {metadata.get('name')} has a database Kustomization but "
+        f"not {PRUNE_ANNOTATION}: disabled — removing the wiring would prune the "
+        "Namespace and cascade-delete the database and its PVCs, whatever the db "
+        "Kustomization's deletionPolicy says"
+    ]
+
+
 def _placement_problems(docs: list, rel: str, namespace) -> list[str]:
     """Every namespaced document sits in the tenant namespace or flux-system.
 
@@ -240,6 +270,7 @@ def check_file(path: Path, rel: str, listed: set[str],
                 problems.append(f"{rel}: namespace {namespace} has no {label} label")
 
     problems += _caps_problems(docs, rel)
+    problems += _prune_guard_problems(docs, rel, namespaces)
     problems += _placement_problems(docs, rel, namespace)
     problems += _store_problems(docs, rel, namespace, labels)
 

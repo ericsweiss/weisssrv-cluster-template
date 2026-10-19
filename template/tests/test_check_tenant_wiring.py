@@ -500,22 +500,57 @@ def test_every_kustomization_in_a_tenant_file_is_checked(repo: Path) -> None:
     assert any("demo-app-db" in p and "serviceAccountName" in p for p in problems), problems
 
 
+CONFINED_SECOND = SECOND.replace(
+    "  dependsOn:\n", "  serviceAccountName: demo-app-flux\n  dependsOn:\n"
+)
+# A tenant that runs a database keeps its Namespace out of Flux pruning.
+GUARDED_TENANT = TENANT.replace(
+    "  name: demo-app\n  labels:\n",
+    "  name: demo-app\n  annotations:\n"
+    "    kustomize.toolkit.fluxcd.io/prune: disabled\n  labels:\n",
+    1,
+)
+
+
 def test_a_confined_second_kustomization_passes(repo: Path) -> None:
-    second = SECOND.replace(
-        "  dependsOn:\n", "  serviceAccountName: demo-app-flux\n  dependsOn:\n"
-    )
-    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
+    assert GUARDED_TENANT != TENANT
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", GUARDED_TENANT + CONFINED_SECOND)
     assert gate.check(repo) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [TENANT, GUARDED_TENANT.replace(": disabled", ": enabled")],
+    ids=["absent", "enabled"],
+)
+def test_a_database_tenant_namespace_without_the_prune_guard_fails(
+    repo: Path, body: str
+) -> None:
+    """Pruning the Namespace cascades through every object and PVC in it, which
+    the db Kustomization's `deletionPolicy: Orphan` cannot stop."""
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body + CONFINED_SECOND)
+    problems = gate.check(repo)
+    assert any(
+        "demo-app" in p and "kustomize.toolkit.fluxcd.io/prune: disabled" in p
+        for p in problems
+    ), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_database_tree_named_by_path_alone_needs_the_prune_guard(repo: Path) -> None:
+    second = CONFINED_SECOND.replace("name: demo-app-db", "name: demo-app-data")
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
+    assert any("prune: disabled" in p for p in gate.check(repo))
 
 
 def test_a_database_kustomization_that_orphans_on_deletion_passes(repo: Path) -> None:
     """The database Kustomization carries `deletionPolicy: Orphan`, so deleting its
     wiring leaves the database whole; the gate must accept the field."""
-    second = SECOND.replace(
-        "  dependsOn:\n", "  serviceAccountName: demo-app-flux\n  dependsOn:\n"
-    ).replace("  prune: true\n", "  prune: true\n  deletionPolicy: Orphan\n")
+    second = CONFINED_SECOND.replace(
+        "  prune: true\n", "  prune: true\n  deletionPolicy: Orphan\n"
+    )
     assert "deletionPolicy: Orphan" in second
-    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", GUARDED_TENANT + second)
     assert gate.check(repo) == []
 
 
