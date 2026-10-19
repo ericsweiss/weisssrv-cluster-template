@@ -215,6 +215,15 @@ copy passes `task lint:comment-length`. The longer reasons live here:
   "Private tenant repositories" above. It is bootstrap state and lives in
   `flux-system`, alongside the GitRepository, because `secretRef` is
   namespace-local.
+- **Hostname grant.** `tenant-routing-example-app` lists the exact hostnames
+  the tenant may route; the platform decides them, never the tenant. The
+  binding beside it applies `tenant-traefik-hostnames` to the tenant namespace
+  alone, with that ConfigMap as its parameter. Every route must open with
+  `Host()` on a granted hostname and may not use `||`, `HostRegexp` or any
+  other `Host`; split an OR into one route per hostname. A route may set
+  `priority` only when the grant carries `maxPriority`, and at most that. An
+  Ingress needs a granted `host` on every rule, granted TLS hosts and no
+  default backend. Grant a hostname no platform route serves.
 - **Impersonation.** Without `serviceAccountName`, kustomize-controller applies
   tenant manifests with its own cluster-admin credentials. The ServiceAccount
   must live in the Kustomization's own namespace (`flux-system`), because
@@ -327,6 +336,37 @@ spec:
   # Private repo: add `secretRef: {name: example-app-git-auth}` and create
   # that Secret in flux-system with `flux create secret git` — see "Private
   # repository" in the tenants README.
+---
+# The hostnames this tenant may route, one per line, granted by the platform.
+# It lives in flux-system so the tenant cannot edit its own grant ("Hostname
+# grant" in the tenants README).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tenant-routing-example-app
+  namespace: flux-system
+data:
+  hosts: |
+    example-app.{{ external_domain }}
+    example-app.{{ internal_domain }}
+---
+# Holds this namespace's IngressRoutes and Ingresses to the grant above, and
+# refuses them all if the grant is missing.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-traefik-hostnames-example-app
+spec:
+  policyName: tenant-traefik-hostnames
+  validationActions: [Deny]
+  paramRef:
+    name: tenant-routing-example-app
+    namespace: flux-system
+    parameterNotFoundAction: Deny
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: example-app
 ---
 # kustomize-controller impersonates this SA instead of using cluster-admin, so
 # it lives in the Kustomization's own namespace (flux-system); the RoleBindings
@@ -486,6 +526,12 @@ spec:
   and it silently disables an `absent()` arm as soon as another namespace has a
   match. Require `namespace="<slug>"` in the selector, not only in the alert
   labels.
+- **Hostnames are granted by the platform.** Decide the tenant's hostnames at
+  onboarding review and write them into its `tenant-routing-<ns>` ConfigMap,
+  with the per-tenant binding of `tenant-traefik-hostnames`, as the example
+  does. A namespace without both refuses every IngressRoute and Ingress, and
+  `task lint:tenant-traefik-isolation` fails. Never grant a hostname a
+  platform route serves.
 - **Add the tenant's hostnames to the blackbox targets.** A tenant's own
   `PrometheusRule` covers replica availability and certificate readiness. A
   broken IngressRoute or DNS record while the replicas stay ready is caught only
@@ -514,16 +560,34 @@ spec:
   selector, and `tenant-no-manual-endpoints` refuses any Endpoints or
   EndpointSlice not written by the control plane (hand-written ones could name
   another namespace's pod or Service IP). An off-cluster backend a tenant needs
-  is fronted from the platform `vm-ingress` namespace instead. In full, the set is
-  `tenant-traefik-route-refs`, `tenant-traefik-object-refs`,
-  `tenant-traefik-ingress-refs`, `tenant-no-externalname-services` and
-  `tenant-no-manual-endpoints`.
+  is fronted from the platform `vm-ingress` namespace instead. What a route
+  matches is pinned too: `tenant-traefik-hostnames` holds every IngressRoute
+  and Ingress to the hostnames granted in the tenant's `tenant-routing-<ns>`
+  ConfigMap, with no raised priority unless granted ("Hostname grant" above),
+  and `tenant-no-tcp-udp-routes` refuses IngressRouteTCP and IngressRouteUDP,
+  whose catch-all `HostSNI` or whole-port routers would take platform traffic. In
+  full, the set is seven: `tenant-traefik-route-refs`,
+  `tenant-traefik-object-refs`, `tenant-traefik-ingress-refs`,
+  `tenant-traefik-hostnames`, `tenant-no-tcp-udp-routes`,
+  `tenant-no-externalname-services` and `tenant-no-manual-endpoints`.
   Once any tenant is onboarded, `task lint:tenant-traefik-isolation` fails if
   the policies or their bindings go missing, if a binding narrows its match
   below every tenant namespace, or if a policy fails open, narrows its resources,
   or changes, drops or adds a variable or validation expression, even with
-  `allowCrossNamespace: false`. The gate carries each expression verbatim, so a
-  deliberate policy edit changes the gate's table in the same commit.
+  `allowCrossNamespace: false`. It also fails unless each tenant namespace has
+  its own Deny binding of `tenant-traefik-hostnames` reading
+  `flux-system/tenant-routing-<ns>` with `parameterNotFoundAction: Deny`, and
+  that ConfigMap grants at least one hostname. The gate carries each
+  expression verbatim, so a deliberate policy edit changes the gate's table in
+  the same commit.
+- **What remains cooperative in routing.** Four things the policies do not
+  enforce. The grant itself: the platform must not list a hostname a platform
+  route serves. The external-dns annotations on a tenant route
+  (`external-dns.alpha.kubernetes.io/hostname`, `target`): external-dns's TXT
+  ownership keeps a tenant from taking over an existing record, not from
+  publishing a new name, so review them at onboarding. Routes written before
+  the policies applied, which the audit below does not list. And what a route
+  serves on its own hostnames, such as `/metrics` (above).
 - **Audit what predates the policies.** The policies act on CREATE and UPDATE
   only, so a Service or endpoint written before they were applied, or into a
   namespace before it carried the `fluxcd.io/tenant` label, stays in place.

@@ -517,3 +517,40 @@ def test_a_database_kustomization_that_orphans_on_deletion_passes(repo: Path) ->
     assert "deletionPolicy: Orphan" in second
     write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
     assert gate.check(repo) == []
+
+
+ROUTING = textwrap.dedent(
+    """\
+    ---
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: tenant-routing-demo-app
+      namespace: flux-system
+    data:
+      hosts: |
+        demo-app.example.com
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicyBinding
+    metadata:
+      name: tenant-traefik-hostnames-demo-app
+    spec:
+      policyName: tenant-traefik-hostnames
+      validationActions: [Deny]
+      paramRef:
+        name: tenant-routing-demo-app
+        namespace: flux-system
+        parameterNotFoundAction: Deny
+      matchResources:
+        namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: demo-app
+    """
+)
+
+
+def test_the_hostname_binding_is_cluster_scoped(repo: Path) -> None:
+    """The per-tenant hostname binding names no namespace because it has none."""
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + ROUTING)
+    assert gate.check(repo) == []
