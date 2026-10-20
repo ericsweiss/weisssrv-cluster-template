@@ -481,6 +481,9 @@ FINALIZING_POLICIES = (
     "tenant-no-externalname-services", "tenant-no-tcp-udp-routes", "tenant-traefik-tls-defaults",
     "tenant-traefik-hostnames", "tenant-certificates", "tenant-pod-volumes",
 )
+# The endpoints policy carries its own form of the exemption (routing data in
+# place of a spec); the weakening tests below cover it through its own list.
+ENDPOINTS_FINALIZING = ("tenant-no-manual-endpoints",)
 FINALIZING_EXPRESSION = (
     "request.operation != 'UPDATE' || !has(object.metadata.deletionTimestamp) || "
     "object.spec != oldObject.spec || (has(object.metadata.annotations) ? "
@@ -510,6 +513,11 @@ def test_only_the_service_policies_skip_a_finalizer_only_update():
         if name in FINALIZING_POLICIES else []
         for name in gate.REQUIRED_POLICIES
     }
+    # No spec to compare: the endpoints policy keys the same exemption on the
+    # routing data, labels and annotations instead.
+    expected["tenant-no-manual-endpoints"] = [
+        ("enforce-unless-finalizing-unchanged", gate._cel(" ".join(gate.FINALIZING_UNCHANGED_ENDPOINTS[0][1].split())))
+    ]
     assert pinned == expected
     assert shipped == expected
 
@@ -534,7 +542,7 @@ def _ignore_annotations(spec):
     "weakening", [_drop_conditions, _condition_false, _ignore_annotations],
     ids=["dropped", "false", "annotations-ignored"],
 )
-@pytest.mark.parametrize("name", FINALIZING_POLICIES)
+@pytest.mark.parametrize("name", FINALIZING_POLICIES + ENDPOINTS_FINALIZING)
 def test_a_widened_finalizer_exemption_keeps_the_gate_closed(tmp_path, name, weakening):
     """Without the annotations clause a tenant could hold its own Service in
     Terminating and rewrite the annotations these policies validate."""

@@ -41,6 +41,21 @@ FINALIZING_UNCHANGED = [
         "oldObject.metadata.annotations : {})",
     ),
 ]
+# Endpoints and EndpointSlices have no spec: the same exemption keys on their
+# routing data (subsets; addressType, endpoints, ports) plus labels and annotations.
+FINALIZING_UNCHANGED_ENDPOINTS = [
+    (
+        "enforce-unless-finalizing-unchanged",
+        "request.operation != 'UPDATE' || !has(object.metadata.deletionTimestamp) || (request.res"
+        "ource.resource == 'endpoints' ? (has(object.subsets) ? object.subsets : []) != (has(oldO"
+        "bject.subsets) ? oldObject.subsets : []) : (object.addressType != oldObject.addressType "
+        "|| object.endpoints != oldObject.endpoints || (has(object.ports) ? object.ports : []) !="
+        " (has(oldObject.ports) ? oldObject.ports : []))) || (has(object.metadata.labels) ? objec"
+        "t.metadata.labels : {}) != (has(oldObject.metadata.labels) ? oldObject.metadata.labels :"
+        " {}) || (has(object.metadata.annotations) ? object.metadata.annotations : {}) != (has(ol"
+        "dObject.metadata.annotations) ? oldObject.metadata.annotations : {})"
+    ),
+]
 # The route-level middleware rule, held on every per-service middlewares list too.
 MIDDLEWARE_REF = (
     "!m.name.contains('@') && (!has(m.namespace) || m.namespace == variables.ns || "
@@ -269,6 +284,7 @@ REQUIRED_POLICIES = {
                 "resources": ["endpointslices"],
             },
         ],
+        "matchConditions": FINALIZING_UNCHANGED_ENDPOINTS,
         "variables": [],
         "validations": [
             (

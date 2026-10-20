@@ -376,6 +376,25 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["endpointslices"]
+  # A finalizer's removal from a terminating object changes neither its routing
+  # data nor its labels or annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || (request.resource.resource == 'endpoints'
+        ? (has(object.subsets) ? object.subsets : [])
+        != (has(oldObject.subsets) ? oldObject.subsets : [])
+        : (object.addressType != oldObject.addressType
+        || object.endpoints != oldObject.endpoints
+        || (has(object.ports) ? object.ports : [])
+        != (has(oldObject.ports) ? oldObject.ports : [])))
+        || (has(object.metadata.labels) ? object.metadata.labels : {})
+        != (has(oldObject.metadata.labels) ? oldObject.metadata.labels : {})
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
   validations:
     - expression: >-
         request.userInfo.username == 'system:kube-controller-manager' ||
