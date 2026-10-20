@@ -10,14 +10,15 @@ from conftest import REPO
 
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
 NAME = "tenant-pvc-storageclasses"
-ALLOWED_CLASSES = ["", "tenant-local"]
 VALIDATION = (
     "has(object.spec.storageClassName)"
-    " && object.spec.storageClassName in ['', 'tenant-local']"
+    " && (object.spec.storageClassName == 'tenant-local'"
+    " || (object.spec.storageClassName == ''"
+    " && has(object.spec.volumeName) && object.spec.volumeName != ''))"
 )
 MESSAGE = (
-    "tenant claims must use the tenant-local StorageClass or storageClassName \"\""
-    " for a platform-written static volume"
+    "tenant claims must use the tenant-local StorageClass, or name a platform-written"
+    " static volume with storageClassName \"\" and volumeName"
 )
 TENANT_MATCH = {
     "namespaceSelector": {
@@ -77,9 +78,13 @@ def test_the_policy_is_the_last_in_the_file():
 
 
 def allowed(claim: dict) -> bool:
-    """The validation: the class must be set, and set to "" or tenant-local."""
+    """The validation: tenant-local, or "" naming its pre-bound volume."""
     spec = claim["spec"]
-    return "storageClassName" in spec and spec["storageClassName"] in ALLOWED_CLASSES
+    if "storageClassName" not in spec:
+        return False
+    if spec["storageClassName"] == "tenant-local":
+        return True
+    return spec["storageClassName"] == "" and bool(spec.get("volumeName"))
 
 
 def claim(storage_class: str | None, volume_name: str | None = None) -> dict:
@@ -110,6 +115,13 @@ def test_a_claim_on_another_class_is_refused(storage_class):
     """Another class lands tenant data on a disk the backups and the
     class-scoped quota never see."""
     assert not allowed(claim(storage_class))
+
+
+@pytest.mark.parametrize("volume_name", [None, ""], ids=["absent", "empty"])
+def test_an_empty_class_claim_without_a_volume_name_is_refused(volume_name):
+    """Without volumeName a "" claim binds any unbound classless volume, so the
+    static exception must name the platform-written volume it was written for."""
+    assert not allowed(claim("", volume_name=volume_name))
 
 
 def test_a_claim_without_a_class_is_refused():

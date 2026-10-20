@@ -720,10 +720,14 @@ spec:
         operations: ["CREATE"]
         resources: ["persistentvolumeclaims"]
   validations:
+    # A "" claim with no volumeName would bind any unbound classless volume, so
+    # the static exception names its pre-bound volume explicitly.
     - expression: >-
         has(object.spec.storageClassName)
-        && object.spec.storageClassName in ['', 'tenant-local']
-      message: "tenant claims must use the tenant-local StorageClass or storageClassName \"\" for a platform-written static volume"
+        && (object.spec.storageClassName == 'tenant-local'
+        || (object.spec.storageClassName == ''
+        && has(object.spec.volumeName) && object.spec.volumeName != ''))
+      message: "tenant claims must use the tenant-local StorageClass, or name a platform-written static volume with storageClassName \"\" and volumeName"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

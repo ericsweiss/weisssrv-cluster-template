@@ -725,6 +725,10 @@ POLICY_CASES = {
         _with("cronjobs", workload("bad", [NFS], cron=True)),
         "demo CronJob/bad: volume dump uses nfs, outside the restricted volume set",
     ),
+    "claim-empty-class-no-volume": (
+        _with("persistentvolumeclaims", claim("loose", "")),
+        'demo PersistentVolumeClaim/loose: storageClassName "" without volumeName',
+    ),
     "claim-local-path": (
         _with("persistentvolumeclaims", claim("scratch", "local-path")),
         "demo PersistentVolumeClaim/scratch: storageClassName local-path",

@@ -521,7 +521,9 @@ REQUIRED_POLICIES = {
         "validations": [
             (
                 "has(object.spec.storageClassName) && "
-                "object.spec.storageClassName in ['', 'tenant-local']"
+                "(object.spec.storageClassName == 'tenant-local' || "
+                "(object.spec.storageClassName == '' && has(object.spec.volumeName) "
+                "&& object.spec.volumeName != ''))"
             ),
         ],
     },
