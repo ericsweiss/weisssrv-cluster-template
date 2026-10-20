@@ -161,7 +161,7 @@ maintenance_ci_runner_namespaces:
 # Host-side pins consumed by weisssrv.infra roles (no role default — required).
 adguard_home_version: "0.107.79"
 adguard_sync_version: "0.9.4"
-alloy_host_version: "1.20.1-1"    # apt package version, not the chart version
+alloy_host_version: "1.21.0-1"    # apt package version, not the chart version
 {%- if vpn_tailscale %}
 # apt package pin, read from a tasks-only maintenance play where the role
 # default is out of scope. Not helm_chart_versions.tailscale_operator.
