@@ -262,8 +262,9 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
 
 
 # An ExternalName or selectorless Service, or hand-written endpoints, would
-# send Traefik into another namespace past the forwardAuth pin, and a raw
-# CertificateRequest skips tenant-certificates, so the gate needs each refusal.
+# send Traefik into another namespace past the forwardAuth pin, a raw
+# CertificateRequest skips tenant-certificates, and an inline nfs volume mounts
+# any NAS export from a node address, so the gate needs each refusal.
 @pytest.mark.parametrize("kind", ["ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"])
 @pytest.mark.parametrize(
     "name",
@@ -273,6 +274,7 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
         "tenant-no-tcp-udp-routes",
         "tenant-traefik-tls-defaults",
         "tenant-certificaterequests",
+        "tenant-pod-volumes",
     ],
 )
 def test_a_policy_file_without_a_service_refusal_keeps_the_gate_closed(tmp_path, kind, name):
@@ -306,9 +308,67 @@ def test_a_policy_file_without_a_per_tenant_policy_keeps_the_gate_closed(tmp_pat
     assert len(gate.check(root)) == 1
 
 
-def test_the_gate_pins_ten_policies():
-    assert len(gate.REQUIRED_POLICIES) == 10
+def test_the_gate_pins_eleven_policies():
+    assert len(gate.REQUIRED_POLICIES) == 11
     assert "tenant-certificaterequests" in gate.REQUIRED_POLICIES
+    assert "tenant-pod-volumes" in gate.REQUIRED_POLICIES
+
+
+# The Pod Security restricted volume set, plus each volume's own name.
+RESTRICTED_VOLUME_KEYS = (
+    "['name', 'configMap', 'csi', 'downwardAPI', 'emptyDir', 'ephemeral', "
+    "'persistentVolumeClaim', 'projected', 'secret']"
+)
+
+
+def test_the_gate_pins_the_restricted_volume_set_on_pods_and_workloads():
+    """Baseline Pod Security admits nfs, iscsi and the other node-mounted volume
+    types, and the NAS exports trust node addresses, so the gate holds tenant
+    pods and every pod template to the restricted set."""
+    required = gate.REQUIRED_POLICIES["tenant-pod-volumes"]
+    assert required["paramKind"] is None
+    assert required["resourceRules"] == [
+        {"apiGroups": [""], "apiVersions": ["v1"], "operations": ["CREATE", "UPDATE"],
+         "resources": ["pods"]},
+        {"apiGroups": ["apps"], "apiVersions": ["v1"], "operations": ["CREATE", "UPDATE"],
+         "resources": ["deployments", "statefulsets", "daemonsets", "replicasets"]},
+        {"apiGroups": ["batch"], "apiVersions": ["v1"], "operations": ["CREATE", "UPDATE"],
+         "resources": ["jobs", "cronjobs"]},
+    ]
+    assert required["variables"] == [(
+        "volumes",
+        "request.resource.resource == 'pods' ? (has(object.spec.volumes) ? "
+        "object.spec.volumes : []) : request.resource.resource == 'cronjobs' ? "
+        "(has(object.spec.jobTemplate.spec.template.spec.volumes) ? "
+        "object.spec.jobTemplate.spec.template.spec.volumes : []) : "
+        "(has(object.spec.template.spec.volumes) ? object.spec.template.spec.volumes : [])",
+    )]
+    assert required["validations"] == [
+        f"variables.volumes.all(v, v.all(k, k in {RESTRICTED_VOLUME_KEYS}))"
+    ]
+
+
+def _admit_nfs(spec):
+    spec["validations"][0]["expression"] = spec["validations"][0]["expression"].replace(
+        "'secret']", "'secret', 'nfs']"
+    )
+
+
+def _drop_workloads(spec):
+    spec["matchConstraints"]["resourceRules"] = spec["matchConstraints"]["resourceRules"][:1]
+
+
+@pytest.mark.parametrize("weakening", [_admit_nfs, _drop_workloads], ids=["nfs", "pods-only"])
+def test_a_pod_volumes_policy_that_admits_nfs_or_drops_workloads_keeps_the_gate_closed(
+    tmp_path, weakening
+):
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, _mutated("tenant-pod-volumes", weakening))
+    assert len(gate.check(root)) == 1
 
 
 @pytest.mark.parametrize(

@@ -79,11 +79,22 @@ def endpoints(name: str, addresses: tuple[str, ...] = ()) -> dict:
     return {"metadata": {"name": name}, "subsets": subsets}
 
 
-def pod(name: str, labels: dict, ip: str, phase: str = "Running") -> dict:
-    return {
+def pod(name: str, labels: dict, ip: str, phase: str = "Running",
+        volumes: list[dict] | None = None) -> dict:
+    doc: dict = {
         "metadata": {"name": name, "labels": labels},
         "status": {"phase": phase, "podIP": ip, "podIPs": [{"ip": ip}]},
     }
+    if volumes is not None:
+        doc["spec"] = {"volumes": volumes}
+    return doc
+
+
+def workload(name: str, volumes: list[dict], cron: bool = False) -> dict:
+    """A workload whose pod template carries `volumes`: a CronJob's sits under
+    jobTemplate, every other kind's under template."""
+    template = {"spec": {"template": {"spec": {"volumes": volumes}}}}
+    return named(name, {"jobTemplate": template} if cron else template["spec"])
 
 
 def run(tmp_path: Path, fixture: dict) -> subprocess.CompletedProcess:
@@ -120,6 +131,17 @@ def grant(ns: str = "demo", hosts: str = "demo.apps.test\n  demo.home.test \n\n"
 
 
 PROD = {"name": "letsencrypt-prod", "kind": "ClusterIssuer", "group": "cert-manager.io"}
+RESTRICTED_VOLUMES = [
+    {"name": "cm", "configMap": {"name": "cm"}},
+    {"name": "csi", "csi": {"driver": "x"}},
+    {"name": "down", "downwardAPI": {"items": []}},
+    {"name": "tmp", "emptyDir": {}},
+    {"name": "eph", "ephemeral": {"volumeClaimTemplate": {"spec": {}}}},
+    {"name": "data", "persistentVolumeClaim": {"claimName": "data"}},
+    {"name": "token", "projected": {"sources": []}},
+    {"name": "creds", "secret": {"secretName": "creds"}},
+]
+NFS = {"name": "dump", "nfs": {"server": "nas.lan", "path": "/mnt/ssd/tenant-dumps"}}
 ROUTE = {
     "match": "Host(`demo.apps.test`) && PathPrefix(`/`)",
     "priority": 100,
@@ -135,7 +157,10 @@ CLEAN_APP = {
     "services": [service("web", {"app": "web"})],
     "endpointslices": [slice_("web-abc12")],
     "endpoints": [endpoints("web", ("10.42.0.5",))],
-    "pods": [pod("web-0", {"app": "web", "pod-template-hash": "x"}, "10.42.0.5")],
+    "pods": [pod("web-0", {"app": "web", "pod-template-hash": "x"}, "10.42.0.5",
+                 volumes=RESTRICTED_VOLUMES)],
+    "deployments": [workload("web", RESTRICTED_VOLUMES)],
+    "cronjobs": [workload("dump", RESTRICTED_VOLUMES, cron=True)],
     "ingressroutes": [
         named("web", {
             "routes": [ROUTE],
@@ -358,6 +383,8 @@ def test_every_tenant_namespace_is_audited(tmp_path):
         "ingressroutes.traefik.io",
         "certificates.cert-manager.io",
         "configmaps",
+        "pods",
+        "cronjobs.batch",
     ],
 )
 def test_a_kubectl_failure_is_an_error_not_a_pass(tmp_path, resource):
@@ -660,6 +687,34 @@ POLICY_CASES = {
         _with("tlsstores", named("default")),
         "demo TLSStore/default: the default TLSStore is platform-owned",
     ),
+    "pod-nfs": (
+        _with("pods", pod("bad", {}, "10.42.0.9", volumes=[NFS])),
+        "demo Pod/bad: volume dump uses nfs, outside the restricted volume set",
+    ),
+    "deployment-iscsi": (
+        _with("deployments", workload("bad", [{"name": "lun", "iscsi": {"lun": 0}}])),
+        "demo Deployment/bad: volume lun uses iscsi, outside the restricted volume set",
+    ),
+    "statefulset-nfs": (
+        {**CLEAN_APP, "statefulsets": [workload("bad", [NFS])]},
+        "demo StatefulSet/bad: volume dump uses nfs, outside the restricted volume set",
+    ),
+    "daemonset-hostpath": (
+        {**CLEAN_APP, "daemonsets": [workload("bad", [{"name": "h", "hostPath": {"path": "/"}}])]},
+        "demo DaemonSet/bad: volume h uses hostPath, outside the restricted volume set",
+    ),
+    "replicaset-nfs": (
+        {**CLEAN_APP, "replicasets": [workload("bad", [NFS])]},
+        "demo ReplicaSet/bad: volume dump uses nfs, outside the restricted volume set",
+    ),
+    "job-cephfs": (
+        {**CLEAN_APP, "jobs": [workload("bad", [{"name": "fs", "cephfs": {"monitors": []}}])]},
+        "demo Job/bad: volume fs uses cephfs, outside the restricted volume set",
+    ),
+    "cronjob-nfs": (
+        _with("cronjobs", workload("bad", [NFS], cron=True)),
+        "demo CronJob/bad: volume dump uses nfs, outside the restricted volume set",
+    ),
 }
 
 
@@ -761,6 +816,19 @@ def _policy_variable(policy: str, variable: str) -> list[str]:
 def test_the_audit_allowlists_are_the_policies(constant, policy, variable):
     """The audit repeats each policy allowlist, so the two cannot drift apart."""
     assert _script_list(constant) == _policy_variable(policy, variable)
+
+
+def test_the_audit_volume_set_is_the_policies():
+    """The pod-volumes policy carries its allowlist inline in the validation."""
+    spec = next(
+        d["spec"] for d in yaml.safe_load_all(POLICY.read_text())
+        if isinstance(d, dict) and d.get("kind") == "ValidatingAdmissionPolicy"
+        and d["metadata"]["name"] == "tenant-pod-volumes"
+    )
+    expression = " ".join(spec["validations"][0]["expression"].split())
+    allowed = re.fullmatch(r"variables\.volumes\.all\(v, v\.all\(k, k in (\[.*\])\)\)",
+                           expression).group(1)
+    assert _script_list("RESTRICTED_VOLUME_KEYS") == ast.literal_eval(allowed)
 
 
 def test_the_audit_forward_auth_pattern_is_the_policies():

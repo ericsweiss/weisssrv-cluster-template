@@ -438,6 +438,48 @@ REQUIRED_POLICIES = {
             ),
         ],
     },
+    # Baseline Pod Security admits nfs and other node-mounted volumes; every
+    # tenant pod and pod template keeps to the restricted volume set.
+    "tenant-pod-volumes": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": [""],
+                "apiVersions": ["v1"],
+                "operations": WRITES,
+                "resources": ["pods"],
+            },
+            {
+                "apiGroups": ["apps"],
+                "apiVersions": ["v1"],
+                "operations": WRITES,
+                "resources": ["deployments", "statefulsets", "daemonsets", "replicasets"],
+            },
+            {
+                "apiGroups": ["batch"],
+                "apiVersions": ["v1"],
+                "operations": WRITES,
+                "resources": ["jobs", "cronjobs"],
+            },
+        ],
+        "variables": [
+            (
+                "volumes",
+                "request.resource.resource == 'pods' ? (has(object.spec.volumes) ? "
+                "object.spec.volumes : []) : request.resource.resource == 'cronjobs' ? "
+                "(has(object.spec.jobTemplate.spec.template.spec.volumes) ? "
+                "object.spec.jobTemplate.spec.template.spec.volumes : []) : "
+                "(has(object.spec.template.spec.volumes) ? object.spec.template.spec.volumes : [])",
+            ),
+        ],
+        "validations": [
+            (
+                "variables.volumes.all(v, v.all(k, k in ['name', 'configMap', 'csi', "
+                "'downwardAPI', 'emptyDir', 'ephemeral', 'persistentVolumeClaim', "
+                "'projected', 'secret']))"
+            ),
+        ],
+    },
 }
 # Bound once per tenant, in its wiring file, to the hostnames the platform
 # granted that namespace in flux-system/tenant-routing-<ns>; every other

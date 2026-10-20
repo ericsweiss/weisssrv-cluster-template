@@ -609,3 +609,54 @@ spec:
       matchExpressions:
         - key: fluxcd.io/tenant
           operator: Exists
+---
+# Baseline Pod Security admits nfs, iscsi and other node-mounted volumes, and the
+# NAS exports trust node addresses with no per-tenant identity, so tenant pods get
+# the restricted volume set; see "Pod volumes" in the tenants README.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-pod-volumes
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs", "cronjobs"]
+  variables:
+    - name: volumes
+      expression: >-
+        request.resource.resource == 'pods'
+        ? (has(object.spec.volumes) ? object.spec.volumes : [])
+        : request.resource.resource == 'cronjobs'
+        ? (has(object.spec.jobTemplate.spec.template.spec.volumes)
+        ? object.spec.jobTemplate.spec.template.spec.volumes : [])
+        : (has(object.spec.template.spec.volumes) ? object.spec.template.spec.volumes : [])
+  validations:
+    - expression: >-
+        variables.volumes.all(v, v.all(k, k in ['name', 'configMap', 'csi', 'downwardAPI',
+        'emptyDir', 'ephemeral', 'persistentVolumeClaim', 'projected', 'secret']))
+      message: "tenant pods may use only configMap, csi, downwardAPI, emptyDir, ephemeral, persistentVolumeClaim, projected and secret volumes; nfs and other node-level volume types are platform-owned"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-pod-volumes
+spec:
+  policyName: tenant-pod-volumes
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists

@@ -20,6 +20,8 @@ PLATFORM_ISSUERS='["letsencrypt-prod", "letsencrypt-staging"]'
 OWN_SERVICE_HEAD='^https?://[a-z]([-a-z0-9]*[a-z0-9])?[.]'
 OWN_SERVICE_TAIL='[.]svc([.]cluster[.]local)?(:[0-9]{1,5})?(/.*)?$'
 CERT_MANAGER_SA=system:serviceaccount:cert-manager:cert-manager
+# tenant-pod-volumes' allowlist: the restricted volume set and each volume's name.
+RESTRICTED_VOLUME_KEYS='["name", "configMap", "csi", "downwardAPI", "emptyDir", "ephemeral", "persistentVolumeClaim", "projected", "secret"]'
 
 # owned(ip; selector): a live Pod carries ip and every selector label.
 # shellcheck disable=SC2016 # a jq program, expanded by jq
@@ -123,6 +125,11 @@ def tailscale($o): (.metadata.annotations // {}) | keys[] | select(startswith("t
     TCP_UDP_CHECKS='"\($o): tenants may not route TCP or UDP"'
     DEFAULT_TLS_CHECKS='select($n == "default") | "\($o): the default \($kind) is platform-owned"'
     SERVICE_CHECKS='tailscale($o), refs($o)'
+    VOLUME_CHECKS='(if $kind == "Pod" then .spec.volumes
+            elif $kind == "CronJob" then .spec.jobTemplate.spec.template.spec.volumes
+            else .spec.template.spec.volumes end) // []
+        | .[] | .name as $v | keys[] | select(. as $k | any($c.volumes[]; . == $k) | not)
+        | "\($o): volume \($v) uses \(.), outside the restricted volume set"'
 }
 
 die() {
@@ -155,7 +162,9 @@ fi
 constants=$(jq -nc --argjson m "$PLATFORM_MIDDLEWARES" --argjson r "$PLATFORM_REFS" \
     --argjson f "$PLATFORM_FORWARD_AUTH" --argjson i "$PLATFORM_ISSUERS" \
     --arg h "$OWN_SERVICE_HEAD" --arg t "$OWN_SERVICE_TAIL" --arg sa "$CERT_MANAGER_SA" \
-    '{middlewares: $m, refs: $r, forwardAuth: $f, issuers: $i, head: $h, tail: $t, sa: $sa}') ||
+    --argjson v "$RESTRICTED_VOLUME_KEYS" \
+    '{middlewares: $m, refs: $r, forwardAuth: $f, issuers: $i, head: $h, tail: $t, sa: $sa,
+      volumes: $v}') ||
     die "unreadable allowlists"
 grants=$(kget -n "$FLUX_NAMESPACE" get configmaps)
 
@@ -177,6 +186,12 @@ for ns in $namespaces; do
     ingresses=$(kget -n "$ns" get ingresses.networking.k8s.io)
     certificates=$(kget -n "$ns" get certificates.cert-manager.io)
     requests=$(kget -n "$ns" get certificaterequests.cert-manager.io)
+    deployments=$(kget -n "$ns" get deployments.apps)
+    statefulsets=$(kget -n "$ns" get statefulsets.apps)
+    daemonsets=$(kget -n "$ns" get daemonsets.apps)
+    replicasets=$(kget -n "$ns" get replicasets.apps)
+    jobs=$(kget -n "$ns" get jobs.batch)
+    cronjobs=$(kget -n "$ns" get cronjobs.batch)
 
     # The grant: hosts, maxPriority as the isolation gate takes it (ASCII digits
     # to 2^31-1; \A..\z, as $ matches before a final newline), and any problem.
@@ -249,6 +264,13 @@ for ns in $namespaces; do
         audit Ingress "$ingresses" "$INGRESS_CHECKS"
         audit Certificate "$certificates" "$CERTIFICATE_CHECKS"
         audit CertificateRequest "$requests" "$REQUEST_CHECKS"
+        audit Pod "$pods" "$VOLUME_CHECKS"
+        audit Deployment "$deployments" "$VOLUME_CHECKS"
+        audit StatefulSet "$statefulsets" "$VOLUME_CHECKS"
+        audit DaemonSet "$daemonsets" "$VOLUME_CHECKS"
+        audit ReplicaSet "$replicasets" "$VOLUME_CHECKS"
+        audit Job "$jobs" "$VOLUME_CHECKS"
+        audit CronJob "$cronjobs" "$VOLUME_CHECKS"
     )
 done
 
@@ -261,7 +283,7 @@ done
 if [ "${#findings[@]}" -gt 0 ]; then
     printf '%s\n' "${findings[@]}"
     echo "audit-tenant-admission: ${#findings[@]} finding(s) the tenant policies refuse on the next write." >&2
-    echo "    Fix each as the tenants README describes: grant, routes, Services, endpoints, certificates." >&2
+    echo "    Fix each as the tenants README describes: grant, routes, Services, endpoints, certificates, volumes." >&2
     exit 1
 fi
 echo "audit-tenant-admission: OK ($count tenant namespace(s))"
