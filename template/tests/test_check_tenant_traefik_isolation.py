@@ -331,8 +331,10 @@ def test_the_gate_pins_the_restricted_volume_set_on_pods_and_workloads():
          "resources": ["pods"]},
         {"apiGroups": ["apps"], "apiVersions": ["v1"], "operations": ["CREATE", "UPDATE"],
          "resources": ["deployments", "statefulsets", "daemonsets", "replicasets"]},
+        {"apiGroups": ["batch"], "apiVersions": ["v1"], "operations": ["CREATE"],
+         "resources": ["jobs"]},
         {"apiGroups": ["batch"], "apiVersions": ["v1"], "operations": ["CREATE", "UPDATE"],
-         "resources": ["jobs", "cronjobs"]},
+         "resources": ["cronjobs"]},
     ]
     assert required["variables"] == [(
         "volumes",
@@ -437,17 +439,17 @@ def test_the_gate_matches_update_only_where_the_webhook_leaves_spec_mutable():
     }
 
 
-def test_the_gate_matches_pods_on_create_and_pod_templates_on_both():
-    """A Pod's volumes are immutable after creation, so UPDATE on pods adds nothing
-    and would refuse finalizer-only updates on pods admitted before the policy;
-    workload pod templates stay mutable, so those kinds keep UPDATE."""
+def test_the_gate_matches_immutable_templates_on_create_and_mutable_ones_on_both():
+    """A Pod's volumes and a Job's pod template are immutable after creation, so
+    UPDATE on them adds nothing and would refuse finalizer-only updates on objects
+    admitted before the policy; the other kinds' templates stay mutable."""
     rules = gate.REQUIRED_POLICIES["tenant-pod-volumes"]["resourceRules"]
     ops = {r: tuple(rule["operations"]) for rule in rules for r in rule["resources"]}
     both = ("CREATE", "UPDATE")
     assert ops == {
-        "pods": ("CREATE",),
+        "pods": ("CREATE",), "jobs": ("CREATE",),
         "deployments": both, "statefulsets": both, "daemonsets": both,
-        "replicasets": both, "jobs": both, "cronjobs": both,
+        "replicasets": both, "cronjobs": both,
     }
 
 

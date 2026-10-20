@@ -471,8 +471,14 @@ REQUIRED_POLICIES = {
             {
                 "apiGroups": ["batch"],
                 "apiVersions": ["v1"],
+                "operations": ["CREATE"],
+                "resources": ["jobs"],
+            },
+            {
+                "apiGroups": ["batch"],
+                "apiVersions": ["v1"],
                 "operations": WRITES,
-                "resources": ["jobs", "cronjobs"],
+                "resources": ["cronjobs"],
             },
         ],
         "variables": [

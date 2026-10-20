@@ -579,11 +579,13 @@ spec:
   placeholder tag no registry has leaves the Deployment at zero available
   replicas, and the tenant's own replica-availability alert fires critical in
   this cluster's Alertmanager minutes later.
-- **Tenant storage is yours to back up.** A volume provisioned for a tenant
-  namespace sits outside whatever backup set this cluster runs until you add
-  the `{{ storage_backend }}`-backed volume behind the PV to it. Its snapshot
-  schedule is the operator's, not the tenant's; `docs/RUNBOOKS.md` holds the
-  backup and restore procedures.
+- **Tenant storage is yours to back up.** `tenant-local` volumes share the
+  `tenant-volumes` zvol, which the off-site tier's recipe in `docs/RUNBOOKS.md`
+  already names (`restic_offsite_zvol_sources`), so they are covered once that
+  tier runs. A platform-written PV on any other `{{ storage_backend }}`-backed
+  volume sits outside whatever backup set this cluster runs until you add it.
+  Snapshot schedules are the operator's, not the tenant's; `docs/RUNBOOKS.md`
+  holds the backup and restore procedures.
 - **Pod volumes.** The example Namespace enforces Pod Security `baseline`
   (warning and auditing at `restricted`). Baseline refuses `hostPath` but
   admits `nfs`, `iscsi`, `cephfs`, `rbd`, `fc`, `flexVolume`, `gitRepo` and the
@@ -597,12 +599,12 @@ spec:
   restricted volume set: `configMap`, `csi`, `downwardAPI`, `emptyDir`,
   `ephemeral`, `persistentVolumeClaim`, `projected` and `secret`. Matching
   Pods covers pods any other controller creates; the workload kinds are
-  matched so a bad template is refused at its own apply. Pods are matched on
-  CREATE only: a Pod's volumes are immutable after creation, so matching
-  UPDATE would add nothing and would refuse the finalizer-only updates (Job
-  tracking, garbage collection) on pods admitted before the policy. The
-  workload kinds, whose pod templates stay mutable, are matched on CREATE and
-  UPDATE. A tenant that needs
+  matched so a bad template is refused at its own apply. Pods and Jobs are
+  matched on CREATE only: a Pod's volumes and a Job's pod template are
+  immutable after creation, so matching UPDATE would add nothing and would
+  refuse the finalizer-only updates (Job tracking, garbage collection) on
+  objects admitted before the policy. The other workload kinds, whose pod
+  templates stay mutable, are matched on CREATE and UPDATE. A tenant that needs
   NAS storage gets a platform-written PersistentVolume pre-bound by `claimRef`
   to its claim, as a database dump landing zone does, and mounts the claim. The
   model is baseline plus this policy rather than `restricted` enforcement,

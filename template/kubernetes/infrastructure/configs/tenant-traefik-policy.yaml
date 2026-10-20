@@ -654,10 +654,17 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+      # A Job's pod template is immutable as well (only scheduling directives move
+      # while it is suspended), so Jobs match on CREATE; a CronJob's jobTemplate
+      # stays mutable and keeps UPDATE.
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["jobs"]
       - apiGroups: ["batch"]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["jobs", "cronjobs"]
+        resources: ["cronjobs"]
   variables:
     # Each step is has()-guarded: an error under failurePolicy Fail refuses the write.
     - name: volumes

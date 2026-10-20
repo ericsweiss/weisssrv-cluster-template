@@ -81,8 +81,10 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
              "resources": ["pods"]},
             {"apiGroups": ["apps"], "apiVersions": ["v1"], "operations": WRITES,
              "resources": ["deployments", "statefulsets", "daemonsets", "replicasets"]},
+            {"apiGroups": ["batch"], "apiVersions": ["v1"], "operations": ["CREATE"],
+             "resources": ["jobs"]},
             {"apiGroups": ["batch"], "apiVersions": ["v1"], "operations": WRITES,
-             "resources": ["jobs", "cronjobs"]},
+             "resources": ["cronjobs"]},
         ]
     }
     assert [(v["name"], _cel(v["expression"])) for v in spec["variables"]] == [

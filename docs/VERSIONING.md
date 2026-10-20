@@ -358,9 +358,10 @@ before it merges:
    or any other node-mounted type) to a PersistentVolumeClaim, such as one
    pre-bound to a platform NFS PersistentVolume. `tenant-pod-volumes` refuses
    a workload that still uses one on its next update, a metadata-only update
-   included, but matches Pods on CREATE only, because a Pod's volumes are
-   immutable and matching UPDATE would refuse finalizer-only updates on pods
-   admitted before the policy; an existing Pod runs on and deletes cleanly.
+   included, but matches Pods and Jobs on CREATE only, because a Pod's volumes
+   and a Job's pod template are immutable and matching UPDATE would refuse
+   finalizer-only updates on objects admitted before the policy; an existing
+   Pod or Job runs on and deletes cleanly.
 
 What a tenant can no longer create or update:
 
