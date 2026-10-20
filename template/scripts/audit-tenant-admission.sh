@@ -175,6 +175,7 @@ for ns in $namespaces; do
     services=$(kget -n "$ns" get services)
     slices=$(kget -n "$ns" get endpointslices.discovery.k8s.io)
     endpoints=$(kget -n "$ns" get endpoints)
+    claims=$(kget -n "$ns" get persistentvolumeclaims)
     pods=$(kget -n "$ns" get pods)
     routes=$(kget -n "$ns" get ingressroutes.traefik.io)
     tcp_routes=$(kget -n "$ns" get ingressroutetcps.traefik.io)
@@ -274,6 +275,11 @@ for ns in $namespaces; do
         audit ReplicaSet "$replicasets" "$VOLUME_CHECKS"
         audit Job "$jobs" "$VOLUME_CHECKS"
         audit CronJob "$cronjobs" "$VOLUME_CHECKS"
+        # tenant-pvc-storageclasses: tenant-local, or "" for a platform-written static volume.
+        jq -r --arg ns "$ns" '.items[] | (if (.spec | has("storageClassName")) then .spec.storageClassName else null end) as $s
+            | select($s != "" and $s != "tenant-local")
+            | "\($ns) PersistentVolumeClaim/\(.metadata.name): storageClassName \($s // "unset")"' <<<"$claims" ||
+            echo "!persistentvolumeclaims"
     )
 done
 
@@ -286,7 +292,7 @@ done
 if [ "${#findings[@]}" -gt 0 ]; then
     printf '%s\n' "${findings[@]}"
     echo "audit-tenant-admission: ${#findings[@]} finding(s) the tenant policies refuse on the next write." >&2
-    echo "    Fix each as the tenants README describes: grant, routes, Services, endpoints, certificates, volumes." >&2
+    echo "    Fix each as the tenants README describes: grant, routes, Services, endpoints, certificates, volumes, claims." >&2
     exit 1
 fi
 echo "audit-tenant-admission: OK ($count tenant namespace(s))"

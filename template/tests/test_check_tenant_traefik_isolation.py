@@ -273,8 +273,8 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
 
 
 # ExternalName/selectorless Services or hand-written endpoints send Traefik past
-# the forwardAuth pin, a raw CertificateRequest skips tenant-certificates, and an
-# inline nfs volume mounts any NAS export, so the gate needs each refusal.
+# the forwardAuth pin, a raw CertificateRequest skips tenant-certificates, an nfs
+# volume mounts any NAS export and a claim on another class escapes the quota.
 @pytest.mark.parametrize("kind", ["ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"])
 @pytest.mark.parametrize(
     "name",
@@ -285,6 +285,7 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
         "tenant-traefik-tls-defaults",
         "tenant-certificaterequests",
         "tenant-pod-volumes",
+        "tenant-pvc-storageclasses",
     ],
 )
 def test_a_policy_file_without_a_service_refusal_keeps_the_gate_closed(tmp_path, kind, name):
@@ -318,10 +319,11 @@ def test_a_policy_file_without_a_per_tenant_policy_keeps_the_gate_closed(tmp_pat
     assert len(gate.check(root)) == 1
 
 
-def test_the_gate_pins_eleven_policies():
-    assert len(gate.REQUIRED_POLICIES) == 11
+def test_the_gate_pins_twelve_policies():
+    assert len(gate.REQUIRED_POLICIES) == 12
     assert "tenant-certificaterequests" in gate.REQUIRED_POLICIES
     assert "tenant-pod-volumes" in gate.REQUIRED_POLICIES
+    assert "tenant-pvc-storageclasses" in gate.REQUIRED_POLICIES
 
 
 # The Pod Security restricted volume set, each admitted by has() on its source.
@@ -462,6 +464,14 @@ def test_the_gate_matches_immutable_templates_on_create_and_mutable_ones_on_both
         "deployments": both, "statefulsets": both, "daemonsets": both,
         "replicasets": both, "cronjobs": both,
     }
+
+
+def test_the_gate_matches_claims_on_create_alone():
+    """A claim's storageClassName is immutable after creation, so CREATE is the
+    whole surface and UPDATE would only refuse finalizer-only updates."""
+    rules = gate.REQUIRED_POLICIES["tenant-pvc-storageclasses"]["resourceRules"]
+    ops = {r: tuple(rule["operations"]) for rule in rules for r in rule["resources"]}
+    assert ops == {"persistentvolumeclaims": ("CREATE",)}
 
 
 FINALIZING_POLICIES = ("tenant-no-externalname-services", "tenant-traefik-ingress-refs")
@@ -630,10 +640,10 @@ def _narrow_resources(spec):
 
 
 def _narrow_operations(spec):
-    rule = next(
-        r for r in spec["matchConstraints"]["resourceRules"] if "UPDATE" in r["operations"]
-    )
-    rule["operations"] = ["CREATE"]
+    rules = [r for r in spec["matchConstraints"]["resourceRules"] if "UPDATE" in r["operations"]]
+    if not rules:
+        pytest.skip("no rule matches UPDATE")
+    rules[0]["operations"] = ["CREATE"]
 
 
 def _expression_true(index: int):

@@ -275,7 +275,7 @@ Rules the template enforces:
   addresses and NFS carries no per-tenant client identity, so an inline `nfs:`
   volume would reach every export its node may mount. Tenant namespaces
   enforce Pod Security `baseline`, which admits `nfs`, so
-  `tenant-pod-volumes`, one of the eleven tenant ValidatingAdmissionPolicies
+  `tenant-pod-volumes`, one of the twelve tenant ValidatingAdmissionPolicies
   in `tenant-traefik-policy.yaml`, holds tenant pods and pod templates to the
   restricted volume set. A tenant gets persistent storage by one of two
   routes: a `tenant-local` claim (with `tenant_storage`), dynamically

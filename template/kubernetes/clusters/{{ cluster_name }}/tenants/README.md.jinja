@@ -621,6 +621,22 @@ spec:
   because `restricted` also requires a non-root, capability-dropped,
   seccomp-confined securityContext of every tenant container, a separate
   migration for every tenant; the policy closes the volume gap without it.
+- **Claim classes.** A tenant PersistentVolumeClaim names `tenant-local`, or
+  `storageClassName: ""` for a platform-written static PersistentVolume
+  pre-bound to it by `claimRef`, as a database dump landing zone's claim is.
+  `tenant-pvc-storageclasses`, Deny-bound on every `fluxcd.io/tenant`
+  namespace, refuses any other class: the default class or any other
+  provisioner would land tenant data on a node disk that no backup covers and
+  that the ResourceQuota, scoped to `tenant-local` alone, never counts.
+  Omitting the field is no way around it: the DefaultStorageClass admission
+  plugin writes the default class's name into the claim before validation, so
+  the claim is refused unless that default is `tenant-local`, and with no
+  default class the field stays unset and is refused as well; a claim that
+  sets `""` explicitly keeps `""`. A claim's class is immutable, so the
+  policy matches CREATE only, and a claim that predates it is migrated to a
+  new claim rather than edited.{% if not tenant_storage %} This cluster renders
+  no `tenant-local` class, so tenant claims are limited to platform-written
+  static volumes until the tenant-storage module is enabled.{% endif %}
 {%- if secrets_backend == 'onepassword' %}
 - **The Connect Service the example names.** `onepassword-connect` in namespace
   `external-secrets`, on port 8080, is what a tenant store's `connectHost`
@@ -768,13 +784,14 @@ spec:
   `global.rbac.aggregateClusterRoles: false` on the cert-manager release, and
   granting tenants Certificate and Issuer rights explicitly, would close the
   same path by authorization instead; the platform keeps the chart default and
-  the policy. In full, the set is eleven: `tenant-traefik-route-refs`,
+  the policy. In full, the set is twelve: `tenant-traefik-route-refs`,
   `tenant-traefik-object-refs`, `tenant-traefik-ingress-refs`,
   `tenant-traefik-hostnames`, `tenant-certificates`,
   `tenant-certificaterequests`, `tenant-no-tcp-udp-routes`,
   `tenant-traefik-tls-defaults`, `tenant-no-externalname-services`,
-  `tenant-no-manual-endpoints` and `tenant-pod-volumes` ("Pod volumes" above).
-  Once any tenant is onboarded, `task lint:tenant-traefik-isolation` fails if
+  `tenant-no-manual-endpoints`, `tenant-pod-volumes` ("Pod volumes" above) and
+  `tenant-pvc-storageclasses` ("Claim classes" above).
+  Whether or not a tenant is wired, `task lint:tenant-traefik-isolation` fails if
   the policies or their bindings go missing, if a binding narrows its match
   below every tenant namespace, or if a policy fails open, narrows its resources,
   or changes, drops or adds a variable or validation expression, even with
@@ -816,7 +833,8 @@ spec:
   tenant-written CertificateRequests to anything but a core Issuer; and a
   TLSOption or TLSStore named `default`; and Pods, Deployments, StatefulSets,
   DaemonSets, ReplicaSets, Jobs and CronJobs with a volume outside the
-  restricted set. It does not audit ACME Orders or
+  restricted set, and PersistentVolumeClaims on a
+  StorageClass other than `tenant-local` or `""`. It does not audit ACME Orders or
   Challenges: tenant RBAC grants no create on them, so that policy is defence
   in depth only. A missing or wildcard grant, or one whose `maxPriority` is not
   a plain whole number up to 2147483647, is one line per route, Ingress and

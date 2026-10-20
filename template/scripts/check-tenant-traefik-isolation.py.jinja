@@ -505,6 +505,26 @@ REQUIRED_POLICIES = {
             ),
         ],
     },
+    # Tenant claims stay on the backed-up, quota-bounded tenant-local class, or
+    # take "" for a platform-written static volume pre-bound by claimRef.
+    "tenant-pvc-storageclasses": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": [""],
+                "apiVersions": ["v1"],
+                "operations": ["CREATE"],
+                "resources": ["persistentvolumeclaims"],
+            },
+        ],
+        "variables": [],
+        "validations": [
+            (
+                "has(object.spec.storageClassName) && "
+                "object.spec.storageClassName in ['', 'tenant-local']"
+            ),
+        ],
+    },
 }
 # Bound once per tenant, in its wiring file, to the hostnames the platform
 # granted that namespace in flux-system/tenant-routing-<ns>; every other

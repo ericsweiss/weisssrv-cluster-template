@@ -97,6 +97,13 @@ def workload(name: str, volumes: list[dict], cron: bool = False) -> dict:
     return named(name, {"jobTemplate": template} if cron else template["spec"])
 
 
+def claim(name: str, storage_class: str, volume_name: str | None = None) -> dict:
+    spec = {"storageClassName": storage_class, "resources": {"requests": {"storage": "1Gi"}}}
+    if volume_name is not None:
+        spec["volumeName"] = volume_name
+    return named(name, spec)
+
+
 def run(tmp_path: Path, fixture: dict) -> subprocess.CompletedProcess:
     require_tool("jq", "audit-tenant-admission")
     bin_dir = tmp_path / "bin"
@@ -161,6 +168,8 @@ CLEAN_APP = {
                  volumes=RESTRICTED_VOLUMES)],
     "deployments": [workload("web", RESTRICTED_VOLUMES)],
     "cronjobs": [workload("dump", RESTRICTED_VOLUMES, cron=True)],
+    # A claim on tenant-local, and the dump landing zone's static claim with "".
+    "persistentvolumeclaims": [claim("data", "tenant-local"), claim("pg-dump", "", "tenant-dumps")],
     "ingressroutes": [
         named("web", {
             "routes": [ROUTE],
@@ -385,6 +394,7 @@ def test_every_tenant_namespace_is_audited(tmp_path):
         "configmaps",
         "pods",
         "cronjobs.batch",
+        "persistentvolumeclaims",
     ],
 )
 def test_a_kubectl_failure_is_an_error_not_a_pass(tmp_path, resource):
@@ -714,6 +724,17 @@ POLICY_CASES = {
     "cronjob-nfs": (
         _with("cronjobs", workload("bad", [NFS], cron=True)),
         "demo CronJob/bad: volume dump uses nfs, outside the restricted volume set",
+    ),
+    "claim-local-path": (
+        _with("persistentvolumeclaims", claim("scratch", "local-path")),
+        "demo PersistentVolumeClaim/scratch: storageClassName local-path",
+    ),
+    # No default class: the field stays unset, and the policy refuses the claim
+    # if it is ever recreated as written.
+    "claim-class-unset": (
+        _with("persistentvolumeclaims", {k: v for k, v in claim("scratch", "").items()}
+              | {"spec": {"resources": {"requests": {"storage": "1Gi"}}}}),
+        "demo PersistentVolumeClaim/scratch: storageClassName unset",
     ),
 }
 

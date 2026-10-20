@@ -702,3 +702,38 @@ spec:
       matchExpressions:
         - key: fluxcd.io/tenant
           operator: Exists
+---
+# Tenant claims use the backed-up tenant-local class, or storageClassName ""
+# for a platform-written static volume pre-bound by claimRef. Any other class,
+# the default included, lands tenant data on an unbacked disk the quota never sees.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-pvc-storageclasses
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      # A claim's class is immutable after creation, so CREATE is the whole surface.
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["persistentvolumeclaims"]
+  validations:
+    - expression: >-
+        has(object.spec.storageClassName)
+        && object.spec.storageClassName in ['', 'tenant-local']
+      message: "tenant claims must use the tenant-local StorageClass or storageClassName \"\" for a platform-written static volume"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-pvc-storageclasses
+spec:
+  policyName: tenant-pvc-storageclasses
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
