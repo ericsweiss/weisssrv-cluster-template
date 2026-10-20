@@ -725,6 +725,10 @@ POLICY_CASES = {
         _with("cronjobs", workload("bad", [NFS], cron=True)),
         "demo CronJob/bad: volume dump uses nfs, outside the restricted volume set",
     ),
+    "middleware-rate-limit-redis": (
+        _with("middlewares", named("limiter", {"rateLimit": {"average": 5, "redis": {"endpoints": ["redis.other:6379"]}}})),
+        "demo Middleware/limiter: rateLimit names a Redis backend, which Traefik would connect to with its own egress",
+    ),
     "claim-empty-class-no-volume": (
         _with("persistentvolumeclaims", claim("loose", "")),
         'demo PersistentVolumeClaim/loose: storageClassName "" without volumeName',

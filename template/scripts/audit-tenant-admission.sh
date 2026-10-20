@@ -111,7 +111,8 @@ def tailscale($o): (.metadata.annotations // {}) | keys[] | select(startswith("t
             | if any($c.forwardAuth[]; . == $a) or ($a | test($c.head + $ns + $c.tail)) then empty
               else "\($o): forwardAuth address \($a) is neither a Service in \($ns) nor the platform outpost" end),
           (($s.chain.middlewares // [])[] | svcref($o; "chain middleware")),
-          ($s.errors.service // empty | svcref($o; "errors service"))'
+          ($s.errors.service // empty | svcref($o; "errors service")),
+          ($s.rateLimit.redis // empty | "\($o): rateLimit names a Redis backend, which Traefik would connect to with its own egress")'
     TRAEFIKSERVICE_CHECKS='.spec as $s
         | (($s.weighted.services // [])[] | svcref($o; "weighted service")),
           (($s.highestRandomWeight.services // [])[] | svcref($o; "highestRandomWeight service")),

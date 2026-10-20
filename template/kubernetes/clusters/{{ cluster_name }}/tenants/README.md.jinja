@@ -704,7 +704,9 @@ spec:
   `name@provider` only for an allowlisted platform middleware. Add any shared
   middleware a tenant needs to both allowlists. A tenant `forwardAuth`
   middleware may call only the platform's Authentik outpost or a Service in its
-  own namespace. Traefik makes that call, and every route's backend call, with
+  own namespace, and a tenant `rateLimit` middleware may not name a Redis
+  backend, another address Traefik would open itself. Traefik makes that call,
+  and every route's backend call, with
   its own egress, which is wider than a tenant's; the policies pin what a tenant
   can point it at, not where Traefik itself may connect. A same-namespace
   Service name is only safe while that Service resolves to the tenant's own

@@ -136,6 +136,7 @@ REQUIRED_POLICIES = {
                 "variables.platformForwardAuth || "
                 "object.spec.forwardAuth.address.matches(variables.ownServiceAddress)"
             ),
+            "!has(object.spec.rateLimit) || !has(object.spec.rateLimit.redis)",
             (
                 "!has(object.spec.weighted) || !has(object.spec.weighted.services) || "
                 "object.spec.weighted.services.all(s, !has(s.namespace) || s.namespace == "

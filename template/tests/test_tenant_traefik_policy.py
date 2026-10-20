@@ -109,6 +109,32 @@ def test_another_namespace_or_outside_address_is_refused(address):
     assert not allowed({"forwardAuth": {"address": address}}, "demo")
 
 
+REDIS_MESSAGE = (
+    "a tenant rateLimit middleware may not name a Redis backend"
+    " (Traefik would connect to it with its own egress)"
+)
+REDIS_EXPRESSION = "!has(object.spec.rateLimit) || !has(object.spec.rateLimit.redis)"
+
+
+def test_the_redis_refusal_is_the_shape_the_mirror_evaluates():
+    found = [v for v in _object_refs()["validations"] if v["message"] == REDIS_MESSAGE]
+    assert len(found) == 1
+    assert " ".join(found[0]["expression"].split()) == REDIS_EXPRESSION
+
+
+def redis_allowed(spec: dict) -> bool:
+    return "rateLimit" not in spec or "redis" not in spec["rateLimit"]
+
+
+def test_a_rate_limit_with_a_redis_backend_is_refused():
+    """Traefik, not the tenant, opens the Redis connection, with its own egress."""
+    assert not redis_allowed({"rateLimit": {"average": 10, "redis": {"endpoints": ["10.0.0.5:6379"]}}})
+
+
+def test_an_in_memory_rate_limit_is_untouched():
+    assert redis_allowed({"rateLimit": {"average": 10, "burst": 20}})
+
+
 def test_a_middleware_without_forward_auth_is_untouched():
     assert allowed({"headers": {"customResponseHeaders": {"X-Frame-Options": "DENY"}}}, "demo")
 
