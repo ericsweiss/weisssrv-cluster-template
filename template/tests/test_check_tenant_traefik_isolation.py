@@ -95,7 +95,17 @@ def build(tmp_path: Path, resources: list[str], release: str) -> Path:
 
 def test_baseline_only_passes(tmp_path):
     root = build(tmp_path, ["tenant-crd-editor.yaml"], RELEASE_WITH_VALUES.format(allow="true"))
+    write_policy(root, policy())
     assert gate.check(root) == []
+
+
+def test_baseline_only_without_the_policies_fails(tmp_path):
+    """A torn-down tenant's Namespace stays live with the tenant label, so the
+    label-bound policies are required with no tenant wired as well."""
+    root = build(tmp_path, ["tenant-crd-editor.yaml"], RELEASE_WITH_VALUES.format(allow="true"))
+    problems = gate.check(root)
+    assert len(problems) == 1
+    assert "wires no tenant" in problems[0]
 
 
 def test_a_tenant_with_cross_namespace_still_true_fails(tmp_path):
@@ -125,6 +135,7 @@ def test_a_tenant_without_the_policies_fails_with_cross_namespace_off(tmp_path):
 
 def test_baseline_only_passes_with_cross_namespace_off(tmp_path):
     root = build(tmp_path, ["tenant-crd-editor.yaml"], RELEASE_WITH_VALUES.format(allow="false"))
+    write_policy(root, policy())
     assert gate.check(root) == []
 
 

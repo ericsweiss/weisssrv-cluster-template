@@ -765,14 +765,18 @@ def check(root: Path = REPO) -> list[str]:
         ]
 
     tenants = [r for r in resources if r not in BASELINE]
-    if not tenants:
-        return []
-    problems = routing_problems(root, tenants)
+    problems = routing_problems(root, tenants) if tenants else []
     if policies_pin_tenants(root / TENANT_POLICY, root):
         return problems
 
+    # The policies bind by label, and a torn-down tenant's Namespace stays live
+    # with that label, so they are required with no tenant wired as well.
+    onboards = (
+        f"onboards {', '.join(tenants)} without" if tenants
+        else "wires no tenant, but the labelled Namespaces it left live still need"
+    )
     return [
-        f"{TENANTS_KUSTOMIZATION} onboards {', '.join(tenants)} without "
+        f"{TENANTS_KUSTOMIZATION} {onboards} "
         f"the complete Deny-bound tenant policies in {TENANT_POLICY}. "
         "Those policies are required even when "
         "providers.kubernetesCRD.allowCrossNamespace is false: plain Ingress "
