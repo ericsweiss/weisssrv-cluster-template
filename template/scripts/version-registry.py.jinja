@@ -260,9 +260,16 @@ CONFIG = {
             "var_name": "local_path_provisioner_helper_version",
             "category": "dockerhub",
             "docker_image": "library/busybox",
-            "tag_regex": r"^(\d+\.\d+)$",
+            "image_ref": "docker.io/library/busybox",
+            "tag_regex": r"^(\d+\.\d+\.\d+)$",
+            # Digest-pinned in the manifest (root helper on the tenant zvol), so
+            # the pin is read from there and a bump rewrites tag and digest by hand.
+            "version_file": [
+                "kubernetes/infrastructure/controllers/local-path-provisioner/configmap.yaml",
+            ],
             "source_url": "https://hub.docker.com/_/busybox/tags",
-            "deploy_command": _FLUX,
+            "notes": "Tag and digest move together; the digest is the multi-arch index digest of the tag.",
+            # No deploy_command: a version_file pin derives its own instruction.
         },
 {%- endif %}
 {%- if git_backend == 'gitlab_selfhosted' %}

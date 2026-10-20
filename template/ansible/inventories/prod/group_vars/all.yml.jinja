@@ -240,11 +240,10 @@ registry_cache_version: "3.1.2"
 busybox_version: "1.38"
 {%- if tenant_storage %}
 
-# Tenant StorageClass provisioner (controllers/local-path-provisioner) and the
-# busybox tag its helper pods run. The provisioner's Docker Hub tag equals its
-# GitHub release tag.
+# Tenant StorageClass provisioner (controllers/local-path-provisioner). Its
+# Docker Hub tag equals its GitHub release tag. The BusyBox its helper pods run
+# is digest-pinned in the provisioner ConfigMap and tracked from there.
 local_path_provisioner_version: "v0.0.37"
-local_path_provisioner_helper_version: "1.38"
 {%- endif %}
 {%- if vpn_tailscale %}
 

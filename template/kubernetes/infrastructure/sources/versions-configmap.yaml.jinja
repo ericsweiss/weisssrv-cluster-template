@@ -47,7 +47,6 @@ data:
   helm_chart_versions_vpa: 5.1.0
   k3s_version: v1.37.1+k3s1
 {%- if tenant_storage %}
-  local_path_provisioner_helper_version: '1.38'
   local_path_provisioner_version: v0.0.37
 {%- endif %}
 {%- if gpu == 'nvidia' %}

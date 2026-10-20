@@ -139,8 +139,11 @@ def test_the_provisioner_writes_only_under_the_tenant_root():
     assert json.loads(_config()["config.json"]) == {"nodePathMap": [
         {"node": "DEFAULT_PATH_FOR_NON_LISTED_NODES", "paths": [ROOT]}]}
     helper = yaml.safe_load(_config()["helperPod.yaml"])
-    assert helper["spec"]["containers"][0]["image"].endswith(
-        ":${local_path_provisioner_helper_version}")
+    # Root on the tenant zvol: an exact tag AND the index digest, never a
+    # floating alias the registry can retarget.
+    assert re.fullmatch(
+        r"docker\.io/library/busybox:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}",
+        helper["spec"]["containers"][0]["image"])
 
 
 def test_the_helper_pod_carries_no_api_token():
@@ -150,10 +153,11 @@ def test_the_helper_pod_carries_no_api_token():
     assert helper["spec"]["automountServiceAccountToken"] is False
 
 
-def test_both_images_are_pinned_in_the_inventory():
+def test_the_provisioner_image_is_pinned_in_the_inventory():
     pins = yaml.safe_load(ALL_VARS.read_text())
     assert pins["local_path_provisioner_version"].startswith("v")
-    assert pins["local_path_provisioner_helper_version"]
+    # The helper is digest-pinned in the ConfigMap; no inventory var for it.
+    assert "local_path_provisioner_helper_version" not in pins
 
 
 def test_the_tenant_root_is_a_zvol_on_the_nas_node():

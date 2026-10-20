@@ -409,6 +409,15 @@ What a tenant can no longer create or update:
   which refuses only `hostPath`; an inline `nfs` volume would mount any NAS
   export from the node's address, which NFS cannot tell apart per tenant.
 
+### The provisioner helper is digest-pinned
+
+The local-path-provisioner helper runs as root with the tenant zvol mounted,
+so its BusyBox image is now an exact tag plus the multi-arch index digest in
+the provisioner ConfigMap, and version-check reads the pin from that manifest.
+`local_path_provisioner_helper_version` leaves `all.yml` and the versions
+ConfigMap; `copier update` removes both, and a cluster that overrode the var
+drops the override. A bump rewrites tag and digest together.
+
 ### Default version pins move with this release
 
 `copier update` with default answers moves these shipped defaults, which Flux

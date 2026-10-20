@@ -50,5 +50,8 @@ data:
           effect: NoSchedule
       containers:
         - name: helper-pod
-          image: docker.io/library/busybox:${local_path_provisioner_helper_version}
+          # Digest-pinned: the helper runs as root with the tenant zvol mounted, so a
+          # floating tag could pull unreviewed code onto it. version-check reads this
+          # pin from the manifest; bump tag and digest together (hub.docker.com/_/busybox).
+          image: docker.io/library/busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
           imagePullPolicy: IfNotPresent
