@@ -277,8 +277,11 @@ Rules the template enforces:
   enforce Pod Security `baseline`, which admits `nfs`, so
   `tenant-pod-volumes`, one of the eleven tenant ValidatingAdmissionPolicies
   in `tenant-traefik-policy.yaml`, holds tenant pods and pod templates to the
-  restricted volume set; NAS storage reaches a tenant only as a
-  platform-written PersistentVolume pre-bound to its claim.
+  restricted volume set. A tenant gets persistent storage by one of two
+  routes: a `tenant-local` claim (with `tenant_storage`), dynamically
+  provisioned on the tenant zvol, where the provisioner creates the
+  PersistentVolume; or, for a NAS export such as the dump landing zone, a
+  platform-written static PersistentVolume pre-bound to its claim.
 - **Application state survives its consumer.** A zvol outlives the VM it is
   attached to; a PV outlives the pod and the node.
 
