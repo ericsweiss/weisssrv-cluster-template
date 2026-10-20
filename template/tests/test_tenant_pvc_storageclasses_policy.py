@@ -22,6 +22,12 @@ MESSAGE = (
     " static volume with storageClassName \"\" and a volumeName of the form"
     " <namespace>-<purpose>"
 )
+VOLUME_TYPE_VALIDATION = (
+    "!has(object.metadata.annotations) || !('volumeType' in object.metadata.annotations)"
+)
+VOLUME_TYPE_MESSAGE = (
+    "tenant claims may not carry a volumeType annotation; tenant-local volumes are always local"
+)
 TENANT_MATCH = {
     "namespaceSelector": {
         "matchExpressions": [{"key": "fluxcd.io/tenant", "operator": "Exists"}]
@@ -59,7 +65,8 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
         ]
     }
     assert [(_cel(v["expression"]), v["message"]) for v in spec["validations"]] == [
-        (VALIDATION, MESSAGE)
+        (VALIDATION, MESSAGE),
+        (VOLUME_TYPE_VALIDATION, VOLUME_TYPE_MESSAGE),
     ]
 
 
@@ -104,6 +111,28 @@ def claim(storage_class: str | None, volume_name: str | None = None) -> dict:
         "apiVersion": "v1", "kind": "PersistentVolumeClaim",
         "metadata": {"name": "dumps", "namespace": "demo"}, "spec": spec,
     }
+
+
+def volume_type_allowed(claim: dict) -> bool:
+    """The second validation: no volumeType annotation at all."""
+    return "volumeType" not in (claim["metadata"].get("annotations") or {})
+
+
+@pytest.mark.parametrize("volume_type", ["hostPath", "local"])
+def test_a_claim_with_a_volume_type_annotation_is_refused(volume_type):
+    """The provisioner honours the claim's annotation over the class default, and
+    a hostPath volume has no node affinity; even "local" is refused so the class
+    stays the only place the type is set."""
+    c = claim("tenant-local")
+    c["metadata"]["annotations"] = {"volumeType": volume_type}
+    assert not volume_type_allowed(c)
+
+
+def test_a_claim_without_annotations_passes_the_volume_type_rule():
+    assert volume_type_allowed(claim("tenant-local"))
+    c = claim("tenant-local")
+    c["metadata"]["annotations"] = {"app": "demo"}
+    assert volume_type_allowed(c)
 
 
 def test_a_claim_on_tenant_local_is_admitted():

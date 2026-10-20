@@ -733,6 +733,10 @@ POLICY_CASES = {
         _with("persistentvolumeclaims", claim("loose", "")),
         'demo PersistentVolumeClaim/loose: storageClassName "" with volumeName unset not named for this namespace',
     ),
+    "claim-volume-type-annotation": (
+        _with("persistentvolumeclaims", claim("scratch", "tenant-local") | {"metadata": {"name": "scratch", "annotations": {"volumeType": "hostPath"}}}),
+        "demo PersistentVolumeClaim/scratch: volumeType annotation overrides the class default local volume type",
+    ),
     "claim-empty-class-foreign-volume": (
         _with("persistentvolumeclaims", claim("grab", "", "loki-data")),
         'demo PersistentVolumeClaim/grab: storageClassName "" with volumeName loki-data not named for this namespace',

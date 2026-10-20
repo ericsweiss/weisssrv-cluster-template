@@ -282,6 +282,8 @@ for ns in $namespaces; do
               then "\($ns) PersistentVolumeClaim/\(.metadata.name): storageClassName \"\" with volumeName \(.spec.volumeName // "unset") not named for this namespace"
               elif $s != "" and $s != "tenant-local"
               then "\($ns) PersistentVolumeClaim/\(.metadata.name): storageClassName \($s // "unset")"
+              elif ((.metadata.annotations // {}) | has("volumeType"))
+              then "\($ns) PersistentVolumeClaim/\(.metadata.name): volumeType annotation overrides the class default local volume type"
               else empty end' <<<"$claims" ||
             echo "!persistentvolumeclaims"
     )

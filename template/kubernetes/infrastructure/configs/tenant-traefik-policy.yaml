@@ -811,6 +811,13 @@ spec:
         && has(object.spec.volumeName)
         && object.spec.volumeName.startsWith(object.metadata.namespace + '-')))
       message: "tenant claims must use the tenant-local StorageClass, or name a platform-written static volume with storageClassName \"\" and a volumeName of the form <namespace>-<purpose>"
+    # The provisioner lets a claim's volumeType annotation override the class's
+    # defaultVolumeType: a hostPath volume has no node affinity, so a pod could
+    # land on another node and find an empty directory.
+    - expression: >-
+        !has(object.metadata.annotations)
+        || !('volumeType' in object.metadata.annotations)
+      message: "tenant claims may not carry a volumeType annotation; tenant-local volumes are always local"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

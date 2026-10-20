@@ -533,6 +533,7 @@ REQUIRED_POLICIES = {
                 "(object.spec.storageClassName == '' && has(object.spec.volumeName) && "
                 "object.spec.volumeName.startsWith(object.metadata.namespace + '-')))"
             ),
+            "!has(object.metadata.annotations) || !('volumeType' in object.metadata.annotations)",
         ],
     },
 }

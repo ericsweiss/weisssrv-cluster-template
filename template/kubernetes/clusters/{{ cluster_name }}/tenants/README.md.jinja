@@ -627,7 +627,10 @@ spec:
   as a database dump landing zone's claim is. Platform-written tenant volumes
   carry the tenant's namespace as their name prefix, so a `""` claim can name
   only a volume written for its own namespace, never another tenant's or the
-  platform's own.
+  platform's own. The same policy refuses a `volumeType` annotation on a claim:
+  the provisioner would honour it over the class's `defaultVolumeType`, and a
+  `hostPath` volume has no node affinity, so a pod could land on another node
+  and find an empty directory.
   `tenant-pvc-storageclasses`, Deny-bound on every `fluxcd.io/tenant`
   namespace, refuses any other class: the default class or any other
   provisioner would land tenant data on a node disk that no backup covers and
