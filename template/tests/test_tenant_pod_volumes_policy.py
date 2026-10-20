@@ -1,7 +1,6 @@
-"""Baseline Pod Security admits nfs, iscsi and every other node-mounted volume
-type, and the NAS exports trust node addresses, so a tenant Pod or pod template
-may carry only the restricted volume set. `allowed()` mirrors the policy; the
-first tests pin the shape it assumes."""
+"""Baseline Pod Security admits nfs and other node-mounted volumes, which the NAS
+exports trust by node address, so tenant pods keep to the restricted volume set.
+`allowed()` mirrors the policy; the first tests pin the shape it assumes."""
 
 from __future__ import annotations
 

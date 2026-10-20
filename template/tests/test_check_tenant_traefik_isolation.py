@@ -261,10 +261,9 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
     assert len(gate.check(root)) == 1
 
 
-# An ExternalName or selectorless Service, or hand-written endpoints, would
-# send Traefik into another namespace past the forwardAuth pin, a raw
-# CertificateRequest skips tenant-certificates, and an inline nfs volume mounts
-# any NAS export from a node address, so the gate needs each refusal.
+# ExternalName/selectorless Services or hand-written endpoints send Traefik past
+# the forwardAuth pin, a raw CertificateRequest skips tenant-certificates, and an
+# inline nfs volume mounts any NAS export, so the gate needs each refusal.
 @pytest.mark.parametrize("kind", ["ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"])
 @pytest.mark.parametrize(
     "name",
