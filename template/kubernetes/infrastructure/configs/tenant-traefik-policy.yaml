@@ -17,6 +17,17 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["ingressroutes", "ingressroutetcps", "ingressrouteudps"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
   variables:
     - name: ns
       expression: "object.metadata.namespace"
@@ -96,6 +107,17 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["middlewares", "traefikservices"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
   variables:
     - name: ns
       expression: "object.metadata.namespace"
@@ -497,6 +519,17 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["certificates"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
   variables:
     - name: hosts
       expression: >-
@@ -598,6 +631,17 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["ingressroutetcps", "ingressrouteudps"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
   validations:
     - expression: "false"
       message: "tenants serve HTTP only; ask the platform for a TCP route"
@@ -630,6 +674,17 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["tlsoptions", "tlsstores"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
   validations:
     - expression: "object.metadata.name != 'default'"
       message: "the Traefik default TLSOption/TLSStore is platform-owned"
@@ -680,6 +735,17 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["cronjobs"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
   variables:
     # Each step is has()-guarded: an error under failurePolicy Fail refuses the write.
     - name: volumes

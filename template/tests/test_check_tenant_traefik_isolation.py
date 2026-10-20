@@ -474,8 +474,12 @@ def test_the_gate_matches_claims_on_create_alone():
     assert ops == {"persistentvolumeclaims": ("CREATE",)}
 
 
+# Every policy that matches UPDATE on a kind with a spec; endpoints have none,
+# and the CREATE-only policies never see a finalizer update.
 FINALIZING_POLICIES = (
-    "tenant-no-externalname-services", "tenant-traefik-ingress-refs", "tenant-traefik-hostnames",
+    "tenant-traefik-route-refs", "tenant-traefik-object-refs", "tenant-traefik-ingress-refs",
+    "tenant-no-externalname-services", "tenant-no-tcp-udp-routes", "tenant-traefik-tls-defaults",
+    "tenant-traefik-hostnames", "tenant-certificates", "tenant-pod-volumes",
 )
 FINALIZING_EXPRESSION = (
     "request.operation != 'UPDATE' || !has(object.metadata.deletionTimestamp) || "
