@@ -288,8 +288,10 @@ in `tenant-crd-editor`. An update with default answers therefore installs them,
 and a render with `tenant_storage` and `postgres_operator` both `false` differs
 from the previous release by that set with the docs, gates and audit script
 that go with it, by the `lib_ref` default (weisssrv-lib v0.22.0, with the
-vendored copies that follow it) and by the default version pins below. It is
-not byte-identical.
+vendored copies that follow it), by the default version pins below, and by the
+tenant-volumes marker play in `ansible/playbooks/k3s.yml`, every task of which
+is skipped unless a VM disk mounts `/mnt/tenant-volumes`. It is not
+byte-identical.
 
 The policies act on CREATE and UPDATE, so an object a tenant already holds
 stays until its next apply, which they then refuse. On the update branch,
