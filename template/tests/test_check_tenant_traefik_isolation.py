@@ -474,7 +474,9 @@ def test_the_gate_matches_claims_on_create_alone():
     assert ops == {"persistentvolumeclaims": ("CREATE",)}
 
 
-FINALIZING_POLICIES = ("tenant-no-externalname-services", "tenant-traefik-ingress-refs")
+FINALIZING_POLICIES = (
+    "tenant-no-externalname-services", "tenant-traefik-ingress-refs", "tenant-traefik-hostnames",
+)
 FINALIZING_EXPRESSION = (
     "request.operation != 'UPDATE' || !has(object.metadata.deletionTimestamp) || "
     "object.spec != oldObject.spec || (has(object.metadata.annotations) ? "

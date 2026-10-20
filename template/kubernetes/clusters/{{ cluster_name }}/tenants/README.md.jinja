@@ -720,7 +720,9 @@ spec:
   `tenant-traefik-ingress-refs` skip an UPDATE to a terminating Service that
   changes neither spec nor annotations, so a legacy LoadBalancer Service
   admitted before them can shed its `service.kubernetes.io/load-balancer-cleanup`
-  finalizer and finish deleting. Annotations are in that test because both
+  finalizer and finish deleting; `tenant-traefik-hostnames` does the same for a
+  terminating Ingress, so a legacy Tailscale Ingress can shed its operator's
+  finalizer. Annotations are in that test because these
   policies validate them and a tenant can hold its own Service in Terminating
   with a finalizer it added; with spec and annotations unchanged, the update
   changes only finalizers or labels, which neither policy reads.

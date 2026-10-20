@@ -320,7 +320,9 @@ before it merges:
    still be deleted: `tenant-traefik-ingress-refs` and
    `tenant-no-externalname-services` skip an UPDATE to a terminating Service
    that changes neither spec nor annotations, so a LoadBalancer Service's
-   cleanup finalizer comes off. It does
+   cleanup finalizer comes off, and `tenant-traefik-hostnames` does the same
+   for a terminating Ingress (a Tailscale Ingress carries its operator's
+   finalizer). It does
    not audit ACME Orders or Challenges: tenant RBAC grants no create on them,
    so that policy is defence in depth only. Routes,
    Ingresses and Certificates read as ungranted until step 2's grants are in

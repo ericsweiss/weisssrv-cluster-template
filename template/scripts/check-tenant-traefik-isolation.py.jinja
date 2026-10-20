@@ -320,6 +320,7 @@ REQUIRED_POLICIES = {
                 "resources": ["ingresses"],
             },
         ],
+        "matchConditions": FINALIZING_UNCHANGED,
         "variables": [
             ("isRoute", "request.resource.resource == 'ingressroutes'"),
             ("hosts", "params.data.hosts.split('\\n').map(h, h.trim()).filter(h, h != '')"),

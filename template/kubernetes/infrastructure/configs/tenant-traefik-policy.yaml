@@ -397,6 +397,17 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["ingresses"]
+  # As on the Service policies: a terminating Ingress (a Tailscale one carries
+  # its operator's finalizer) sheds a finalizer through an UPDATE that changes
+  # neither spec nor annotations, and refusing it strands the object.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
   variables:
     - name: isRoute
       expression: "request.resource.resource == 'ingressroutes'"
