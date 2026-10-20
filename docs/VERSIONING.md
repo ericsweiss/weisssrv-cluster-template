@@ -444,7 +444,7 @@ drops the override. A bump rewrites tag and digest together.
 `copier update` with default answers moves these shipped defaults, which Flux
 reconciles on merge: external-secrets 2.13.0, Traefik 42.0.0 (a major: read
 its release notes against any Traefik values the cluster overrides),
-kube-prometheus-stack 92.10.1 (the CRDs chart stays at 32.0.1), Loki 18.17.1,
+kube-prometheus-stack 92.11.0 (the CRDs chart stays at 32.0.1), Loki 18.17.1,
 Alloy 1.14.0, the Tailscale operator 1.104.1, Authentik 2026.8.4 and the
 GitLab runner chart 0.94.0. They are the pins the reference cluster already
 runs; a cluster that pinned its own values in `all.yml` keeps them, and
