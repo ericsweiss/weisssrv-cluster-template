@@ -232,6 +232,9 @@ for ns in $namespaces; do
               (if ((.spec.externalIPs // []) | length) > 0
                then "\($ns) Service/\($n): externalIPs \(.spec.externalIPs | join(","))"
                else empty end)' <<<"$services" || echo "!services"
+        # Only the Service-driven controller is accepted: a slice the MIRRORING
+        # controller manages mirrors a hand-written Endpoints object, which the
+        # policies refuse to recreate, so it is a finding rather than noise.
         jq -r --arg ns "$ns" --arg c "$CONTROLLER" '.items[]
             | (.metadata.labels // {})["endpointslice.kubernetes.io/managed-by"] as $m
             | select($m != $c)
