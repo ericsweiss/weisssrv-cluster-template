@@ -559,7 +559,7 @@ def test_a_database_kustomization_that_orphans_on_deletion_passes(repo: Path) ->
     "policy", [None, "Delete", "MirrorPrune", "WaitForTermination"],
     ids=["absent", "delete", "mirror-prune", "wait"],
 )
-@pytest.mark.parametrize("by", ["name", "path"])
+@pytest.mark.parametrize("by", ["name", "path", "nested-path"])
 def test_a_database_kustomization_without_orphan_fails(
     repo: Path, policy: str | None, by: str
 ) -> None:
@@ -569,6 +569,10 @@ def test_a_database_kustomization_without_orphan_fails(
     second = CONFINED_SECOND.replace("  deletionPolicy: Orphan\n", replacement)
     if by == "path":
         second = second.replace("name: demo-app-db\n", "name: demo-app-data\n")
+    if by == "nested-path":
+        second = second.replace("name: demo-app-db\n", "name: demo-app-data\n").replace(
+            "path: ./kubernetes/db\n", "path: ./kubernetes/db/overlays/prod\n"
+        )
     write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
     problems = gate.check(repo)
     assert len(problems) == 1, problems
