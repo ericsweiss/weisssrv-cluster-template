@@ -285,9 +285,11 @@ The tenant isolation set renders whatever the answers are:
 ValidatingAdmissionPolicies and their Deny bindings on every `fluxcd.io/tenant`
 namespace, Traefik's `defaultTLSResourcesNamespace: traefik`, and the CNPG kinds
 in `tenant-crd-editor`. An update with default answers therefore installs them,
-and a render with `tenant_storage` and `postgres_operator` both `false` is
-identical to the previous release apart from that set and the docs, gates and
-audit script that go with it. It is not byte-identical.
+and a render with `tenant_storage` and `postgres_operator` both `false` differs
+from the previous release by that set with the docs, gates and audit script
+that go with it, by the `lib_ref` default (weisssrv-lib v0.22.0, with the
+vendored copies that follow it) and by the default version pins below. It is
+not byte-identical.
 
 The policies act on CREATE and UPDATE, so an object a tenant already holds
 stays until its next apply, which they then refuse. On the update branch,
@@ -406,6 +408,18 @@ What a tenant can no longer create or update:
   (the Pod Security restricted set). Tenant namespaces enforce `baseline`,
   which refuses only `hostPath`; an inline `nfs` volume would mount any NAS
   export from the node's address, which NFS cannot tell apart per tenant.
+
+### Default version pins move with this release
+
+`copier update` with default answers moves these shipped defaults, which Flux
+reconciles on merge: external-secrets 2.13.0, Traefik 42.0.0 (a major: read
+its release notes against any Traefik values the cluster overrides),
+kube-prometheus-stack 92.10.1 (the CRDs chart stays at 32.0.1), Loki 18.17.1,
+Alloy 1.14.0, the Tailscale operator 1.104.1, Authentik 2026.8.4 and the
+GitLab runner chart 0.94.0. They are the pins the reference cluster already
+runs; a cluster that pinned its own values in `all.yml` keeps them, and
+`task maintenance:check-versions` reports the drift either way. MetalLB stays
+held at 0.15.3.
 
 ### Every tenant's Namespace, caps and hostname grant carry the prune guard
 
