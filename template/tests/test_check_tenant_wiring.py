@@ -58,6 +58,8 @@ TENANT = textwrap.dedent(
           default:
             memory: 512Mi
             ephemeral-storage: 512Mi
+          defaultRequest:
+            ephemeral-storage: 128Mi
           max:
             ephemeral-storage: 2Gi
     ---
@@ -366,12 +368,15 @@ def test_a_quota_that_does_not_cap_ephemeral_storage_fails(repo: Path, key: str)
 # The fixture's Container ephemeral-storage lines, by the LimitRange key they sit under.
 EPHEMERAL_LIMITS = {
     "default": "        ephemeral-storage: 512Mi",
+    "defaultRequest": "        ephemeral-storage: 128Mi",
     "max": "        ephemeral-storage: 2Gi",
 }
 
 
 @pytest.mark.parametrize(
-    "unset", [("default",), ("max",), ("default", "max")], ids=["default", "max", "both"]
+    "unset",
+    [("default",), ("defaultRequest",), ("max",), ("default", "defaultRequest", "max")],
+    ids=["default", "defaultRequest", "max", "all"],
 )
 def test_a_limit_range_without_an_ephemeral_storage_limit_fails(
     repo: Path, unset: tuple[str, ...]

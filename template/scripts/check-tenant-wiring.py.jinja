@@ -240,15 +240,18 @@ def _caps_problems(docs: list, rel: str) -> list[str]:
                 "lands unbounded inside the quota"
             )
         for entry in entries:
+            # default supplies only the limit: without defaultRequest a container
+            # with no resources block is charged the whole limit against the
+            # requests quota and may be refused rather than defaulted.
             unset = [
-                k for k in ("default", "max")
+                k for k in ("default", "defaultRequest", "max")
                 if "ephemeral-storage" not in (entry.get(k) or {})
             ]
             if unset:
                 problems.append(
                     f"{rel}: LimitRange {name} sets no ephemeral-storage under "
-                    f"{', '.join(unset)} — a tenant container with no limit would "
-                    "spend the node's disk unbounded"
+                    f"{', '.join(unset)} — a tenant container with no resources block "
+                    "would spend the node's disk unbounded, or be refused by the quota"
                 )
     return problems
 

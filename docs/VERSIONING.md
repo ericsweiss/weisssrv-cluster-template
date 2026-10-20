@@ -484,7 +484,7 @@ boot disk.
 
 `scripts/check-tenant-wiring.py` now requires `requests.ephemeral-storage` and
 `limits.ephemeral-storage` in every tenant's ResourceQuota and `ephemeral-storage`
-under `default` and `max` in its LimitRange Container entry, since emptyDir
+under `default`, `defaultRequest` and `max` in its LimitRange Container entry, since emptyDir
 volumes and writable layers otherwise fill the node's disk unbounded. Before
 the update merges, add those keys to every existing tenant file, as the tenants
 README § Example shows, or `task lint:invariants` fails.

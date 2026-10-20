@@ -658,7 +658,7 @@ spec:
   per-pod memory limits, or the surge pod is rejected and the rollout stalls.
   `check-tenant-wiring` also requires `requests.ephemeral-storage` and
   `limits.ephemeral-storage` in the quota, and an `ephemeral-storage` entry
-  under the LimitRange's `default` and `max`: emptyDir volumes and container
+  under the LimitRange's `default`, `defaultRequest` and `max`: emptyDir volumes and container
   writable layers draw on the node's disk, and nothing else bounds them, so one
   tenant pod could otherwise fill a node's boot disk and evict its neighbours.
 - **Metrics must not ride the public port.** A tenant route matches on hostname,
