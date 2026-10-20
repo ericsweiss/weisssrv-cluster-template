@@ -314,6 +314,11 @@ spec:
     requests.cpu: "2"
     requests.memory: 4Gi
     limits.memory: 8Gi
+    # emptyDir and container writable layers draw on the node's disk, which
+    # tenant-pod-volumes admits, so this bounds what the namespace may write
+    # there. check-tenant-wiring requires both keys.
+    requests.ephemeral-storage: 4Gi
+    limits.ephemeral-storage: 8Gi
 {%- if tenant_storage %}
     # check-tenant-wiring requires both keys: tenant-local sizes are not
     # enforced, so this bounds declared requests only. Use "0" for a tenant
@@ -322,9 +327,9 @@ spec:
     tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
 {%- endif %}
 ---
-# Defaults and per-container ceilings, so a pod with no resources block cannot
-# land unbounded inside the quota. A `max:` key with no matching `default:` key
-# becomes the default limit, so CPU is left to the quota's requests.cpu.
+# Defaults and ceilings, so a pod with no resources block cannot land unbounded.
+# A `max:` with no `default:` becomes the default limit, so CPU is left to the
+# quota. The ephemeral-storage default makes every container fund the pod's disk.
 apiVersion: v1
 kind: LimitRange
 metadata:
@@ -338,11 +343,16 @@ spec:
     - type: Container
       default:
         memory: 512Mi
+        # The floor at admission: check-ephemeral-storage-cap reads manifests,
+        # so a tenant manifest still declares its own ephemeral-storage limits.
+        ephemeral-storage: 512Mi
       defaultRequest:
         cpu: 50m
         memory: 128Mi
+        ephemeral-storage: 128Mi
       max:
         memory: 2Gi
+        ephemeral-storage: 2Gi
 ---
 # The tenant's own 1Password vault and a Connect token granted that vault
 # alone. Bootstrap the token Secret and allowlist it as "Per-tenant vault" in
@@ -623,6 +633,11 @@ spec:
   the starting numbers. `pods:` has to exceed the tenant's replica count, which
   surges by one during a rollout, and `limits.memory` has to cover that many
   per-pod memory limits, or the surge pod is rejected and the rollout stalls.
+  `check-tenant-wiring` also requires `requests.ephemeral-storage` and
+  `limits.ephemeral-storage` in the quota, and an `ephemeral-storage` entry
+  under the LimitRange's `default` and `max`: emptyDir volumes and container
+  writable layers draw on the node's disk, and nothing else bounds them, so one
+  tenant pod could otherwise fill a node's boot disk and evict its neighbours.
 - **Metrics must not ride the public port.** A tenant route matches on hostname,
   not path, so a `/metrics` endpoint served on the port the tenant's own
   IngressRoute publishes is reachable from the internet. Require a separate

@@ -40,6 +40,8 @@ TENANT = textwrap.dedent(
     spec:
       hard:
         pods: "10"
+        requests.ephemeral-storage: 4Gi
+        limits.ephemeral-storage: 8Gi
         persistentvolumeclaims: "4"
         tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
     ---
@@ -55,6 +57,9 @@ TENANT = textwrap.dedent(
         - type: Container
           default:
             memory: 512Mi
+            ephemeral-storage: 512Mi
+          max:
+            ephemeral-storage: 2Gi
     ---
     apiVersion: v1
     kind: ServiceAccount
@@ -343,6 +348,48 @@ def test_the_claim_caps_may_sit_on_a_second_quota(repo: Path) -> None:
     )
     write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
     assert gate.check(repo) == []
+
+
+@pytest.mark.parametrize("key", list(gate.EPHEMERAL_QUOTA_KEYS))
+def test_a_quota_that_does_not_cap_ephemeral_storage_fails(repo: Path, key: str) -> None:
+    """emptyDir and writable layers draw on the node's disk, which nothing but
+    the quota bounds for the namespace as a whole."""
+    body = drop(TENANT, f"    {key}:")
+    assert key not in body
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    expected = f"ResourceQuota does not cap ephemeral storage; missing spec.hard keys {key}"
+    assert any(expected in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+# The fixture's Container ephemeral-storage lines, by the LimitRange key they sit under.
+EPHEMERAL_LIMITS = {
+    "default": "        ephemeral-storage: 512Mi",
+    "max": "        ephemeral-storage: 2Gi",
+}
+
+
+@pytest.mark.parametrize(
+    "unset", [("default",), ("max",), ("default", "max")], ids=["default", "max", "both"]
+)
+def test_a_limit_range_without_an_ephemeral_storage_limit_fails(
+    repo: Path, unset: tuple[str, ...]
+) -> None:
+    """A tenant container with no ephemeral-storage limit could spend the node's
+    disk unbounded, so the LimitRange supplies the default and the ceiling."""
+    body = TENANT
+    for key in unset:
+        assert body.count(EPHEMERAL_LIMITS[key] + "\n") == 1, key
+        body = body.replace(EPHEMERAL_LIMITS[key] + "\n", "")
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    expected = (
+        f"LimitRange demo-app-limits sets no ephemeral-storage under {', '.join(unset)}"
+    )
+    assert any(expected in p for p in problems), problems
+    assert len(problems) == 1, problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
 
 
 def test_a_cap_in_another_namespace_fails(repo: Path) -> None:

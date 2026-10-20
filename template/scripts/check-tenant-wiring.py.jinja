@@ -52,6 +52,12 @@ STORAGE_QUOTA_KEYS: tuple[str, ...] = (
 {%- else %}
 STORAGE_QUOTA_KEYS: tuple[str, ...] = ()
 {%- endif %}
+# emptyDir and container writable layers draw on the node's disk, which the
+# tenant-pod-volumes policy admits; only the quota and LimitRange bound them.
+EPHEMERAL_QUOTA_KEYS: tuple[str, ...] = (
+    "requests.ephemeral-storage",
+    "limits.ephemeral-storage",
+)
 # A pruned Namespace cascades through every object and PVC in it, which the db
 # Kustomization's `deletionPolicy: Orphan` cannot stop; its caps stay with it.
 PRUNE_ANNOTATION = "kustomize.toolkit.fluxcd.io/prune"
@@ -192,7 +198,9 @@ def _store_problems(docs: list, rel: str, namespace, labels: dict) -> list[str]:
 
 
 def _caps_problems(docs: list, rel: str) -> list[str]:
-    """Both namespace caps are declared, or the tenant quota is unbounded."""
+    """Both namespace caps are declared, the quota bounds claims and ephemeral
+    storage, and every Container limit bounds ephemeral storage by default and
+    at most, or the tenant can spend a node's disk."""
     problems = []
     for kind in REQUIRED_CAPS:
         if not _of_kind(docs, kind):
@@ -212,6 +220,28 @@ def _caps_problems(docs: list, rel: str) -> list[str]:
             f"spec.hard keys {', '.join(missing)} — the provisioner enforces no "
             "size, so nothing else bounds what the tenant may claim"
         )
+    missing = [k for k in EPHEMERAL_QUOTA_KEYS if k not in hard]
+    if quotas and missing:
+        problems.append(
+            f"{rel}: ResourceQuota does not cap ephemeral storage; missing "
+            f"spec.hard keys {', '.join(missing)} — emptyDir and writable layers "
+            "would be bounded only by the node's disk"
+        )
+    for limit_range in _of_kind(docs, "LimitRange"):
+        name = ((limit_range.get("metadata") or {}).get("name")) or "?"
+        for entry in ((limit_range.get("spec") or {}).get("limits") or []):
+            if not isinstance(entry, dict) or entry.get("type") != "Container":
+                continue
+            unset = [
+                k for k in ("default", "max")
+                if "ephemeral-storage" not in (entry.get(k) or {})
+            ]
+            if unset:
+                problems.append(
+                    f"{rel}: LimitRange {name} sets no ephemeral-storage under "
+                    f"{', '.join(unset)} — a tenant container with no limit would "
+                    "spend the node's disk unbounded"
+                )
     return problems
 
 

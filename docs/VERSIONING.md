@@ -464,6 +464,15 @@ teardown helper applies the same check, so deleting a claim while the zvol is
 unmounted fails closed instead of removing a same-named directory from the
 boot disk.
 
+### Every tenant's quota and LimitRange cap ephemeral storage
+
+`scripts/check-tenant-wiring.py` now requires `requests.ephemeral-storage` and
+`limits.ephemeral-storage` in every tenant's ResourceQuota and `ephemeral-storage`
+under `default` and `max` in its LimitRange Container entry, since emptyDir
+volumes and writable layers otherwise fill the node's disk unbounded. Before
+the update merges, add those keys to every existing tenant file, as the tenants
+README § Example shows, or `task lint:invariants` fails.
+
 ## Related
 
 - [RUNBOOKS.md](RUNBOOKS.md) § Updating the template — the operator-side procedure
