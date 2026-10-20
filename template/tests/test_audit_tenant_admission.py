@@ -819,16 +819,21 @@ def test_the_audit_allowlists_are_the_policies(constant, policy, variable):
 
 
 def test_the_audit_volume_set_is_the_policies():
-    """The pod-volumes policy carries its allowlist inline in the validation."""
+    """The pod-volumes policy carries its allowlist inline, one has() per source.
+    The audit checks each volume's keys instead, so its list adds `name`; a
+    Volume carries exactly one source, so the two refuse the same volumes."""
     spec = next(
         d["spec"] for d in yaml.safe_load_all(POLICY.read_text())
         if isinstance(d, dict) and d.get("kind") == "ValidatingAdmissionPolicy"
         and d["metadata"]["name"] == "tenant-pod-volumes"
     )
     expression = " ".join(spec["validations"][0]["expression"].split())
-    allowed = re.fullmatch(r"variables\.volumes\.all\(v, v\.all\(k, k in (\[.*\])\)\)",
-                           expression).group(1)
-    assert _script_list("RESTRICTED_VOLUME_KEYS") == ast.literal_eval(allowed)
+    body = re.fullmatch(r"variables\.volumes\.all\(v, (.*)\)", expression)
+    assert body, expression
+    terms = body.group(1).split(" || ")
+    sources = [re.fullmatch(r"has\(v\.([A-Za-z]+)\)", t) for t in terms]
+    assert all(sources), terms
+    assert _script_list("RESTRICTED_VOLUME_KEYS") == ["name"] + [m.group(1) for m in sources]
 
 
 def test_the_audit_forward_auth_pattern_is_the_policies():
