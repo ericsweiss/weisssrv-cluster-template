@@ -583,6 +583,26 @@ spec:
   the `{{ storage_backend }}`-backed volume behind the PV to it. Its snapshot
   schedule is the operator's, not the tenant's; `docs/RUNBOOKS.md` holds the
   backup and restore procedures.
+- **Pod volumes.** The example Namespace enforces Pod Security `baseline`
+  (warning and auditing at `restricted`). Baseline refuses `hostPath` but
+  admits `nfs`, `iscsi`, `cephfs`, `rbd`, `fc`, `flexVolume`, `gitRepo` and the
+  other node-mounted volume types, and kubelet mounts those with the node's
+  identity. The NAS exports authorise node addresses, and NFS carries no
+  per-tenant client identity, so an inline `nfs:` volume in a tenant Pod could
+  read or overwrite any export: another tenant's retained dumps, or the
+  platform's own. `tenant-pod-volumes`, Deny-bound on every `fluxcd.io/tenant`
+  namespace, therefore holds every tenant Pod, and the pod template of every
+  Deployment, StatefulSet, DaemonSet, ReplicaSet, Job and CronJob, to the
+  restricted volume set: `configMap`, `csi`, `downwardAPI`, `emptyDir`,
+  `ephemeral`, `persistentVolumeClaim`, `projected` and `secret`. Matching
+  Pods covers pods any other controller creates; the workload kinds are
+  matched so a bad template is refused at its own apply. A tenant that needs
+  NAS storage gets a platform-written PersistentVolume pre-bound by `claimRef`
+  to its claim, as a database dump landing zone does, and mounts the claim. The
+  model is baseline plus this policy rather than `restricted` enforcement,
+  because `restricted` also requires a non-root, capability-dropped,
+  seccomp-confined securityContext of every tenant container, a separate
+  migration for every tenant; the policy closes the volume gap without it.
 {%- if secrets_backend == 'onepassword' %}
 - **The Connect Service the example names.** `onepassword-connect` in namespace
   `external-secrets`, on port 8080, is what a tenant store's `connectHost`
@@ -717,12 +737,12 @@ spec:
   `global.rbac.aggregateClusterRoles: false` on the cert-manager release, and
   granting tenants Certificate and Issuer rights explicitly, would close the
   same path by authorization instead; the platform keeps the chart default and
-  the policy. In full, the set is ten: `tenant-traefik-route-refs`,
+  the policy. In full, the set is eleven: `tenant-traefik-route-refs`,
   `tenant-traefik-object-refs`, `tenant-traefik-ingress-refs`,
   `tenant-traefik-hostnames`, `tenant-certificates`,
   `tenant-certificaterequests`, `tenant-no-tcp-udp-routes`,
-  `tenant-traefik-tls-defaults`, `tenant-no-externalname-services` and
-  `tenant-no-manual-endpoints`.
+  `tenant-traefik-tls-defaults`, `tenant-no-externalname-services`,
+  `tenant-no-manual-endpoints` and `tenant-pod-volumes` ("Pod volumes" above).
   Once any tenant is onboarded, `task lint:tenant-traefik-isolation` fails if
   the policies or their bindings go missing, if a binding narrows its match
   below every tenant namespace, or if a policy fails open, narrows its resources,
@@ -763,7 +783,9 @@ spec:
   IngressRouteTCP or IngressRouteUDP; Certificates whose names are not all
   granted or whose issuer is not a platform ClusterIssuer or a core Issuer;
   tenant-written CertificateRequests to anything but a core Issuer; and a
-  TLSOption or TLSStore named `default`. It does not audit ACME Orders or
+  TLSOption or TLSStore named `default`; and Pods, Deployments, StatefulSets,
+  DaemonSets, ReplicaSets, Jobs and CronJobs with a volume outside the
+  restricted set. It does not audit ACME Orders or
   Challenges: tenant RBAC grants no create on them, so that policy is defence
   in depth only. A missing or wildcard grant, or one whose `maxPriority` is not
   a plain whole number up to 2147483647, is one line per route, Ingress and

@@ -53,6 +53,11 @@ registered in three places the way authentik's is:
   `BackupArtifactStale`
   ([kube-prometheus-stack/release.yaml](../kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml)).
 
+The dump job mounts the landing zone through its claim, a
+`persistentVolumeClaim` volume. An inline `nfs:` volume is refused in every
+tenant namespace by `tenant-pod-volumes` (tenants README, "Pod volumes"),
+because the exports trust node addresses, not tenants.
+
 ## What the tenant ships (example)
 
 Every object below lives in the tenant's own repository and namespace, with

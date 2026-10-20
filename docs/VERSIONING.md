@@ -281,7 +281,7 @@ notes for the tag that ships an entry repeat it under **Breaking changes**.
 ### Tenant isolation policies render unconditionally
 
 The tenant isolation set renders whatever the answers are:
-`infrastructure/configs/tenant-traefik-policy.yaml` with its ten
+`infrastructure/configs/tenant-traefik-policy.yaml` with its eleven
 ValidatingAdmissionPolicies and their Deny bindings on every `fluxcd.io/tenant`
 namespace, Traefik's `defaultTLSResourcesNamespace: traefik`, and the CNPG kinds
 in `tenant-crd-editor`. An update with default answers therefore installs them,
@@ -308,8 +308,10 @@ before it merges:
    carrying a `tailscale.com/*` annotation, and Ingresses of a class other
    than `traefik`; any IngressRouteTCP or IngressRouteUDP;
    Certificates off the grant or naming another issuer; tenant-written
-   CertificateRequests to anything but a core Issuer; and a TLSOption or
-   TLSStore named `default`. The next reconcile of each is refused. It does
+   CertificateRequests to anything but a core Issuer; a TLSOption or
+   TLSStore named `default`; and Pods, Deployments, StatefulSets, DaemonSets,
+   ReplicaSets, Jobs and CronJobs whose pod spec carries a volume outside the
+   restricted set. The next reconcile of each is refused. It does
    not audit ACME Orders or Challenges: tenant RBAC grants no create on them,
    so that policy is defence in depth only. Routes,
    Ingresses and Certificates read as ungranted until step 2's grants are in
@@ -343,6 +345,13 @@ before it merges:
    granted Traefik route, or to a platform-owned object, and replace any
    tenant TraefikService `failover` with a weighted service; the next apply of
    either is refused.
+7. Move every tenant volume the audit lists as outside the restricted set
+   (an inline `nfs`, `iscsi`, `cephfs`, `rbd`, `fc`, `flexVolume`, `gitRepo`
+   or any other node-mounted type) to a PersistentVolumeClaim, such as one
+   pre-bound to a platform NFS PersistentVolume. `tenant-pod-volumes` refuses
+   an existing tenant Pod or workload that still uses one on its next update,
+   a metadata-only update included, so delete such a Pod rather than leave
+   it: a controller removing its finalizer is refused too.
 
 What a tenant can no longer create or update:
 
@@ -390,7 +399,13 @@ What a tenant can no longer create or update:
 - an ExternalName, NodePort or LoadBalancer Service, a Service with
   `externalIPs`, or a Service with no selector (internal ClusterIP Services,
   headless ones included, stay allowed);
-- an Endpoints or EndpointSlice the control plane did not write.
+- an Endpoints or EndpointSlice the control plane did not write;
+- a Pod, or a Deployment, StatefulSet, DaemonSet, ReplicaSet, Job or CronJob
+  pod template, with a volume other than `configMap`, `csi`, `downwardAPI`,
+  `emptyDir`, `ephemeral`, `persistentVolumeClaim`, `projected` or `secret`
+  (the Pod Security restricted set). Tenant namespaces enforce `baseline`,
+  which refuses only `hostPath`; an inline `nfs` volume would mount any NAS
+  export from the node's address, which NFS cannot tell apart per tenant.
 
 ### Every tenant's Namespace, caps and hostname grant carry the prune guard
 

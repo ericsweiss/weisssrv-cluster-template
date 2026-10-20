@@ -271,6 +271,14 @@ Rules the template enforces:
 - **NFS is authenticated in transit.** Exports require TLS (`xprtsec=tls`) and
   mounts address the server **by hostname**, because the certificate has no
   address in its SAN.
+- **Tenant pods mount no NAS export directly.** The exports authorise k3s node
+  addresses and NFS carries no per-tenant client identity, so an inline `nfs:`
+  volume would reach every export its node may mount. Tenant namespaces
+  enforce Pod Security `baseline`, which admits `nfs`, so
+  `tenant-pod-volumes`, one of the eleven tenant ValidatingAdmissionPolicies
+  in `tenant-traefik-policy.yaml`, holds tenant pods and pod templates to the
+  restricted volume set; NAS storage reaches a tenant only as a
+  platform-written PersistentVolume pre-bound to its claim.
 - **Application state survives its consumer.** A zvol outlives the VM it is
   attached to; a PV outlives the pod and the node.
 
