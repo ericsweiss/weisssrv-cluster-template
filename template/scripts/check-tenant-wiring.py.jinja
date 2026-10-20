@@ -229,9 +229,17 @@ def _caps_problems(docs: list, rel: str) -> list[str]:
         )
     for limit_range in _of_kind(docs, "LimitRange"):
         name = ((limit_range.get("metadata") or {}).get("name")) or "?"
-        for entry in ((limit_range.get("spec") or {}).get("limits") or []):
-            if not isinstance(entry, dict) or entry.get("type") != "Container":
-                continue
+        entries = [
+            e for e in ((limit_range.get("spec") or {}).get("limits") or [])
+            if isinstance(e, dict) and e.get("type") == "Container"
+        ]
+        if not entries:
+            problems.append(
+                f"{rel}: LimitRange {name} has no Container entry — the defaults "
+                "and ceilings never apply, so a container with no resources block "
+                "lands unbounded inside the quota"
+            )
+        for entry in entries:
             unset = [
                 k for k in ("default", "max")
                 if "ephemeral-storage" not in (entry.get(k) or {})

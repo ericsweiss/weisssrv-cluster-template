@@ -392,6 +392,17 @@ def test_a_limit_range_without_an_ephemeral_storage_limit_fails(
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
+def test_a_limit_range_without_a_container_entry_fails(repo: Path) -> None:
+    """A Pod- or PVC-only LimitRange supplies none of the per-container defaults
+    and ceilings, so a container with no resources block lands unbounded."""
+    assert TENANT.count("    - type: Container\n") == 1
+    body = TENANT.replace("    - type: Container\n", "    - type: Pod\n", 1)
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    assert any("LimitRange demo-app-limits has no Container entry" in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
 def test_a_cap_in_another_namespace_fails(repo: Path) -> None:
     body = TENANT.replace("  name: demo-app-quota\n  namespace: demo-app",
                           "  name: demo-app-quota\n  namespace: other-app")
