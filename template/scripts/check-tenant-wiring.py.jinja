@@ -42,6 +42,16 @@ REQUIRED_NS_LABELS = (
 # The tenant's `admin` RoleBinding places no ceiling on what it may request, so
 # both caps are part of the wiring rather than a nicety.
 REQUIRED_CAPS = ("ResourceQuota", "LimitRange")
+{%- if tenant_storage %}
+# tenant-local does not enforce a claim's size, so the quota is the only bound
+# on how many claims, and how much storage, a tenant may declare.
+STORAGE_QUOTA_KEYS: tuple[str, ...] = (
+    "persistentvolumeclaims",
+    "tenant-local.storageclass.storage.k8s.io/requests.storage",
+)
+{%- else %}
+STORAGE_QUOTA_KEYS: tuple[str, ...] = ()
+{%- endif %}
 # A pruned Namespace cascades through every object and PVC in it, which the db
 # Kustomization's `deletionPolicy: Orphan` cannot stop; its caps stay with it.
 PRUNE_ANNOTATION = "kustomize.toolkit.fluxcd.io/prune"
@@ -190,6 +200,18 @@ def _caps_problems(docs: list, rel: str) -> list[str]:
                 f"{rel}: declares no {kind} — the tenant's admin RoleBinding places "
                 "no ceiling on what its pods may request"
             )
+    quotas = _of_kind(docs, "ResourceQuota")
+    hard: set = set()
+    for quota in quotas:
+        keys = (quota.get("spec") or {}).get("hard")
+        hard |= set(keys) if isinstance(keys, dict) else set()
+    missing = [k for k in STORAGE_QUOTA_KEYS if k not in hard]
+    if quotas and missing:
+        problems.append(
+            f"{rel}: ResourceQuota does not cap tenant-local claims; missing "
+            f"spec.hard keys {', '.join(missing)} — the provisioner enforces no "
+            "size, so nothing else bounds what the tenant may claim"
+        )
     return problems
 
 

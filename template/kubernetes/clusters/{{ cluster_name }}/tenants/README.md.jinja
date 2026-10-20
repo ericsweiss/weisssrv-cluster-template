@@ -315,8 +315,9 @@ spec:
     requests.memory: 4Gi
     limits.memory: 8Gi
 {%- if tenant_storage %}
-    # tenant-local sizes are not enforced; this bounds declared requests only.
-    # Use "0" for a tenant that runs no database.
+    # check-tenant-wiring requires both keys: tenant-local sizes are not
+    # enforced, so this bounds declared requests only. Use "0" for a tenant
+    # that runs no database.
     persistentvolumeclaims: "4"
     tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
 {%- endif %}

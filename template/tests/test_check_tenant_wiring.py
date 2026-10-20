@@ -40,6 +40,8 @@ TENANT = textwrap.dedent(
     spec:
       hard:
         pods: "10"
+        persistentvolumeclaims: "4"
+        tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
     ---
     apiVersion: v1
     kind: LimitRange
@@ -275,6 +277,72 @@ def test_a_missing_namespace_cap_fails(repo: Path, kind: str) -> None:
     problems = gate.check(repo)
     assert any(f"declares no {kind}" in p for p in problems), problems
     assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+# The tenant-local StorageClass ships only under tenant_storage; the gate
+# demands the claim caps exactly when it does.
+TENANT_LOCAL = (
+    REPO / "kubernetes" / "infrastructure" / "controllers" / "local-path-provisioner"
+    / "storageclass.yaml"
+)
+CLAIM_CAPS = (
+    "persistentvolumeclaims",
+    "tenant-local.storageclass.storage.k8s.io/requests.storage",
+)
+
+
+def test_the_claim_caps_are_required_exactly_when_tenant_local_ships() -> None:
+    assert gate.STORAGE_QUOTA_KEYS == (CLAIM_CAPS if TENANT_LOCAL.is_file() else ())
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [CLAIM_CAPS[:1], CLAIM_CAPS[1:], CLAIM_CAPS],
+    ids=["persistentvolumeclaims", "requests.storage", "both"],
+)
+def test_a_quota_that_does_not_cap_tenant_local_claims_fails(
+    repo: Path, missing: tuple[str, ...]
+) -> None:
+    """tenant-local sizes are not enforced, so the quota is the only bound on
+    how many claims, and how much storage, a tenant may declare."""
+    body = TENANT
+    for key in missing:
+        body = drop(body, f"    {key}:")
+        assert key not in body
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    if not TENANT_LOCAL.is_file():
+        assert problems == []
+        return
+    expected = (
+        "ResourceQuota does not cap tenant-local claims; missing spec.hard keys "
+        + ", ".join(missing)
+    )
+    assert any(expected in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_the_claim_caps_may_sit_on_a_second_quota(repo: Path) -> None:
+    """The keys are read across every ResourceQuota the tenant file declares."""
+    body = drop(TENANT, "    tenant-local.storageclass")
+    assert "tenant-local" not in body
+    body += textwrap.dedent(
+        """\
+        ---
+        apiVersion: v1
+        kind: ResourceQuota
+        metadata:
+          name: demo-app-storage
+          namespace: demo-app
+          annotations:
+            kustomize.toolkit.fluxcd.io/prune: disabled
+        spec:
+          hard:
+            tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
+        """
+    )
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    assert gate.check(repo) == []
 
 
 def test_a_cap_in_another_namespace_fails(repo: Path) -> None:
