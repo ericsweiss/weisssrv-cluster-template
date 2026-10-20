@@ -922,11 +922,52 @@ def fetch_dockerhub_version(svc: dict) -> str:
         current=svc.get("_current_version", ""),
         return_full_tag=True,
         name_filter=svc.get("dockerhub_name_filter", ""),
+        max_pages=svc.get("dockerhub_max_pages", 1),
         page_size=svc.get("dockerhub_page_size", 50),
     )
     if best_tag is None:
         raise RuntimeError(f"No matching tags found for {image} (regex: {tag_regex})")
+    _require_window_reached_pin(
+        image, tag_regex, best_tag, svc.get("_current_version", ""),
+        svc.get("version_prefix", ""),
+    )
     return best_tag
+
+
+def _captured(regex: str, tag: str) -> Optional[str]:
+    """The version `regex` captures from `tag` (the whole match without a group)."""
+    match = re.match(regex, tag or "")
+    if not match:
+        return None
+    return match.group(1) if match.lastindex else match.group(0)
+
+
+def _require_window_reached_pin(
+    image: str, regex: str, best: str, current: str, version_prefix: str,
+) -> None:
+    """Raise when the tag window ended before the pinned tag.
+
+    Docker Hub lists tags by last push, so the newest tag a short window holds
+    can sit below the pin and would print as a downgrade marked "up to date".
+    """
+    # A pin the entry's own regex does not read ("unknown", "latest", another
+    # tag scheme) has nothing to compare.
+    pin = _captured(regex, current)
+    found = _captured(regex, best)
+    if pin is None or found is None or not version_greater(pin, found):
+        return
+    if version_prefix and not current.startswith(version_prefix):
+        raise RuntimeError(
+            f"{image}: the pin {current} is outside version_prefix "
+            f"{version_prefix!r}, whose newest tag is {best} — move the prefix "
+            "with the pin"
+        )
+    raise RuntimeError(
+        f"{image}: the newest tag in the fetched window is {best}, older "
+        f"than the pin {current} — the window ended before the pinned tag; "
+        "add dockerhub_name_filter, or raise dockerhub_page_size or "
+        "dockerhub_max_pages"
+    )
 
 
 def fetch_lsio_version(svc: dict) -> str:

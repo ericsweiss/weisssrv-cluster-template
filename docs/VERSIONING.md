@@ -106,7 +106,7 @@ section — read it before running `copier update`.
 
 `lib_ref` is an answer, so a generated cluster can pin any library tag it likes —
 but exactly **one** pair is ever proved to work: the `lib_ref` default in
-`copier.yml`, currently weisssrv-lib `v0.22.0`. `validate-rendered-cluster`
+`copier.yml`, currently weisssrv-lib `v0.22.1`. `validate-rendered-cluster`
 renders the template with the answer fixtures — which do not answer `lib_ref`,
 so they inherit that default — and runs the real toolchain over the output
 against a checkout of the library at that ref.
@@ -287,7 +287,7 @@ namespace, Traefik's `defaultTLSResourcesNamespace: traefik`, and the CNPG kinds
 in `tenant-crd-editor`. An update with default answers therefore installs them,
 and a render with `tenant_storage` and `postgres_operator` both `false` differs
 from the previous release by that set with the docs, gates and audit script
-that go with it, by the `lib_ref` default (weisssrv-lib v0.22.0, with the
+that go with it, by the `lib_ref` default (weisssrv-lib v0.22.1, with the
 vendored copies that follow it), by the default version pins below, and by the
 tenant-volumes marker play in `ansible/playbooks/k3s.yml`, every task of which
 is skipped unless a VM disk mounts `/mnt/tenant-volumes`. It is not
