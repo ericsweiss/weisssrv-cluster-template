@@ -322,7 +322,8 @@ before it merges:
    that changes neither spec nor annotations, so a LoadBalancer Service's
    cleanup finalizer comes off; every other policy that matches UPDATE on a
    kind with a spec carries the same condition (a Tailscale Ingress's operator
-   finalizer, a foreground-deleted workload's garbage-collector one). It does
+   finalizer, a foreground-deleted workload's garbage-collector one), and the
+   Endpoints policy keys it on routing data, labels and annotations. It does
    not audit ACME Orders or Challenges: tenant RBAC grants no create on them,
    so that policy is defence in depth only. Routes,
    Ingresses and Certificates read as ungranted until step 2's grants are in
@@ -445,7 +446,7 @@ drops the override. A bump rewrites tag and digest together.
 ### Default version pins move with this release
 
 `copier update` with default answers moves these shipped defaults, which Flux
-reconciles on merge: external-secrets 2.13.0, Traefik 42.0.0 (a major: read
+reconciles on merge: external-secrets 2.13.0, Traefik 42.1.0 (a major: read
 its release notes against any Traefik values the cluster overrides),
 kube-prometheus-stack 92.11.0 (the CRDs chart stays at 32.0.1), Loki 18.17.1,
 Alloy 1.14.0, the Tailscale operator 1.104.1, Authentik 2026.8.4 and the
