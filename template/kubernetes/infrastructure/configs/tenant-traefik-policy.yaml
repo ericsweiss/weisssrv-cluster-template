@@ -237,6 +237,17 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["services"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
   variables:
     - name: platformRefs
       expression: >-
@@ -279,6 +290,17 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["services"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
   validations:
     - expression: "!has(object.spec.type) || object.spec.type != 'ExternalName'"
       message: "tenant Services may not be ExternalName (it would CNAME Traefik to another namespace)"
@@ -621,9 +643,12 @@ spec:
   failurePolicy: Fail
   matchConstraints:
     resourceRules:
+      # A Pod's volumes are immutable after creation, so UPDATE adds nothing and
+      # would refuse finalizer-only updates on pods admitted before this policy;
+      # the workload kinds keep UPDATE because their pod templates are mutable.
       - apiGroups: [""]
         apiVersions: ["v1"]
-        operations: ["CREATE", "UPDATE"]
+        operations: ["CREATE"]
         resources: ["pods"]
       - apiGroups: ["apps"]
         apiVersions: ["v1"]

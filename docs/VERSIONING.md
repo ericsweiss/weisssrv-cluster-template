@@ -313,7 +313,11 @@ before it merges:
    CertificateRequests to anything but a core Issuer; a TLSOption or
    TLSStore named `default`; and Pods, Deployments, StatefulSets, DaemonSets,
    ReplicaSets, Jobs and CronJobs whose pod spec carries a volume outside the
-   restricted set. The next reconcile of each is refused. It does
+   restricted set. The next reconcile of each is refused. Such a Service can
+   still be deleted: `tenant-traefik-ingress-refs` and
+   `tenant-no-externalname-services` skip an UPDATE to a terminating Service
+   that changes neither spec nor annotations, so a LoadBalancer Service's
+   cleanup finalizer comes off. It does
    not audit ACME Orders or Challenges: tenant RBAC grants no create on them,
    so that policy is defence in depth only. Routes,
    Ingresses and Certificates read as ungranted until step 2's grants are in
@@ -351,9 +355,10 @@ before it merges:
    (an inline `nfs`, `iscsi`, `cephfs`, `rbd`, `fc`, `flexVolume`, `gitRepo`
    or any other node-mounted type) to a PersistentVolumeClaim, such as one
    pre-bound to a platform NFS PersistentVolume. `tenant-pod-volumes` refuses
-   an existing tenant Pod or workload that still uses one on its next update,
-   a metadata-only update included, so delete such a Pod rather than leave
-   it: a controller removing its finalizer is refused too.
+   a workload that still uses one on its next update, a metadata-only update
+   included, but matches Pods on CREATE only, because a Pod's volumes are
+   immutable and matching UPDATE would refuse finalizer-only updates on pods
+   admitted before the policy; an existing Pod runs on and deletes cleanly.
 
 What a tenant can no longer create or update:
 

@@ -360,3 +360,21 @@ def test_a_tenant_route_with_parent_refs_is_refused_whatever_it_names(refs):
 def test_a_tenant_route_without_parent_refs_is_admitted():
     assert parent_refs_allowed({"routes": []})
     assert parent_refs_allowed({"routes": [], "parentRefs": []})
+
+
+# Skipped: an UPDATE to a terminating object that leaves spec and annotations
+# unchanged; the annotations clause keeps the name@provider check out of reach.
+FINALIZING_EXPRESSION = (
+    "request.operation != 'UPDATE' || !has(object.metadata.deletionTimestamp) || "
+    "object.spec != oldObject.spec || (has(object.metadata.annotations) ? "
+    "object.metadata.annotations : {}) != (has(oldObject.metadata.annotations) ? "
+    "oldObject.metadata.annotations : {})"
+)
+
+
+def test_the_ingress_refs_policy_lets_a_terminating_object_shed_its_finalizer():
+    spec = _policy("tenant-traefik-ingress-refs")
+    assert list(spec)[:3] == ["failurePolicy", "matchConstraints", "matchConditions"]
+    assert [(c["name"], " ".join(c["expression"].split())) for c in spec["matchConditions"]] == [
+        ("enforce-unless-finalizing-unchanged", FINALIZING_EXPRESSION)
+    ]

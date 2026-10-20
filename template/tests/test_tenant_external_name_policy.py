@@ -31,6 +31,17 @@ ANNOTATION_EXPRESSION = (
     f" || object.metadata.annotations.all(k, !k.startsWith('{TAILSCALE}'))"
 )
 ANNOTATION_MESSAGE = "tenant Services may not bypass Traefik through the Tailscale operator"
+# Skipped: an UPDATE to a terminating object that leaves spec and annotations
+# unchanged, so a legacy Service can shed its cleanup finalizer.
+FINALIZING_CONDITIONS = [{
+    "name": "enforce-unless-finalizing-unchanged",
+    "expression": (
+        "request.operation != 'UPDATE' || !has(object.metadata.deletionTimestamp) || "
+        "object.spec != oldObject.spec || (has(object.metadata.annotations) ? "
+        "object.metadata.annotations : {}) != (has(oldObject.metadata.annotations) ? "
+        "oldObject.metadata.annotations : {})"
+    ),
+}]
 TENANT_MATCH = {
     "namespaceSelector": {
         "matchExpressions": [{"key": "fluxcd.io/tenant", "operator": "Exists"}]
@@ -71,6 +82,11 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
             "resources": ["services"],
         }
     ]
+    assert list(spec)[:3] == ["failurePolicy", "matchConstraints", "matchConditions"]
+    assert [
+        {"name": c["name"], "expression": " ".join(c["expression"].split())}
+        for c in spec["matchConditions"]
+    ] == FINALIZING_CONDITIONS
     assert [
         {"expression": " ".join(v["expression"].split()), "message": v["message"]}
         for v in spec["validations"]
@@ -177,3 +193,44 @@ def test_a_tailscale_operator_annotation_is_refused(annotations):
 )
 def test_an_internal_service_without_tailscale_annotations_is_admitted(annotations):
     assert allowed(INTERNAL, annotations)
+
+
+def enforced(operation: str, old: dict | None, new: dict) -> bool:
+    """The match condition; a missing annotations map reads as an empty one."""
+    if operation != "UPDATE" or "deletionTimestamp" not in new["metadata"]:
+        return True
+    return new["spec"] != old["spec"] or (
+        new["metadata"].get("annotations") or {}
+    ) != (old["metadata"].get("annotations") or {})
+
+
+LEGACY = {
+    "metadata": {"finalizers": ["service.kubernetes.io/load-balancer-cleanup"],
+                 "deletionTimestamp": "2026-10-20T00:00:00Z"},
+    "spec": {"type": "LoadBalancer", "selector": {"app": "demo"}},
+}
+
+
+def test_a_terminating_service_may_shed_its_finalizer():
+    """Admitted before the policy, a LoadBalancer Service is refused by every
+    validation, so only the match condition lets its cleanup finalizer go."""
+    shed = {"metadata": {**LEGACY["metadata"], "finalizers": []}, "spec": LEGACY["spec"]}
+    assert not allowed(LEGACY["spec"])
+    assert not enforced("UPDATE", LEGACY, shed)
+
+
+@pytest.mark.parametrize(
+    ("operation", "change"),
+    [
+        ("UPDATE", {"spec": {"type": "ExternalName", "externalName": "x.example.com"}}),
+        ("UPDATE", {"metadata": {**LEGACY["metadata"],
+                                 "annotations": {"tailscale.com/expose": "true"}}}),
+        ("UPDATE", {"metadata": {"finalizers": []}}),
+        ("CREATE", {}),
+    ],
+    ids=["spec-changed", "annotations-changed", "not-terminating", "create"],
+)
+def test_any_other_write_is_enforced(operation, change):
+    """A tenant can hold its own Service in Terminating with a finalizer it added,
+    so a spec or annotation change there is still validated."""
+    assert enforced(operation, LEGACY, {**LEGACY, **change})

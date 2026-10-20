@@ -25,11 +25,22 @@ TRAEFIK_RELEASE = "kubernetes/infrastructure/controllers/traefik/release.yaml"
 BASELINE = {"tenant-crd-editor.yaml"}
 
 # The tenant policies, pinned whole: fail closed, these resources, and exactly
-# these variables and validation expressions (whitespace-normalized), or a
-# weakened copy passes by name. Change together with tenant-traefik-policy.yaml.
+# these match conditions, variables and validation expressions (whitespace-normalized),
+# or a weakened copy passes by name. Change together with tenant-traefik-policy.yaml.
 TENANT_POLICY = "kubernetes/infrastructure/configs/tenant-traefik-policy.yaml"
 CONFIGS_KUSTOMIZATION = "kubernetes/infrastructure/configs/kustomization.yaml"
 WRITES = ["CREATE", "UPDATE"]
+# The two Service-matching policies skip an UPDATE to a terminating object that
+# leaves spec and annotations unchanged, so a legacy Service can shed its finalizer.
+FINALIZING_UNCHANGED = [
+    (
+        "enforce-unless-finalizing-unchanged",
+        "request.operation != 'UPDATE' || !has(object.metadata.deletionTimestamp) || "
+        "object.spec != oldObject.spec || (has(object.metadata.annotations) ? "
+        "object.metadata.annotations : {}) != (has(oldObject.metadata.annotations) ? "
+        "oldObject.metadata.annotations : {})",
+    ),
+]
 # The route-level middleware rule, held on every per-service middlewares list too.
 MIDDLEWARE_REF = (
     "!m.name.contains('@') && (!has(m.namespace) || m.namespace == variables.ns || "
@@ -195,6 +206,7 @@ REQUIRED_POLICIES = {
                 "resources": ["services"],
             },
         ],
+        "matchConditions": FINALIZING_UNCHANGED,
         "variables": [
             ("platformRefs", (
                 "['traefik-lan-tailscale-only@kubernetescrd', "
@@ -223,6 +235,7 @@ REQUIRED_POLICIES = {
                 "resources": ["services"],
             },
         ],
+        "matchConditions": FINALIZING_UNCHANGED,
         "variables": [],
         "validations": [
             "!has(object.spec.type) || object.spec.type != 'ExternalName'",
@@ -446,7 +459,7 @@ REQUIRED_POLICIES = {
             {
                 "apiGroups": [""],
                 "apiVersions": ["v1"],
-                "operations": WRITES,
+                "operations": ["CREATE"],
                 "resources": ["pods"],
             },
             {
@@ -559,20 +572,22 @@ def _entries(items: object) -> list[dict] | None:
 
 
 def enforces(spec: object, required: dict) -> bool:
-    """The policy fails closed, reads exactly the required paramKind, matches
-    exactly the required resources with no match conditions, and carries exactly
-    the required variables and the required validation expressions, in order."""
+    """Fails closed on exactly the required paramKind and resources, under exactly
+    the required match conditions (for most policies none), with exactly the
+    required variables and validation expressions, in order."""
     if not isinstance(spec, dict):
         return False
+    conditions = _entries(spec.get("matchConditions") or [])
     variables = _entries(spec.get("variables") or [])
     validations = _entries(spec.get("validations"))
-    if variables is None or validations is None:
+    if conditions is None or variables is None or validations is None:
         return False
     return (
         spec.get("failurePolicy") == "Fail"
         and spec.get("paramKind") == required["paramKind"]
         and spec.get("matchConstraints") == {"resourceRules": required["resourceRules"]}
-        and not spec.get("matchConditions")
+        and [(c.get("name"), _cel(c.get("expression"))) for c in conditions]
+        == required.get("matchConditions", [])
         and [(v.get("name"), _cel(v.get("expression"))) for v in variables]
         == required["variables"]
         and [_cel(v.get("expression")) for v in validations] == required["validations"]

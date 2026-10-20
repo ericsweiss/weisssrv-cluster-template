@@ -77,7 +77,7 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
     assert "paramKind" not in spec
     assert spec["matchConstraints"] == {
         "resourceRules": [
-            {"apiGroups": [""], "apiVersions": ["v1"], "operations": WRITES,
+            {"apiGroups": [""], "apiVersions": ["v1"], "operations": ["CREATE"],
              "resources": ["pods"]},
             {"apiGroups": ["apps"], "apiVersions": ["v1"], "operations": WRITES,
              "resources": ["deployments", "statefulsets", "daemonsets", "replicasets"]},

@@ -327,7 +327,7 @@ def test_the_gate_pins_the_restricted_volume_set_on_pods_and_workloads():
     required = gate.REQUIRED_POLICIES["tenant-pod-volumes"]
     assert required["paramKind"] is None
     assert required["resourceRules"] == [
-        {"apiGroups": [""], "apiVersions": ["v1"], "operations": ["CREATE", "UPDATE"],
+        {"apiGroups": [""], "apiVersions": ["v1"], "operations": ["CREATE"],
          "resources": ["pods"]},
         {"apiGroups": ["apps"], "apiVersions": ["v1"], "operations": ["CREATE", "UPDATE"],
          "resources": ["deployments", "statefulsets", "daemonsets", "replicasets"]},
@@ -435,6 +435,87 @@ def test_the_gate_matches_update_only_where_the_webhook_leaves_spec_mutable():
         "challenges": ("CREATE",),
         "orders": ("CREATE", "UPDATE"),
     }
+
+
+def test_the_gate_matches_pods_on_create_and_pod_templates_on_both():
+    """A Pod's volumes are immutable after creation, so UPDATE on pods adds nothing
+    and would refuse finalizer-only updates on pods admitted before the policy;
+    workload pod templates stay mutable, so those kinds keep UPDATE."""
+    rules = gate.REQUIRED_POLICIES["tenant-pod-volumes"]["resourceRules"]
+    ops = {r: tuple(rule["operations"]) for rule in rules for r in rule["resources"]}
+    both = ("CREATE", "UPDATE")
+    assert ops == {
+        "pods": ("CREATE",),
+        "deployments": both, "statefulsets": both, "daemonsets": both,
+        "replicasets": both, "jobs": both, "cronjobs": both,
+    }
+
+
+FINALIZING_POLICIES = ("tenant-no-externalname-services", "tenant-traefik-ingress-refs")
+FINALIZING_EXPRESSION = (
+    "request.operation != 'UPDATE' || !has(object.metadata.deletionTimestamp) || "
+    "object.spec != oldObject.spec || (has(object.metadata.annotations) ? "
+    "object.metadata.annotations : {}) != (has(oldObject.metadata.annotations) ? "
+    "oldObject.metadata.annotations : {})"
+)
+
+
+def test_only_the_service_policies_skip_a_finalizer_only_update():
+    """A terminating legacy Service sheds its cleanup finalizer by an UPDATE that
+    changes neither spec nor annotations; only the two Service-matching policies
+    skip it, in the gate's pins and in the shipped file alike."""
+    pinned = {
+        name: required.get("matchConditions", [])
+        for name, required in gate.REQUIRED_POLICIES.items()
+    }
+    shipped = {
+        d["metadata"]["name"]: [
+            (c["name"], gate._cel(c["expression"]))
+            for c in d["spec"].get("matchConditions") or []
+        ]
+        for d in yaml.safe_load_all(SHIPPED_POLICY)
+        if d and d["kind"] == "ValidatingAdmissionPolicy"
+    }
+    expected = {
+        name: [("enforce-unless-finalizing-unchanged", FINALIZING_EXPRESSION)]
+        if name in FINALIZING_POLICIES else []
+        for name in gate.REQUIRED_POLICIES
+    }
+    assert pinned == expected
+    assert shipped == expected
+
+
+def _drop_conditions(spec):
+    spec.pop("matchConditions")
+
+
+def _condition_false(spec):
+    spec["matchConditions"][0]["expression"] = "false"
+
+
+def _ignore_annotations(spec):
+    condition = spec["matchConditions"][0]
+    condition["expression"] = condition["expression"].split(
+        "|| (has(object.metadata.annotations)"
+    )[0]
+    assert "annotations" not in condition["expression"]
+
+
+@pytest.mark.parametrize(
+    "weakening", [_drop_conditions, _condition_false, _ignore_annotations],
+    ids=["dropped", "false", "annotations-ignored"],
+)
+@pytest.mark.parametrize("name", FINALIZING_POLICIES)
+def test_a_widened_finalizer_exemption_keeps_the_gate_closed(tmp_path, name, weakening):
+    """Without the annotations clause a tenant could hold its own Service in
+    Terminating and rewrite the annotations these policies validate."""
+    root = build(
+        tmp_path,
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
+        RELEASE_WITH_VALUES.format(allow="true"),
+    )
+    write_policy(root, _mutated(name, weakening))
+    assert len(gate.check(root)) == 1
 
 
 def test_the_grant_policies_are_bound_per_tenant_not_by_label():
