@@ -465,18 +465,24 @@ REQUIRED_POLICIES = {
         "variables": [
             (
                 "volumes",
-                "request.resource.resource == 'pods' ? (has(object.spec.volumes) ? "
-                "object.spec.volumes : []) : request.resource.resource == 'cronjobs' ? "
-                "(has(object.spec.jobTemplate.spec.template.spec.volumes) ? "
+                "request.resource.resource == 'pods' ? (has(object.spec) && "
+                "has(object.spec.volumes) ? object.spec.volumes : []) : "
+                "request.resource.resource == 'cronjobs' ? (has(object.spec) && "
+                "has(object.spec.jobTemplate) && has(object.spec.jobTemplate.spec) && "
+                "has(object.spec.jobTemplate.spec.template) && "
+                "has(object.spec.jobTemplate.spec.template.spec) && "
+                "has(object.spec.jobTemplate.spec.template.spec.volumes) ? "
                 "object.spec.jobTemplate.spec.template.spec.volumes : []) : "
-                "(has(object.spec.template.spec.volumes) ? object.spec.template.spec.volumes : [])",
+                "(has(object.spec) && has(object.spec.template) && "
+                "has(object.spec.template.spec) && has(object.spec.template.spec.volumes) ? "
+                "object.spec.template.spec.volumes : [])",
             ),
         ],
         "validations": [
             (
-                "variables.volumes.all(v, v.all(k, k in ['name', 'configMap', 'csi', "
-                "'downwardAPI', 'emptyDir', 'ephemeral', 'persistentVolumeClaim', "
-                "'projected', 'secret']))"
+                "variables.volumes.all(v, has(v.configMap) || has(v.csi) || "
+                "has(v.downwardAPI) || has(v.emptyDir) || has(v.ephemeral) || "
+                "has(v.persistentVolumeClaim) || has(v.projected) || has(v.secret))"
             ),
         ],
     },

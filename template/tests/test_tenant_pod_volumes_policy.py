@@ -10,21 +10,36 @@ from conftest import REPO
 
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
 NAME = "tenant-pod-volumes"
-ALLOWED_KEYS = [
-    "name", "configMap", "csi", "downwardAPI", "emptyDir", "ephemeral",
+# The Pod Security restricted volume set. A Volume carries exactly one source,
+# so the policy admits a volume only when one of these is set; a source type
+# added upstream is refused until it is listed here.
+ALLOWED_SOURCES = [
+    "configMap", "csi", "downwardAPI", "emptyDir", "ephemeral",
     "persistentVolumeClaim", "projected", "secret",
 ]
+# Every path is has()-guarded down to the list, so no matched kind can make the
+# variable throw: a Fail policy that errors refuses every tenant write.
 VARIABLE = (
     "request.resource.resource == 'pods'"
-    " ? (has(object.spec.volumes) ? object.spec.volumes : [])"
+    " ? (has(object.spec) && has(object.spec.volumes) ? object.spec.volumes : [])"
     " : request.resource.resource == 'cronjobs'"
-    " ? (has(object.spec.jobTemplate.spec.template.spec.volumes)"
+    " ? (has(object.spec) && has(object.spec.jobTemplate)"
+    " && has(object.spec.jobTemplate.spec)"
+    " && has(object.spec.jobTemplate.spec.template)"
+    " && has(object.spec.jobTemplate.spec.template.spec)"
+    " && has(object.spec.jobTemplate.spec.template.spec.volumes)"
     " ? object.spec.jobTemplate.spec.template.spec.volumes : [])"
-    " : (has(object.spec.template.spec.volumes) ? object.spec.template.spec.volumes : [])"
+    " : (has(object.spec) && has(object.spec.template)"
+    " && has(object.spec.template.spec)"
+    " && has(object.spec.template.spec.volumes)"
+    " ? object.spec.template.spec.volumes : [])"
 )
+# has() on each source, not all() over the Volume's keys: the all() macro takes
+# lists and maps, and a typed Volume is neither.
 VALIDATION = (
-    "variables.volumes.all(v, v.all(k, k in ['name', 'configMap', 'csi', 'downwardAPI',"
-    " 'emptyDir', 'ephemeral', 'persistentVolumeClaim', 'projected', 'secret']))"
+    "variables.volumes.all(v, has(v.configMap) || has(v.csi) || has(v.downwardAPI)"
+    " || has(v.emptyDir) || has(v.ephemeral) || has(v.persistentVolumeClaim)"
+    " || has(v.projected) || has(v.secret))"
 )
 MESSAGE = (
     "tenant pods may use only configMap, csi, downwardAPI, emptyDir, ephemeral,"
@@ -89,19 +104,27 @@ def test_the_policy_is_deny_bound_on_every_tenant_namespace():
     ]
 
 
+def _at(obj: dict, *path: str) -> list[dict]:
+    """has()-guarded descent: any absent step reads as no volumes."""
+    for key in path:
+        if not isinstance(obj, dict) or key not in obj:
+            return []
+        obj = obj[key]
+    return obj
+
+
 def volumes_of(resource: str, obj: dict) -> list[dict]:
     """The `volumes` variable: the Pod's own list, a CronJob's job template's,
-    or any other workload's pod template's; absent reads as empty."""
-    spec = obj["spec"]
+    or any other workload's pod template's; any absent step reads as empty."""
     if resource == "pods":
-        return spec.get("volumes", [])
+        return _at(obj, "spec", "volumes")
     if resource == "cronjobs":
-        return spec["jobTemplate"]["spec"]["template"]["spec"].get("volumes", [])
-    return spec["template"]["spec"].get("volumes", [])
+        return _at(obj, "spec", "jobTemplate", "spec", "template", "spec", "volumes")
+    return _at(obj, "spec", "template", "spec", "volumes")
 
 
 def allowed(resource: str, obj: dict) -> bool:
-    return all(all(k in ALLOWED_KEYS for k in v) for v in volumes_of(resource, obj))
+    return all(any(s in v for s in ALLOWED_SOURCES) for v in volumes_of(resource, obj))
 
 
 def shaped(resource: str, volumes: list[dict] | None) -> dict:
@@ -166,3 +189,41 @@ def test_the_restricted_volume_set_is_admitted(resource):
 @pytest.mark.parametrize("volumes", [None, []], ids=["absent", "empty"])
 def test_a_pod_spec_without_volumes_is_admitted(resource, volumes):
     assert allowed(resource, shaped(resource, volumes))
+
+
+@pytest.mark.parametrize(
+    ("resource", "obj"),
+    [
+        ("pods", {}),
+        ("deployments", {}),
+        ("deployments", {"spec": {}}),
+        ("deployments", {"spec": {"template": {}}}),
+        ("cronjobs", {"spec": {}}),
+        ("cronjobs", {"spec": {"jobTemplate": {}}}),
+        ("cronjobs", {"spec": {"jobTemplate": {"spec": {}}}}),
+        ("cronjobs", {"spec": {"jobTemplate": {"spec": {"template": {}}}}}),
+    ],
+)
+def test_an_absent_step_on_the_path_reads_as_no_volumes(resource, obj):
+    """Each step is guarded, so a partial object evaluates instead of erroring
+    a Fail policy into refusing the write; API validation refuses it later."""
+    assert volumes_of(resource, obj) == []
+
+
+def test_every_path_the_variable_reads_is_guarded():
+    """Every object.<path> the variable dereferences is has()-checked on each
+    of its prefixes, so no branch can throw on any matched kind."""
+    import re
+
+    paths = set(re.findall(r"object((?:\.[A-Za-z]+)+)", VARIABLE))
+    guarded = set(re.findall(r"has\(object((?:\.[A-Za-z]+)+)\)", VARIABLE))
+    for path in paths:
+        steps = path.lstrip(".").split(".")
+        for i in range(1, len(steps) + 1):
+            assert "." + ".".join(steps[:i]) in guarded, path
+
+
+def test_a_volume_with_no_listed_source_is_refused():
+    """A source type added upstream carries a key the list does not name."""
+    assert not allowed("pods", shaped("pods", [{"name": "new", "futureSource": {}}]))
+    assert not allowed("pods", shaped("pods", [{"name": "bare"}]))

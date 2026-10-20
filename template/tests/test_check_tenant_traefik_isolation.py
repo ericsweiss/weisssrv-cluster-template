@@ -313,10 +313,10 @@ def test_the_gate_pins_eleven_policies():
     assert "tenant-pod-volumes" in gate.REQUIRED_POLICIES
 
 
-# The Pod Security restricted volume set, plus each volume's own name.
-RESTRICTED_VOLUME_KEYS = (
-    "['name', 'configMap', 'csi', 'downwardAPI', 'emptyDir', 'ephemeral', "
-    "'persistentVolumeClaim', 'projected', 'secret']"
+# The Pod Security restricted volume set, each admitted by has() on its source.
+RESTRICTED_VOLUME_SOURCES = (
+    "has(v.configMap) || has(v.csi) || has(v.downwardAPI) || has(v.emptyDir) || "
+    "has(v.ephemeral) || has(v.persistentVolumeClaim) || has(v.projected) || has(v.secret)"
 )
 
 
@@ -336,20 +336,26 @@ def test_the_gate_pins_the_restricted_volume_set_on_pods_and_workloads():
     ]
     assert required["variables"] == [(
         "volumes",
-        "request.resource.resource == 'pods' ? (has(object.spec.volumes) ? "
-        "object.spec.volumes : []) : request.resource.resource == 'cronjobs' ? "
-        "(has(object.spec.jobTemplate.spec.template.spec.volumes) ? "
+        "request.resource.resource == 'pods' ? (has(object.spec) && "
+        "has(object.spec.volumes) ? object.spec.volumes : []) : "
+        "request.resource.resource == 'cronjobs' ? (has(object.spec) && "
+        "has(object.spec.jobTemplate) && has(object.spec.jobTemplate.spec) && "
+        "has(object.spec.jobTemplate.spec.template) && "
+        "has(object.spec.jobTemplate.spec.template.spec) && "
+        "has(object.spec.jobTemplate.spec.template.spec.volumes) ? "
         "object.spec.jobTemplate.spec.template.spec.volumes : []) : "
-        "(has(object.spec.template.spec.volumes) ? object.spec.template.spec.volumes : [])",
+        "(has(object.spec) && has(object.spec.template) && "
+        "has(object.spec.template.spec) && has(object.spec.template.spec.volumes) ? "
+        "object.spec.template.spec.volumes : [])",
     )]
     assert required["validations"] == [
-        f"variables.volumes.all(v, v.all(k, k in {RESTRICTED_VOLUME_KEYS}))"
+        f"variables.volumes.all(v, {RESTRICTED_VOLUME_SOURCES})"
     ]
 
 
 def _admit_nfs(spec):
     spec["validations"][0]["expression"] = spec["validations"][0]["expression"].replace(
-        "'secret']", "'secret', 'nfs']"
+        "has(v.secret))", "has(v.secret) || has(v.nfs))"
     )
 
 
