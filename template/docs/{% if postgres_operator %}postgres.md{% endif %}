@@ -41,8 +41,9 @@ zvol's size bounds the blast radius to the tenant volumes, and
 A tenant that also dumps its database needs a backup landing zone on the NAS,
 registered in three places the way authentik's is:
 
-- an NFS PersistentVolume pre-bound by `claimRef` to the dump claim, with
-  `storageClassName: ""` and `persistentVolumeReclaimPolicy: Retain`
+- an NFS PersistentVolume named `<namespace>-<purpose>` (the tenant admission
+  policy admits a `""` claim only for a volume so named), pre-bound by `claimRef`
+  to the dump claim, with `storageClassName: ""` and `persistentVolumeReclaimPolicy: Retain`
   ([kubernetes/apps/authentik/storage.yaml](../kubernetes/apps/authentik/storage.yaml));
 - a per-app `nas_storage_exports` entry with its own `fsid` and
   `xprtsec: "tls"`

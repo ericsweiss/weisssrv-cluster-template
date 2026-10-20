@@ -278,8 +278,8 @@ for ns in $namespaces; do
         audit CronJob "$cronjobs" "$VOLUME_CHECKS"
         # tenant-pvc-storageclasses: tenant-local, or "" for a platform-written static volume.
         jq -r --arg ns "$ns" '.items[] | (if (.spec | has("storageClassName")) then .spec.storageClassName else null end) as $s
-            | if $s == "" and ((.spec.volumeName // "") == "")
-              then "\($ns) PersistentVolumeClaim/\(.metadata.name): storageClassName \"\" without volumeName"
+            | if $s == "" and ((.spec.volumeName // "") | startswith($ns + "-") | not)
+              then "\($ns) PersistentVolumeClaim/\(.metadata.name): storageClassName \"\" with volumeName \(.spec.volumeName // "unset") not named for this namespace"
               elif $s != "" and $s != "tenant-local"
               then "\($ns) PersistentVolumeClaim/\(.metadata.name): storageClassName \($s // "unset")"
               else empty end' <<<"$claims" ||

@@ -530,8 +530,8 @@ REQUIRED_POLICIES = {
             (
                 "has(object.spec.storageClassName) && "
                 "(object.spec.storageClassName == 'tenant-local' || "
-                "(object.spec.storageClassName == '' && has(object.spec.volumeName) "
-                "&& object.spec.volumeName != ''))"
+                "(object.spec.storageClassName == '' && has(object.spec.volumeName) && "
+                "object.spec.volumeName.startsWith(object.metadata.namespace + '-')))"
             ),
         ],
     },

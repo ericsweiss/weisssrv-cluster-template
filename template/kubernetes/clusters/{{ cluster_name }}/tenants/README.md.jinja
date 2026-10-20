@@ -622,10 +622,12 @@ spec:
   seccomp-confined securityContext of every tenant container, a separate
   migration for every tenant; the policy closes the volume gap without it.
 - **Claim classes.** A tenant PersistentVolumeClaim names `tenant-local`, or
-  `storageClassName: ""` plus `volumeName` for a platform-written static
-  PersistentVolume pre-bound to it by `claimRef`, as a database dump landing
-  zone's claim is; without `volumeName` a `""` claim would bind any unbound
-  classless volume.
+  `storageClassName: ""` plus a `volumeName` of the form `<namespace>-<purpose>`
+  for a platform-written static PersistentVolume pre-bound to it by `claimRef`,
+  as a database dump landing zone's claim is. Platform-written tenant volumes
+  carry the tenant's namespace as their name prefix, so a `""` claim can name
+  only a volume written for its own namespace, never another tenant's or the
+  platform's own.
   `tenant-pvc-storageclasses`, Deny-bound on every `fluxcd.io/tenant`
   namespace, refuses any other class: the default class or any other
   provisioner would land tenant data on a node disk that no backup covers and

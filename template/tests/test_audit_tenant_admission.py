@@ -169,7 +169,7 @@ CLEAN_APP = {
     "deployments": [workload("web", RESTRICTED_VOLUMES)],
     "cronjobs": [workload("dump", RESTRICTED_VOLUMES, cron=True)],
     # A claim on tenant-local, and the dump landing zone's static claim with "".
-    "persistentvolumeclaims": [claim("data", "tenant-local"), claim("pg-dump", "", "tenant-dumps")],
+    "persistentvolumeclaims": [claim("data", "tenant-local"), claim("pg-dump", "", "demo-pg-dump")],
     "ingressroutes": [
         named("web", {
             "routes": [ROUTE],
@@ -731,7 +731,11 @@ POLICY_CASES = {
     ),
     "claim-empty-class-no-volume": (
         _with("persistentvolumeclaims", claim("loose", "")),
-        'demo PersistentVolumeClaim/loose: storageClassName "" without volumeName',
+        'demo PersistentVolumeClaim/loose: storageClassName "" with volumeName unset not named for this namespace',
+    ),
+    "claim-empty-class-foreign-volume": (
+        _with("persistentvolumeclaims", claim("grab", "", "loki-data")),
+        'demo PersistentVolumeClaim/grab: storageClassName "" with volumeName loki-data not named for this namespace',
     ),
     "claim-local-path": (
         _with("persistentvolumeclaims", claim("scratch", "local-path")),

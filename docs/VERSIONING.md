@@ -428,7 +428,8 @@ What a tenant can no longer create or update:
   export from the node's address, which NFS cannot tell apart per tenant;
 - a PersistentVolumeClaim on any StorageClass but `tenant-local`, the
   default class included, other than a `storageClassName: ""` claim for a
-  platform-written static volume pre-bound by `claimRef`. An omitted class
+  platform-written static volume named `<namespace>-<purpose>` and pre-bound by
+  `claimRef`. An omitted class
   takes the default before validation, so it is refused too unless the
   default is `tenant-local`.
 

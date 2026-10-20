@@ -14,11 +14,13 @@ VALIDATION = (
     "has(object.spec.storageClassName)"
     " && (object.spec.storageClassName == 'tenant-local'"
     " || (object.spec.storageClassName == ''"
-    " && has(object.spec.volumeName) && object.spec.volumeName != ''))"
+    " && has(object.spec.volumeName)"
+    " && object.spec.volumeName.startsWith(object.metadata.namespace + '-')))"
 )
 MESSAGE = (
     "tenant claims must use the tenant-local StorageClass, or name a platform-written"
-    " static volume with storageClassName \"\" and volumeName"
+    " static volume with storageClassName \"\" and a volumeName of the form"
+    " <namespace>-<purpose>"
 )
 TENANT_MATCH = {
     "namespaceSelector": {
@@ -84,7 +86,8 @@ def allowed(claim: dict) -> bool:
         return False
     if spec["storageClassName"] == "tenant-local":
         return True
-    return spec["storageClassName"] == "" and bool(spec.get("volumeName"))
+    prefix = claim["metadata"]["namespace"] + "-"
+    return spec["storageClassName"] == "" and (spec.get("volumeName") or "").startswith(prefix)
 
 
 def claim(storage_class: str | None, volume_name: str | None = None) -> dict:
@@ -97,7 +100,10 @@ def claim(storage_class: str | None, volume_name: str | None = None) -> dict:
         spec["storageClassName"] = storage_class
     if volume_name is not None:
         spec["volumeName"] = volume_name
-    return {"apiVersion": "v1", "kind": "PersistentVolumeClaim", "spec": spec}
+    return {
+        "apiVersion": "v1", "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "dumps", "namespace": "demo"}, "spec": spec,
+    }
 
 
 def test_a_claim_on_tenant_local_is_admitted():
@@ -107,7 +113,14 @@ def test_a_claim_on_tenant_local_is_admitted():
 def test_a_static_claim_with_an_empty_class_is_admitted():
     """The dump landing zone: a platform-written PersistentVolume pre-bound to
     the claim by claimRef, which the claim names with storageClassName ""."""
-    assert allowed(claim("", volume_name="tenant-dumps"))
+    assert allowed(claim("", volume_name="demo-dumps"))
+
+
+@pytest.mark.parametrize("volume_name", ["other-dumps", "demo", "demodumps", "loki-data"])
+def test_an_empty_class_claim_naming_another_tenants_or_a_platform_volume_is_refused(volume_name):
+    """A platform-written tenant volume is named <namespace>-<purpose>, so a
+    name without this claim's namespace prefix is not one written for it."""
+    assert not allowed(claim("", volume_name=volume_name))
 
 
 @pytest.mark.parametrize("storage_class", ["local-path", "nfs-client", "tenant-local-2", "TENANT-LOCAL"])
