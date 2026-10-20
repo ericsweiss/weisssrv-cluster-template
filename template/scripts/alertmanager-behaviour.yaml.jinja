@@ -60,3 +60,13 @@ escalation_pairs:
   - critical: CertExpiringCritical
     warning: CertExpiringWarning
     equal: [namespace, name]
+{%- if tenant_storage %}
+  - critical: TenantVolumesNearlyFull
+    warning: TenantVolumesFilling
+    equal: [instance]
+{%- endif %}
+{%- if postgres_operator %}
+  - critical: CNPGBaseBackupStaleCritical
+    warning: CNPGBaseBackupStale
+    equal: [namespace, pod]
+{%- endif %}

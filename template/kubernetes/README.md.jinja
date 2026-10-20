@@ -95,6 +95,9 @@ reconcile. Escape a deliberate literal as `$${...}`.
 | `cluster_secrets_vault` | Vault the secret store reads |
 | `cluster_git_host` / `cluster_runbook_base_url` | Git host; runbook link prefix for alerts |
 | `cluster_nas_host` / `cluster_smtp_host` / `cluster_alert_email` | Host-side services the platform talks to |
+{%- if tenant_storage %}
+| `cluster_tenant_volumes_zvol` | the zvol `hosts.yml` mounts at `/mnt/tenant-volumes`; the `tenant-local` provisioner refuses a root whose marker names another |
+{%- endif %}
 {%- if vpn_tailscale %}
 | `cluster_upstream_dns_servers` | LAN resolvers the tailnet override zone forwards to |
 | `cluster_tailnet_dns_suffix` | MagicDNS suffix (`<tailnet>.ts.net`) |

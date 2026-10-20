@@ -1,0 +1,80 @@
+---
+# promtool tests for the base-backup age alerts at a 15m interval, because
+# their windows are 30h and 54h.
+rule_files:
+  - rules.yaml
+evaluation_interval: 15m
+tests:
+  - interval: 15m
+    input_series:
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="app", pod="app-db-1"}'
+        values: '3600x260'
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="other-app", pod="other-app-db-1"}'
+        values: '0+900x260'
+    alert_rule_test:
+      - eval_time: 31h45m
+        alertname: CNPGBaseBackupStale
+        exp_alerts: []
+      - eval_time: 32h30m
+        alertname: CNPGBaseBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: app
+              pod: app-db-1
+      - eval_time: 55h45m
+        alertname: CNPGBaseBackupStaleCritical
+        exp_alerts: []
+      - eval_time: 56h30m
+        alertname: CNPGBaseBackupStaleCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: app
+              pod: app-db-1
+  # Both databases appear at 60h, so time() is far from zero as in production.
+  # "late" first backs up at 62h: the age alerts fire 31h and 55h after that.
+  # "never" stays at 0: only CNPGNeverBackedUp fires, 31h after it appeared.
+  - interval: 15m
+    input_series:
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="late", pod="late-db-1"}'
+        values: '_x240 0x7 223200x240'
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="never", pod="never-db-1"}'
+        values: '_x240 0x250'
+    alert_rule_test:
+      - eval_time: 61h30m
+        alertname: CNPGBaseBackupStale
+        exp_alerts: []
+      - eval_time: 61h30m
+        alertname: CNPGBaseBackupStaleCritical
+        exp_alerts: []
+      - eval_time: 90h45m
+        alertname: CNPGNeverBackedUp
+        exp_alerts: []
+      - eval_time: 91h30m
+        alertname: CNPGNeverBackedUp
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: never
+              pod: never-db-1
+      - eval_time: 92h45m
+        alertname: CNPGBaseBackupStale
+        exp_alerts: []
+      - eval_time: 93h30m
+        alertname: CNPGBaseBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: late
+              pod: late-db-1
+      - eval_time: 116h45m
+        alertname: CNPGBaseBackupStaleCritical
+        exp_alerts: []
+      - eval_time: 117h30m
+        alertname: CNPGBaseBackupStaleCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: late
+              pod: late-db-1

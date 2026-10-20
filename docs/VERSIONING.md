@@ -106,7 +106,7 @@ section — read it before running `copier update`.
 
 `lib_ref` is an answer, so a generated cluster can pin any library tag it likes —
 but exactly **one** pair is ever proved to work: the `lib_ref` default in
-`copier.yml`, currently weisssrv-lib `v0.21.1`. `validate-rendered-cluster`
+`copier.yml`, currently weisssrv-lib `v0.22.1`. `validate-rendered-cluster`
 renders the template with the answer fixtures — which do not answer `lib_ref`,
 so they inherit that default — and runs the real toolchain over the output
 against a checkout of the library at that ref.
@@ -272,6 +272,223 @@ output shape, so its call sites in `template/.pre-commit-config.yaml`,
 template's CLI. Each is a declared `forked:` entry carrying the difference in
 its `reason:`, held to the library by `reconciled_sha256` so a library-side
 change forces a review.
+
+## Upgrade notes
+
+Hand work a `copier update` brings with it that no question gates. The release
+notes for the tag that ships an entry repeat it under **Breaking changes**.
+
+### Tenant isolation policies render unconditionally
+
+The tenant isolation set renders whatever the answers are:
+`infrastructure/configs/tenant-traefik-policy.yaml` with its twelve
+ValidatingAdmissionPolicies and their Deny bindings on every `fluxcd.io/tenant`
+namespace, Traefik's `defaultTLSResourcesNamespace: traefik`, and the CNPG kinds
+in `tenant-crd-editor`. An update with default answers therefore installs them,
+and a render with `tenant_storage` and `postgres_operator` both `false` differs
+from the previous release by that set with the docs, gates and audit script
+that go with it, by the `lib_ref` default (weisssrv-lib v0.22.1, with the
+vendored copies that follow it), by the default version pins below, and by the
+tenant-volumes marker play in `ansible/playbooks/k3s.yml`, every task of which
+is skipped unless a VM disk mounts `/mnt/tenant-volumes`. It is not
+byte-identical.
+
+The policies act on CREATE and UPDATE, so an object a tenant already holds
+stays until its next apply, which they then refuse. On the update branch,
+before it merges:
+
+1. Run `scripts/audit-tenant-admission.sh` (it arrives with the update; it was
+   `audit-tenant-services.sh`) against the cluster and fix each object it
+   lists: ExternalName, NodePort or
+   LoadBalancer Services, Services with `externalIPs`, selectorless Services,
+   hand-written Endpoints or EndpointSlices; IngressRoutes and Ingresses off
+   the grant or carrying a refused annotation, `name@provider` or
+   cross-namespace reference, `HostRegexp` or priority; Middlewares with a
+   forwardAuth address outside the allowed forms; TraefikServices with
+   cross-namespace or `@` references (`highestRandomWeight` services included)
+   or a `failover`; a per-service middleware on a route service, errors page,
+   weighted, `highestRandomWeight` or mirroring service outside the namespace
+   and the platform middleware allowlist; Services and Ingresses
+   carrying a `tailscale.com/*` annotation, and Ingresses of a class other
+   than `traefik`; any IngressRouteTCP or IngressRouteUDP;
+   Certificates off the grant or naming another issuer; tenant-written
+   CertificateRequests to anything but a core Issuer; a TLSOption or
+   TLSStore named `default`; and Pods, Deployments, StatefulSets, DaemonSets,
+   ReplicaSets, Jobs and CronJobs whose pod spec carries a volume outside the
+   restricted set; and PersistentVolumeClaims on a StorageClass other than
+   `tenant-local` or `""`. The next reconcile of each is refused. Such a Service can
+   still be deleted: `tenant-traefik-ingress-refs` and
+   `tenant-no-externalname-services` skip an UPDATE to a terminating Service
+   that changes neither spec nor annotations, so a LoadBalancer Service's
+   cleanup finalizer comes off; every other policy that matches UPDATE on a
+   kind with a spec carries the same condition (a Tailscale Ingress's operator
+   finalizer, a foreground-deleted workload's garbage-collector one), and the
+   Endpoints policy keys it on routing data, labels and annotations. It does
+   not audit ACME Orders or Challenges: tenant RBAC grants no create on them,
+   so that policy is defence in depth only. Routes,
+   Ingresses and Certificates read as ungranted until step 2's grants are in
+   the cluster, so run it again after step 2. A tenant that needs a port
+   outside Traefik asks the platform to expose it.
+2. For each tenant, add a `tenant-routing-<ns>` ConfigMap in `flux-system`
+   granting its exact hostnames (no wildcards: a grant with `*` refuses every
+   route, Ingress and Certificate in the namespace), and the Deny bindings of `tenant-traefik-hostnames`
+   and `tenant-certificates` that read it, before that tenant's routes and
+   Certificates reconcile again. The tenants README § Example carries all three
+   ("Hostname grant"); `task lint:tenant-traefik-isolation` fails until every
+   tenant has them. A tenant Certificate whose names are not in the grant, or
+   that names another ClusterIssuer, is refused on its next apply.
+3. Remove any tenant TLSOption or TLSStore named `default`; Traefik already
+   ignores it once `defaultTLSResourcesNamespace` is set.
+4. List the CertificateRequests in tenant namespaces that name anything but a
+   core `cert-manager.io` Issuer: a ClusterIssuer or an external issuer kind
+   (`kubectl get certificaterequests -A -o json`, filtered on
+   `spec.issuerRef.kind`, `spec.issuerRef.group` and `spec.username`). One
+   whose `spec.username` is not
+   `system:serviceaccount:cert-manager:cert-manager` was written by hand before
+   `tenant-certificaterequests` applied: tenants hold `admin`, which the
+   cert-manager chart's default `aggregateClusterRoles` extends with
+   CertificateRequest write. Delete it, and revoke the certificate in its
+   `status.certificate` if that names a hostname the tenant was never granted.
+5. Remove any `traefik.ingress.kubernetes.io/router.rule`, `router.priority`
+   or `router.rulesyntax` annotation from tenant Ingresses; the next apply of
+   one that still carries it is refused.
+6. Move anything the audit lists as published by the Tailscale operator (a
+   `tailscale.com/*` annotation or a non-`traefik` Ingress class) behind a
+   granted Traefik route, or to a platform-owned object, and replace any
+   tenant TraefikService `failover` with a weighted service; the next apply of
+   either is refused.
+7. Move every tenant volume the audit lists as outside the restricted set
+   (an inline `nfs`, `iscsi`, `cephfs`, `rbd`, `fc`, `flexVolume`, `gitRepo`
+   or any other node-mounted type) to a PersistentVolumeClaim, such as one
+   pre-bound to a platform NFS PersistentVolume. `tenant-pod-volumes` refuses
+   a workload that still uses one on its next update, a metadata-only update
+   included, but matches Pods and Jobs on CREATE only, because a Pod's volumes
+   and a Job's pod template are immutable and matching UPDATE would refuse
+   finalizer-only updates on objects admitted before the policy; an existing
+   Pod or Job runs on and deletes cleanly.
+8. Migrate every claim the audit lists on a StorageClass other than
+   `tenant-local` or `""` before the policies bind: copy its data to a new
+   `tenant-local` claim, or to a platform-written static PersistentVolume
+   pre-bound to a `storageClassName: ""` claim, and point the workload at it.
+   A claim's class is immutable, so `tenant-pvc-storageclasses` matches
+   CREATE only: the old claim stays bound, but recreating it as it stands,
+   from the tenant's repository or a restore, is refused.
+
+What a tenant can no longer create or update:
+
+- an IngressRoute, Middleware, TraefikService or TLS reference to another
+  namespace, other than the allowlisted platform middlewares, and any
+  `name@provider` reference outside that allowlist, in a CRD or a
+  `traefik.ingress.kubernetes.io/*` annotation;
+- an IngressRoute or Ingress on a hostname its grant does not list; a route
+  that does not open with `Host()` on a granted hostname, or that uses `||`,
+  `HostRegexp` or a second `Host`; a `priority` when the grant carries no
+  `maxPriority`, or above it; a route `tls.domains` name not granted; an
+  Ingress rule with no host, a TLS host or `router.tls.domains.*` annotation
+  name not granted, a default backend, or a `router.rule`, `router.priority`
+  or `router.rulesyntax` annotation in any letter case;
+- a cert-manager Certificate naming a hostname its grant does not list, a
+  wildcard, an IP, URI, email, otherName or `literalSubject`, or an issuer
+  other than `letsencrypt-prod`, `letsencrypt-staging` or an Issuer in its own
+  namespace;
+- a cert-manager CertificateRequest to a ClusterIssuer or to any external
+  issuer kind or group, which cert-manager now creates from a validated
+  Certificate only (a request to a `cert-manager.io` Issuer in the tenant's
+  own namespace stays allowed);
+- an ACME Order or Challenge (`acme.cert-manager.io`) created by anyone but
+  cert-manager's controller, or an Order updated by anyone but that controller
+  or the garbage collector; tenant RBAC already grants no Order create or
+  update, so this is defence in depth and refuses nothing a tenant does today.
+  CertificateRequests and Challenges are matched on CREATE only, because
+  cert-manager's webhook refuses their spec changes after creation, which
+  keeps a finalizer removal from wedging their deletion;
+- an IngressRouteTCP or IngressRouteUDP;
+- a TraefikService with `failover` (its service and fallback carry full
+  references, per-service middlewares included); use weighted services;
+- a `highestRandomWeight` service in another namespace or with a
+  `name@provider` name or transport, or a per-service middleware (on an
+  IngressRoute service, an errors page, a weighted, `highestRandomWeight` or
+  mirroring service, or a mirror) outside the tenant's namespace and the
+  platform middleware allowlist, or written as `name@provider`;
+- a Service or Ingress carrying any `tailscale.com/*` annotation, or an
+  Ingress whose `spec.ingressClassName` or `kubernetes.io/ingress.class`
+  annotation is set to anything but `traefik`. The Tailscale operator would
+  publish it with no Traefik in the path, and the refusal holds whether or not
+  the cluster runs that operator: tenants cannot publish through the Tailscale
+  operator; ask the platform;
+- a TLSOption or TLSStore named `default`;
+- an ExternalName, NodePort or LoadBalancer Service, a Service with
+  `externalIPs`, or a Service with no selector (internal ClusterIP Services,
+  headless ones included, stay allowed);
+- an Endpoints or EndpointSlice the control plane did not write;
+- a Pod, or a Deployment, StatefulSet, DaemonSet, ReplicaSet, Job or CronJob
+  pod template, with a volume other than `configMap`, `csi`, `downwardAPI`,
+  `emptyDir`, `ephemeral`, `persistentVolumeClaim`, `projected` or `secret`
+  (the Pod Security restricted set). Tenant namespaces enforce `baseline`,
+  which refuses only `hostPath`; an inline `nfs` volume would mount any NAS
+  export from the node's address, which NFS cannot tell apart per tenant;
+- a PersistentVolumeClaim on any StorageClass but `tenant-local`, the
+  default class included, other than a `storageClassName: ""` claim for a
+  platform-written static volume named `<namespace>-<purpose>` and pre-bound by
+  `claimRef`. An omitted class
+  takes the default before validation, so it is refused too unless the
+  default is `tenant-local`.
+
+### The provisioner helper is digest-pinned
+
+The local-path-provisioner helper runs as root with the tenant zvol mounted,
+so its BusyBox image is now an exact tag plus the multi-arch index digest in
+the provisioner ConfigMap, and version-check reads the pin from that manifest.
+`local_path_provisioner_helper_version` leaves `all.yml` and the versions
+ConfigMap; `copier update` removes both, and a cluster that overrode the var
+drops the override. A bump rewrites tag and digest together.
+
+### Default version pins move with this release
+
+`copier update` with default answers moves these shipped defaults, which Flux
+reconciles on merge: external-secrets 2.13.0, Traefik 42.1.0 (a major: read
+its release notes against any Traefik values the cluster overrides),
+kube-prometheus-stack 92.11.0 (the CRDs chart stays at 32.0.1), Loki 18.17.1,
+Alloy 1.14.0, the Tailscale operator 1.104.1, Authentik 2026.8.4 and the
+GitLab runner chart 0.94.0. They are the pins the reference cluster already
+runs; a cluster that pinned its own values in `all.yml` keeps them, and
+`task maintenance:check-versions` reports the drift either way. MetalLB stays
+held at 0.15.3.
+
+### Every tenant's Namespace, caps and hostname grant carry the prune guard
+
+`scripts/check-tenant-wiring.py` now requires
+`kustomize.toolkit.fluxcd.io/prune: disabled` on every tenant file's Namespace,
+ResourceQuota and LimitRange, whether or not the tenant runs a database, so
+removing a tenant's wiring never prunes its Namespace (which cascades through
+every object and PVC in it) or strips its caps. It requires the same on the
+tenant's `tenant-routing-<ns>` ConfigMap and its `tenant-traefik-hostnames`
+and `tenant-certificates` bindings: the Namespace outlives the wiring, so
+admission for it must too, until the Namespace is deleted by hand. Before the
+update merges, add the annotation to those six objects in each existing
+tenant file, as the tenants README § Example shows; `task lint:invariants`
+fails until every tenant carries all six.
+
+### Tenant volumes need the zvol marker
+
+With `tenant_storage`, the `tenant-local` provisioner now refuses a claim unless
+`/mnt/tenant-volumes` carries both `lost+found` and the `.tenant-volumes-zvol`
+marker, which `ansible/playbooks/k3s.yml` writes after confirming the zvol is
+mounted. Run it on the NAS-colocated agent (`task k3s:deploy -- --limit
+<nas agent>`) before the updated provisioner ConfigMap reconciles, or new
+tenant claims stay Pending until it runs; existing volumes are unaffected. The
+teardown helper applies the same check, so deleting a claim while the zvol is
+unmounted fails closed instead of removing a same-named directory from the
+boot disk.
+
+### Every tenant's quota and LimitRange cap ephemeral storage
+
+`scripts/check-tenant-wiring.py` now requires `requests.ephemeral-storage` and
+`limits.ephemeral-storage` in every tenant's ResourceQuota and `ephemeral-storage`
+under `default`, `defaultRequest` and `max` in its LimitRange Container entry, since emptyDir
+volumes and writable layers otherwise fill the node's disk unbounded. Before
+the update merges, add those keys to every existing tenant file, as the tenants
+README § Example shows, or `task lint:invariants` fails.
 
 ## Related
 

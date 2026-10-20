@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Assert a pod's sized emptyDirs fit inside its ephemeral-storage budget.
+"""Assert a pod's ephemeral-storage budget is one the kubelet will honour.
 
-A pod whose budget is below the emptyDirs it mounts is evicted before the
-volumes it sized ever fill. Contract: weisssrv-lib docs/SCRIPTS.md.
+Sized emptyDirs must fit the budget, and every running container must fund it:
+the kubelet charges them all against it. Contract: weisssrv-lib docs/SCRIPTS.md.
 """
 from __future__ import annotations
 
@@ -175,7 +175,67 @@ def _limit(container: dict, unreadable: list[tuple[str, object]]) -> float | Non
     return parsed
 
 
+def _budget_containers(spec: dict) -> list[dict]:
+    """The containers whose limits add up to the running pod's budget: every
+    app container and every sidecar (`restartPolicy: Always`) init container."""
+    return _containers(spec, "containers") + [
+        c for c in _containers(spec, "initContainers")
+        if c.get("restartPolicy") == "Always"
+    ]
+
+
+def _partial_budget_violation(label: str, spec: dict) -> list[str]:
+    """A pod where some running containers fund the budget and others only spend it.
+
+    The kubelet charges every container's writable layer and logs against the
+    declared limits added up, so a container with no limit is unfunded, not exempt.
+    """
+    containers = _budget_containers(spec)
+    limited = [c.get("name", "?") for c in containers if _declared(c, "limits") is not None]
+    unlimited = [c.get("name", "?") for c in containers if _declared(c, "limits") is None]
+    if not unlimited:
+        return []
+    if not limited:
+        # A plain init container's limit is the floor of the pod budget, so with
+        # no running container funding it, it IS the budget for the pod's life.
+        plain_init = [
+            c.get("name", "?") for c in _containers(spec, "initContainers")
+            if c.get("restartPolicy") != "Always" and _declared(c, "limits") is not None
+        ]
+        if not plain_init:
+            return []
+        limited = plain_init
+        funder = "init %s %s" % (_plural("container", plain_init), _names(plain_init))
+        advice = "declare a limit on every running container or take it off the init container"
+    else:
+        funder = "%s %s" % (_plural("container", limited), _names(limited))
+        advice = "declare a limit on every running container or on none"
+    return [
+        "  %s: %s %s limits.%s while %s %s %s not — the kubelet charges every "
+        "container's writable layer and logs against the declared limits added "
+        "up, so the unlimited containers spend a budget they never funded; %s"
+        % (
+            label, funder, "declares" if len(limited) == 1 else "declare", RESOURCE,
+            _plural("container", unlimited), _names(unlimited),
+            "does" if len(unlimited) == 1 else "do", advice,
+        )
+    ]
+
+
+def _plural(noun: str, items: list) -> str:
+    return noun if len(items) == 1 else noun + "s"
+
+
+def _names(items: list[str]) -> str:
+    return ", ".join(repr(n) for n in items)
+
+
 def _pod_violations(label: str, spec: dict) -> list[str]:
+    """Everything wrong with one pod spec's ephemeral-storage budget."""
+    return _partial_budget_violation(label, spec) + _sized_violations(label, spec)
+
+
+def _sized_violations(label: str, spec: dict) -> list[str]:
     """Everything wrong with one pod spec's sized emptyDirs."""
     sized = sized_volumes(spec)
     if not sized:
@@ -254,10 +314,10 @@ def main() -> int:
 
     if found:
         print(
-            "Sized emptyDirs the pod's ephemeral-storage budget does not cover. "
-            "The kubelet evicts on the pod's limit — its containers' limits added "
-            "up — not on the volume's sizeLimit, so the pod dies before the "
-            "volume is full:",
+            "Ephemeral-storage budgets the kubelet reads differently from the "
+            "manifest. It evicts on the pod's limit — its containers' limits added "
+            "up, with every container's usage counted — not on a volume's sizeLimit "
+            "or on the containers that declared one:",
             file=sys.stderr,
         )
         print("\n".join(found), file=sys.stderr)

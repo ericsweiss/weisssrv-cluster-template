@@ -256,13 +256,32 @@ Rules the template enforces:
 
 - **Pools are created by hand.** Ansible sets properties, creates datasets and
   zvols, and mounts them. It never runs `zpool create` or `zpool destroy`.
-- **Every PV is static.** No dynamic provisioner, and `storageClassName: ""`
-  everywhere, so nothing can land on the cluster-default local path — which lives
-  on a stateless VM disk excluded from every backup. An alert fires if anything
-  ever does.
+- **No default StorageClass.** `local-storage` is in `k3s_disable`, so k3s
+  ships neither its `local-path` provisioner nor its default class, and
+  `tenant-local` carries no default annotation. A claim names its class or
+  stays Pending rather than landing on a stateless VM disk excluded from every
+  backup; `LocalPathPVExists` fires if a `local-path` PV ever appears (the
+  k3s add-on re-enabled, or a class left over from before it was disabled).
+  Platform volumes are static (`storageClassName: ""`). With
+  `tenant_storage`, tenant claims name `tenant-local`, whose only root is a
+  zvol on the NAS-colocated agent that the `ssd/appdata` replication covers,
+  and whose provisioner refuses a root that is not the mounted zvol: it needs
+  both `lost+found` and the `.tenant-volumes-zvol` marker that `k3s.yml`
+  writes only after confirming the mount.
 - **NFS is authenticated in transit.** Exports require TLS (`xprtsec=tls`) and
   mounts address the server **by hostname**, because the certificate has no
   address in its SAN.
+- **Tenant pods mount no NAS export directly.** The exports authorise k3s node
+  addresses and NFS carries no per-tenant client identity, so an inline `nfs:`
+  volume would reach every export its node may mount. Tenant namespaces
+  enforce Pod Security `baseline`, which admits `nfs`, so
+  `tenant-pod-volumes`, one of the twelve tenant ValidatingAdmissionPolicies
+  in `tenant-traefik-policy.yaml`, holds tenant pods and pod templates to the
+  restricted volume set. A tenant gets persistent storage by one of two
+  routes: a `tenant-local` claim (with `tenant_storage`), dynamically
+  provisioned on the tenant zvol, where the provisioner creates the
+  PersistentVolume; or, for a NAS export such as the dump landing zone, a
+  platform-written static PersistentVolume pre-bound to its claim.
 - **Application state survives its consumer.** A zvol outlives the VM it is
   attached to; a PV outlives the pod and the node.
 

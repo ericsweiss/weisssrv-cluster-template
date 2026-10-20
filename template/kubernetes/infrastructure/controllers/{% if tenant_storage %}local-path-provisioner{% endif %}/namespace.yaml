@@ -1,0 +1,14 @@
+---
+# Namespace for the tenant StorageClass provisioner. pod-security is
+# privileged because its helper pods mount the volume root on the NAS agent as
+# a hostPath to create each claim's directory.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: local-path-storage
+  labels:
+    app.kubernetes.io/name: local-path-provisioner
+    app.kubernetes.io/managed-by: flux
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged

@@ -1,0 +1,20 @@
+---
+# Tenant class: a `local` volume per claim (so fsGroup applies), kept after
+# deletion, pinned to the NAS agent. Not the default, and k3s_disable drops k3s's
+# local-path default class, so a claim naming no class stays Pending.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: tenant-local
+  annotations:
+    defaultVolumeType: local
+    kustomize.toolkit.fluxcd.io/force: "Enabled"
+provisioner: rancher.io/tenant-local
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false
+allowedTopologies:
+  - matchLabelExpressions:
+      - key: ${cluster_node_label_domain}/nas
+        values:
+          - "true"

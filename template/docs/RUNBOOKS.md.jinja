@@ -1,4 +1,5 @@
 {%- import "partials/links.jinja" as links with context -%}
+{%- from "partials/tenant-volumes.jinja" import tenant_volumes_zvol -%}
 # Runbooks — {{ cluster_name }}
 
 Day-two operations for this cluster. This is the file every alert's
@@ -85,9 +86,11 @@ to read on:
 | `DiskUsageWarning` / `DiskUsageCritical` | a filesystem is filling | Storage |
 | `InodeUsageWarning` / `InodeUsageCritical` | inodes are exhausting before bytes do | Storage |
 | `PVCUsageWarning` / `PVCUsageCritical` | a claim is filling | Storage |
-| `LocalPathPVExists` | a PV landed on the local-path class instead of a static volume | Storage |
+| `LocalPathPVExists` | a PV landed on the local-path class instead of {% if tenant_storage %}a static volume or `tenant-local`{% else %}a static volume{% endif %} | Storage |
 | `KubeletImageGCIneffective` | a node root filesystem is above the kubelet image-gc watermark | Storage, "Kubelet image store" |
-| `ZFSPoolNotOnline` / `ZFSPoolDataErrors` | a pool is DEGRADED or has unrecoverable data | Storage, "A degraded pool" |
+{% if tenant_storage %}| `TenantVolumesFilling` / `TenantVolumesNearlyFull` | the shared tenant-volumes zvol is under 20% / 10% free | Storage, "Tenant volumes filling" |
+| `TenantVolumesMountMissing` | no node-exporter reports `/mnt/tenant-volumes`, so the zvol is not mounted | Storage, "Tenant claim refused: not the mounted tenant-volumes zvol" |
+{% endif %}| `ZFSPoolNotOnline` / `ZFSPoolDataErrors` | a pool is DEGRADED or has unrecoverable data | Storage, "A degraded pool" |
 | `ZFSPoolDeviceErrors` / `ZFSPoolScrubStale` | checksum errors on an ONLINE pool, or no scrub in 35 days | Storage, "A degraded pool" |
 | `SMARTDeviceUnhealthy` / `SMARTPendingSectorsGrowing` / `SMARTOfflineUncorrectableGrowing` / `SMARTMediaErrors` / `SMARTReallocatedSectorsGrowing` | a drive's own SMART attributes say it is failing | Storage, "A failing drive" |
 | `SMARTCollectorStale` | the smartmon textfile collector stopped refreshing, so the SMART alerts serve stale or no inputs | Storage, "A failing drive" |
@@ -1084,12 +1087,17 @@ the rule is per-client internal consistency, not a fleet-wide state.
 
 **Something landed on the wrong storage class**
 
-Every PV in the cluster is static with `storageClassName: ""`. If an alert says
-one is on the default class, the claim was created before the manifest was
-fixed — a StatefulSet's volume template is immutable, so the fix is: scale to
-zero, copy the data to the intended volume, delete the claim, recreate it bound
-to the right volume, scale back up.
-
+{% if tenant_storage %}Platform PVs are static with `storageClassName: ""`; tenant claims name
+`tenant-local`.{% else %}Every PV in the cluster is static with `storageClassName: ""`.{% endif %} If an alert says
+one is on the `local-path` class, k3s's default class is back (`local-storage`
+left `k3s_disable` in `group_vars/k3s.yml`, or the class predates it) and a
+claim naming no class fell through to it. A StatefulSet's volume template is
+immutable, so the fix is: put `local-storage` back in `k3s_disable`, scale to
+zero, copy the data to the intended volume, delete the claim, recreate it
+{% if tenant_storage %}(a platform claim with `storageClassName: ""` bound to its static PV, a
+tenant claim with `storageClassName: tenant-local`), scale back up.
+{% else %}with `storageClassName: ""` bound to its static PV, scale back up.
+{% endif %}
 ### Adding a dataset to a live NAS
 
 `nas_storage` never creates datasets, so a new entry under
@@ -1207,7 +1215,59 @@ the churn. `proxmox_vm_disk_size` applies at VM create only, so growing an
 existing node means resizing the disk on the hypervisor and running `growpart`
 plus `resize2fs` in the guest, or rebuilding the node from the inventory.
 
-### Encrypted swap
+{% if tenant_storage %}### Tenant volumes filling
+
+`TenantVolumesFilling` (under 20% free for 15 minutes) and
+`TenantVolumesNearlyFull` (under 10% for 5 minutes) watch `/mnt/tenant-volumes`
+on the NAS-colocated agent. Every `tenant-local` volume is a plain directory
+there, so a claim's size is never enforced: a tenant's ResourceQuota bounds what
+it declares, not what it writes, and one volume can fill the zvol for all of
+them. Find the volume that grew:
+
+```bash
+kubectl get pv -o custom-columns=PV:.metadata.name,CLAIM:.spec.claimRef.namespace,NAME:.spec.claimRef.name,PATH:.spec.local.path \
+  | grep tenant-volumes
+ssh {{ admin_user }}@<nas agent>
+sudo du -sh /mnt/tenant-volumes/* | sort -h | tail
+```
+
+Take the largest directory to its tenant. {% if postgres_operator %}A database volume usually means WAL
+piling up behind a failing archive (`CNPGWALArchivingFailing`), which clears once
+archiving recovers; anything else is the tenant's data to trim.{% else %}What it holds is the tenant's data
+to trim.{% endif %} If the tenants'
+declared sizes have simply outgrown the zvol, grow it as in "Expanding a
+zvol-backed volume" above, and raise the `tenant-volumes` disk size in
+`hosts.yml` with it.
+
+### Tenant claim refused: not the mounted tenant-volumes zvol
+
+`TenantVolumesMountMissing` fires when no node-exporter has reported a
+`/mnt/tenant-volumes` filesystem for 10 minutes: the zvol is not mounted, or the
+NAS agent's node-exporter is down. While the zvol is unmounted, every new claim
+is refused as below.
+
+A `tenant-local` claim stays Pending, and the provisioner's helper pod logs
+`refusing ...: /mnt/tenant-volumes is not the mounted tenant-volumes zvol`
+(or `refusing teardown of ...` when a claim is deleted on such a root; the
+volume's directory then waits for the zvol instead of being removed),
+when the root lacks `lost+found` or its `.tenant-volumes-zvol` marker does not
+name the zvol in `cluster_tenant_volumes_zvol`. Either the zvol is not mounted
+(the claim would otherwise land on the VM's boot disk, outside every backup), the
+marker was never written, or `hosts.yml` and cluster-config name different zvols.
+On the NAS agent:
+
+```bash
+mountpoint /mnt/tenant-volumes
+cat /mnt/tenant-volumes/.tenant-volumes-zvol   # must read {{ tenant_volumes_zvol }}
+```
+
+If it is not a mount point, fix the mount first (the k3s role mounts it from
+`vm_additional_disks`); never create the marker by hand on an unmounted
+directory. Then run `task k3s:deploy -- --limit <nas agent>`, whose
+`k3s.yml` re-confirms the mount and writes the marker; the claim binds on its
+next retry.
+
+{% endif %}### Encrypted swap
 
 Every `encrypted_swap` fallback branch exits 0 so the host keeps booting, so the
 textfile gauges are the only report that swap is not encrypted.
@@ -1245,7 +1305,7 @@ plaintext device is the usual cause, and that clears on the next reboot.
 | `PveClusterBackupFailed` / `PveClusterBackupStale` | the /etc/pve backup failed or stopped; both stay inert until `nas_storage_pve_cluster_backup_enabled` is true | the backup storage's free space |
 | `BackupArtifactStale` / `BackupArtifactZeroBytes` | an application dump stopped landing, or landed empty | that app's dump CronJob and its last pod's logs |
 | `BackupArtifactNeverLanded` | no dump has ever landed for an app: the job never ran, or it writes outside the collector's glob | that app's dump CronJob, then the collector's glob for it |
-| `LocalPathPVExists` | a claim bound to the local-path class instead of a static volume | Storage, "Something landed on the wrong storage class" |
+| `LocalPathPVExists` | a claim bound to the local-path class instead of {% if tenant_storage %}a static volume or `tenant-local`{% else %}a static volume{% endif %} | Storage, "Something landed on the wrong storage class" |
 
 What the generated cluster ships, and what it does **not**:
 
@@ -1352,6 +1412,12 @@ restic_offsite_cache_dir: /mnt/ssd/restic-cache
 restic_offsite_sources:
   - {name: backups, mountpoint: /mnt/tank/backups}
   - {name: appdata, mountpoint: /mnt/ssd/appdata}
+{%- if tenant_storage %}
+# The tenant-local root is a zvol, empty in the appdata walk: restic clones its
+# newest snapshot and walks the clone.
+restic_offsite_zvol_sources:
+  - {name: tenant-volumes, zvol: {{ tenant_volumes_zvol }}, fstype: ext4, mount_opts: ro}
+{%- endif %}
 ```
 
 In the **same change**, flip `cluster_offsite_backup_probe_metric` in
@@ -1443,7 +1509,7 @@ Current residents and their ingress: CoreDNS `53/udp`+`53/tcp` from everything
 and `9153` from observability; metrics-server `10250` from the aggregation
 layer; kured `8080` from observability; kube-vip is hostNetwork, which
 NetworkPolicy never gates. `local-storage` sits in `k3s_disable`, so there is no
-local-path-provisioner and no default StorageClass: a PVC that omits
+k3s local-path-provisioner here and no default StorageClass: a PVC that omits
 `storageClassName` stays Pending. Adding a workload here means adding its allow
 in the same commit.
 
@@ -1531,3 +1597,7 @@ upstream:
 | The generator, its answers and its own docs | [weisssrv-cluster-template](https://github.com/ericsweiss/weisssrv-cluster-template) |
 
 This cluster's pipeline is described in [ci-pipeline.md](ci-pipeline.md).
+{%- if postgres_operator %}
+PostgreSQL clusters, their backups and point-in-time recovery are described in
+[postgres.md](postgres.md).
+{%- endif %}

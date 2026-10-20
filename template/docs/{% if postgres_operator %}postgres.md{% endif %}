@@ -1,0 +1,240 @@
+# PostgreSQL clusters (CloudNativePG)
+
+The CloudNativePG (CNPG) operator and its Barman Cloud plugin run in
+`cnpg-system` (`kubernetes/infrastructure/controllers/cnpg/`). Each tenant runs
+its own one-instance cluster in its own namespace; the cluster side provides
+the operator, the RBAC, the `tenant-local` StorageClass and the alert rules.
+
+## Decisions
+
+- One CNPG cluster per app, so each app's point-in-time recovery is its own.
+- Backups through the Barman Cloud plugin `ObjectStore`, not the deprecated
+  in-tree `barmanObjectStore`.
+- Instance volumes come from StorageClass `tenant-local` (`tenant_storage`):
+  one `local` volume per claim, a directory on the `tenant-volumes` zvol of
+  the NAS-colocated agent, kept when its claim is deleted. A `local` volume
+  applies the pod's `fsGroup` (26), which `hostPath` ignores. The volume is a
+  plain directory, so `storage.size` is accounting metadata, not a limit; the
+  class is for trusted tenants only until a backend that enforces sizes exists.
+- `enablePDB: false` on one instance: an unsatisfiable PodDisruptionBudget
+  makes every node drain time out.
+
+## What the cluster side adds per tenant
+
+No volume: the tenant's claim provisions its own from `tenant-local`. The
+tenant's existing `<app>-quota` ResourceQuota (the one in its wiring file) must
+carry two keys in `spec.hard`, as the tenants README example does:
+
+```yaml
+spec:
+  hard:
+    persistentvolumeclaims: "4"
+    tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
+```
+
+The quota bounds the sizes the tenant's claims declare, not the bytes they
+write: an instance can grow past its `storage.size` on the shared zvol. The
+zvol's size bounds the blast radius to the tenant volumes, and
+`TenantVolumesFilling` and `TenantVolumesNearlyFull` fire before it fills
+([RUNBOOKS.md](RUNBOOKS.md#tenant-volumes-filling)).
+
+A tenant that also dumps its database needs a backup landing zone on the NAS,
+registered in three places the way authentik's is:
+
+- an NFS PersistentVolume named `<namespace>-<purpose>` (the tenant admission
+  policy admits a `""` claim only for a volume so named), pre-bound by `claimRef`
+  to the dump claim, with `storageClassName: ""` and `persistentVolumeReclaimPolicy: Retain`
+  ([kubernetes/apps/authentik/storage.yaml](../kubernetes/apps/authentik/storage.yaml));
+- a per-app `nas_storage_exports` entry with its own `fsid` and
+  `xprtsec: "tls"`
+  ([ansible/inventories/prod/group_vars/nas.yml](../ansible/inventories/prod/group_vars/nas.yml),
+  the `/export/backups-apps/authentik` entry);
+- a `nas_storage_backup_artifact_apps` entry in the same file, plus the
+  matching `absent(backup_artifact_last_mtime_seconds{app="<app>"})` arm on
+  `BackupArtifactStale`
+  ([kube-prometheus-stack/release.yaml](../kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml)).
+
+The dump job mounts the landing zone through its claim, a
+`persistentVolumeClaim` volume. An inline `nfs:` volume is refused in every
+tenant namespace by `tenant-pod-volumes` (tenants README, "Pod volumes"),
+because the exports trust node addresses, not tenants.
+
+## What the tenant ships (example)
+
+Every object below lives in the tenant's own repository and namespace, with
+no `namespace:` set (the tenant Kustomization's `targetNamespace` supplies it).
+The connection-Secret contract is weisssrv-lib's docs/DATABASE-CONTRACT.md,
+in releases v0.22.0 and later.
+
+```yaml
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: <app>-backups
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  retentionPolicy: "30d"
+  configuration:
+    destinationPath: s3://<bucket>/
+    endpointURL: https://<s3 endpoint>
+    s3Credentials:
+      accessKeyId: {name: <app>-backups, key: access-key-id}
+      secretAccessKey: {name: <app>-backups, key: secret-access-key}
+    wal: {compression: gzip, maxParallel: 2}
+    data: {compression: gzip}
+  instanceSidecarConfiguration:
+    env:
+      - {name: AWS_REQUEST_CHECKSUM_CALCULATION, value: when_required}
+      - {name: AWS_RESPONSE_CHECKSUM_VALIDATION, value: when_required}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: <app>-db
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  instances: 1
+  # Pinned: the default image follows the operator chart, major included.
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.6-minimal-trixie
+  enablePDB: false
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters: {barmanObjectName: <app>-backups}
+  storage:
+    storageClass: tenant-local
+    size: 20Gi
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: <app>-db-nightly
+spec:
+  schedule: "0 0 11 * * *"
+  immediate: true
+  backupOwnerReference: self
+  cluster: {name: <app>-db}
+  method: plugin
+  pluginConfiguration: {name: barman-cloud.cloudnative-pg.io}
+```
+
+The object-store Secret `<app>-backups` comes from an ExternalSecret against
+the tenant's store, keys `access-key-id` and `secret-access-key`. Instance pods
+must admit `cnpg-system` on 8000, `observability` on 9187 and their own
+application pods on 5432, and reach DNS, the apiserver at
+`${cluster_apiserver_egress_cidr}` on 6443 and public 443; a PodMonitor on
+`cnpg.io/cluster: <app>-db`, port `metrics`, feeds the rules.
+Ship an `absent(cnpg_collector_up{namespace="<namespace>"})` rule too; the
+platform rules need a series to fire.
+
+## Point-in-time recovery
+
+Recover into a side cluster in a scratch namespace, check it, then cut over.
+
+1. Pick the target time `T` (RFC 3339, UTC). The side cluster's volume
+   comes from `tenant-local` like any other claim.
+2. Create the scratch namespace and copy the object-store Secret and
+   `ObjectStore` into it, the `ObjectStore` without `retentionPolicy`.
+3. Create the side cluster with no `plugins:` section, so it never archives
+   into the production path. Give it production's `spec.imageName`: a base
+   backup restores only into the same PostgreSQL major.
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: <side>
+spec:
+  instances: 1
+  imageName: <production's spec.imageName>
+  enablePDB: false
+  bootstrap:
+    recovery:
+      source: production
+      recoveryTarget: {targetTime: "<T>"}
+  externalClusters:
+    - name: production
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters: {barmanObjectName: <app>-backups, serverName: <app>-db}
+  storage:
+    storageClass: tenant-local
+    size: 20Gi
+```
+
+4. `kubectl -n <scratch namespace> wait --for=condition=Ready cluster/<side> --timeout=60m`,
+   then compare row counts of the tables that matter, and a marker row written
+   just before `T`, against production.
+5. Cut over by restoring the application's database from the side cluster
+   (`pg_dump` from the side, restore into production after stopping writers),
+   or by re-pointing the application at a cluster bootstrapped the same way.
+6. Delete the scratch namespace, then the side volume it leaves `Released`:
+   read its directory with `kubectl get pv <pv> -o jsonpath='{.spec.local.path}'`,
+   delete the PersistentVolume, and remove that directory on the storage node.
+
+Run the drill before an application holds data that matters, and quarterly.
+
+## Runbooks
+
+### Postgres down
+
+Alerts: `CNPGPostgresDown`. Run `kubectl cnpg status -n <ns> <cluster>` and
+`kubectl -n <ns> logs <cluster>-1 -c postgres --tail=200`. A full volume shows
+as `No space left on device`; a node reboot explains a short outage.
+
+### Database metrics absent
+
+Alerts: tenant `DatabaseAbsent`, the tenant's own
+`absent(cnpg_collector_up{namespace="<namespace>"})` rule. No series means
+none of the platform rules above can fire.
+
+1. Check that the instance pod exists and is scheduled:
+   `kubectl -n <ns> get pods,cluster.postgresql.cnpg.io` and
+   `kubectl -n <ns> describe pod <cluster>-1`.
+2. Check the PodMonitor target on port `metrics` (9187) in Prometheus.
+3. Check that the instance pods' ingress NetworkPolicy (`db-allow-ingress` in
+   the app-template) admits `observability` on 9187.
+4. Once the pod runs, continue with [Postgres down](#postgres-down).
+
+### Backup metrics absent
+
+Alerts: `CNPGBackupMetricsAbsent` (warning). The instance reports
+`cnpg_collector_up == 1` but has exported no
+`barman_cloud_cloudnative_pg_io_last_available_backup_timestamp` series for 30
+minutes. Every base-backup alert reads that family, so none of them can fire.
+
+1. Check that the Cluster names the plugin and that the sidecar runs:
+   `kubectl -n <ns> get cluster.postgresql.cnpg.io <cluster> -o jsonpath='{.spec.plugins}'`
+   and `kubectl -n <ns> get pod <cluster>-1 -o jsonpath='{.spec.initContainers[*].name} {.spec.containers[*].name}'`
+   (expect `plugin-barman-cloud`).
+2. Read `kubectl -n <ns> logs <cluster>-1 -c plugin-barman-cloud --tail=200`
+   and `kubectl -n cnpg-system logs -l app.kubernetes.io/name=plugin-barman-cloud --tail=200`.
+3. Check that the `ObjectStore` the plugin parameters name exists in `<ns>`.
+
+A recovery side cluster runs with no `plugins:` section on purpose, so it raises
+this warning until its scratch namespace is deleted.
+
+### WAL archiving failing
+
+Alerts: `CNPGWALArchivingFailing`. Read
+`kubectl -n <ns> logs <cluster>-1 -c plugin-barman-cloud --tail=200`: an expired
+object-store key, an object store refusing checksum headers (set the two
+`AWS_*_CHECKSUM_*` variables above to `when_required`), or no public egress.
+
+### Base backup failed or stale
+
+Alerts: `CNPGBaseBackupFailed`, `CNPGBaseBackupStale`, `CNPGBaseBackupStaleCritical`,
+`CNPGNeverBackedUp`.
+`kubectl -n <ns> get backups.postgresql.cnpg.io`, describe the newest failed
+one, fix the cause, then
+`kubectl cnpg backup -n <ns> <cluster> --method=plugin --plugin-name=barman-cloud.cloudnative-pg.io`.
+
+The two age alerts measure from the last successful backup: the warning fires
+31 hours after it and the critical 55 hours after it (30h and 54h plus one hour
+pending). A database that has never completed a backup reports a timestamp of 0,
+which the age alerts skip; `CNPGNeverBackedUp` (warning) fires instead once the
+instance has reported that 0 for 31 hours, so a new database never pages before
+its first nightly run has had a chance. It is a warning only: when the first backup
+runs and fails, `CNPGBaseBackupFailed` pages as critical.

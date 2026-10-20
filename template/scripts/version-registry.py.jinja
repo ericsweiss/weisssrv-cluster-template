@@ -179,6 +179,22 @@ CONFIG = {
         _chart("VPA", "vpa", "https://charts.fairwinds.com/stable", "vpa"),
         _chart("kured", "kured", "https://kubereboot.github.io/charts", "kured"),
         _chart("Reloader", "reloader", "https://stakater.github.io/stakater-charts", "reloader"),
+{%- if postgres_operator %}
+        _chart(
+            "CloudNativePG operator",
+            "cloudnative_pg",
+            "https://cloudnative-pg.github.io/charts",
+            "cloudnative-pg",
+            source_url="https://github.com/cloudnative-pg/charts/releases",
+        ),
+        _chart(
+            "CloudNativePG Barman Cloud plugin",
+            "plugin_barman_cloud",
+            "https://cloudnative-pg.github.io/charts",
+            "plugin-barman-cloud",
+            source_url="https://github.com/cloudnative-pg/plugin-barman-cloud/releases",
+        ),
+{%- endif %}
         # --- Applications ---------------------------------------------------
         {
             # Deployed from the goauthentik chart, so the pin is a CHART version.
@@ -229,6 +245,33 @@ CONFIG = {
             "source_url": "https://hub.docker.com/_/busybox/tags",
             "deploy_command": "edit scripts/post-maintenance-verify.sh to match",
         },
+{%- if tenant_storage %}
+        {
+            "name": "local-path-provisioner",
+            "var_name": "local_path_provisioner_version",
+            "category": "dockerhub",
+            "docker_image": "rancher/local-path-provisioner",
+            "tag_regex": r"^(v\d+\.\d+\.\d+)$",
+            "source_url": "https://github.com/rancher/local-path-provisioner/releases",
+            "deploy_command": _FLUX,
+        },
+        {
+            "name": "local-path-provisioner helper (BusyBox)",
+            "var_name": "local_path_provisioner_helper_version",
+            "category": "dockerhub",
+            "docker_image": "library/busybox",
+            "image_ref": "docker.io/library/busybox",
+            "tag_regex": r"^(\d+\.\d+\.\d+)$",
+            # Digest-pinned in the manifest (root helper on the tenant zvol), so
+            # the pin is read from there and a bump rewrites tag and digest by hand.
+            "version_file": [
+                "kubernetes/infrastructure/controllers/local-path-provisioner/configmap.yaml",
+            ],
+            "source_url": "https://hub.docker.com/_/busybox/tags",
+            "notes": "Tag and digest move together; the digest is the multi-arch index digest of the tag.",
+            # No deploy_command: a version_file pin derives its own instruction.
+        },
+{%- endif %}
 {%- if git_backend == 'gitlab_selfhosted' %}
         {
             "name": "GitLab Runner",

@@ -1,0 +1,55 @@
+---
+# Barman Cloud plugin: WAL archiving and base backups to an object store for
+# every CNPG Cluster that names it. It must share the operator's namespace and
+# needs cert-manager for its mTLS pair, hence the two dependsOn entries.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: barman-cloud
+  namespace: cnpg-system
+spec:
+  interval: 30m
+  releaseName: barman-cloud
+  dependsOn:
+    - name: cnpg
+    - name: cert-manager
+      namespace: cert-manager
+  chart:
+    spec:
+      chart: plugin-barman-cloud
+      version: "${helm_chart_versions_plugin_barman_cloud}"
+      sourceRef:
+        kind: HelmRepository
+        name: cloudnative-pg
+        namespace: flux-system
+      interval: 12h
+  install:
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  postRenderers:
+    - kustomize:
+        patches:
+          - target:
+              group: apiextensions.k8s.io
+              kind: CustomResourceDefinition
+              name: ".*\\.barmancloud\\.cnpg\\.io"
+            patch: |
+              apiVersion: apiextensions.k8s.io/v1
+              kind: CustomResourceDefinition
+              metadata:
+                name: placeholder
+                annotations:
+                  helm.sh/resource-policy: keep
+  values:
+    priorityClassName: platform
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        memory: 256Mi

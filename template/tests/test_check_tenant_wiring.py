@@ -22,6 +22,8 @@ TENANT = textwrap.dedent(
     kind: Namespace
     metadata:
       name: demo-app
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
       labels:
         fluxcd.io/tenant: demo-app
         pod-security.kubernetes.io/enforce: baseline
@@ -33,20 +35,33 @@ TENANT = textwrap.dedent(
     metadata:
       name: demo-app-quota
       namespace: demo-app
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
     spec:
       hard:
         pods: "10"
+        requests.ephemeral-storage: 4Gi
+        limits.ephemeral-storage: 8Gi
+        persistentvolumeclaims: "4"
+        tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
     ---
     apiVersion: v1
     kind: LimitRange
     metadata:
       name: demo-app-limits
       namespace: demo-app
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
     spec:
       limits:
         - type: Container
           default:
             memory: 512Mi
+            ephemeral-storage: 512Mi
+          defaultRequest:
+            ephemeral-storage: 128Mi
+          max:
+            ephemeral-storage: 2Gi
     ---
     apiVersion: v1
     kind: ServiceAccount
@@ -271,6 +286,128 @@ def test_a_missing_namespace_cap_fails(repo: Path, kind: str) -> None:
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
+# The tenant-local StorageClass ships only under tenant_storage; the gate
+# demands the claim caps exactly when it does.
+TENANT_LOCAL = (
+    REPO / "kubernetes" / "infrastructure" / "controllers" / "local-path-provisioner"
+    / "storageclass.yaml"
+)
+CLAIM_CAPS = (
+    "persistentvolumeclaims",
+    "tenant-local.storageclass.storage.k8s.io/requests.storage",
+)
+
+
+def test_the_claim_caps_are_required_exactly_when_tenant_local_ships() -> None:
+    assert gate.STORAGE_QUOTA_KEYS == (CLAIM_CAPS if TENANT_LOCAL.is_file() else ())
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [CLAIM_CAPS[:1], CLAIM_CAPS[1:], CLAIM_CAPS],
+    ids=["persistentvolumeclaims", "requests.storage", "both"],
+)
+def test_a_quota_that_does_not_cap_tenant_local_claims_fails(
+    repo: Path, missing: tuple[str, ...]
+) -> None:
+    """tenant-local sizes are not enforced, so the quota is the only bound on
+    how many claims, and how much storage, a tenant may declare."""
+    body = TENANT
+    for key in missing:
+        body = drop(body, f"    {key}:")
+        assert key not in body
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    if not TENANT_LOCAL.is_file():
+        assert problems == []
+        return
+    expected = (
+        "ResourceQuota does not cap tenant-local claims; missing spec.hard keys "
+        + ", ".join(missing)
+    )
+    assert any(expected in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_the_claim_caps_may_sit_on_a_second_quota(repo: Path) -> None:
+    """The keys are read across every ResourceQuota the tenant file declares."""
+    body = drop(TENANT, "    tenant-local.storageclass")
+    assert "tenant-local" not in body
+    body += textwrap.dedent(
+        """\
+        ---
+        apiVersion: v1
+        kind: ResourceQuota
+        metadata:
+          name: demo-app-storage
+          namespace: demo-app
+          annotations:
+            kustomize.toolkit.fluxcd.io/prune: disabled
+        spec:
+          hard:
+            tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
+        """
+    )
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    assert gate.check(repo) == []
+
+
+@pytest.mark.parametrize("key", list(gate.EPHEMERAL_QUOTA_KEYS))
+def test_a_quota_that_does_not_cap_ephemeral_storage_fails(repo: Path, key: str) -> None:
+    """emptyDir and writable layers draw on the node's disk, which nothing but
+    the quota bounds for the namespace as a whole."""
+    body = drop(TENANT, f"    {key}:")
+    assert key not in body
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    expected = f"ResourceQuota does not cap ephemeral storage; missing spec.hard keys {key}"
+    assert any(expected in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+# The fixture's Container ephemeral-storage lines, by the LimitRange key they sit under.
+EPHEMERAL_LIMITS = {
+    "default": "        ephemeral-storage: 512Mi",
+    "defaultRequest": "        ephemeral-storage: 128Mi",
+    "max": "        ephemeral-storage: 2Gi",
+}
+
+
+@pytest.mark.parametrize(
+    "unset",
+    [("default",), ("defaultRequest",), ("max",), ("default", "defaultRequest", "max")],
+    ids=["default", "defaultRequest", "max", "all"],
+)
+def test_a_limit_range_without_an_ephemeral_storage_limit_fails(
+    repo: Path, unset: tuple[str, ...]
+) -> None:
+    """A tenant container with no ephemeral-storage limit could spend the node's
+    disk unbounded, so the LimitRange supplies the default and the ceiling."""
+    body = TENANT
+    for key in unset:
+        assert body.count(EPHEMERAL_LIMITS[key] + "\n") == 1, key
+        body = body.replace(EPHEMERAL_LIMITS[key] + "\n", "")
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    expected = (
+        f"LimitRange demo-app-limits sets no ephemeral-storage under {', '.join(unset)}"
+    )
+    assert any(expected in p for p in problems), problems
+    assert len(problems) == 1, problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_limit_range_without_a_container_entry_fails(repo: Path) -> None:
+    """A Pod- or PVC-only LimitRange supplies none of the per-container defaults
+    and ceilings, so a container with no resources block lands unbounded."""
+    assert TENANT.count("    - type: Container\n") == 1
+    body = TENANT.replace("    - type: Container\n", "    - type: Pod\n", 1)
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    assert any("LimitRange demo-app-limits has no Container entry" in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
 def test_a_cap_in_another_namespace_fails(repo: Path) -> None:
     body = TENANT.replace("  name: demo-app-quota\n  namespace: demo-app",
                           "  name: demo-app-quota\n  namespace: other-app")
@@ -464,3 +601,217 @@ def test_a_non_utf8_tenant_file_is_reported_not_dropped(repo: Path) -> None:
     (repo / gate.TENANTS_DIR / "demo-app.yaml").write_bytes(b"kind: \xff\xfe\n")
     problems = gate.check(repo)
     assert any("demo-app.yaml: unparseable YAML" in p for p in problems)
+
+
+SECOND = textwrap.dedent(
+    """\
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: demo-app-db
+      namespace: flux-system
+    spec:
+      dependsOn:
+        - name: infrastructure-configs
+      sourceRef:
+        kind: GitRepository
+        name: demo-app
+      path: ./kubernetes/db
+      prune: true
+      targetNamespace: demo-app
+      postBuild:
+        substituteFrom:
+          - kind: ConfigMap
+            name: cluster-config
+            optional: false
+    """
+)
+
+
+def test_every_kustomization_in_a_tenant_file_is_checked(repo: Path) -> None:
+    """A second Kustomization reconciles with the first one's reach, so it is
+    held to the same confinement rather than skipped."""
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + SECOND)
+    problems = gate.check(repo)
+    assert any("demo-app-db" in p and "serviceAccountName" in p for p in problems), problems
+
+
+CONFINED_SECOND = SECOND.replace(
+    "  dependsOn:\n", "  serviceAccountName: demo-app-flux\n  dependsOn:\n"
+).replace("  prune: true\n", "  prune: true\n  deletionPolicy: Orphan\n")
+GUARD = "  annotations:\n    kustomize.toolkit.fluxcd.io/prune: disabled\n"
+
+
+def test_a_confined_second_kustomization_passes(repo: Path) -> None:
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + CONFINED_SECOND)
+    assert gate.check(repo) == []
+
+
+def _unguarded(kind: str, value: str | None) -> str:
+    """TENANT with `kind`'s prune guard removed (None) or set to `value`."""
+    docs = TENANT.split("\n---\n")
+    hit = [i for i, d in enumerate(docs) if f"kind: {kind}\n" in d]
+    assert len(hit) == 1 and GUARD in docs[hit[0]]
+    docs[hit[0]] = docs[hit[0]].replace(
+        GUARD, "" if value is None else GUARD.replace("disabled", value)
+    )
+    return "\n---\n".join(docs)
+
+
+@pytest.mark.parametrize("kind", ["Namespace", "ResourceQuota", "LimitRange"])
+@pytest.mark.parametrize("value", [None, "enabled"], ids=["absent", "enabled"])
+@pytest.mark.parametrize("second", ["", CONFINED_SECOND], ids=["app-only", "database"])
+def test_a_tenant_object_without_the_prune_guard_fails(
+    repo: Path, kind: str, value: str | None, second: str
+) -> None:
+    """Every tenant's Namespace and caps outlive its wiring: a pruned Namespace
+    cascades through every object and PVC in it, which `deletionPolicy: Orphan`
+    cannot stop, and a pruned cap leaves the surviving namespace unbounded."""
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", _unguarded(kind, value) + second)
+    problems = gate.check(repo)
+    assert any(
+        kind in p and "kustomize.toolkit.fluxcd.io/prune: disabled" in p
+        for p in problems
+    ), problems
+    assert len(problems) == 1, problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_database_kustomization_that_orphans_on_deletion_passes(repo: Path) -> None:
+    """The database Kustomization carries `deletionPolicy: Orphan`, so deleting its
+    wiring leaves the database whole; the gate must accept the field."""
+    assert "deletionPolicy: Orphan" in CONFINED_SECOND
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + CONFINED_SECOND)
+    assert gate.check(repo) == []
+
+
+@pytest.mark.parametrize(
+    "policy", [None, "Delete", "MirrorPrune", "WaitForTermination"],
+    ids=["absent", "delete", "mirror-prune", "wait"],
+)
+@pytest.mark.parametrize("by", ["name", "path", "nested-path"])
+def test_a_database_kustomization_without_orphan_fails(
+    repo: Path, policy: str | None, by: str
+) -> None:
+    """Without `deletionPolicy: Orphan`, deleting the db Kustomization garbage
+    collects the database Cluster and its PVCs with it."""
+    replacement = "" if policy is None else f"  deletionPolicy: {policy}\n"
+    second = CONFINED_SECOND.replace("  deletionPolicy: Orphan\n", replacement)
+    if by == "path":
+        second = second.replace("name: demo-app-db\n", "name: demo-app-data\n")
+    if by == "nested-path":
+        second = second.replace("name: demo-app-db\n", "name: demo-app-data\n").replace(
+            "path: ./kubernetes/db\n", "path: ./kubernetes/db/overlays/prod\n"
+        )
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
+    problems = gate.check(repo)
+    assert len(problems) == 1, problems
+    assert "deletionPolicy: Orphan" in problems[0], problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_an_app_kustomization_needs_no_orphan(repo: Path) -> None:
+    """Only the database tree is held to Orphan; the app tree prunes normally."""
+    assert "deletionPolicy" not in TENANT
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT)
+    assert gate.check(repo) == []
+
+
+ROUTING = textwrap.dedent(
+    """\
+    ---
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: tenant-routing-demo-app
+      namespace: flux-system
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
+    data:
+      hosts: |
+        demo-app.example.com
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicyBinding
+    metadata:
+      name: tenant-traefik-hostnames-demo-app
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
+    spec:
+      policyName: tenant-traefik-hostnames
+      validationActions: [Deny]
+      paramRef:
+        name: tenant-routing-demo-app
+        namespace: flux-system
+        parameterNotFoundAction: Deny
+      matchResources:
+        namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: demo-app
+    ---
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicyBinding
+    metadata:
+      name: tenant-certificates-demo-app
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
+    spec:
+      policyName: tenant-certificates
+      validationActions: [Deny]
+      paramRef:
+        name: tenant-routing-demo-app
+        namespace: flux-system
+        parameterNotFoundAction: Deny
+      matchResources:
+        namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: demo-app
+    """
+)
+
+
+def test_the_hostname_binding_is_cluster_scoped(repo: Path) -> None:
+    """The per-tenant hostname and certificate bindings name no namespace
+    because they have none."""
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + ROUTING)
+    assert gate.check(repo) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "tenant-routing-demo-app",
+        "tenant-traefik-hostnames-demo-app",
+        "tenant-certificates-demo-app",
+    ],
+)
+@pytest.mark.parametrize("value", [None, "enabled"], ids=["absent", "enabled"])
+def test_a_hostname_grant_or_binding_without_the_prune_guard_fails(
+    repo: Path, name: str, value: str | None
+) -> None:
+    """The Namespace outlives the wiring, so the grant and both bindings that
+    admit writes in it must too, until the Namespace is deleted by hand."""
+    docs = ROUTING.split("\n---\n")
+    hit = [i for i, d in enumerate(docs) if f"metadata:\n  name: {name}\n" in d]
+    assert len(hit) == 1 and GUARD in docs[hit[0]]
+    docs[hit[0]] = docs[hit[0]].replace(
+        GUARD, "" if value is None else GUARD.replace("disabled", value)
+    )
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + "\n---\n".join(docs))
+    problems = gate.check(repo)
+    assert len(problems) == 1, problems
+    assert name in problems[0] and "kustomize.toolkit.fluxcd.io/prune: disabled" in problems[0]
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_an_unrelated_configmap_or_binding_needs_no_prune_guard(repo: Path) -> None:
+    """Only the hostname grant and its two bindings are held to the guard."""
+    other = (
+        ROUTING.replace(GUARD, "")
+        .replace("tenant-routing-demo-app", "demo-app-settings")
+        .replace("policyName: tenant-traefik-hostnames", "policyName: demo-app-other")
+        .replace("policyName: tenant-certificates", "policyName: demo-app-another")
+    )
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + other)
+    assert gate.check(repo) == []

@@ -1,0 +1,57 @@
+---
+# Every tenant claim becomes a directory under /mnt/tenant-volumes, the
+# tenant-volumes zvol on the NAS agent. setup refuses a root without lost+found
+# or whose .tenant-volumes-zvol marker (k3s.yml) is not cluster_tenant_volumes_zvol.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-path-config
+data:
+  config.json: |-
+    {
+      "nodePathMap": [
+        {
+          "node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
+          "paths": ["/mnt/tenant-volumes"]
+        }
+      ]
+    }
+  setup: |-
+    #!/bin/sh
+    set -eu
+    base=$(dirname "$VOL_DIR")
+    marker=$(cat "$base/.tenant-volumes-zvol" 2>/dev/null || true)
+    if [ ! -d "$base/lost+found" ] || [ "$marker" != "${cluster_tenant_volumes_zvol}" ]; then
+      echo "refusing $VOL_DIR: $base is not the mounted tenant-volumes zvol" >&2
+      exit 1
+    fi
+    mkdir -m 0777 -p "$VOL_DIR"
+  teardown: |-
+    #!/bin/sh
+    set -eu
+    base=$(dirname "$VOL_DIR")
+    marker=$(cat "$base/.tenant-volumes-zvol" 2>/dev/null || true)
+    if [ ! -d "$base/lost+found" ] || [ "$marker" != "${cluster_tenant_volumes_zvol}" ]; then
+      echo "refusing teardown of $VOL_DIR: $base is not the mounted tenant-volumes zvol" >&2
+      exit 1
+    fi
+    rm -rf "$VOL_DIR"
+  helperPod.yaml: |-
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: helper-pod
+    spec:
+      automountServiceAccountToken: false
+      priorityClassName: system-node-critical
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: helper-pod
+          # Digest-pinned: the helper runs as root with the tenant zvol mounted, so a
+          # floating tag could pull unreviewed code onto it. version-check reads this
+          # pin from the manifest; bump tag and digest together (hub.docker.com/_/busybox).
+          image: docker.io/library/busybox:1.38.0@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
+          imagePullPolicy: IfNotPresent

@@ -1,0 +1,4 @@
+{#- The tenant-volumes zvol name: hosts.yml mounts it and k3s.yml writes it into
+    the marker, and cluster-config hands it to the provisioner's setup script,
+    which refuses a root whose marker names anything else. -#}
+{%- set tenant_volumes_zvol = "ssd/appdata/tenant-volumes/data" -%}

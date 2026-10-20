@@ -914,6 +914,31 @@ use_unifi:
     leaves your router exactly as it is.
   default: false
 
+tenant_storage:
+  type: bool
+  help: >-
+    Serve tenant PersistentVolumeClaims from StorageClass tenant-local: Rancher
+    local-path-provisioner, one directory per claim on a zvol on the
+    NAS-colocated agent that the ssd/appdata replication covers. Not the
+    default class; a volume is kept when its claim is deleted and is never
+    grown. Required by postgres_operator.
+  default: false
+
+postgres_operator:
+  type: bool
+  help: >-
+    Install the CloudNativePG operator and its Barman Cloud plugin, so tenants
+    can run their own PostgreSQL clusters with WAL archiving and point-in-time
+    recovery to an S3-compatible object store. Needs cert-manager (always
+    rendered) and tenant_storage. The tenant RBAC grants the CNPG kinds either
+    way.
+  default: false
+  validator: >-
+    {% if postgres_operator and not tenant_storage %}
+    postgres_operator needs tenant_storage: every CNPG instance requests the
+    tenant-local StorageClass that module installs
+    {% endif %}
+
 compose_app_guests:
   type: yaml
   help: >-
@@ -971,14 +996,14 @@ lib_ref:
     Never answer a tag OLDER than the default below: the generated playbooks are
     written against the role contracts of the release the template pins, and an
     older pin takes the role defaults silently rather than failing.
-  default: "v0.21.1"
+  default: "v0.22.1"
   validator: >-
     {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
     lib_ref must be a release TAG of the form vX.Y.Z (e.g. v1.2.3). A branch is
     never a valid pin: the generated repo's scripts/check-lib-pins.py enforces
     the same shape on the declared `lib_ref` input every `include:` entry reads,
     so a branch answered here fails the very first pipeline.
-    {% elif (lib_ref[1:].split('.') | map('int') | list) < [0, 21, 1] %}
+    {% elif (lib_ref[1:].split('.') | map('int') | list) < [0, 22, 1] %}
     lib_ref must be the release this template pins or newer. The generated
     playbooks are written against that release's role contracts: an older pin
     takes the role defaults silently rather than failing.

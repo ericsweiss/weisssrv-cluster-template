@@ -1,0 +1,300 @@
+"""Tenant claims land only on the NAS agent's backed-up zvol, through a
+non-default, retained StorageClass that refuses an unmounted root."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import stat
+import subprocess
+from pathlib import Path
+
+import pytest
+import yaml
+from conftest import REPO
+
+LPP = REPO / "kubernetes" / "infrastructure" / "controllers" / "local-path-provisioner"
+HOSTS = REPO / "ansible" / "inventories" / "prod" / "hosts.yml"
+ALL_VARS = REPO / "ansible" / "inventories" / "prod" / "group_vars" / "all.yml"
+CLUSTER_CONFIG = REPO / "kubernetes" / "infrastructure" / "sources" / "cluster-config.yaml"
+RUNBOOKS = REPO / "docs" / "RUNBOOKS.md"
+CLASS = "tenant-local"
+PROVISIONER = "rancher.io/tenant-local"
+ROOT = "/mnt/tenant-volumes"
+MARKER = ".tenant-volumes-zvol"
+K3S_PLAYBOOK = REPO / "ansible" / "playbooks" / "k3s.yml"
+
+
+def _docs(path: Path) -> list[dict]:
+    return [d for d in yaml.safe_load_all(path.read_text()) if isinstance(d, dict)]
+
+
+def _one(path: Path, kind: str) -> dict:
+    found = [d for d in _docs(path) if d.get("kind") == kind]
+    assert len(found) == 1, f"{path.name}: {len(found)} {kind}"
+    return found[0]
+
+
+def _config() -> dict:
+    return _one(LPP / "configmap.yaml", "ConfigMap")["data"]
+
+
+def _inventory_hosts(node, found: dict) -> dict:
+    """host name -> merged vars, for every `hosts:` mapping in the inventory."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "hosts" and isinstance(value, dict):
+                for name, host_vars in value.items():
+                    found.setdefault(name, {}).update(host_vars or {})
+            _inventory_hosts(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _inventory_hosts(value, found)
+    return found
+
+
+def _nas_labelled_hosts() -> list[str]:
+    domain = _one(CLUSTER_CONFIG, "ConfigMap")["data"]["cluster_node_label_domain"]
+    hosts = _inventory_hosts(yaml.safe_load(HOSTS.read_text()), {})
+    return sorted(
+        name for name, host in hosts.items()
+        if str((host.get("k3s_labels") or {}).get(f"{domain}/nas")) == "true"
+    )
+
+
+def _root_disk() -> dict:
+    labelled = _nas_labelled_hosts()
+    assert len(labelled) == 1, f"nas-labelled hosts: {labelled}"
+    hosts = _inventory_hosts(yaml.safe_load(HOSTS.read_text()), {})
+    disks = [d for d in hosts[labelled[0]].get("vm_additional_disks") or []
+             if d["mount_point"] == ROOT]
+    assert len(disks) == 1, f"{labelled[0]} mounts {len(disks)} disks at {ROOT}"
+    return disks[0]
+
+
+def _runbook_yaml(heading: str) -> dict:
+    """The first ```yaml block under a RUNBOOKS.md heading."""
+    text = RUNBOOKS.read_text()
+    assert heading in text, f"RUNBOOKS.md has no {heading!r}"
+    match = re.search(r"```yaml\n(.*?)```", text.split(heading, 1)[1], re.DOTALL)
+    assert match, f"no yaml block under {heading!r}"
+    return yaml.safe_load(match.group(1))
+
+
+ZVOL_KEY = "cluster_tenant_volumes_zvol"
+
+
+def _zvol_answer() -> str:
+    return _one(CLUSTER_CONFIG, "ConfigMap")["data"][ZVOL_KEY]
+
+
+def _setup(tmp_path: Path, vol_dir: Path) -> subprocess.CompletedProcess:
+    """The setup script as Flux delivers it: cluster-config substituted in."""
+    script = tmp_path / "setup"
+    script.write_text(_config()["setup"].replace("${" + ZVOL_KEY + "}", _zvol_answer()))
+    env = {**os.environ, "VOL_DIR": str(vol_dir)}
+    return subprocess.run(["sh", str(script)], env=env, capture_output=True,
+                          text=True, check=False)
+
+
+def _teardown(tmp_path: Path, vol_dir: Path) -> subprocess.CompletedProcess:
+    """The teardown script as Flux delivers it: cluster-config substituted in."""
+    script = tmp_path / "teardown"
+    script.write_text(_config()["teardown"].replace("${" + ZVOL_KEY + "}", _zvol_answer()))
+    env = {**os.environ, "VOL_DIR": str(vol_dir)}
+    return subprocess.run(["sh", str(script)], env=env, capture_output=True,
+                          text=True, check=False)
+
+
+def test_the_tenant_class_is_retained_late_bound_and_not_default():
+    sc = _one(LPP / "storageclass.yaml", "StorageClass")
+    assert sc["metadata"]["name"] == CLASS
+    assert sc["provisioner"] == PROVISIONER
+    assert sc["reclaimPolicy"] == "Retain"
+    assert sc["volumeBindingMode"] == "WaitForFirstConsumer"
+    assert sc["allowVolumeExpansion"] is False
+    annotations = sc["metadata"].get("annotations") or {}
+    assert annotations.get("defaultVolumeType") == "local"
+    assert "storageclass.kubernetes.io/is-default-class" not in annotations
+
+
+def test_the_tenant_class_only_admits_the_one_nas_node():
+    sc = _one(LPP / "storageclass.yaml", "StorageClass")
+    assert sc["allowedTopologies"] == [{"matchLabelExpressions": [
+        {"key": "${cluster_node_label_domain}/nas", "values": ["true"]}]}]
+    assert len(_nas_labelled_hosts()) == 1, _nas_labelled_hosts()
+
+
+def test_the_provisioner_answers_only_for_the_tenant_class():
+    deploy = _one(LPP / "deployment.yaml", "Deployment")
+    assert deploy["spec"]["replicas"] == 1
+    assert deploy["spec"]["strategy"]["type"] == "Recreate"
+    container = deploy["spec"]["template"]["spec"]["containers"][0]
+    command = container["command"]
+    assert command[command.index("--provisioner-name") + 1] == PROVISIONER
+    assert container["image"].endswith(":${local_path_provisioner_version}")
+
+
+def test_the_provisioner_writes_only_under_the_tenant_root():
+    assert json.loads(_config()["config.json"]) == {"nodePathMap": [
+        {"node": "DEFAULT_PATH_FOR_NON_LISTED_NODES", "paths": [ROOT]}]}
+    helper = yaml.safe_load(_config()["helperPod.yaml"])
+    # Root on the tenant zvol: an exact tag AND the index digest, never a
+    # floating alias the registry can retarget.
+    assert re.fullmatch(
+        r"docker\.io/library/busybox:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}",
+        helper["spec"]["containers"][0]["image"])
+
+
+def test_the_helper_pod_carries_no_api_token():
+    """setup and teardown only touch the host path, so the root helper pod gets
+    no service-account token to misuse."""
+    helper = yaml.safe_load(_config()["helperPod.yaml"])
+    assert helper["spec"]["automountServiceAccountToken"] is False
+
+
+def test_the_provisioner_image_is_pinned_in_the_inventory():
+    pins = yaml.safe_load(ALL_VARS.read_text())
+    assert pins["local_path_provisioner_version"].startswith("v")
+    # The helper is digest-pinned in the ConfigMap; no inventory var for it.
+    assert "local_path_provisioner_helper_version" not in pins
+
+
+def test_the_tenant_root_is_a_zvol_on_the_nas_node():
+    disk = _root_disk()
+    assert disk["zvol"].startswith("ssd/appdata/")
+    assert disk["fstype"] == "ext4"
+
+
+def test_setup_checks_the_marker_against_the_inventory_zvol():
+    """The marker must name the zvol the inventory mounts, the same string k3s.yml
+    writes, delivered to the script through cluster-config."""
+    assert _zvol_answer() == _root_disk()["zvol"]
+    assert '"${' + ZVOL_KEY + '}"' in _config()["setup"]
+
+
+def test_the_tenant_root_rides_the_documented_archive_and_offsite_backups():
+    """Archive and offsite ship off; the runbook blocks an operator pastes to
+    enable them must carry the tenant zvol."""
+    zvol = _root_disk()["zvol"]
+    archive = _runbook_yaml("### Enabling archive replication (tier 3)")
+    assert any(zvol.startswith(src + "/") for src in archive["nas_storage_archive_backup_sources"])
+    excluded = archive.get("nas_storage_archive_backup_exclude") or []
+    assert not any(zvol == ex or zvol.startswith(ex + "/") for ex in excluded)
+    offsite = _runbook_yaml("### Enabling offsite (tier 4)")
+    assert zvol in {z["zvol"] for z in offsite["restic_offsite_zvol_sources"]}
+
+
+def _root(tmp_path: Path, lost_found: bool, marker: str | None) -> Path:
+    root = tmp_path / "root"
+    root.mkdir()
+    if lost_found:
+        (root / "lost+found").mkdir()
+    if marker is not None:
+        (root / MARKER).write_text(marker)
+    return root
+
+
+@pytest.mark.parametrize(
+    ("lost_found", "marker"),
+    [
+        (False, None), (True, None), (False, "ssd/appdata/tenant-volumes/data"), (True, ""),
+        (True, "ssd/appdata/other/data\n"), (True, "ssd/appdata/tenant-volumes/data/x\n"),
+        (True, "yes\n"),
+    ],
+    ids=["bare", "stray-lost-found", "marker-only", "empty-marker", "other-zvol",
+         "longer-name", "any-content"],
+)
+def test_setup_refuses_a_root_that_is_not_the_zvol_filesystem(tmp_path, lost_found, marker):
+    """A stray lost+found on the VM's own filesystem is not proof the zvol is
+    mounted; the marker the k3s playbook writes onto the mounted zvol is."""
+    vol = _root(tmp_path, lost_found, marker) / "pvc-1_ns_claim"
+    result = _setup(tmp_path, vol)
+    assert result.returncode == 1
+    assert "refusing" in result.stderr
+    assert not vol.exists()
+
+
+def test_setup_creates_the_claim_directory_on_the_zvol_root(tmp_path):
+    vol = _root(tmp_path, True, _root_disk()["zvol"] + "\n") / "pvc-1_ns_claim"
+    result = _setup(tmp_path, vol)
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(vol.stat().st_mode) == 0o777
+
+
+@pytest.mark.parametrize(
+    ("lost_found", "marker"),
+    [(False, None), (True, None), (True, ""), (True, "ssd/appdata/other/data\n")],
+    ids=["bare", "stray-lost-found", "empty-marker", "other-zvol"],
+)
+def test_teardown_refuses_a_root_that_is_not_the_zvol_filesystem(tmp_path, lost_found, marker):
+    """With the zvol unmounted, a same-named directory on the VM's own filesystem
+    is not the claim: the helper fails closed and the claim's data on the zvol
+    waits for the mount to come back instead of being mistaken for deleted."""
+    vol = _root(tmp_path, lost_found, marker) / "pvc-1_ns_claim"
+    vol.mkdir()
+    (vol / "keep").write_text("x")
+    result = _teardown(tmp_path, vol)
+    assert result.returncode == 1
+    assert "refusing teardown" in result.stderr
+    assert (vol / "keep").exists()
+
+
+def test_teardown_removes_the_claim_directory_on_the_zvol_root(tmp_path):
+    vol = _root(tmp_path, True, _root_disk()["zvol"] + "\n") / "pvc-1_ns_claim"
+    vol.mkdir()
+    (vol / "data").write_text("x")
+    result = _teardown(tmp_path, vol)
+    assert result.returncode == 0, result.stderr
+    assert not vol.exists()
+
+
+def test_the_k3s_playbook_marks_the_mounted_tenant_zvol():
+    """The marker is written only after the mount is confirmed, with the zvol's
+    name, on the host whose inventory mounts the tenant root."""
+    plays = yaml.safe_load(K3S_PLAYBOOK.read_text())
+    names = [p["name"] for p in plays]
+    play = next(p for p in plays if p["name"] == "Mark the mounted tenant-volumes zvol")
+    assert names.index(play["name"]) > names.index("Deploy k3s agents")
+    assert play["hosts"] == "k3s_agents"
+    assert play["become"] is True
+    text = yaml.safe_dump(play)
+    assert f"mountpoint -q {ROOT}" in text
+    tasks = play["tasks"]
+    probe = next(t for t in tasks if "ansible.builtin.command" in t)
+    write = next(t for t in tasks if "ansible.builtin.copy" in t)
+    assert tasks.index(probe) < tasks.index(write)
+    assert write["ansible.builtin.copy"]["dest"] == f"{ROOT}/{MARKER}"
+    assert ".zvol" in write["ansible.builtin.copy"]["content"]
+    assert ROOT in play["vars"]["tenant_volumes_disks"]
+
+
+def _rules(kind: str) -> dict[str, set[str]]:
+    """resource -> verbs granted by the one `kind` in rbac.yaml."""
+    granted: dict[str, set[str]] = {}
+    for rule in _one(LPP / "rbac.yaml", kind)["rules"]:
+        assert rule["apiGroups"] in ([""], ["storage.k8s.io"]), rule
+        for resource in rule["resources"]:
+            granted.setdefault(resource, set()).update(rule["verbs"])
+    return granted
+
+
+def test_the_provisioner_reads_pods_and_their_logs_only_in_its_own_namespace():
+    """Helper pods run only in local-path-storage, so pod and log access is a
+    namespaced Role, a deliberate narrowing of upstream's cluster-wide grant."""
+    assert _rules("Role") == {
+        "pods": {"get", "list", "watch", "create", "patch", "update", "delete"},
+        "pods/log": {"get"},
+    }
+    assert _rules("ClusterRole") == {
+        "nodes": {"get", "list", "watch"},
+        "persistentvolumeclaims": {"get", "list", "watch"},
+        "configmaps": {"get", "list", "watch"},
+        "persistentvolumes": {"get", "list", "watch", "create", "patch", "update", "delete"},
+        "events": {"create", "patch"},
+        "storageclasses": {"get", "list", "watch"},
+    }
+    kustomization = yaml.safe_load((LPP / "kustomization.yaml").read_text())
+    binding = _one(LPP / "rbac.yaml", "RoleBinding")
+    assert binding["roleRef"]["kind"] == "Role"
+    assert binding["subjects"][0]["namespace"] == kustomization["namespace"]

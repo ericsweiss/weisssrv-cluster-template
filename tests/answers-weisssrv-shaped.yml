@@ -53,6 +53,10 @@ tailnet_dns_suffix: tail1a2b3c.ts.net
 gpu: nvidia
 # The gateway root and its drift-plan job, which exist only under this answer.
 use_unifi: true
+# The tenant-local StorageClass, as the reference cluster runs it.
+tenant_storage: true
+# The CloudNativePG operator and plugin, as the reference cluster runs them.
+postgres_operator: true
 
 # The library is the one upstream this fixture legitimately names. `lib_ref` is
 # deliberately unanswered so the render inherits copier.yml's release-tag default.

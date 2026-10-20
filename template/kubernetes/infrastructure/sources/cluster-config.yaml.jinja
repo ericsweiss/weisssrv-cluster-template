@@ -1,5 +1,6 @@
 ---
 {%- from "partials/roster.jinja" import resolvers, pve_hosts, k3s_server_ips with context %}
+{%- from "partials/tenant-volumes.jinja" import tenant_volumes_zvol %}
 # Cluster identity, addressing and backend names for Flux postBuild substitution;
 # every stage after sources substitutes from this and cluster-versions. Keys are a
 # contract: StrictPostBuildSubstitutions fails the reconcile on an unknown one.
@@ -116,6 +117,13 @@ data:
   # under; add members, never replace them. Dropping node-exporter-host
   # silences every host rule.
   cluster_node_exporter_job_regex: "{{ node_exporter_job_regex }}"
+{%- if tenant_storage %}
+
+  # The zvol hosts.yml mounts at /mnt/tenant-volumes; the provisioner refuses a
+  # root whose .tenant-volumes-zvol marker names anything else. Renamed in
+  # hosts.yml means renamed here too.
+  cluster_tenant_volumes_zvol: "{{ tenant_volumes_zvol }}"
+{%- endif %}
 {%- if vpn_tailscale %}
 
   # CGNAT range (RFC 6598) that Tailscale allocates from — a constant, kept here

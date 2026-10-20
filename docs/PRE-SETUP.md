@@ -610,6 +610,29 @@ Policy ORDER, mDNS reflection, device adoption, per-port VLAN assignment and
 README so they can be written into your own cut-over runbook rather than
 discovered during one.
 
+### Tenant volumes (`tenant_storage`)
+
+Turn it on if a tenant needs a PersistentVolumeClaim. It adds a 100G sparse
+zvol, `ssd/appdata/tenant-volumes/data`, to the NAS-colocated agent's
+`vm_additional_disks` (SCSI slot 4, mounted at `/mnt/tenant-volumes`) and
+serves StorageClass `tenant-local` from it with Rancher local-path-provisioner.
+Every claim is a directory on that one zvol, so no claim has a size of its own.
+`ansible/playbooks/k3s.yml` confirms the zvol is mounted and writes the marker
+`/mnt/tenant-volumes/.tenant-volumes-zvol` (the zvol's name) onto it; the
+provisioner refuses a claim on a root without that marker and `lost+found`, so
+an unmounted zvol fails the claim instead of filling the VM's boot disk, and its
+teardown applies the same check before removing a claim's directory.
+`postgres_operator` requires it.
+
+### Tenant databases (`postgres_operator`)
+
+Turn it on if a tenant will run its own PostgreSQL. It installs the
+CloudNativePG operator and its Barman Cloud plugin in `cnpg-system`; the plugin
+takes its mTLS pair from cert-manager, which every render ships. Nothing is
+needed before generating: each tenant brings its own object-store bucket and
+credentials when it adds a database. It needs `tenant_storage`: every instance
+requests the `tenant-local` StorageClass.
+
 ---
 
 ## 9. Answers to accept as they come

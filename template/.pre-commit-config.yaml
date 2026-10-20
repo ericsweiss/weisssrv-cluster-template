@@ -36,7 +36,8 @@ repos:
           check-lib-pins\.py |
           check-netpol-except-parity\.py | check-nfs-tls\.py | check-pvc-storageclass\.py |
           check-role-inputs\.py |
-          check-scrape-netpol\.py | check-scrape-wiring\.py |
+          check-scrape-netpol\.py |
+          check-scrape-wiring\.py |
           check-secretstore-scope\.py | check-taskfile\.sh |
           check-version-checksums\.py | check-versions\.py | ci-fetch-tools\.py |
           ci_playbook_invocations\.py |

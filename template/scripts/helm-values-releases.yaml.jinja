@@ -67,6 +67,18 @@ releases:
     chart: reloader
     repo_name: stakater
     repo_url: https://stakater.github.io/stakater-charts
+{%- if postgres_operator %}
+  - name: cnpg
+    manifest: kubernetes/infrastructure/controllers/cnpg/release.yaml
+    chart: cloudnative-pg
+    repo_name: cloudnative-pg
+    repo_url: https://cloudnative-pg.github.io/charts
+  - name: barman-cloud
+    manifest: kubernetes/infrastructure/controllers/cnpg/release-barman-cloud.yaml
+    chart: plugin-barman-cloud
+    repo_name: cloudnative-pg
+    repo_url: https://cloudnative-pg.github.io/charts
+{%- endif %}
   - name: vpa
     manifest: kubernetes/infrastructure/controllers/vpa/release.yaml
     chart: vpa

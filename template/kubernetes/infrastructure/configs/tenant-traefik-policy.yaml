@@ -1,0 +1,852 @@
+---
+# These policies bound future writes only; run scripts/audit-tenant-admission.sh
+# once at rollout and before each onboarding for objects that predate them.
+
+# Tenants hold full traefik.io write while Traefik allows cross-namespace refs
+# for the platform. These policies pin every reference a tenant route makes to
+# its own namespace, and what it matches to the hostnames the platform grants.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-traefik-route-refs
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingressroutes", "ingressroutetcps", "ingressrouteudps"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
+  variables:
+    - name: ns
+      expression: "object.metadata.namespace"
+    - name: platformMiddlewares
+      expression: >-
+        ['traefik/lan-tailscale-only', 'traefik/lan-tailscale-strict',
+        'traefik/hsts-header', 'traefik/security-headers', 'authentik/authentik-auth']
+  validations:
+    - expression: >-
+        !has(object.spec.routes) || object.spec.routes.all(r,
+        !has(r.services) || r.services.all(s,
+        !has(s.namespace) || s.namespace == variables.ns))
+      message: "a tenant route may reference Services only in its own namespace"
+    - expression: >-
+        !has(object.spec.routes) || object.spec.routes.all(r,
+        !has(r.middlewares) || r.middlewares.all(m,
+        !has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares))
+      message: "a tenant route may reference only its own middlewares or the platform allowlist"
+    # Traefik resolves a name@provider reference (for example
+    # other-ns-mw@kubernetescrd) ignoring the namespace field, so it is refused.
+    - expression: >-
+        !has(object.spec.routes) || object.spec.routes.all(r,
+        (!has(r.middlewares) || r.middlewares.all(m, !m.name.contains('@')))
+        && (!has(r.services) || r.services.all(s, !s.name.contains('@')
+        && (!has(s.serversTransport) || !s.serversTransport.contains('@')))))
+      message: "a tenant route may not use a name@provider middleware, service or transport reference"
+    # Traefik v3.7 IngressRoute routes[].services[].middlewares: the route-level rule.
+    - expression: >-
+        !has(object.spec.routes) || object.spec.routes.all(r,
+        !has(r.services) || r.services.all(s, !has(s.middlewares)
+        || s.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares))))
+      message: "a tenant route service may apply only its own middlewares or the platform allowlist, never a name@provider one"
+    - expression: >-
+        !has(object.spec.tls) || ((!has(object.spec.tls.options)
+        || ((!has(object.spec.tls.options.namespace)
+        || object.spec.tls.options.namespace == variables.ns)
+        && !object.spec.tls.options.name.contains('@')))
+        && (!has(object.spec.tls.store)
+        || ((!has(object.spec.tls.store.namespace)
+        || object.spec.tls.store.namespace == variables.ns)
+        && !object.spec.tls.store.name.contains('@'))))
+      message: "a tenant route may reference TLS options and stores only in its own namespace"
+    # Traefik v3.7 IngressRoute spec.parentRefs attach a route under another
+    # router (multi-layer routing), so a tenant route may name none.
+    - expression: >-
+        !has(object.spec.parentRefs) || size(object.spec.parentRefs) == 0
+      message: "tenant routes may not attach to parent routes; multi-layer routing is platform-owned"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-traefik-route-refs
+spec:
+  policyName: tenant-traefik-route-refs
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
+# Middlewares and TraefikServices can point across namespaces too: a chain, an errors
+# page service, a forwardAuth address, weighted, highestRandomWeight, mirrored or
+# failover services, and the middlewares each service applies.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-traefik-object-refs
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["middlewares", "traefikservices"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
+  variables:
+    - name: ns
+      expression: "object.metadata.namespace"
+    # The Authentik outpost the platform authentik-auth middleware calls.
+    - name: platformForwardAuth
+      expression: >-
+        ['http://authentik-server.authentik.svc.cluster.local/outpost.goauthentik.io/auth/traefik']
+    - name: ownServiceAddress
+      expression: >-
+        '^https?://[a-z]([-a-z0-9]*[a-z0-9])?[.]' + variables.ns
+        + '[.]svc([.]cluster[.]local)?(:[0-9]{1,5})?(/.*)?$'
+    # The route-level allowlist in tenant-traefik-route-refs, verbatim.
+    - name: platformMiddlewares
+      expression: >-
+        ['traefik/lan-tailscale-only', 'traefik/lan-tailscale-strict',
+        'traefik/hsts-header', 'traefik/security-headers', 'authentik/authentik-auth']
+  validations:
+    - expression: >-
+        !has(object.spec.chain) || !has(object.spec.chain.middlewares)
+        || object.spec.chain.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns))
+      message: "a tenant chain middleware may reference only its own namespace"
+    - expression: >-
+        !has(object.spec.errors) || !has(object.spec.errors.service)
+        || !has(object.spec.errors.service.namespace)
+        || object.spec.errors.service.namespace == variables.ns
+      message: "a tenant errors middleware may reference only its own namespace"
+    # Traefik, whose egress is wider than the tenant's, calls this address
+    # itself. redirectRegex only answers the client, and plugin settings reach
+    # only plugins Traefik's static config loads, of which there are none.
+    - expression: >-
+        !has(object.spec.forwardAuth)
+        || object.spec.forwardAuth.address in variables.platformForwardAuth
+        || object.spec.forwardAuth.address.matches(variables.ownServiceAddress)
+      message: "a tenant forwardAuth middleware may call only a Service in its own namespace"
+    # A rateLimit Redis backend is another address Traefik itself connects to,
+    # with its own egress rather than the tenant's.
+    - expression: "!has(object.spec.rateLimit) || !has(object.spec.rateLimit.redis)"
+      message: "a tenant rateLimit middleware may not name a Redis backend (Traefik would connect to it with its own egress)"
+    - expression: >-
+        !has(object.spec.weighted) || !has(object.spec.weighted.services)
+        || object.spec.weighted.services.all(s,
+        !has(s.namespace) || s.namespace == variables.ns)
+      message: "a tenant weighted service may reference only its own namespace"
+    - expression: >-
+        !has(object.spec.mirroring)
+        || ((!has(object.spec.mirroring.namespace)
+        || object.spec.mirroring.namespace == variables.ns)
+        && (!has(object.spec.mirroring.mirrors)
+        || object.spec.mirroring.mirrors.all(s,
+        !has(s.namespace) || s.namespace == variables.ns)))
+      message: "a tenant mirroring service may reference only its own namespace"
+    # As for routes: a TraefikService-kind name such as api@internal or
+    # other-ns-svc@kubernetescrd is resolved ignoring the namespace field.
+    - expression: >-
+        (!has(object.spec.errors) || !has(object.spec.errors.service)
+        || (!object.spec.errors.service.name.contains('@')
+        && (!has(object.spec.errors.service.serversTransport)
+        || !object.spec.errors.service.serversTransport.contains('@'))))
+        && (!has(object.spec.weighted) || !has(object.spec.weighted.services)
+        || object.spec.weighted.services.all(s, !s.name.contains('@')
+        && (!has(s.serversTransport) || !s.serversTransport.contains('@'))))
+        && (!has(object.spec.mirroring)
+        || (!object.spec.mirroring.name.contains('@')
+        && (!has(object.spec.mirroring.serversTransport)
+        || !object.spec.mirroring.serversTransport.contains('@'))
+        && (!has(object.spec.mirroring.mirrors)
+        || object.spec.mirroring.mirrors.all(s, !s.name.contains('@')
+        && (!has(s.serversTransport) || !s.serversTransport.contains('@'))))))
+      message: "a tenant errors, weighted or mirroring service may not use a name@provider service or transport reference"
+    - expression: >-
+        !has(object.spec.highestRandomWeight)
+        || !has(object.spec.highestRandomWeight.services)
+        || object.spec.highestRandomWeight.services.all(s,
+        (!has(s.namespace) || s.namespace == variables.ns)
+        && !s.name.contains('@')
+        && (!has(s.serversTransport) || !s.serversTransport.contains('@')))
+      message: "a tenant highestRandomWeight service may reference only its own namespace, never a name@provider service or transport"
+    # Every per-service middlewares list the Traefik v3.7 CRDs define: errors.service,
+    # weighted and highestRandomWeight services[], mirroring and mirroring.mirrors[].
+    - expression: >-
+        (!has(object.spec.errors) || !has(object.spec.errors.service)
+        || !has(object.spec.errors.service.middlewares)
+        || object.spec.errors.service.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares)))
+        && (!has(object.spec.weighted) || !has(object.spec.weighted.services)
+        || object.spec.weighted.services.all(s, !has(s.middlewares)
+        || s.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares))))
+        && (!has(object.spec.highestRandomWeight)
+        || !has(object.spec.highestRandomWeight.services)
+        || object.spec.highestRandomWeight.services.all(s, !has(s.middlewares)
+        || s.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares))))
+        && (!has(object.spec.mirroring)
+        || ((!has(object.spec.mirroring.middlewares)
+        || object.spec.mirroring.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares)))
+        && (!has(object.spec.mirroring.mirrors)
+        || object.spec.mirroring.mirrors.all(s,
+        !has(s.middlewares) || s.middlewares.all(m, !m.name.contains('@')
+        && (!has(m.namespace) || m.namespace == variables.ns
+        || (m.namespace + '/' + m.name) in variables.platformMiddlewares))))))
+      message: "a tenant errors, weighted, highestRandomWeight or mirroring service may apply only its own middlewares or the platform allowlist, never a name@provider one"
+    # A failover service and fallback each take a full service reference, per-service
+    # middlewares included; refusing the form whole leaves no field unpinned.
+    - expression: "!has(object.spec.failover)"
+      message: "tenant failover services are not supported; use weighted services"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-traefik-object-refs
+spec:
+  policyName: tenant-traefik-object-refs
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
+# The kubernetesIngress provider resolves name@provider annotations on plain
+# Ingresses and Services in any namespace, and allowCrossNamespace does not
+# govern it, so only the platform middlewares below may be referenced that way.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-traefik-ingress-refs
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingresses"]
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["services"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
+  variables:
+    - name: platformRefs
+      expression: >-
+        ['traefik-lan-tailscale-only@kubernetescrd', 'traefik-lan-tailscale-strict@kubernetescrd',
+        'traefik-hsts-header@kubernetescrd', 'traefik-security-headers@kubernetescrd',
+        'authentik-authentik-auth@kubernetescrd']
+  validations:
+    - expression: >-
+        !has(object.metadata.annotations) || object.metadata.annotations.all(k,
+        !k.startsWith('traefik.ingress.kubernetes.io/')
+        || object.metadata.annotations[k].split(',').all(v,
+        !v.contains('@') || v.trim() in variables.platformRefs))
+      message: "a tenant Traefik annotation may use a name@provider reference only from the platform allowlist"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-traefik-ingress-refs
+spec:
+  policyName: tenant-traefik-ingress-refs
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
+# ExternalName or selectorless Services send Traefik into another namespace;
+# NodePort, LoadBalancer and externalIPs bypass Traefik, and externalIPs can
+# capture any address (CVE-2020-8554). Headless ClusterIP stays allowed.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-no-externalname-services
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["services"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
+  validations:
+    - expression: "!has(object.spec.type) || object.spec.type != 'ExternalName'"
+      message: "tenant Services may not be ExternalName (it would CNAME Traefik to another namespace)"
+    - expression: "has(object.spec.selector) && size(object.spec.selector) > 0"
+      message: "tenant Services must select pods (selectorless Services allow hand-written endpoints)"
+    - expression: >-
+        (!has(object.spec.type) || object.spec.type == 'ClusterIP')
+        && (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0)
+      message: "tenant Services must be internal ClusterIP Services without externalIPs"
+    # Tailscale's operator publishes a Service with any tailscale.com/ key, no Traefik.
+    # Also checked: metallb.io/* acts only on LoadBalancer (refused above), and
+    # external-dns publishes DNS, not traffic (see the tenants README).
+    - expression: >-
+        !has(object.metadata.annotations)
+        || object.metadata.annotations.all(k, !k.startsWith('tailscale.com/'))
+      message: "tenant Services may not bypass Traefik through the Tailscale operator"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-no-externalname-services
+spec:
+  policyName: tenant-no-externalname-services
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
+# k3s runs kube-controller-manager with use-service-account-credentials=true
+# (pkg/daemons/control/server.go): the endpoint, endpointslice and mirroring
+# controllers write as those three kube-system ServiceAccounts, and only they may.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-no-manual-endpoints
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["endpoints"]
+      - apiGroups: ["discovery.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["endpointslices"]
+  # A finalizer's removal from a terminating object changes neither its routing
+  # data nor its labels or annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || (request.resource.resource == 'endpoints'
+        ? (has(object.subsets) ? object.subsets : [])
+        != (has(oldObject.subsets) ? oldObject.subsets : [])
+        : (object.addressType != oldObject.addressType
+        || object.endpoints != oldObject.endpoints
+        || (has(object.ports) ? object.ports : [])
+        != (has(oldObject.ports) ? oldObject.ports : [])))
+        || (has(object.metadata.labels) ? object.metadata.labels : {})
+        != (has(oldObject.metadata.labels) ? oldObject.metadata.labels : {})
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
+  validations:
+    - expression: >-
+        request.userInfo.username == 'system:kube-controller-manager' ||
+        request.userInfo.username in ['system:serviceaccount:kube-system:endpoint-controller',
+        'system:serviceaccount:kube-system:endpointslice-controller',
+        'system:serviceaccount:kube-system:endpointslicemirroring-controller']
+      message: "tenant Endpoints and EndpointSlices are managed by the control plane only"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-no-manual-endpoints
+spec:
+  policyName: tenant-no-manual-endpoints
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
+# A tenant route may match only hostnames the platform granted it, so it cannot
+# shadow a platform route. Each tenant's wiring file binds this policy to its
+# namespace with paramRef flux-system/tenant-routing-<ns>; none is bound here.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-traefik-hostnames
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingressroutes"]
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingresses"]
+  # As on the Service policies: a terminating Ingress (a Tailscale one carries
+  # its operator's finalizer) sheds a finalizer through an UPDATE that changes
+  # neither spec nor annotations, and refusing it strands the object.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
+  variables:
+    - name: isRoute
+      expression: "request.resource.resource == 'ingressroutes'"
+    # data.hosts: one exact hostname per line.
+    - name: hosts
+      expression: >-
+        params.data.hosts.split('\n').map(h, h.trim()).filter(h, h != '')
+    - name: hostMatchers
+      expression: "variables.hosts.map(h, 'Host(`' + h + '`)')"
+  validations:
+    # A wildcard grant would let one Ingress rule route every name under it.
+    - expression: "variables.hosts.all(h, !h.contains('*'))"
+      message: "the platform grant must list exact hostnames, no wildcards"
+    # Leading Host() and no ||, so every rule is a conjunction that pins the
+    # host: a PathPrefix-only, ClientIP-only or OR-ed rule would match any host.
+    - expression: >-
+        !variables.isRoute || !has(object.spec.routes) || object.spec.routes.all(r,
+        r.match.matches('^Host[(]`[^`]+`[)]( && .*)?$') && !r.match.contains('||')
+        && !r.match.contains('HostRegexp(')
+        && r.match.findAll('Host[(]`[^`]*`[)]').all(h, h in variables.hostMatchers))
+      message: "a tenant route must open with Host() on a hostname the platform granted this namespace, and may not use ||, HostRegexp or any other Host"
+    # data.maxPriority, when the platform sets it, is the highest route priority
+    # the tenant may claim; without it a tenant route keeps Traefik's default.
+    - expression: >-
+        !variables.isRoute || !has(object.spec.routes) || object.spec.routes.all(r,
+        !has(r.priority) || ('maxPriority' in params.data
+        && r.priority <= int(params.data.maxPriority)))
+      message: "a tenant route may set a priority only up to the maxPriority the platform granted this namespace"
+    # A TLS domain asks Traefik for a certificate on that name, so it is a host too.
+    - expression: >-
+        !variables.isRoute || !has(object.spec.tls) || !has(object.spec.tls.domains)
+        || object.spec.tls.domains.all(d, (!has(d.main) || d.main in variables.hosts)
+        && (!has(d.sans) || d.sans.all(s, s in variables.hosts)))
+      message: "a tenant route may list only TLS domains the platform granted this namespace"
+    - expression: >-
+        variables.isRoute || !has(object.spec) || !has(object.spec.defaultBackend)
+      message: "a tenant Ingress may not set a default backend (it answers every hostname)"
+    - expression: >-
+        variables.isRoute || !has(object.spec) || !has(object.spec.rules)
+        || object.spec.rules.all(r, has(r.host) && r.host in variables.hosts)
+      message: "every tenant Ingress rule must name a host the platform granted this namespace"
+    - expression: >-
+        variables.isRoute || !has(object.spec) || !has(object.spec.tls)
+        || object.spec.tls.all(t, !has(t.hosts) || t.hosts.all(h, h in variables.hosts))
+      message: "a tenant Ingress may list only TLS hosts the platform granted this namespace"
+    # Traefik decodes annotation fields case-insensitively, so keys are lowercased.
+    - expression: >-
+        variables.isRoute || !has(object.metadata.annotations)
+        || object.metadata.annotations.all(k,
+        !k.lowerAscii().startsWith('traefik.ingress.kubernetes.io/router.tls.domains.')
+        || object.metadata.annotations[k].split(',').all(d, d.trim() in variables.hosts))
+      message: "a tenant Ingress may list only router.tls.domains the platform granted this namespace"
+    # Traefik v3 builds the rule from spec.rules; these would reshape or outrank it.
+    # The other router.* annotations stay open: see the tenants README.
+    - expression: >-
+        variables.isRoute || !has(object.metadata.annotations)
+        || object.metadata.annotations.all(k, !(k.lowerAscii() in
+        ['traefik.ingress.kubernetes.io/router.rule',
+        'traefik.ingress.kubernetes.io/router.priority',
+        'traefik.ingress.kubernetes.io/router.rulesyntax']))
+      message: "tenant Ingresses may not override the routing rule or priority by annotation; use spec.rules with granted hosts"
+    # Another ingress operator (Tailscale's: class tailscale, tailscale.com/ keys)
+    # would publish the Ingress with no Traefik, installed today or later.
+    - expression: >-
+        variables.isRoute || ((!has(object.spec) || !has(object.spec.ingressClassName)
+        || object.spec.ingressClassName == 'traefik')
+        && (!has(object.metadata.annotations) || object.metadata.annotations.all(k,
+        !k.startsWith('tailscale.com/')
+        && (k != 'kubernetes.io/ingress.class' || object.metadata.annotations[k] == 'traefik'))))
+      message: "tenant Ingresses may be handled only by Traefik, not another ingress operator"
+---
+# The ClusterIssuers solve DNS-01 for the whole zone, so a tenant Certificate is
+# held to the same grant as its routes. Each tenant's wiring file binds this
+# beside tenant-traefik-hostnames with the same paramRef; none is bound here.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-certificates
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["cert-manager.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["certificates"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
+  variables:
+    - name: hosts
+      expression: >-
+        params.data.hosts.split('\n').map(h, h.trim()).filter(h, h != '')
+    # The ClusterIssuers in cluster-issuer.yaml.
+    - name: platformIssuers
+      expression: "['letsencrypt-prod', 'letsencrypt-staging']"
+  validations:
+    - expression: "variables.hosts.all(h, !h.contains('*'))"
+      message: "the platform grant must list exact hostnames, no wildcards"
+    - expression: >-
+        (!has(object.spec.dnsNames) || object.spec.dnsNames.all(n,
+        !n.contains('*') && n in variables.hosts))
+        && (!has(object.spec.commonName) || (!object.spec.commonName.contains('*')
+        && object.spec.commonName in variables.hosts))
+      message: "a tenant may request certificates only for hostnames granted this namespace"
+    # literalSubject carries its own CN, which an ACME CA issues as a name too.
+    - expression: >-
+        !has(object.spec.literalSubject) && !has(object.spec.ipAddresses)
+        && !has(object.spec.uris) && !has(object.spec.emailAddresses)
+        && !has(object.spec.otherNames)
+      message: "a tenant certificate may name only DNS hostnames (no literalSubject, IP, URI, email or otherName)"
+    # A namespaced Issuer resolves in the Certificate's own namespace.
+    - expression: >-
+        (!has(object.spec.issuerRef.group) || object.spec.issuerRef.group in ['', 'cert-manager.io'])
+        && (has(object.spec.issuerRef.kind) && object.spec.issuerRef.kind == 'ClusterIssuer'
+        ? object.spec.issuerRef.name in variables.platformIssuers
+        : !has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind in ['', 'Issuer'])
+      message: "a tenant certificate may use only a platform ClusterIssuer or an Issuer in its own namespace"
+---
+# Tenants hold `admin`, which cert-manager's aggregateClusterRoles grows with
+# certificaterequests write, and admission cannot read a CSR's names: only the
+# controller SA (chart deployment.yaml serviceAccountName) may ask a ClusterIssuer.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-certificaterequests
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      # cert-manager's webhook freezes CertificateRequest and Challenge spec after
+      # creation (internal/apis/{certmanager,acme}/validation) but Order spec only in
+      # spec.request, so Orders alone keep UPDATE; see tenants README.md.
+      - apiGroups: ["cert-manager.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE"]
+        resources: ["certificaterequests"]
+      - apiGroups: ["acme.cert-manager.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE"]
+        resources: ["challenges"]
+      - apiGroups: ["acme.cert-manager.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["orders"]
+  validations:
+    # An empty kind or group is cert-manager's core Issuer; any other kind, an
+    # external plugin's ClusterIssuer included, would sign outside the grant.
+    - expression: >-
+        request.resource.group == 'acme.cert-manager.io'
+        || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'
+        || ((!has(object.spec.issuerRef.group) || object.spec.issuerRef.group in ['', 'cert-manager.io'])
+        && (!has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind in ['', 'Issuer']))
+      message: "tenant certificate requests may use a platform ClusterIssuer (via a validated Certificate) or a cert-manager.io Issuer in their own namespace only"
+    # Defence in depth, not a live bypass: cert-manager-edit grants no Order create or
+    # update. The garbage collector may only UPDATE Orders (foregroundDeletion finalizers).
+    - expression: >-
+        request.resource.group != 'acme.cert-manager.io'
+        || request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'
+        || (request.operation == 'UPDATE'
+        && request.userInfo.username == 'system:serviceaccount:kube-system:generic-garbage-collector')
+      message: "tenant ACME Orders and Challenges are created by cert-manager's controller only"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-certificaterequests
+spec:
+  policyName: tenant-certificaterequests
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
+# A TCP or UDP router on a shared entryPoint can claim HostSNI(`*`) or the whole
+# port and intercept platform traffic, so tenants get none of their own.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-no-tcp-udp-routes
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingressroutetcps", "ingressrouteudps"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
+  validations:
+    - expression: "false"
+      message: "tenants serve HTTP only; ask the platform for a TCP route"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-no-tcp-udp-routes
+spec:
+  policyName: tenant-no-tcp-udp-routes
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
+# Traefik v3.7 crd provider (buildTLSOptions/buildTLSStores) drops a `default`
+# TLSOption or TLSStore defined in two namespaces, so a tenant `default` would
+# void the platform's TLS floor for every route; the defaults are platform-owned.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-traefik-tls-defaults
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["tlsoptions", "tlsstores"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
+  validations:
+    - expression: "object.metadata.name != 'default'"
+      message: "the Traefik default TLSOption/TLSStore is platform-owned"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-traefik-tls-defaults
+spec:
+  policyName: tenant-traefik-tls-defaults
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
+# Baseline Pod Security admits nfs, iscsi and other node-mounted volumes, and the
+# NAS exports trust node addresses with no per-tenant identity, so tenant pods get
+# the restricted volume set; see "Pod volumes" in the tenants README.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-pod-volumes
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      # A Pod's volumes are immutable after creation, so UPDATE adds nothing and
+      # would refuse finalizer-only updates on pods admitted before this policy;
+      # the workload kinds keep UPDATE because their pod templates are mutable.
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+      # A Job's pod template is immutable as well (only scheduling directives move
+      # while it is suspended), so Jobs match on CREATE; a CronJob's jobTemplate
+      # stays mutable and keeps UPDATE.
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["jobs"]
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["cronjobs"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
+  variables:
+    # Each step is has()-guarded: an error under failurePolicy Fail refuses the write.
+    - name: volumes
+      expression: >-
+        request.resource.resource == 'pods'
+        ? (has(object.spec) && has(object.spec.volumes) ? object.spec.volumes : [])
+        : request.resource.resource == 'cronjobs'
+        ? (has(object.spec) && has(object.spec.jobTemplate)
+        && has(object.spec.jobTemplate.spec)
+        && has(object.spec.jobTemplate.spec.template)
+        && has(object.spec.jobTemplate.spec.template.spec)
+        && has(object.spec.jobTemplate.spec.template.spec.volumes)
+        ? object.spec.jobTemplate.spec.template.spec.volumes : [])
+        : (has(object.spec) && has(object.spec.template)
+        && has(object.spec.template.spec)
+        && has(object.spec.template.spec.volumes)
+        ? object.spec.template.spec.volumes : [])
+  validations:
+    # A Volume carries one source; an unlisted (or future) source is refused.
+    - expression: >-
+        variables.volumes.all(v, has(v.configMap) || has(v.csi) || has(v.downwardAPI)
+        || has(v.emptyDir) || has(v.ephemeral) || has(v.persistentVolumeClaim)
+        || has(v.projected) || has(v.secret))
+      message: "tenant pods may use only configMap, csi, downwardAPI, emptyDir, ephemeral, persistentVolumeClaim, projected and secret volumes; nfs and other node-level volume types are platform-owned"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-pod-volumes
+spec:
+  policyName: tenant-pod-volumes
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists
+---
+# Tenant claims use the backed-up tenant-local class, or storageClassName ""
+# for a platform-written static volume pre-bound by claimRef. Any other class,
+# the default included, lands tenant data on an unbacked disk the quota never sees.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tenant-pvc-storageclasses
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      # A claim's class is immutable after creation, so CREATE is the whole surface.
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["persistentvolumeclaims"]
+  validations:
+    # A "" claim could name any unbound classless volume; a platform-written
+    # tenant volume is named <namespace>-<purpose> and pre-bound by claimRef,
+    # so the name must carry the claim's own namespace.
+    - expression: >-
+        has(object.spec.storageClassName)
+        && (object.spec.storageClassName == 'tenant-local'
+        || (object.spec.storageClassName == ''
+        && has(object.spec.volumeName)
+        && object.spec.volumeName.startsWith(object.metadata.namespace + '-')))
+      message: "tenant claims must use the tenant-local StorageClass, or name a platform-written static volume with storageClassName \"\" and a volumeName of the form <namespace>-<purpose>"
+    # The provisioner lets a claim's volumeType annotation override the class's
+    # defaultVolumeType: a hostPath volume has no node affinity, so a pod could
+    # land on another node and find an empty directory.
+    - expression: >-
+        !has(object.metadata.annotations)
+        || !('volumeType' in object.metadata.annotations)
+      message: "tenant claims may not carry a volumeType annotation; tenant-local volumes are always local"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tenant-pvc-storageclasses
+spec:
+  policyName: tenant-pvc-storageclasses
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: fluxcd.io/tenant
+          operator: Exists

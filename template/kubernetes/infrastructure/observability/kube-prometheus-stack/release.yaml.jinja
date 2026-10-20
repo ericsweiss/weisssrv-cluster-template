@@ -682,10 +682,13 @@ spec:
                   summary: 'PVC {{ $labels.persistentvolumeclaim }} in {{ $labels.namespace }} above 90%'
                   description: 'PVC usage is {{ $value | printf "%.1f" }}%.'
 
-              # Every stateful PV here is statically provisioned. A local-path
-              # PV means a claim fell through to the default class, onto a node
-              # bootdisk no backup covers. Delete if you adopt a provisioner.
-              - alert: LocalPathPVExists
+{% endraw %}{% if tenant_storage %}{% raw %}              # k3s local-storage is disabled and tenant claims name tenant-local,
+              # so a local-path PV means k3s's default class came back and a claim
+              # fell through to it, onto a node bootdisk no backup covers.
+{% endraw %}{% else %}{% raw %}              # Every stateful PV here is statically provisioned and k3s
+              # local-storage is off: a local-path PV means its default class came
+              # back, onto an unbacked bootdisk. Delete if you adopt a provisioner.
+{% endraw %}{% endif %}{% raw %}              - alert: LocalPathPVExists
                 expr: kube_persistentvolume_info{storageclass="local-path"} > 0
                 for: 15m
                 labels:
@@ -696,9 +699,64 @@ spec:
                   description: >-
                     PV {{ $labels.persistentvolume }} uses the local-path
                     StorageClass, which lands on a stateless node bootdisk and is
-                    excluded from backups. Pin its storageClassName to "" and
+{% endraw %}{% if tenant_storage %}{% raw %}                    excluded from backups. A platform claim: pin its
+                    storageClassName to "" and rebind it to the intended static
+                    PV. A tenant claim: recreate it with storageClassName:
+                    tenant-local.
+{% endraw %}{% else %}{% raw %}                    excluded from backups. Pin its storageClassName to "" and
                     rebind it to the intended static PV.
-{% endraw %}{% if storage_backend == 'zfs' %}{% raw %}
+{% endraw %}{% endif %}{% if tenant_storage %}{% raw %}
+
+              # tenant-local claim sizes are not enforced, so the shared zvol is
+              # the only cap on what tenants write. Runbook: "Tenant volumes filling".
+              - alert: TenantVolumesFilling
+                expr: >-
+                  node_filesystem_avail_bytes{job="node-exporter", mountpoint="/mnt/tenant-volumes"}
+                  / node_filesystem_size_bytes{job="node-exporter", mountpoint="/mnt/tenant-volumes"}
+                  < 0.20
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#tenant-volumes-filling'
+                  summary: 'The tenant-volumes filesystem on {{ $labels.instance }} is under 20% free'
+                  description: >-
+                    {{ $value | humanizePercentage }} of /mnt/tenant-volumes is
+                    free. Every tenant-local claim shares it, and a claim can
+                    write past its declared size.
+
+              - alert: TenantVolumesNearlyFull
+                expr: >-
+                  node_filesystem_avail_bytes{job="node-exporter", mountpoint="/mnt/tenant-volumes"}
+                  / node_filesystem_size_bytes{job="node-exporter", mountpoint="/mnt/tenant-volumes"}
+                  < 0.10
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#tenant-volumes-filling'
+                  summary: 'The tenant-volumes filesystem on {{ $labels.instance }} is under 10% free'
+                  description: >-
+                    {{ $value | humanizePercentage }} of /mnt/tenant-volumes is
+                    free. When it fills, every tenant volume on it, database
+                    instances included, stops accepting writes.
+
+              # The two alerts above go silent when the mount is gone, the state
+              # in which the provisioner refuses every tenant claim.
+              - alert: TenantVolumesMountMissing
+                expr: >-
+                  absent(node_filesystem_size_bytes{job="node-exporter", mountpoint="/mnt/tenant-volumes"})
+                for: 10m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#tenant-claim-refused-not-the-mounted-tenant-volumes-zvol'
+                  summary: 'No node-exporter reports a /mnt/tenant-volumes filesystem'
+                  description: >-
+                    The tenant-volumes zvol is not mounted on the NAS agent, or
+                    its node-exporter is down. New tenant-local claims are
+                    refused, and the TenantVolumes fill alerts cannot fire.
+{% endraw %}{% endif %}{% if storage_backend == 'zfs' %}{% raw %}
 
               # Pool integrity, from the node_exporter_host zpool textfile
               # collector — it covers every host with a pool, not only the NAS.
@@ -1598,7 +1656,7 @@ spec:
             rules:
               # Disabled upstream. for: 15m rides out a transient receiver
               # timeout; the inner `> 0` keeps a healthy gossip peer from flooring min().
-              # Taken from kube-prometheus-stack 92.3.0
+              # Taken from kube-prometheus-stack 92.11.0
               - alert: AlertmanagerClusterFailedToSendAlerts
                 expr: >-
                   min by (namespace, service, integration) (
@@ -1927,3 +1985,120 @@ spec:
                     recent mtime — the run wrote nothing. An empty dump restores
                     nothing; treat it as no backup for that app tonight.
 {%- endraw %}
+{%- if postgres_operator %}{% raw %}
+
+      platform-databases:
+        groups:
+          - name: platform.databases
+            rules:
+              - alert: CNPGPostgresDown
+                expr: cnpg_collector_up == 0
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#postgres-down'
+                  summary: 'PostgreSQL in {{ $labels.namespace }}/{{ $labels.pod }} is not accepting connections'
+                  description: >-
+                    The CNPG instance manager reports PostgreSQL down for 5
+                    minutes. Applications on this cluster cannot read or write.
+
+              # A failure newer than the newest success means the archive is
+              # behind now. A database with no success yet has no archived series,
+              # so the failure is compared with zero, joined on the full label set.
+              - alert: CNPGWALArchivingFailing
+                expr: >-
+                  cnpg_pg_stat_archiver_last_failed_time
+                  > (cnpg_pg_stat_archiver_last_archived_time
+                  or cnpg_pg_stat_archiver_last_failed_time * 0)
+                for: 30m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#wal-archiving-failing'
+                  summary: 'WAL archiving from {{ $labels.namespace }}/{{ $labels.pod }} has been failing for 30 minutes'
+                  description: >-
+                    Point-in-time recovery stops at the last archived segment,
+                    and WAL accumulates on the instance volume until this clears.
+
+              # As for WAL: no success yet exports no available series, so the
+              # failure is compared with zero, joined on the full label set.
+              - alert: CNPGBaseBackupFailed
+                expr: >-
+                  barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp
+                  > (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp
+                  or barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp * 0)
+                for: 15m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#base-backup-failed-or-stale'
+                  summary: 'The latest base backup of {{ $labels.namespace }}/{{ $labels.pod }} failed'
+                  description: >-
+                    A failed base backup is newer than the last good one; the
+                    recovery window shrinks every night this repeats.
+
+              # A missing or broken Barman plugin exports no barman_cloud_* series,
+              # which silences every base-backup alert. Both exporters
+              # share the instance pod's target labels, so the join is per pod.
+              - alert: CNPGBackupMetricsAbsent
+                expr: >-
+                  cnpg_collector_up == 1
+                  unless on (namespace, pod)
+                  barman_cloud_cloudnative_pg_io_last_available_backup_timestamp
+                for: 30m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#backup-metrics-absent'
+                  summary: '{{ $labels.namespace }}/{{ $labels.pod }} is up but exports no Barman backup metrics'
+                  description: >-
+                    The instance reports PostgreSQL up, but no barman_cloud_*
+                    series has arrived for 30 minutes, so no base-backup alert can fire.
+
+              # 30h is one nightly cycle plus margin. A timestamp of 0 is no backup
+              # ever, which CNPGNeverBackedUp covers; the age alerts skip it.
+              - alert: CNPGBaseBackupStale
+                expr: >-
+                  time() - barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 108000
+                  and barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 0
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#base-backup-failed-or-stale'
+                  summary: 'No base backup of {{ $labels.namespace }}/{{ $labels.pod }} in over 30 hours'
+                  description: >-
+                    The nightly ScheduledBackup has missed at least one run.
+
+              - alert: CNPGBaseBackupStaleCritical
+                expr: >-
+                  time() - barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 194400
+                  and barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 0
+                for: 1h
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#base-backup-failed-or-stale'
+                  summary: 'No base backup of {{ $labels.namespace }}/{{ $labels.pod }} in over 54 hours'
+                  description: >-
+                    Two nightly base backups in a row are missing; restores now
+                    replay more than two days of WAL.
+
+              # Still 0 in every sample for 30h, and reported 30h ago: an instance
+              # up that long has missed its first nightly backup.
+              - alert: CNPGNeverBackedUp
+                expr: >-
+                  max by (namespace, pod) (max_over_time(barman_cloud_cloudnative_pg_io_last_available_backup_timestamp[30h])) == 0
+                  and on (namespace, pod)
+                  count by (namespace, pod) (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp offset 30h)
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/postgres.md#base-backup-failed-or-stale'
+                  summary: '{{ $labels.namespace }}/{{ $labels.pod }} has reported for 30 hours without a base backup'
+                  description: >-
+                    The instance has never completed a base backup, so there is
+                    nothing to restore from; the first nightly run was missed.
+{%- endraw %}{% endif %}

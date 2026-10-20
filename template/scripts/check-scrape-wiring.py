@@ -54,6 +54,7 @@ CLUSTER_SCOPED_KINDS = frozenset(
         "RuntimeClass",
         "StorageClass",
         "ValidatingAdmissionPolicy",
+        "ValidatingAdmissionPolicyBinding",
         "ValidatingWebhookConfiguration",
         "VolumeSnapshotClass",
     }

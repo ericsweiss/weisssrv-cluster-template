@@ -365,9 +365,10 @@ tasks:
 {% endraw %}{% endif %}{% raw %}
 
   tenant-traefik-isolation:
-    desc: Assert no tenant is onboarded while Traefik allows cross-namespace refs
-    # tenant-crd-editor grants a tenant full traefik.io write, so with
-    # allowCrossNamespace on, one tenant can route to another's Service.
+    desc: Assert the Deny-bound tenant Traefik policies, in shape, and each tenant's hostname grant
+    # Whatever allowCrossNamespace says, only the Deny-bound policies in
+    # tenant-traefik-policy.yaml keep a tenant's refs in its own namespace, and
+    # its per-tenant hostname binding keeps its routes off platform hostnames.
     preconditions:
       - *needs_pyyaml
     cmds:

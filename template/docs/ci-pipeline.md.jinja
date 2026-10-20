@@ -103,7 +103,7 @@ rendered corpus, each covering a class kubeconform structurally cannot see:
 | `check-default-deny-coverage.py` | a namespace owns a workload but carries no namespace-wide ingress default-deny (or one defeated by an allow-everything rule beside it) |
 | `check-secretstore-scope.py` | a `ClusterSecretStore` has no `spec.conditions`, or a consumer namespace those conditions do not admit |
 | `check-pvc-storageclass.py` | a claim omits `storageClassName`, which the DefaultStorageClass admission plugin rewrites at create time with no diff in git |
-| `check-ephemeral-storage-cap.py` | a container's `ephemeral-storage` limit is below the sized emptyDirs it mounts, so the kubelet evicts the pod before the volume it sized fills |
+| `check-ephemeral-storage-cap.py` | a container's `ephemeral-storage` limit is below the sized emptyDirs it mounts, so the kubelet evicts the pod before the volume it sized fills; or only some of a pod's running containers declare a limit, so the others spend a budget they never funded |
 | `validate-helm-values.py` | a `.spec.values` block the kustomize corpus never renders fails `helm template` |
 
 The last two arms run only with `--require-chart-native-vpas`, which

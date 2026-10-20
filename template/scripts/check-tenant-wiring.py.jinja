@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Assert every tenant wiring file carries the confinement it is supposed to.
-Each omitted piece fails OPEN: Pod Security labels, namespace caps, the
-ServiceAccount and RoleBindings, the store conditions, the landing namespace.
+Each omitted piece fails OPEN: PSS labels, caps, SA and RoleBindings, stores,
+landing namespace, prune guards, and the db Kustomization's Orphan policy.
 """
 from __future__ import annotations
 
@@ -42,6 +42,31 @@ REQUIRED_NS_LABELS = (
 # The tenant's `admin` RoleBinding places no ceiling on what it may request, so
 # both caps are part of the wiring rather than a nicety.
 REQUIRED_CAPS = ("ResourceQuota", "LimitRange")
+{%- if tenant_storage %}
+# tenant-local does not enforce a claim's size, so the quota is the only bound
+# on how many claims, and how much storage, a tenant may declare.
+STORAGE_QUOTA_KEYS: tuple[str, ...] = (
+    "persistentvolumeclaims",
+    "tenant-local.storageclass.storage.k8s.io/requests.storage",
+)
+{%- else %}
+STORAGE_QUOTA_KEYS: tuple[str, ...] = ()
+{%- endif %}
+# emptyDir and container writable layers draw on the node's disk, which the
+# tenant-pod-volumes policy admits; only the quota and LimitRange bound them.
+EPHEMERAL_QUOTA_KEYS: tuple[str, ...] = (
+    "requests.ephemeral-storage",
+    "limits.ephemeral-storage",
+)
+# A pruned Namespace cascades through every object and PVC in it, which the db
+# Kustomization's `deletionPolicy: Orphan` cannot stop; its caps stay with it.
+PRUNE_ANNOTATION = "kustomize.toolkit.fluxcd.io/prune"
+PRUNE_GUARDED_KINDS = ("Namespace", *REQUIRED_CAPS)
+# The Namespace outlives the wiring, so the hostname grant and the bindings that
+# admit writes in it must too, until the Namespace is deleted by hand.
+GRANT_PREFIX = "tenant-routing-"
+GRANT_POLICIES = ("tenant-traefik-hostnames", "tenant-certificates")
+DATABASE_PATH = "kubernetes/db"
 # Kinds with no namespace of their own; everything else lands somewhere.
 CLUSTER_SCOPED_KINDS = frozenset(
     {
@@ -53,6 +78,7 @@ CLUSTER_SCOPED_KINDS = frozenset(
         "ClusterIssuer",
         "PriorityClass",
         "CustomResourceDefinition",
+        "ValidatingAdmissionPolicyBinding",
     }
 )
 
@@ -172,13 +198,120 @@ def _store_problems(docs: list, rel: str, namespace, labels: dict) -> list[str]:
 
 
 def _caps_problems(docs: list, rel: str) -> list[str]:
-    """Both namespace caps are declared, or the tenant quota is unbounded."""
+    """Both namespace caps are declared, the quota bounds claims and ephemeral
+    storage, and every Container limit bounds ephemeral storage by default and
+    at most, or the tenant can spend a node's disk."""
     problems = []
     for kind in REQUIRED_CAPS:
         if not _of_kind(docs, kind):
             problems.append(
                 f"{rel}: declares no {kind} — the tenant's admin RoleBinding places "
                 "no ceiling on what its pods may request"
+            )
+    quotas = _of_kind(docs, "ResourceQuota")
+    hard: set = set()
+    for quota in quotas:
+        keys = (quota.get("spec") or {}).get("hard")
+        hard |= set(keys) if isinstance(keys, dict) else set()
+    missing = [k for k in STORAGE_QUOTA_KEYS if k not in hard]
+    if quotas and missing:
+        problems.append(
+            f"{rel}: ResourceQuota does not cap tenant-local claims; missing "
+            f"spec.hard keys {', '.join(missing)} — the provisioner enforces no "
+            "size, so nothing else bounds what the tenant may claim"
+        )
+    missing = [k for k in EPHEMERAL_QUOTA_KEYS if k not in hard]
+    if quotas and missing:
+        problems.append(
+            f"{rel}: ResourceQuota does not cap ephemeral storage; missing "
+            f"spec.hard keys {', '.join(missing)} — emptyDir and writable layers "
+            "would be bounded only by the node's disk"
+        )
+    for limit_range in _of_kind(docs, "LimitRange"):
+        name = ((limit_range.get("metadata") or {}).get("name")) or "?"
+        entries = [
+            e for e in ((limit_range.get("spec") or {}).get("limits") or [])
+            if isinstance(e, dict) and e.get("type") == "Container"
+        ]
+        if not entries:
+            problems.append(
+                f"{rel}: LimitRange {name} has no Container entry — the defaults "
+                "and ceilings never apply, so a container with no resources block "
+                "lands unbounded inside the quota"
+            )
+        for entry in entries:
+            # default supplies only the limit: without defaultRequest a container
+            # with no resources block is charged the whole limit against the
+            # requests quota and may be refused rather than defaulted.
+            unset = [
+                k for k in ("default", "defaultRequest", "max")
+                if "ephemeral-storage" not in (entry.get(k) or {})
+            ]
+            if unset:
+                problems.append(
+                    f"{rel}: LimitRange {name} sets no ephemeral-storage under "
+                    f"{', '.join(unset)} — a tenant container with no resources block "
+                    "would spend the node's disk unbounded, or be refused by the quota"
+                )
+    return problems
+
+
+def _is_database_tree(kustomization: dict) -> bool:
+    """A `-db` Kustomization, or one reconciling the database tree, or any
+    directory under it, by path."""
+    name = str((kustomization.get("metadata") or {}).get("name") or "")
+    path = posixpath.normpath(str((kustomization.get("spec") or {}).get("path") or "."))
+    tree = path.lstrip("/")
+    return (
+        name.endswith("-db")
+        or tree == DATABASE_PATH
+        or tree.startswith(DATABASE_PATH + "/")
+    )
+
+
+def _prune_guard_problems(docs: list, rel: str) -> list[str]:
+    """A tenant's Namespace, caps, hostname grant and grant bindings outlive its
+    wiring, one rule for all."""
+    flux = [
+        k for k in _of_kind(docs, "Kustomization")
+        if "kustomize.toolkit" in str(k.get("apiVersion"))
+    ]
+    database = any(_is_database_tree(k) for k in flux)
+    problems = []
+    for kind in PRUNE_GUARDED_KINDS:
+        for doc in _of_kind(docs, kind):
+            metadata = doc.get("metadata") or {}
+            if (metadata.get("annotations") or {}).get(PRUNE_ANNOTATION) == "disabled":
+                continue
+            if kind != "Namespace":
+                why = ("removing the wiring would prune it and leave the surviving "
+                       "Namespace without that ceiling")
+            elif database:
+                why = ("removing the wiring would prune the Namespace and "
+                       "cascade-delete the database and its PVCs, whatever the db "
+                       "Kustomization's deletionPolicy says")
+            else:
+                why = ("removing the wiring would prune the Namespace and "
+                       "cascade-delete every object and PVC in it")
+            problems.append(
+                f"{rel}: {kind} {metadata.get('name')} lacks "
+                f"{PRUNE_ANNOTATION}: disabled — {why}"
+            )
+    admission = [
+        d for d in _of_kind(docs, "ConfigMap")
+        if str((d.get("metadata") or {}).get("name") or "").startswith(GRANT_PREFIX)
+    ] + [
+        d for d in _of_kind(docs, "ValidatingAdmissionPolicyBinding")
+        if (d.get("spec") or {}).get("policyName") in GRANT_POLICIES
+    ]
+    for doc in admission:
+        metadata = doc.get("metadata") or {}
+        if (metadata.get("annotations") or {}).get(PRUNE_ANNOTATION) != "disabled":
+            problems.append(
+                f"{rel}: {doc.get('kind')} {metadata.get('name')} lacks "
+                f"{PRUNE_ANNOTATION}: disabled — removing the wiring would prune it "
+                "while the Namespace survives, and admission for the Namespace must "
+                "outlive the wiring until the Namespace is deleted by hand"
             )
     return problems
 
@@ -239,6 +372,7 @@ def check_file(path: Path, rel: str, listed: set[str],
                 problems.append(f"{rel}: namespace {namespace} has no {label} label")
 
     problems += _caps_problems(docs, rel)
+    problems += _prune_guard_problems(docs, rel)
     problems += _placement_problems(docs, rel, namespace)
     problems += _store_problems(docs, rel, namespace, labels)
 
@@ -247,31 +381,48 @@ def check_file(path: Path, rel: str, listed: set[str],
     if not kustomizations:
         problems.append(f"{rel}: declares no Flux Kustomization")
         return problems
-    spec = kustomizations[0].get("spec") or {}
+    for kustomization in kustomizations:
+        name = (kustomization.get("metadata") or {}).get("name", "?")
+        problems += _kustomization_problems(
+            docs, f"{rel} [{name}]", kustomization, namespace, root
+        )
+    return problems
 
+
+def _kustomization_problems(docs: list, label: str, kustomization: dict,
+                            namespace, root: Path | None) -> list[str]:
+    """One Flux Kustomization's confinement. Every Kustomization in a tenant
+    file reconciles with the same reach, so each is checked, not the first."""
+    problems = []
+    spec = kustomization.get("spec") or {}
     service_account = spec.get("serviceAccountName")
     if not service_account:
         problems.append(
-            f"{rel}: Kustomization has no serviceAccountName — it would reconcile "
+            f"{label}: Kustomization has no serviceAccountName — it would reconcile "
             "as kustomize-controller's own cluster-admin"
         )
     if spec.get("prune") is not True:
-        problems.append(f"{rel}: Kustomization does not set prune: true")
+        problems.append(f"{label}: Kustomization does not set prune: true")
+    if _is_database_tree(kustomization) and spec.get("deletionPolicy") != "Orphan":
+        problems.append(
+            f"{label}: database Kustomization does not set deletionPolicy: Orphan — "
+            "deleting it would garbage-collect the database Cluster and its PVCs"
+        )
     target = spec.get("targetNamespace")
     if not target:
-        problems.append(f"{rel}: Kustomization has no targetNamespace")
+        problems.append(f"{label}: Kustomization has no targetNamespace")
     elif namespace and target != namespace:
         problems.append(
-            f"{rel}: Kustomization targetNamespace {target!r} is not the tenant "
+            f"{label}: Kustomization targetNamespace {target!r} is not the tenant "
             f"namespace {namespace!r}"
         )
-    problems += _substitute_problems(spec, rel)
-    problems += _source_problems(docs, rel, spec)
-    problems += _path_problems(rel, spec, root)
+    problems += _substitute_problems(spec, label)
+    problems += _source_problems(docs, label, spec)
+    problems += _path_problems(label, spec, root)
     depends = {str((d or {}).get("name")) for d in (spec.get("dependsOn") or [])}
     if REQUIRED_DEPENDENCY not in depends:
         problems.append(
-            f"{rel}: Kustomization does not dependOn {REQUIRED_DEPENDENCY} — on a "
+            f"{label}: Kustomization does not dependOn {REQUIRED_DEPENDENCY} — on a "
             "fresh bootstrap it applies before the platform CRDs exist"
         )
 
@@ -282,10 +433,10 @@ def check_file(path: Path, rel: str, listed: set[str],
         }
         if (service_account, FLUX_NAMESPACE) not in accounts:
             problems.append(
-                f"{rel}: no ServiceAccount {service_account} in {FLUX_NAMESPACE} — "
+                f"{label}: no ServiceAccount {service_account} in {FLUX_NAMESPACE} — "
                 "kustomize-controller impersonates it from its own namespace"
             )
-        problems += _rolebinding_problems(docs, rel, service_account, namespace)
+        problems += _rolebinding_problems(docs, label, service_account, namespace)
     return problems
 
 

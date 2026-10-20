@@ -28,11 +28,11 @@ vendored:
   - scripts/check-kubectl-version-pin.py
   - scripts/check-lib-pins.py
   - scripts/check-netpol-except-parity.py
-  - scripts/check-scrape-wiring.py
   - scripts/check-nfs-tls.py
   - scripts/check-pvc-storageclass.py
   - scripts/check-role-inputs.py
   - scripts/check-scrape-netpol.py
+  - scripts/check-scrape-wiring.py
   - scripts/check-secretstore-scope.py
   - scripts/check-taskfile.sh
   - scripts/check-version-checksums.py

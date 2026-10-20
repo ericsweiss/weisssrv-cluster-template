@@ -62,8 +62,6 @@ vendored:
     consumer: template/scripts/check-lib-pins.py
   - lib: scripts/check-netpol-except-parity.py
     consumer: template/scripts/check-netpol-except-parity.py
-  - lib: scripts/check-scrape-wiring.py
-    consumer: template/scripts/check-scrape-wiring.py
   - lib: scripts/check-nfs-tls.py
     consumer: template/scripts/check-nfs-tls.py
   - lib: scripts/check-pvc-storageclass.py
@@ -72,6 +70,8 @@ vendored:
     consumer: template/scripts/check-role-inputs.py
   - lib: scripts/check-scrape-netpol.py
     consumer: template/scripts/check-scrape-netpol.py
+  - lib: scripts/check-scrape-wiring.py
+    consumer: template/scripts/check-scrape-wiring.py
   - lib: scripts/check-secretstore-scope.py
     consumer: template/scripts/check-secretstore-scope.py
   - lib: scripts/check-taskfile.sh

@@ -82,6 +82,8 @@ MODULES_ON = {
     "vpn_tailscale": True,
     "gpu": "nvidia",
     "use_unifi": True,
+    "tenant_storage": True,
+    "postgres_operator": True,
     "enable_semantic_release": False,
     "compose_app_guests": [
         {
@@ -867,6 +869,14 @@ GATED_ENTRY_POINTS = {
         "terraform/unifi/main.tf",
         "docs/unifi-network.md",
         "scripts/check-unifi-doc-parity.py",
+    ),
+    "postgres_operator": (
+        "kubernetes/infrastructure/controllers/cnpg/release.yaml",
+        "kubernetes/infrastructure/sources/cloudnative-pg.yaml",
+    ),
+    "tenant_storage": (
+        "kubernetes/infrastructure/controllers/local-path-provisioner/storageclass.yaml",
+        "kubernetes/infrastructure/controllers/local-path-provisioner/configmap.yaml",
     ),
     "vpn_tailscale": (
         "kubernetes/apps/tailnet-dns/kustomization.yaml",
@@ -3694,3 +3704,91 @@ def test_a_quantity_with_an_unknown_suffix_is_skipped():
     assert _quantity("${cluster_memory}") is None
     assert _quantity("128Mi") == 128 * 2**20
     assert _quantity("1G") == 10**9
+
+
+def test_the_static_pv_wording_follows_tenant_storage(cluster):
+    """With tenant_storage on, tenant claims provision from tenant-local, so the
+    LocalPathPVExists comment and the wrong-class runbook must not claim every
+    PV is static, and must not tell the operator to delete the rule."""
+    release = (
+        cluster.path
+        / "kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml"
+    ).read_text()
+    runbooks = " ".join((cluster.path / "docs/RUNBOOKS.md").read_text().split())
+    head = release.split("- alert: LocalPathPVExists")[0].splitlines()[-4:]
+    comment = " ".join(line.strip() for line in head)
+    rule = release.split("- alert: LocalPathPVExists")[1].split("- alert:")[0]
+    description = " ".join(rule.split("description:")[1].split())
+    wrong_class = runbooks.split("**Something landed on the wrong storage class**")[1]
+    wrong_class = wrong_class.split("###")[0]
+    # Platform claims always rebind to a static PV; with tenant_storage a tenant
+    # claim is recreated naming tenant-local, never pinned to "".
+    assert 'storageClassName to ""' in description, description
+    assert 'storageClassName: ""' in wrong_class, wrong_class
+    if cluster.answers["tenant_storage"]:
+        assert "tenant-local" in comment, comment
+        assert "Every stateful PV here is statically provisioned" not in comment, comment
+        assert "Delete if you adopt a provisioner" not in comment, comment
+        assert "tenant claims name `tenant-local`" in runbooks
+        assert "Every PV in the cluster is static" not in runbooks
+        assert "storageClassName: tenant-local" in description, description
+        assert "`storageClassName: tenant-local`" in wrong_class, wrong_class
+    else:
+        assert "Every stateful PV here is statically provisioned" in comment, comment
+        assert "tenant-local" not in comment, comment
+        assert "Every PV in the cluster is static" in runbooks
+        assert "tenant-local" not in description, description
+        assert "tenant-local" not in wrong_class, wrong_class
+
+
+def test_the_example_tenant_quota_caps_tenant_local_only_with_tenant_storage(cluster):
+    """tenant-local enforces no size on the shared zvol, so the example quota every
+    tenant wiring file is copied from must cap it whenever tenant_storage renders,
+    and the off render must carry no key for a class it does not have."""
+    readme = next((cluster.path / "kubernetes/clusters").glob("*/tenants/README.md")).read_text()
+    quota = readme.split("name: example-app-quota")[1].split("\n---")[0]
+    key = "tenant-local.storageclass.storage.k8s.io/requests.storage:"
+    if cluster.answers["tenant_storage"]:
+        assert key in quota, quota
+        assert "persistentvolumeclaims:" in quota, quota
+    else:
+        assert key not in readme
+        assert "persistentvolumeclaims:" not in quota, quota
+
+
+def test_the_example_tenant_namespace_and_caps_are_kept_out_of_flux_pruning(cluster):
+    """A pruned tenant Namespace cascades through every object and PVC in it, and
+    the db Kustomization's `deletionPolicy: Orphan` cannot stop that, so the
+    example Namespace and the caps beside it opt out of pruning."""
+    readme = next((cluster.path / "kubernetes/clusters").glob("*/tenants/README.md")).read_text()
+    example = readme.split("## Example", 1)[1].split("```yaml\n", 1)[1].split("```", 1)[0]
+    docs = {
+        d["kind"]: d
+        for d in yaml.safe_load_all(example)
+        if isinstance(d, dict) and d.get("kind") in {"Namespace", "ResourceQuota", "LimitRange"}
+    }
+    assert set(docs) == {"Namespace", "ResourceQuota", "LimitRange"}, docs
+    for kind, doc in docs.items():
+        annotations = doc["metadata"].get("annotations") or {}
+        assert annotations.get("kustomize.toolkit.fluxcd.io/prune") == "disabled", (kind, doc)
+    teardown = readme.split("## Example", 1)[0]
+    assert "by hand" in teardown, teardown
+
+
+def test_the_example_database_kustomization_orphans_on_deletion(cluster):
+    """Deleting the database wiring must never half-dismantle a database: the
+    default policy prunes its policies, ExternalSecrets and ScheduledBackup while
+    the prune-guarded Cluster keeps running isolated and stops archiving."""
+    readme = next((cluster.path / "kubernetes/clusters").glob("*/tenants/README.md")).read_text()
+    example = readme.split("## Example", 1)[1].split("```yaml\n", 1)[1].split("```", 1)[0]
+    flux = {
+        d["metadata"]["name"]: d["spec"]
+        for d in yaml.safe_load_all(example)
+        if isinstance(d, dict) and d.get("kind") == "Kustomization"
+    }
+    assert "deletionPolicy" not in flux["example-app"], flux["example-app"]
+    if cluster.answers["postgres_operator"]:
+        assert flux["example-app-db"]["deletionPolicy"] == "Orphan", flux
+        assert flux["example-app-db"]["path"] == "./kubernetes/db", flux
+    else:
+        assert set(flux) == {"example-app"}, flux

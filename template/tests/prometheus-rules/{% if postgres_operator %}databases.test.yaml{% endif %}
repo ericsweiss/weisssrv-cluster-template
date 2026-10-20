@@ -1,0 +1,124 @@
+---
+# promtool unit tests for the CloudNativePG alerts (platform.databases group).
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'cnpg_collector_up{namespace="app", pod="app-db-1"}'
+        values: '1x5 0x20'
+      - series: 'cnpg_collector_up{namespace="other-app", pod="other-app-db-1"}'
+        values: '1x25'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: CNPGPostgresDown
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: CNPGPostgresDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: app
+              pod: app-db-1
+
+  - interval: 1m
+    input_series:
+      - series: 'cnpg_pg_stat_archiver_last_archived_time{namespace="app", pod="app-db-1"}'
+        values: '1000x60'
+      - series: 'cnpg_pg_stat_archiver_last_failed_time{namespace="app", pod="app-db-1"}'
+        values: '0x10 2000x50'
+      - series: 'cnpg_pg_stat_archiver_last_archived_time{namespace="other-app", pod="other-app-db-1"}'
+        values: '3000x60'
+      - series: 'cnpg_pg_stat_archiver_last_failed_time{namespace="other-app", pod="other-app-db-1"}'
+        values: '2000x60'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: CNPGWALArchivingFailing
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: CNPGWALArchivingFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: app
+              pod: app-db-1
+
+  # A fresh database whose first archive fails exports no last_archived_time
+  # at all; the missing success must read as never, not drop the comparison.
+  - interval: 1m
+    input_series:
+      - series: 'cnpg_pg_stat_archiver_last_failed_time{namespace="fresh", pod="fresh-db-1"}'
+        values: '2000x60'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CNPGWALArchivingFailing
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: CNPGWALArchivingFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: fresh
+              pod: fresh-db-1
+
+  - interval: 1m
+    input_series:
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="app", pod="app-db-1"}'
+        values: '1000x40'
+      - series: 'barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp{namespace="app", pod="app-db-1"}'
+        values: '0x5 2000x35'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CNPGBaseBackupFailed
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CNPGBaseBackupFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: app
+              pod: app-db-1
+
+  # A database whose first base backup fails exports no last_available series;
+  # the missing success must read as never, not drop the comparison.
+  - interval: 1m
+    input_series:
+      - series: 'barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp{namespace="fresh", pod="fresh-db-1"}'
+        values: '2000x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CNPGBaseBackupFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CNPGBaseBackupFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: fresh
+              pod: fresh-db-1
+
+  # A missing or broken Barman plugin exports no barman_cloud_* series at all,
+  # which silences every backup alert; the instance must still be up to count.
+  - interval: 1m
+    input_series:
+      - series: 'cnpg_collector_up{namespace="app", pod="app-db-1", job="app/app-db"}'
+        values: '1x45'
+      - series: 'cnpg_collector_up{namespace="other-app", pod="other-app-db-1", job="other-app/other-app-db"}'
+        values: '1x45'
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="other-app", pod="other-app-db-1", job="other-app/other-app-db"}'
+        values: '1000x45'
+      - series: 'cnpg_collector_up{namespace="down", pod="down-db-1", job="down/down-db"}'
+        values: '0x45'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CNPGBackupMetricsAbsent
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: CNPGBackupMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: app
+              pod: app-db-1
+              job: app/app-db

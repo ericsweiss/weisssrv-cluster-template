@@ -2,6 +2,7 @@
 {%- from "partials/roster.jinja" import n_compute, nas_name, smtp_name, resolvers,
     pve_hosts, n_srv, gpu_host, k3s_server_names, k3s_server_ips, k3s_agent_names,
     k3s_agent_ips with context %}
+{%- from "partials/tenant-volumes.jinja" import tenant_volumes_zvol %}
 # Starter roster for {{ cluster_name }}: one NAS host, {{ n_compute }} compute host(s),
 # {{ resolvers | length }} DNS resolver(s), one SMTP relay, and a {{ n_srv }}-server /
 # {{ pve_hosts | length }}-agent k3s cluster. Guest vmid = 100 + last octet.
@@ -195,9 +196,9 @@ all:
           proxmox_startup_order: 40
           proxmox_startup_delay: 10
 {%- if loop.first %}
-          # NAS-colocated agent (PreferNoSchedule, so it still takes overflow).
-          # These three zvols back the prometheus-data, loki-data and
-          # authentik-postgres-data hostPath PVs; never reorder scsi_slot.
+          # NAS-colocated agent (PreferNoSchedule: still takes overflow). These zvols back
+          # the prometheus-data, loki-data and authentik-postgres-data hostPath PVs (and,
+          # with tenant_storage, the tenant-local root); never reorder scsi_slot.
           vm_additional_disks:
             - name: prometheus-data
               size: 150G
@@ -227,6 +228,18 @@ all:
               # The restorable copy is the nightly pg_dump on the NAS
               # (/backups-apps/authentik), not this block device.
               vzdump_backup: false
+{%- if tenant_storage %}
+            # Root of StorageClass tenant-local: one directory per tenant claim,
+            # replicated with ssd/appdata like the zvols above.
+            - name: tenant-volumes
+              size: 100G
+              zvol: {{ tenant_volumes_zvol }}
+              mount_point: /mnt/tenant-volumes
+              fstype: ext4
+              scsi_slot: 4
+              sparse: true
+              vzdump_backup: false
+{%- endif %}
 {%- endif %}
           k3s_labels:
             {{ internal_domain }}/general: "true"
