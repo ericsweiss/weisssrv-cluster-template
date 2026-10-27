@@ -164,12 +164,12 @@ maintenance_ci_runner_namespaces:
 
 # Host-side pins consumed by weisssrv.infra roles (no role default — required).
 adguard_home_version: "0.107.79"
-adguard_sync_version: "0.9.4"
+adguard_sync_version: "0.9.5"
 alloy_host_version: "1.21.2-1"    # apt package version, not the chart version
 {%- if vpn_tailscale %}
 # apt package pin, read from a tasks-only maintenance play where the role
 # default is out of scope. Not helm_chart_versions.tailscale_operator.
-tailscale_version: "1.104.1"
+tailscale_version: "1.104.2"
 {%- endif %}
 
 # Debian cloud image every VM is built from, a DATED directory rather than
@@ -199,19 +199,19 @@ nvidia_cuda_keyring_sha256: "d0d4ef986a44400f9db33c600ef33a985175e7cc63d805a10e1
 
 # Platform Helm charts reconciled by Flux (kubernetes/infrastructure/).
 helm_chart_versions:
-  cert_manager: "v1.21.2"
+  cert_manager: "v1.21.3"
   external_dns: "1.23.0"
-  external_secrets: "2.13.0"
+  external_secrets: "2.14.0"
   metallb: "0.15.3"
-  traefik: "42.1.0"
+  traefik: "42.1.3"
   # Owns the monitoring.coreos.com CRDs; bump in lockstep with
   # kube_prometheus_stack so the CRDs match the operator.
-  prometheus_operator_crds: "32.0.1"
-  kube_prometheus_stack: "92.11.0"
-  loki: "18.17.1"
-  alloy: "1.14.0"
-  prometheus_blackbox_exporter: "11.20.0"
-  onepassword_connect: "2.4.2"
+  prometheus_operator_crds: "32.0.2"
+  kube_prometheus_stack: "92.14.0"
+  loki: "20.0.2"
+  alloy: "1.14.3"
+  prometheus_blackbox_exporter: "11.20.2"
+  onepassword_connect: "2.4.3"
   vpa: "5.1.0"
   kured: "6.1.0"
   reloader: "2.2.18"
@@ -222,7 +222,7 @@ helm_chart_versions:
   plugin_barman_cloud: "0.8.1"
 {%- endif %}
 {%- if vpn_tailscale %}
-  tailscale_operator: "1.104.1"
+  tailscale_operator: "1.104.2"
 {%- endif %}
 {%- if gpu == 'nvidia' %}
   nvidia_device_plugin: "0.20.1"
@@ -232,7 +232,7 @@ helm_chart_versions:
 
 # SSO provider + its bundled database. postgresql_version is also what the
 # pg_dump CronJob runs, so the client major matches the server.
-authentik_version: "2026.8.4"
+authentik_version: "2026.8.5"
 postgresql_version: "18.6-trixie"
 
 # Pull-through registry cache: the CNCF distribution `registry` image, bare tag.
@@ -253,10 +253,10 @@ local_path_provisioner_version: "v0.0.37"
 
 # CoreDNS for the tailnet split-horizon resolver, pinned to the rancher mirror
 # k3s already caches on every node.
-coredns_tailnet_version: "1.14.7"
+coredns_tailnet_version: "1.15.0"
 {%- endif %}
 {%- if git_backend == 'gitlab_selfhosted' %}
 
 # GitLab Runner chart, shared by both runner tiers.
-gitlab_runner_helm_version: "0.94.0"
+gitlab_runner_helm_version: "0.94.1"
 {%- endif %}
