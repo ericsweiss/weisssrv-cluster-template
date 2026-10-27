@@ -123,6 +123,10 @@ postfix_null_client_sasl_password: "{% raw %}{{ lookup('ansible.builtin.env', 'S
 alloy_host_loki_url: "https://loki.{% raw %}{{ internal_domain }}{% endraw %}/loki/api/v1/push"
 alloy_host_loki_user: "{% raw %}{{ lookup('ansible.builtin.env', 'LOKI_PUSH_USER') | default('', true) }}{% endraw %}"
 alloy_host_loki_password: "{% raw %}{{ lookup('ansible.builtin.env', 'LOKI_PUSH_PASSWORD') | default('', true) }}{% endraw %}"
+# Alloy >= 1.21.0 refuses a loki.write WAL below the experimental stability
+# level (grafana/alloy#7257); the role keeps the WAL on by default. Drop this
+# once the alloy_host role passes the flag itself (weisssrv-lib follow-up).
+alloy_host_extra_args: ["--stability.level=experimental"]
 
 # --- Overlay VPN ------------------------------------------------------------
 tailscale_enabled: {{ 'true' if vpn_tailscale else 'false' }}
@@ -161,7 +165,7 @@ maintenance_ci_runner_namespaces:
 # Host-side pins consumed by weisssrv.infra roles (no role default — required).
 adguard_home_version: "0.107.79"
 adguard_sync_version: "0.9.4"
-alloy_host_version: "1.21.0-1"    # apt package version, not the chart version
+alloy_host_version: "1.21.2-1"    # apt package version, not the chart version
 {%- if vpn_tailscale %}
 # apt package pin, read from a tasks-only maintenance play where the role
 # default is out of scope. Not helm_chart_versions.tailscale_operator.
