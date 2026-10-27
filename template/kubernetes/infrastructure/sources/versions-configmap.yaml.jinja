@@ -26,7 +26,7 @@ data:
 {%- endif %}
   helm_chart_versions_external_dns: 1.23.0
   helm_chart_versions_external_secrets: 2.14.0
-  helm_chart_versions_kube_prometheus_stack: 92.14.0
+  helm_chart_versions_kube_prometheus_stack: 92.14.1
   helm_chart_versions_kured: 6.1.0
   helm_chart_versions_loki: 20.0.2
   helm_chart_versions_metallb: 0.15.3
@@ -39,7 +39,7 @@ data:
 {%- endif %}
   helm_chart_versions_prometheus_blackbox_exporter: 11.20.2
   helm_chart_versions_prometheus_operator_crds: 32.0.2
-  helm_chart_versions_reloader: 2.2.18
+  helm_chart_versions_reloader: 2.2.19
 {%- if vpn_tailscale %}
   helm_chart_versions_tailscale_operator: 1.104.2
 {%- endif %}
@@ -57,7 +57,7 @@ data:
   postgresql_version: 18.6-trixie
   registry_cache_version: 3.1.2
 {%- if vpn_tailscale %}
-  tailscale_version: 1.104.2
+  tailscale_version: 1.104.4
 {%- endif %}
 kind: ConfigMap
 metadata:

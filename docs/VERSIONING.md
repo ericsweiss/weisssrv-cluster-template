@@ -455,14 +455,14 @@ drops the override. A bump rewrites tag and digest together.
 `copier update` with default answers moves these shipped defaults, which Flux
 reconciles on merge: external-secrets 2.14.0, Traefik 42.1.3 (42 is a major:
 read its release notes against any Traefik values the cluster overrides),
-kube-prometheus-stack 92.14.0 with the CRDs chart at 32.0.2 (operator 0.94.2),
-Loki 20.0.2 (a major), Alloy 1.14.3, cert-manager 1.21.3, the Blackbox exporter
-11.20.2, 1Password Connect 2.4.3, Tailscale and its operator 1.104.2, the
-tailnet CoreDNS 1.15.0, adguardhome-sync 0.9.5, Authentik 2026.8.5 and the
-GitLab runner chart 0.94.1. They are the pins the reference cluster already
-runs; a cluster that pinned its own values in `all.yml` keeps them, and
-`task maintenance:check-versions` reports the drift either way. MetalLB stays
-held at 0.15.3.
+kube-prometheus-stack 92.14.1 with the CRDs chart at 32.0.2 (operator 0.94.2),
+Loki 20.0.2 (a major), Alloy 1.14.3, cert-manager 1.21.3, the Blackbox
+exporter 11.20.2, 1Password Connect 2.4.3, Reloader 2.2.19, Tailscale 1.104.4
+and its operator 1.104.2, the tailnet CoreDNS 1.15.0, adguardhome-sync 0.9.5,
+Authentik 2026.8.5 and the GitLab runner chart 0.94.1. They are the pins the
+reference cluster already runs; a cluster that pinned its own values in
+`all.yml` keeps them, and `task maintenance:check-versions` reports the drift
+either way. MetalLB stays held at 0.15.3.
 
 ### Every tenant's Namespace, caps and hostname grant carry the prune guard
 
