@@ -500,6 +500,16 @@ volumes and writable layers otherwise fill the node's disk unbounded. Before
 the update merges, add those keys to every existing tenant file, as the tenants
 README § Example shows, or `task lint:invariants` fails.
 
+### No tenant LimitRange sets CPU under `default` or `max`
+
+`scripts/check-tenant-wiring.py` now fails a tenant LimitRange Container entry
+that sets `cpu` under `default` or `max`. The apiserver copies a `max` with no
+matching `default` into `default`, so either key hands every tenant container a
+CPU limit and CFS throttling. A CPU `defaultRequest` stays allowed. The same
+release reads every Namespace in a tenant file for the required labels, not only
+the first. Remove those keys from every existing tenant file before the update
+merges, or `task lint:invariants` fails.
+
 ## Related
 
 - [RUNBOOKS.md](RUNBOOKS.md) § Updating the template — the operator-side procedure

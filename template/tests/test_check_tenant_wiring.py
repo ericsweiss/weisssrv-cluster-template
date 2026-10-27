@@ -1,7 +1,7 @@
 """Coverage for check-tenant-wiring.py.
 
-No tenant is onboarded, so the live tree exercises only the empty case. Every
-arm runs against a fixture tenant file, and each mutation case must FAIL.
+The live tree is checked as it stands, onboarded tenants or none. Every arm
+also runs against a fixture tenant file, and each mutation case must FAIL.
 """
 from __future__ import annotations
 
@@ -246,6 +246,72 @@ def test_a_tenant_that_pins_its_own_versions_needs_only_cluster_config(repo: Pat
     assert gate.check(repo) == []
 
 
+SUBSTITUTE_VERSIONS = (
+    "      - kind: ConfigMap\n        name: cluster-versions\n        optional: false\n"
+)
+
+
+@pytest.mark.parametrize("kind", ["Secret", None], ids=["secret", "no-kind"])
+def test_a_substitute_source_that_is_not_a_configmap_fails(
+    repo: Path, kind: str | None
+) -> None:
+    """A tenant substitutes from the platform ConfigMaps, never a Secret."""
+    assert TENANT.count(SUBSTITUTE_VERSIONS) == 1
+    entry = SUBSTITUTE_VERSIONS.replace(
+        "      - kind: ConfigMap\n",
+        "      - kind: Secret\n" if kind else "      -\n",
+    )
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT.replace(SUBSTITUTE_VERSIONS, entry))
+    problems = gate.check(repo)
+    assert any("is not a ConfigMap" in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_an_unlisted_substitute_source_fails(repo: Path) -> None:
+    body = TENANT.replace(
+        SUBSTITUTE_VERSIONS, SUBSTITUTE_VERSIONS.replace("cluster-versions", "other-config")
+    )
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    assert any("ConfigMap other-config is not one of" in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_repeated_substitute_source_fails(repo: Path) -> None:
+    body = TENANT.replace(SUBSTITUTE_VERSIONS, SUBSTITUTE_VERSIONS * 2)
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    assert problems == [
+        f"{gate.TENANTS_DIR}/demo-app.yaml [demo-app]: substituteFrom lists ConfigMap "
+        "cluster-versions more than once — each platform source belongs in the list once"
+    ], problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+POST_BUILD = TENANT[TENANT.index("  postBuild:\n"):]
+
+
+@pytest.mark.parametrize(
+    ("replacement", "expected"),
+    [
+        ("  postBuild: true\n", "postBuild is not a mapping"),
+        ("  postBuild:\n    - cluster-config\n", "postBuild is not a mapping"),
+        ("  postBuild:\n    substituteFrom: cluster-config\n", "substituteFrom is not a list"),
+        ("  postBuild:\n    substituteFrom:\n      name: cluster-config\n",
+         "substituteFrom is not a list"),
+    ],
+    ids=["postbuild-bool", "postbuild-list", "substitute-string", "substitute-mapping"],
+)
+def test_a_malformed_postbuild_is_a_finding(
+    repo: Path, replacement: str, expected: str
+) -> None:
+    assert TENANT.endswith(POST_BUILD)
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT.replace(POST_BUILD, replacement))
+    problems = gate.check(repo)
+    assert any(expected in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
 def test_a_kustomization_without_a_source_fails(repo: Path) -> None:
     """Mutation case: a tenant pointed at no source reconciles nothing."""
     body = TENANT.replace(
@@ -261,6 +327,18 @@ def test_a_source_the_file_does_not_declare_fails(repo: Path) -> None:
     assert any("GitRepository other" in p for p in gate.check(repo))
 
 
+def test_a_source_of_another_kind_fails(repo: Path) -> None:
+    body = TENANT.replace("    kind: GitRepository\n", "    kind: OCIRepository\n")
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    assert any("sourceRef.kind" in p for p in gate.check(repo))
+
+
+def test_a_source_outside_flux_system_fails(repo: Path) -> None:
+    body = TENANT.replace("  sourceRef:\n", "  sourceRef:\n    namespace: demo-app\n")
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    assert any("sourceRef.namespace" in p for p in gate.check(repo))
+
+
 def test_a_kustomization_without_a_path_fails(repo: Path) -> None:
     body = TENANT.replace("  path: ./kubernetes/flux\n", "")
     write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
@@ -272,6 +350,13 @@ def test_a_path_naming_this_repos_own_tree_fails(repo: Path) -> None:
     body = TENANT.replace("  path: ./kubernetes/flux\n", "  path: ./kubernetes\n")
     write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
     assert any("directory of this" in p for p in gate.check(repo))
+
+
+def test_a_path_climbing_out_of_the_tenant_repo_fails(repo: Path) -> None:
+    body = TENANT.replace("  path: ./kubernetes/flux\n", "  path: ../other-repo/kubernetes\n")
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    assert any("climbs above the tenant repository root" in p for p in gate.check(repo))
+    assert gate.main(["--repo-root", str(repo)]) == 1
 
 
 @pytest.mark.parametrize("kind", list(gate.REQUIRED_CAPS))
@@ -408,6 +493,31 @@ def test_a_limit_range_without_a_container_entry_fails(repo: Path) -> None:
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
+@pytest.mark.parametrize("key", ["default", "max"])
+def test_a_limit_range_that_sets_cpu_fails(repo: Path, key: str) -> None:
+    """A `max` with no matching `default` becomes the default limit, so either
+    key hands every tenant container a CPU limit."""
+    line = EPHEMERAL_LIMITS[key] + "\n"
+    assert TENANT.count(line) == 1
+    body = TENANT.replace(line, '        cpu: "1"\n' + line)
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    assert problems == [
+        f"{gate.TENANTS_DIR}/demo-app.yaml: LimitRange demo-app-limits sets cpu "
+        f"under {key} — every tenant container would be admitted with a CPU limit "
+        "and CFS-throttled"
+    ], problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_limit_range_cpu_request_default_passes(repo: Path) -> None:
+    """defaultRequest sets a request, which schedules but never throttles."""
+    line = EPHEMERAL_LIMITS["defaultRequest"] + "\n"
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml",
+          TENANT.replace(line, "        cpu: 50m\n" + line))
+    assert gate.check(repo) == []
+
+
 def test_a_cap_in_another_namespace_fails(repo: Path) -> None:
     body = TENANT.replace("  name: demo-app-quota\n  namespace: demo-app",
                           "  name: demo-app-quota\n  namespace: other-app")
@@ -425,6 +535,34 @@ def test_a_namespaced_document_without_a_namespace_fails(repo: Path) -> None:
     problems = gate.check(repo)
     assert any("names no metadata.namespace" in p for p in problems), problems
     assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+LOOKALIKE = textwrap.dedent(
+    """\
+    ---
+    apiVersion: example.com/v1
+    kind: ClusterRole
+    metadata:
+      name: demo-app-lookalike
+    """
+)
+
+
+def test_a_cluster_scoped_kind_name_in_another_group_is_namespaced(repo: Path) -> None:
+    """Cluster scope is the kind in its own group: a CRD reusing the name is
+    namespaced, so it lands in `default` without a namespace."""
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + LOOKALIKE)
+    problems = gate.check(repo)
+    assert any(
+        "ClusterRole demo-app-lookalike names no metadata.namespace" in p for p in problems
+    ), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_real_cluster_role_needs_no_namespace(repo: Path) -> None:
+    body = TENANT + LOOKALIKE.replace("example.com/v1", "rbac.authorization.k8s.io/v1")
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    assert gate.check(repo) == []
 
 
 def test_an_unlisted_tenant_file_fails(repo: Path) -> None:
@@ -452,6 +590,30 @@ def test_a_listed_yml_tenant_is_inspected(repo: Path) -> None:
     problems = gate.check(repo)
     assert any("pod-security.kubernetes.io/enforce" in p for p in problems), problems
     assert not any("not listed" in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_an_unlisted_yml_tenant_on_disk_is_read(repo: Path) -> None:
+    """The scan globs both suffixes, so a `*.yml` left out of the aggregator is
+    reported rather than skipped."""
+    write(repo, f"{gate.TENANTS_DIR}/other-app.yml", TENANT.replace("demo-app", "other-app"))
+    problems = gate.check(repo)
+    assert any("other-app.yml: not listed" in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_listed_directory_is_a_finding(repo: Path) -> None:
+    """Kustomize applies a listed directory, so the gate cannot drop it unread."""
+    (repo / gate.TENANTS_DIR / "other-app").mkdir()
+    write(
+        repo, f"{gate.TENANTS_DIR}/{gate.AGGREGATOR}",
+        AGGREGATOR + "  - other-app\n",
+    )
+    problems = gate.check(repo)
+    assert problems == [
+        f"{gate.TENANTS_DIR}/{gate.AGGREGATOR} lists other-app, which is not a regular "
+        "file, so no tenant wiring in it is checked"
+    ], problems
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
@@ -521,6 +683,17 @@ def test_a_store_reaching_a_second_namespace_fails(repo: Path) -> None:
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
+def test_a_store_with_a_namespace_regex_fails(repo: Path) -> None:
+    body = TENANT + STORE.replace(
+        "    - namespaces:\n        - demo-app",
+        "    - namespaces:\n        - demo-app\n    - namespaceRegexes:\n        - demo-.*",
+    )
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    assert any("namespaceRegexes" in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
 def test_a_store_with_a_namespace_selector_fails(repo: Path) -> None:
     """A selector admits whatever carries the label, so it is not a namespace scope."""
     body = TENANT + STORE.replace(
@@ -546,6 +719,11 @@ def test_an_empty_tree_the_aggregator_agrees_with_passes(tmp_path: Path) -> None
     assert gate.main(["--repo-root", str(tmp_path)]) == 0
 
 
+def test_an_empty_tree_with_an_empty_aggregator_passes(tmp_path: Path) -> None:
+    write(tmp_path, f"{gate.TENANTS_DIR}/{gate.AGGREGATOR}", "resources: []\n")
+    assert gate.main(["--repo-root", str(tmp_path)]) == 0
+
+
 def test_an_empty_tree_that_lists_a_tenant_is_vacuous(tmp_path: Path) -> None:
     write(tmp_path, f"{gate.TENANTS_DIR}/{gate.AGGREGATOR}", AGGREGATOR)
     write(tmp_path, f"{gate.TENANTS_DIR}/tenant-crd-editor.yaml", "kind: ClusterRole\n")
@@ -562,22 +740,43 @@ def test_the_live_tree_is_clean() -> None:
     assert gate.check(REPO) == []
 
 
-def test_the_readme_example_satisfies_the_gate(tmp_path: Path) -> None:
-    """The onboarding example is what a tenant copies, so it must pass the gate."""
+def readme_example() -> str:
+    """The complete tenant wiring fence from the onboarding README."""
     readme = (REPO / gate.TENANTS_DIR / "README.md").read_text()
     blocks = re.findall(r"```yaml\n(.*?)```", readme, re.S)
-    example = next(
+    return next(
         b for b in blocks if "kind: Kustomization" in b and "serviceAccountName" in b
     )
+
+
+def stage_example(root: Path, example: str) -> None:
     docs = [d for d in yaml.safe_load_all(example) if isinstance(d, dict)]
     namespace = next(d for d in docs if d.get("kind") == "Namespace")["metadata"]["name"]
-    write(tmp_path, f"{gate.TENANTS_DIR}/{namespace}.yaml", example)
+    write(root, f"{gate.TENANTS_DIR}/{namespace}.yaml", example)
     write(
-        tmp_path,
+        root,
         f"{gate.TENANTS_DIR}/{gate.AGGREGATOR}",
         f"resources:\n  - tenant-crd-editor.yaml\n  - {namespace}.yaml\n",
     )
+
+
+def test_the_readme_example_satisfies_the_gate(tmp_path: Path) -> None:
+    """The onboarding example is what a tenant copies, so it must pass the gate."""
+    stage_example(tmp_path, readme_example())
     assert gate.check(tmp_path) == []
+    assert gate.main(["--repo-root", str(tmp_path)]) == 0
+
+
+@pytest.mark.parametrize(
+    "needle", ["serviceAccountName", "infrastructure-configs", "prune: true"]
+)
+def test_a_wiring_piece_dropped_from_the_readme_example_fails(
+    tmp_path: Path, needle: str
+) -> None:
+    """Mutation case: the example is checked, not merely parsed."""
+    stage_example(tmp_path, drop(readme_example(), needle))
+    assert gate.check(tmp_path) != []
+    assert gate.main(["--repo-root", str(tmp_path)]) == 1
 
 
 def test_an_unparseable_aggregator_exits_2(repo: Path, capsys) -> None:
@@ -590,6 +789,22 @@ def test_an_unparseable_aggregator_exits_2(repo: Path, capsys) -> None:
 def test_an_aggregator_that_is_not_a_mapping_exits_2(repo: Path) -> None:
     write(repo, f"{gate.TENANTS_DIR}/{gate.AGGREGATOR}", "- tenant-crd-editor.yaml\n")
     assert gate.main(["--repo-root", str(repo)]) == 2
+
+
+@pytest.mark.parametrize(
+    "resources",
+    ["resources: demo-app.yaml\n", "resources: {a: demo-app.yaml}\n",
+     "resources:\n  - 1\n", "resources:\n  - ''\n", "resources:\n  -\n"],
+    ids=["string", "mapping", "number", "empty", "null"],
+)
+def test_a_malformed_resources_list_is_vacuous(repo: Path, resources: str, capsys) -> None:
+    """A resources value the scan cannot read names no subject, so the gate
+    exits 2 naming the aggregator rather than passing on an empty set."""
+    write(repo, f"{gate.TENANTS_DIR}/{gate.AGGREGATOR}", resources)
+    with pytest.raises(gate.Vacuous):
+        gate.listed_resources(repo)
+    assert gate.main(["--repo-root", str(repo)]) == 2
+    assert gate.AGGREGATOR in capsys.readouterr().err
 
 
 def test_a_non_utf8_aggregator_exits_2(repo: Path) -> None:
@@ -675,6 +890,56 @@ def test_a_tenant_object_without_the_prune_guard_fails(
         for p in problems
     ), problems
     assert len(problems) == 1, problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+EXTRA_NAMESPACE = textwrap.dedent(
+    """\
+    ---
+    apiVersion: v1
+    kind: Namespace
+    metadata:
+      name: demo-app-jobs
+      annotations:
+        kustomize.toolkit.fluxcd.io/prune: disabled
+      labels:
+        fluxcd.io/tenant: demo-app
+        pod-security.kubernetes.io/enforce: baseline
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/audit: restricted
+    """
+)
+
+
+def test_a_second_complete_namespace_passes(repo: Path) -> None:
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + EXTRA_NAMESPACE)
+    assert gate.check(repo) == []
+
+
+@pytest.mark.parametrize("value", [None, "enabled"], ids=["absent", "enabled"])
+def test_a_second_namespace_without_the_prune_guard_fails(
+    repo: Path, value: str | None
+) -> None:
+    """Every Namespace in the file cascades on prune, not only the first."""
+    second = EXTRA_NAMESPACE.replace(
+        GUARD, "" if value is None else GUARD.replace("disabled", value)
+    )
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + second)
+    problems = gate.check(repo)
+    assert len(problems) == 1, problems
+    assert "Namespace demo-app-jobs lacks kustomize.toolkit.fluxcd.io/prune" in problems[0]
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+@pytest.mark.parametrize("label", list(gate.REQUIRED_NS_LABELS))
+def test_a_second_namespace_without_a_label_fails(repo: Path, label: str) -> None:
+    """Pod Security admission reads each Namespace's own labels."""
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml",
+          TENANT + drop(EXTRA_NAMESPACE, f"{label}:"))
+    problems = gate.check(repo)
+    assert problems == [
+        f"{gate.TENANTS_DIR}/demo-app.yaml: namespace demo-app-jobs has no {label} label"
+    ], problems
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
