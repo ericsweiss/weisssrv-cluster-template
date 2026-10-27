@@ -214,9 +214,10 @@ CONFIG = {
             "var_name": "postgresql_version",
             "category": "dockerhub",
             "docker_image": "library/postgres",
-            # A tag family whose suffixed tags overflow one page takes
-            # "dockerhub_page_size": 100 here.
             "tag_regex": r"^(\d+(?:\.\d+)?)-trixie$",
+            # Hub pages the tag list; the -trixie tag for the pinned major is off
+            # page one at the default size.
+            "dockerhub_page_size": 100,
             "pin_major_version": True,
             "deploy_command": _FLUX,
             "notes": (
