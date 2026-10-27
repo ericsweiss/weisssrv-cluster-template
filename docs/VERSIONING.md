@@ -403,8 +403,9 @@ What a tenant can no longer create or update:
   own namespace stays allowed);
 - an ACME Order or Challenge (`acme.cert-manager.io`) created by anyone but
   cert-manager's controller, or an Order updated by anyone but that controller
-  or the garbage collector; tenant RBAC already grants no Order create or
-  update, so this is defence in depth and refuses nothing a tenant does today.
+  or the garbage collector, whose role holds no create verb; tenant RBAC
+  already grants no Order create or update, so this is defence in depth and
+  refuses nothing a tenant does today.
   CertificateRequests and Challenges are matched on CREATE only, because
   cert-manager's webhook refuses their spec changes after creation, which
   keeps a finalizer removal from wedging their deletion;

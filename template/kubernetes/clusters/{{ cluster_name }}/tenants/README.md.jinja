@@ -809,10 +809,10 @@ spec:
   (`internal/apis/certmanager/validation/certificaterequest.go` and
   `internal/apis/acme/validation/challenge.go` in v1.21.2). An Order's spec is
   frozen only in `spec.request` (`internal/apis/acme/validation/order.go`), so
-  Order UPDATE stays matched, with the garbage collector
-  (`system:serviceaccount:kube-system:generic-garbage-collector`) admitted
-  beside the controller for UPDATE only, so that removing a
-  `foregroundDeletion` finalizer cannot wedge a deletion; ACME Orders and
+  Order UPDATE stays matched. Beside the controller it admits the garbage
+  collector (`system:serviceaccount:kube-system:generic-garbage-collector`)
+  on Order UPDATE alone, the one verb its role could use here, so removing
+  a `foregroundDeletion` finalizer cannot wedge a deletion. ACME Orders and
   Challenges are created by cert-manager's controller only.
   Setting
   `global.rbac.aggregateClusterRoles: false` on the cert-manager release, and
