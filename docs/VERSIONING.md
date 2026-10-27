@@ -316,13 +316,15 @@ before it merges:
    TLSStore named `default`; and Pods, Deployments, StatefulSets, DaemonSets,
    ReplicaSets, Jobs and CronJobs whose pod spec carries a volume outside the
    restricted set; and PersistentVolumeClaims on a StorageClass other than
-   `tenant-local` or `""`. The next reconcile of each is refused. Such a Service can
-   still be deleted: `tenant-traefik-ingress-refs` and
-   `tenant-no-externalname-services` skip an UPDATE to a terminating Service
-   that changes neither spec nor annotations, so a LoadBalancer Service's
-   cleanup finalizer comes off; every other policy that matches UPDATE on a
-   kind with a spec carries the same condition (a Tailscale Ingress's operator
-   finalizer, a foreground-deleted workload's garbage-collector one), and the
+   `tenant-local` or `""`, or carrying a `volumeType` annotation. The next
+   reconcile of each is refused. Such a Service can still be deleted:
+   `tenant-traefik-ingress-refs` and `tenant-no-externalname-services` skip
+   an UPDATE to a terminating Service that changes neither spec nor
+   annotations, so a LoadBalancer Service's cleanup finalizer comes off;
+   every other policy that matches UPDATE on a kind with a spec, bar
+   `tenant-certificaterequests`, carries the same condition (a Tailscale
+   Ingress's operator finalizer, a foreground-deleted workload's
+   garbage-collector one, a claim's `kubernetes.io/pvc-protection`), and the
    Endpoints policy keys it on routing data, labels and annotations. It does
    not audit ACME Orders or Challenges: tenant RBAC grants no create on them,
    so that policy is defence in depth only. Routes,
@@ -367,12 +369,17 @@ before it merges:
    finalizer-only updates on objects admitted before the policy; an existing
    Pod or Job runs on and deletes cleanly.
 8. Migrate every claim the audit lists on a StorageClass other than
-   `tenant-local` or `""` before the policies bind: copy its data to a new
-   `tenant-local` claim, or to a platform-written static PersistentVolume
-   pre-bound to a `storageClassName: ""` claim, and point the workload at it.
-   A claim's class is immutable, so `tenant-pvc-storageclasses` matches
-   CREATE only: the old claim stays bound, but recreating it as it stands,
-   from the tenant's repository or a restore, is refused.
+   `tenant-local` or `""`, or carrying a `volumeType` annotation, before the
+   policies bind: copy its data to a new `tenant-local` claim, or to a
+   platform-written static PersistentVolume pre-bound to a
+   `storageClassName: ""` claim, and point the workload at it.
+   `tenant-pvc-storageclasses` matches CREATE and UPDATE, because a claim's
+   annotations stay mutable and the provisioner reads `volumeType` when a
+   `WaitForFirstConsumer` claim provisions. An old claim already Bound keeps
+   working, since nothing updates its spec, but cannot be resized; one still
+   Pending can no longer bind, because the scheduler's and binder's updates to
+   it are refused, and must be recreated on `tenant-local`. Recreating either
+   as it stands, from the tenant's repository or a restore, is refused too.
 
 What a tenant can no longer create or update:
 
@@ -432,7 +439,8 @@ What a tenant can no longer create or update:
   platform-written static volume named `<namespace>-<purpose>` and pre-bound by
   `claimRef`. An omitted class
   takes the default before validation, so it is refused too unless the
-  default is `tenant-local`.
+  default is `tenant-local`. A claim also may not carry, or be updated to
+  carry, a `volumeType` annotation.
 
 ### The provisioner helper is digest-pinned
 
