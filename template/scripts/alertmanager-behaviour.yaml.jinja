@@ -50,9 +50,9 @@ upstream_alerts:
 escalation_equal:
   - instance
 
-# Pairs whose identity is a namespaced object rather than a host, so `instance`
-# is not what distinguishes two firing alerts. The labels here are the ones the
-# inhibit rules in alertmanager-config.yaml already share.
+# Pairs the name-stem rule does not derive, or whose identity is not a host, so
+# `instance` is not what distinguishes two firing alerts. The labels here are the
+# ones the inhibit rules in alertmanager-config.yaml already share.
 escalation_pairs:
   - critical: PVCUsageCritical
     warning: PVCUsageWarning
@@ -60,6 +60,9 @@ escalation_pairs:
   - critical: CertExpiringCritical
     warning: CertExpiringWarning
     equal: [namespace, name]
+  - critical: AlertmanagerClusterFailedToSendAlerts
+    warning: AlertmanagerFailedToSendAlerts
+    equal: [namespace, service, integration]
 {%- if tenant_storage %}
   - critical: TenantVolumesNearlyFull
     warning: TenantVolumesFilling
