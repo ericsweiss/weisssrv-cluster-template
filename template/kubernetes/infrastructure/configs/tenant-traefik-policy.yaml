@@ -814,11 +814,23 @@ spec:
   failurePolicy: Fail
   matchConstraints:
     resourceRules:
-      # A claim's class is immutable after creation, so CREATE is the whole surface.
+      # The class is immutable, but the volumeType annotation is not, and the
+      # provisioner reads it when a WaitForFirstConsumer claim binds.
       - apiGroups: [""]
         apiVersions: ["v1"]
-        operations: ["CREATE"]
+        operations: ["CREATE", "UPDATE"]
         resources: ["persistentvolumeclaims"]
+  # A finalizer's removal from a terminating object is an UPDATE that changes
+  # neither spec nor annotations; refusing it strands a legacy object in
+  # Terminating, and admitting it admits nothing new.
+  matchConditions:
+    - name: enforce-unless-finalizing-unchanged
+      expression: >-
+        request.operation != 'UPDATE'
+        || !has(object.metadata.deletionTimestamp)
+        || object.spec != oldObject.spec
+        || (has(object.metadata.annotations) ? object.metadata.annotations : {})
+        != (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {})
   validations:
     # A "" claim could name any unbound classless volume; a platform-written
     # tenant volume is named <namespace>-<purpose> and pre-bound by claimRef,

@@ -30,8 +30,9 @@ BASELINE = {"tenant-crd-editor.yaml"}
 TENANT_POLICY = "kubernetes/infrastructure/configs/tenant-traefik-policy.yaml"
 CONFIGS_KUSTOMIZATION = "kubernetes/infrastructure/configs/kustomization.yaml"
 WRITES = ["CREATE", "UPDATE"]
-# The two Service-matching policies skip an UPDATE to a terminating object that
-# leaves spec and annotations unchanged, so a legacy Service can shed its finalizer.
+# Every policy matching UPDATE on a kind with a spec, bar tenant-certificaterequests
+# (its Order rule admits the garbage collector), skips an UPDATE to a terminating
+# object that leaves spec and annotations unchanged, so it can shed its finalizer.
 FINALIZING_UNCHANGED = [
     (
         "enforce-unless-finalizing-unchanged",
@@ -537,10 +538,11 @@ REQUIRED_POLICIES = {
             {
                 "apiGroups": [""],
                 "apiVersions": ["v1"],
-                "operations": ["CREATE"],
+                "operations": WRITES,
                 "resources": ["persistentvolumeclaims"],
             },
         ],
+        "matchConditions": FINALIZING_UNCHANGED,
         "variables": [],
         "validations": [
             (

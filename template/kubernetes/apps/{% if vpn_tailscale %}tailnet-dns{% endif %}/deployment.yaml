@@ -1,7 +1,7 @@
 ---
-# CoreDNS for the tailnet split-horizon view (see configmap.yaml). Two replicas,
-# spread across nodes best-effort (ScheduleAnyway); the reloader annotation
-# restarts pods when the Corefile changes. Image matches k3s's own CoreDNS.
+# CoreDNS for the tailnet split-horizon view (configmap.yaml), 2 replicas spread
+# best-effort; reloader restarts pods on Corefile change. The image tracks
+# upstream CoreDNS releases, not the copy k3s bundles.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

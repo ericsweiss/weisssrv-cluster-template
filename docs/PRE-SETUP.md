@@ -291,7 +291,9 @@ rotate it later. Move the JSON file into the generated repository's root before
 running that task; the task's precondition looks for
 `./1password-credentials.json` and nowhere else. It is gitignored there — that
 file is a read credential for the whole vault, and it is the one artifact that
-cannot be re-derived from anything else.
+cannot be re-derived from anything else. `--vaults` is repeated per vault
+(`--vaults a --vaults b`); a comma list is accepted silently and scopes the
+server or token to the first vault only.
 
 The credentials file and the minted token become the only two Kubernetes Secrets
 ever created by hand; everything else in the cluster is produced from them.

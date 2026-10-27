@@ -639,9 +639,26 @@ spec:
   plugin writes the default class's name into the claim before validation, so
   the claim is refused unless that default is `tenant-local`, and with no
   default class the field stays unset and is refused as well; a claim that
-  sets `""` explicitly keeps `""`. A claim's class is immutable, so the
-  policy matches CREATE only, and a claim that predates it is migrated to a
-  new claim rather than edited.{% if not tenant_storage %} This cluster renders
+  sets `""` explicitly keeps `""`. A claim's class is immutable but its
+  annotations are not, and the provisioner reads `volumeType` when it
+  provisions, which for a `WaitForFirstConsumer` claim is after creation, so
+  the policy matches CREATE and UPDATE. It is actor-neutral: on a compliant
+  claim the controllers' updates (the binder's `volumeName` and
+  `pv.kubernetes.io/*` annotations, the scheduler's
+  `volume.kubernetes.io/selected-node`, the provisioner's
+  `storage-provisioner` annotations) and a tenant's own legitimate updates,
+  such as a resize through `spec.resources.requests.storage`, all pass,
+  because the class is unchanged and no `volumeType` key is added. Like every
+  other policy that matches UPDATE on a kind with a spec, bar
+  `tenant-certificaterequests`, it skips an UPDATE to a terminating claim that
+  changes neither spec nor annotations, so a legacy claim can shed
+  `kubernetes.io/pvc-protection`.
+  Every other update to a claim that predates the policy on another class or
+  with a `volumeType` annotation is refused, whoever makes it. One
+  already Bound keeps working, since nothing updates its spec, but cannot be
+  resized; one still Pending can no longer bind and must be recreated on
+  `tenant-local`. Migrate the claims the audit lists before rollout rather
+  than editing them.{% if not tenant_storage %} This cluster renders
   no `tenant-local` class, so tenant claims are limited to platform-written
   static volumes until the tenant-storage module is enabled.{% endif %}
 {%- if secrets_backend == 'onepassword' %}
@@ -726,7 +743,8 @@ spec:
   changes neither spec nor annotations, so a legacy LoadBalancer Service
   admitted before them can shed its `service.kubernetes.io/load-balancer-cleanup`
   finalizer and finish deleting. Every other policy that matches UPDATE on a
-  kind with a spec carries the same condition, so a legacy Tailscale Ingress
+  kind with a spec, bar `tenant-certificaterequests` (its Order rule admits the
+  garbage collector), carries the same condition, so a legacy Tailscale Ingress
   sheds its operator's finalizer and a foreground-deleted workload its
   garbage-collector one. Endpoints and EndpointSlices, which have no spec, carry
   the same exemption keyed on their routing data, labels and annotations; the

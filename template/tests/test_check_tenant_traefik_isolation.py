@@ -466,20 +466,22 @@ def test_the_gate_matches_immutable_templates_on_create_and_mutable_ones_on_both
     }
 
 
-def test_the_gate_matches_claims_on_create_alone():
-    """A claim's storageClassName is immutable after creation, so CREATE is the
-    whole surface and UPDATE would only refuse finalizer-only updates."""
+def test_the_gate_matches_claims_on_create_and_update():
+    """A claim's class is immutable but its volumeType annotation is not, and the
+    provisioner reads it at binding, so UPDATE is matched as well."""
     rules = gate.REQUIRED_POLICIES["tenant-pvc-storageclasses"]["resourceRules"]
     ops = {r: tuple(rule["operations"]) for rule in rules for r in rule["resources"]}
-    assert ops == {"persistentvolumeclaims": ("CREATE",)}
+    assert ops == {"persistentvolumeclaims": ("CREATE", "UPDATE")}
 
 
-# Every policy that matches UPDATE on a kind with a spec; endpoints have none,
+# Every policy that matches UPDATE on a kind with a spec, bar tenant-certificaterequests
+# (its Order rule admits the garbage collector); endpoints carry their own form below,
 # and the CREATE-only policies never see a finalizer update.
 FINALIZING_POLICIES = (
     "tenant-traefik-route-refs", "tenant-traefik-object-refs", "tenant-traefik-ingress-refs",
     "tenant-no-externalname-services", "tenant-no-tcp-udp-routes", "tenant-traefik-tls-defaults",
     "tenant-traefik-hostnames", "tenant-certificates", "tenant-pod-volumes",
+    "tenant-pvc-storageclasses",
 )
 # The endpoints policy carries its own form of the exemption (routing data in
 # place of a spec); the weakening tests below cover it through its own list.
@@ -492,10 +494,10 @@ FINALIZING_EXPRESSION = (
 )
 
 
-def test_only_the_service_policies_skip_a_finalizer_only_update():
-    """A terminating legacy Service sheds its cleanup finalizer by an UPDATE that
-    changes neither spec nor annotations; only the two Service-matching policies
-    skip it, in the gate's pins and in the shipped file alike."""
+def test_exactly_the_finalizing_policies_skip_a_finalizer_only_update():
+    """A terminating legacy object sheds its finalizer by an UPDATE that changes
+    neither spec nor annotations; exactly FINALIZING_POLICIES and the endpoints
+    policy skip it, in the gate's pins and in the shipped file alike."""
     pinned = {
         name: required.get("matchConditions", [])
         for name, required in gate.REQUIRED_POLICIES.items()
