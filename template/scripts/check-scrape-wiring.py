@@ -120,6 +120,111 @@ def mapping(value: object, subject: str, field: str) -> dict:
     return value
 
 
+SELECTOR_OPERATORS = ("In", "NotIn", "Exists", "DoesNotExist")
+
+# A Kubernetes label key: an optional DNS-subdomain prefix (63-char segments) and
+# "/", then a name of 1-63 alphanumerics, `-`, `_` or `.`, alphanumeric at both ends.
+_DNS_LABEL = r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?"
+LABEL_KEY = re.compile(
+    rf"^(?:(?=.{{1,253}}/){_DNS_LABEL}(?:\.{_DNS_LABEL})*/)?"
+    r"(?=.{1,63}$)[A-Za-z0-9](?:[-A-Za-z0-9_.]*[A-Za-z0-9])?$"
+)
+
+
+# A label value is empty or a name of the same 1-63 character shape.
+LABEL_VALUE = re.compile(r"^(?:[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)?$")
+
+
+def label_key(key: object) -> bool:
+    """Is `key` a valid Kubernetes label key?"""
+    return isinstance(key, str) and LABEL_KEY.fullmatch(key) is not None
+
+
+def label_value(value: object) -> bool:
+    """Is `value` a valid Kubernetes label value, or a whole Flux placeholder?
+
+    An unrendered tree carries `${name}` where postBuild later writes the value.
+    """
+    return isinstance(value, str) and (
+        LABEL_VALUE.fullmatch(value) is not None or SUBSTITUTION.fullmatch(value) is not None
+    )
+
+
+NAME_LABEL = "kubernetes.io/metadata.name"
+
+
+def selector_problem(selector: object) -> str | None:
+    """Why `selector` is not a LabelSelector this gate can evaluate, or None."""
+    if not isinstance(selector, dict):
+        return "is not a mapping"
+    unknown = sorted(str(k) for k in set(selector) - {"matchLabels", "matchExpressions"})
+    if unknown:
+        return f"carries {', '.join(unknown)}"
+    # Checked before any `or` default: an empty list or mapping of the wrong
+    # type is malformed, not an absent term.
+    if selector.get("matchLabels") is not None and not isinstance(selector["matchLabels"], dict):
+        return "has a matchLabels that is not a mapping"
+    for key, value in (selector.get("matchLabels") or {}).items():
+        if not label_key(key):
+            return f"has a matchLabels key {key!r} that is not a valid label key"
+        if not label_value(value):
+            return f"has a matchLabels value {value!r} that is not a valid label value"
+    expressions = selector.get("matchExpressions")
+    if expressions is not None and not isinstance(expressions, list):
+        return "has a matchExpressions that is not a list"
+    for entry in expressions or []:
+        if not isinstance(entry, dict) or not label_key(entry.get("key")):
+            return f"has a malformed matchExpressions entry {entry!r}"
+        operator, values = entry.get("operator"), entry.get("values")
+        if operator not in SELECTOR_OPERATORS:
+            return f"has a matchExpressions operator {operator!r} this gate does not know"
+        # The API requires a non-empty list of label values for In/NotIn, and no
+        # values (absent, null or []) for Exists/DoesNotExist.
+        if operator in ("In", "NotIn"):
+            wellformed = (
+                isinstance(values, list) and bool(values) and all(label_value(v) for v in values)
+            )
+        else:
+            wellformed = values is None or values == []
+        if not wellformed:
+            return f"has a malformed matchExpressions entry {entry!r}"
+    return None
+
+
+def selector_matches(selector: dict, labels: dict, subject: str = "a selector") -> bool:
+    """Kubernetes LabelSelector semantics: matchLabels AND every matchExpressions entry.
+
+    A shape this gate cannot evaluate is noted and matches nothing.
+    """
+    problem = selector_problem(selector)
+    if problem:
+        note(f"{subject}: its selector {problem}, so it is not credited with a match")
+        return False
+    for key, value in (selector.get("matchLabels") or {}).items():
+        if key not in labels or labels[key] != value:
+            return False
+    for entry in selector.get("matchExpressions") or []:
+        key, operator = entry["key"], entry["operator"]
+        present = key in labels
+        listed = present and labels[key] in (entry.get("values") or [])
+        # NotIn and DoesNotExist hold for a pod that lacks the key altogether.
+        if (
+            (operator == "In" and not listed)
+            or (operator == "NotIn" and listed)
+            or (operator == "Exists" and not present)
+            or (operator == "DoesNotExist" and present)
+        ):
+            return False
+    return True
+
+
+def shown(selector: dict) -> dict:
+    """A selector as a message prints it: the bare labels when that is all it holds."""
+    if set(selector) <= {"matchLabels"}:
+        return selector.get("matchLabels") or {}
+    return selector
+
+
 def load_stream(handle, source: str) -> tuple[list[dict], list[str]]:
     """Every kinded document in one stream, else why it would not read."""
     try:
@@ -167,7 +272,7 @@ def load_corpus(target: str) -> tuple[list[dict], list[str]]:
 
 
 def selected_workloads(documents: list[dict], pods: dict) -> list[Workload]:
-    """Every workload whose pod labels carry `pods`, one record each.
+    """Every workload whose pod labels the LabelSelector `pods` matches, one each.
 
     Per workload, not merged: pods behind one Service may declare the same port
     name at different numbers, and a policy matches pod labels, not a selector.
@@ -184,7 +289,7 @@ def selected_workloads(documents: list[dict], pods: dict) -> list[Workload]:
             subject,
             "spec.template.metadata.labels",
         )
-        if not pods.items() <= labels.items():
+        if not selector_matches(pods, labels, subject):
             continue
         pod = mapping(template.get("spec"), subject, "spec.template.spec")
         names: dict[str, int] = {}
@@ -228,12 +333,13 @@ def resolve_target(
     if isinstance(port, str):
         if not any(port in workload.names for workload in workloads):
             raise Violation(
-                f"{name}{located(where)}: no workload carrying {pods} declares a port "
-                f"named {port!r}"
+                f"{name}{located(where)}: no workload carrying {shown(pods)} declares "
+                f"a port named {port!r}"
             )
     elif not any(port in workload.numbers for workload in workloads):
         raise Violation(
-            f"{name}{located(where)}: no workload carrying {pods} declares a port {port}"
+            f"{name}{located(where)}: no workload carrying {shown(pods)} declares a "
+            f"port {port}"
         )
     targets = []
     for workload in workloads:
@@ -255,7 +361,7 @@ def resolve_target(
 
 
 def services_for(documents: list[dict], selector: dict) -> list[dict]:
-    """Every Service carrying the monitor's labels.
+    """Every Service whose labels the monitor's LabelSelector matches.
 
     Matched on labels only; whether one has a `spec.selector` the gate can
     follow to a workload is `pod_port`'s to refuse.
@@ -266,7 +372,7 @@ def services_for(documents: list[dict], selector: dict) -> list[dict]:
             continue
         metadata = mapping(document.get("metadata"), describe(document), "metadata")
         labels = mapping(metadata.get("labels"), describe(document), "metadata.labels")
-        if selector.items() <= labels.items():
+        if selector_matches(selector, labels, describe(document)):
             matched.append(document)
     return matched
 
@@ -399,7 +505,7 @@ def pod_port(
     services = services_for(documents, selector)
     if not services:
         raise Violation(
-            f"{name}{located(where)}: no Service carries the monitor's labels {selector}: "
+            f"{name}{located(where)}: no Service carries the monitor's labels {shown(selector)}: "
             "the scrape has no target"
         )
     targets: list[Target] = []
@@ -431,22 +537,57 @@ def pod_port(
             )
         if named is None:
             # `targetPort` names a pod port directly, by name or by number.
-            targets += resolve_target(documents, namespace, pods, target, name, here)
+            targets += resolve_target(
+                documents, namespace, {"matchLabels": pods}, target, name, here
+            )
             continue
         for port in service_spec.get("ports") or []:
             if port.get("name") == named:
                 # An absent or null targetPort defaults to the Service port.
                 resolved = port.get("targetPort") or port.get("port")
-                targets += resolve_target(documents, namespace, pods, resolved, name, here)
+                targets += resolve_target(
+                    documents, namespace, {"matchLabels": pods}, resolved, name, here
+                )
                 break
     # A Service without the named port is no target, so only a monitor whose
     # every selected Service lacks it has nothing to scrape.
     if not targets and not by_hand:
         raise Violation(
-            f"{name}{located(where)}: no Service carrying {selector} declares a port "
+            f"{name}{located(where)}: no Service carrying {shown(selector)} declares a port "
             f"named {named!r}"
         )
     return targets, by_hand
+
+
+def namespace_terms(
+    namespaces: dict, scrape_ns: str, subject: str
+) -> tuple[bool, list[str], bool]:
+    """-> (selects scrape_ns, unverifiable terms, names it by kubernetes.io/metadata.name).
+
+    Only the name label is known, so a term of any operator on another key
+    cannot be verified: the namespace may carry the label a NotIn excludes.
+    """
+    problem = selector_problem(namespaces)
+    if problem:
+        note(f"{subject}: its scrape peer's namespaceSelector {problem}, so it is not credited")
+        return False, [], False
+    labels = namespaces.get("matchLabels") or {}
+    expressions = namespaces.get("matchExpressions") or []
+    unverifiable = [f"namespaceSelector.matchLabels.{k}" for k in sorted(set(labels) - {NAME_LABEL})]
+    kept = []
+    for entry in expressions:
+        if entry["key"] != NAME_LABEL:
+            unverifiable.append(
+                f"namespaceSelector.matchExpressions.{entry['key']} {entry['operator']}"
+            )
+        else:
+            kept.append(entry)
+    reduced = {
+        "matchLabels": {k: v for k, v in labels.items() if k == NAME_LABEL},
+        "matchExpressions": kept,
+    }
+    named = NAME_LABEL in labels or any(e["key"] == NAME_LABEL for e in expressions)
+    return selector_matches(reduced, {NAME_LABEL: scrape_ns}, subject), unverifiable, named
 
 
 def scrape_allow(documents: list[dict], scrape_ns: str) -> str | None:
@@ -461,10 +602,16 @@ def scrape_allow(documents: list[dict], scrape_ns: str) -> str | None:
         spec = mapping(document.get("spec"), describe(document), "spec")
         for rule in spec.get("ingress") or []:
             for peer in rule.get("from") or []:
-                namespaces = peer.get("namespaceSelector") or {}
-                labels = namespaces.get("matchLabels") or {}
-                if labels.get("kubernetes.io/metadata.name") == scrape_ns:
-                    return (document.get("metadata") or {}).get("name")
+                namespaces = peer.get("namespaceSelector")
+                # Absent or `{}` names no namespace; any other shape is judged.
+                if namespaces is None or (isinstance(namespaces, dict) and not namespaces):
+                    continue
+                name = (document.get("metadata") or {}).get("name")
+                # Narrowing is not consulted: this feeds the vacuity guard, which
+                # fails closed; admits() is where narrowing is judged.
+                selects, _, named = namespace_terms(namespaces, scrape_ns, name)
+                if selects and named:
+                    return name
     return None
 
 
@@ -484,12 +631,8 @@ def admits(policy: dict, pods: dict, accepted: set[int | str], scrape_ns: str) -
         return False
     selected = mapping(spec.get("podSelector"), describe(policy), "spec.podSelector")
     name = (policy.get("metadata") or {}).get("name")
-    # An empty podSelector selects every pod; matchExpressions is not modelled,
-    # so a policy spelled that way is not credited with admitting the scrape.
-    if set(selected) - {"matchLabels"}:
-        note(f"{name}: its podSelector uses matchExpressions, which this gate does not model")
-        return False
-    if not (selected.get("matchLabels") or {}).items() <= pods.items():
+    # An empty podSelector selects every pod.
+    if not selector_matches(selected, pods, name):
         return False
     for rule in rules:
         peers = rule.get("from") or []
@@ -506,62 +649,64 @@ def admits(policy: dict, pods: dict, accepted: set[int | str], scrape_ns: str) -
                         "resolve against the observability pod CIDR"
                     )
                 continue
-            labels = namespaces.get("matchLabels") or {}
-            if labels.get("kubernetes.io/metadata.name") == scrape_ns:
-                # Prometheus is chart-installed, so its pod labels are in no
-                # manifest: a podSelector here resolves only against the labels
-                # the caller declares, and any other narrowing is not credited.
-                narrowing = [f"namespaceSelector.{t}" for t in sorted(set(namespaces) - {"matchLabels"})]
-                narrowing += [
-                    f"namespaceSelector.matchLabels.{k}"
-                    for k in sorted(set(labels) - {"kubernetes.io/metadata.name"})
-                ]
-                pod_sel = peer.get("podSelector")
-                if pod_sel is not None and not isinstance(pod_sel, dict):
-                    narrowing.append("podSelector")
-                elif isinstance(pod_sel, dict) and pod_sel:
-                    wanted = pod_sel.get("matchLabels") or {}
-                    if (
-                        set(pod_sel) - {"matchLabels"}
-                        or not isinstance(wanted, dict)
-                        or not wanted
-                    ):
-                        narrowing.append("podSelector")
-                    elif any(k not in SCRAPER_LABELS or SCRAPER_LABELS[k] != v for k, v in wanted.items()):
-                        note(
-                            f"{name}: its peer for namespace {scrape_ns} selects pods by "
-                            f"{wanted}, which the declared scraper labels do not carry "
-                            f"({SCRAPER_LABELS or 'none declared'}), so the peer is not credited"
-                        )
-                        continue
-                if narrowing:
-                    note(
-                        f"{name}: its peer for namespace {scrape_ns} narrows it with "
-                        f"{', '.join(narrowing)}, which this gate cannot resolve against "
-                        "Prometheus's chart-installed pods, so the peer is not credited"
-                    )
-                else:
-                    scoped = True
             # An empty namespaceSelector selects every namespace, observability
-            # included, but only a peer with no podSelector admits every pod.
-            elif not namespaces:
-                if peer.get("podSelector"):
+            # included, but only a peer with no podSelector admits every pod. Only
+            # a mapping is empty that way; `[]` or `""` is malformed and judged below.
+            if isinstance(namespaces, dict) and not namespaces:
+                pod_sel = peer.get("podSelector")
+                # Only an absent, null or valid empty mapping admits every pod.
+                if pod_sel is not None and selector_problem(pod_sel):
+                    note(
+                        f"{name}: its scrape peer combines an empty namespaceSelector with "
+                        f"a podSelector that {selector_problem(pod_sel)}, so it is not credited"
+                    )
+                elif pod_sel:
                     note(
                         f"{name}: its scrape peer combines an empty namespaceSelector with "
                         "a podSelector, which this gate does not model"
                     )
                 else:
                     scoped = True
-            elif set(namespaces) - {"matchLabels"}:
-                note(
-                    f"{name}: its scrape peer selects the namespace with matchExpressions, "
-                    "which this gate does not model"
-                )
-            elif "kubernetes.io/metadata.name" not in labels:
+                continue
+            selects, narrowing, named = namespace_terms(namespaces, scrape_ns, name)
+            if not selects:
+                continue
+            if not named and narrowing:
                 note(
                     f"{name}: its scrape peer selects the namespace by labels other than "
                     "kubernetes.io/metadata.name, which this gate does not resolve to a name"
                 )
+                continue
+            # Prometheus is chart-installed, so its pod labels are in no manifest:
+            # a podSelector here resolves only against the labels the caller
+            # declares, and any other narrowing is not credited.
+            pod_sel = peer.get("podSelector")
+            if pod_sel is not None and selector_problem(pod_sel):
+                narrowing.append("podSelector")
+            elif pod_sel and (pod_sel.get("matchLabels") or pod_sel.get("matchExpressions")) and (
+                # A NotIn/DoesNotExist on an undeclared key is unverified (the pods
+                # may carry it), and with nothing declared every term is: fail closed.
+                not SCRAPER_LABELS
+                or any(
+                    e["operator"] in ("NotIn", "DoesNotExist") and e["key"] not in SCRAPER_LABELS
+                    for e in pod_sel.get("matchExpressions") or []
+                )
+                or not selector_matches(pod_sel, SCRAPER_LABELS, name)
+            ):
+                note(
+                    f"{name}: its peer for namespace {scrape_ns} selects pods by "
+                    f"{shown(pod_sel)}, which the declared scraper labels do not carry "
+                    f"({SCRAPER_LABELS or 'none declared'}), so the peer is not credited"
+                )
+                continue
+            if narrowing:
+                note(
+                    f"{name}: its peer for namespace {scrape_ns} narrows it with "
+                    f"{', '.join(narrowing)}, which this gate cannot resolve against "
+                    "Prometheus's chart-installed pods, so the peer is not credited"
+                )
+            else:
+                scoped = True
         if not scoped:
             continue
         ports = rule.get("ports")
@@ -669,7 +814,7 @@ def monitor_scope(
     scope = mapping(spec.get("namespaceSelector"), describe(monitor), "spec.namespaceSelector")
     names = scope.get("matchNames") or []
     if corpus:
-        unknown = sorted(set(scope) - {"any", "matchNames"})
+        unknown = sorted(str(k) for k in set(scope) - {"any", "matchNames"})
         if unknown:
             raise GateError(
                 f"{name}: spec.namespaceSelector carries {', '.join(unknown)}, which is "
@@ -733,16 +878,14 @@ def check_monitor(
     chooses = mapping(spec.get("selector"), describe(monitor), "spec.selector")
     # Discarding a term that narrows the selection judges objects the monitor
     # does not select, and leaves the ones it does select unresolved.
-    unsupported = sorted(set(chooses) - {"matchLabels"})
-    if unsupported:
+    problem = selector_problem(chooses)
+    if problem:
         raise GateError(
-            f"{name}: spec.selector carries {', '.join(unsupported)}, which this gate "
-            "does not model, so the objects the monitor selects cannot be resolved"
+            f"{name}: spec.selector {problem}, so the objects the monitor selects "
+            "cannot be resolved"
         )
-    selector = mapping(
-        chooses.get("matchLabels"), describe(monitor), "spec.selector.matchLabels"
-    )
-    if not selector:
+    selector = chooses
+    if not (selector.get("matchLabels") or selector.get("matchExpressions")):
         raise GateError(
             f"{name}: the monitor selects every pod, so no policy can be matched to it"
         )

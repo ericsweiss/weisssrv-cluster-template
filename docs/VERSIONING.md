@@ -106,7 +106,7 @@ section — read it before running `copier update`.
 
 `lib_ref` is an answer, so a generated cluster can pin any library tag it likes —
 but exactly **one** pair is ever proved to work: the `lib_ref` default in
-`copier.yml`, currently weisssrv-lib `v0.22.1`. `validate-rendered-cluster`
+`copier.yml`, currently weisssrv-lib `v0.23.0`. `validate-rendered-cluster`
 renders the template with the answer fixtures — which do not answer `lib_ref`,
 so they inherit that default — and runs the real toolchain over the output
 against a checkout of the library at that ref.
@@ -287,7 +287,7 @@ namespace, Traefik's `defaultTLSResourcesNamespace: traefik`, and the CNPG kinds
 in `tenant-crd-editor`. An update with default answers therefore installs them,
 and a render with `tenant_storage` and `postgres_operator` both `false` differs
 from the previous release by that set with the docs, gates and audit script
-that go with it, by the `lib_ref` default (weisssrv-lib v0.22.1, with the
+that go with it, by the `lib_ref` default (weisssrv-lib v0.23.0, with the
 vendored copies that follow it) and by the default version pins below. The
 tenant-volumes marker play in `ansible/playbooks/k3s.yml` renders only with
 `tenant_storage`. It is not byte-identical.
@@ -509,6 +509,16 @@ CPU limit and CFS throttling. A CPU `defaultRequest` stays allowed. The same
 release reads every Namespace in a tenant file for the required labels, not only
 the first. Remove those keys from every existing tenant file before the update
 merges, or `task lint:invariants` fails.
+
+### A statically bound claim carries the prune guard
+
+weisssrv-lib v0.23.0's `check-pvc-storageclass.py` fails a
+PersistentVolumeClaim that binds a `volumeName` without
+`kustomize.toolkit.fluxcd.io/prune: disabled`. A Flux prune would delete the
+claim and leave its PersistentVolume Released, which never rebinds without a
+hand edit of its `claimRef`. The shipped Authentik and Grafana claims carry the
+annotation. Add it to every other statically bound claim before the update
+merges, or `task flux:lint` fails.
 
 ## Related
 
