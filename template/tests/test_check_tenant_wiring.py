@@ -807,6 +807,31 @@ def test_a_malformed_resources_list_is_vacuous(repo: Path, resources: str, capsy
     assert gate.AGGREGATOR in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("entry", "normalized"),
+    [
+        ("/etc/tenant.yaml", "/etc/tenant.yaml"),
+        (".", "."),
+        ("..", ".."),
+        ("../other/tenant.yaml", "../other/tenant.yaml"),
+        ("sub/../../tenant.yaml", "../tenant.yaml"),
+        ("kustomization.yaml", "kustomization.yaml"),
+        ("./kustomization.yaml", "kustomization.yaml"),
+    ],
+    ids=["absolute", "dot", "dotdot", "parent", "climbs", "self", "dot-self"],
+)
+def test_an_aggregator_path_outside_the_tenant_directory_is_vacuous(
+    repo: Path, entry: str, normalized: str, capsys
+) -> None:
+    """An entry that leaves the tenants directory or names the aggregator is no
+    tenant file, so the gate exits 2 naming it rather than checking nothing."""
+    write(repo, f"{gate.TENANTS_DIR}/{gate.AGGREGATOR}", AGGREGATOR + f"  - {entry}\n")
+    with pytest.raises(gate.Vacuous, match="outside the tenant directory"):
+        gate.listed_resources(repo)
+    assert gate.main(["--repo-root", str(repo)]) == 2
+    assert repr(normalized) in capsys.readouterr().err
+
+
 def test_a_non_utf8_aggregator_exits_2(repo: Path) -> None:
     (repo / gate.TENANTS_DIR / gate.AGGREGATOR).write_bytes(b"resources:\n  - \xff\xfe.yaml\n")
     assert gate.main(["--repo-root", str(repo)]) == 2
