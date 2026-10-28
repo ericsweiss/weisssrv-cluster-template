@@ -123,6 +123,8 @@ spec:
               target_matchers:
                 - alertname="AlertmanagerFailedToSendAlerts"
               equal:
+                - namespace
+                - service
                 - integration
             # CRITICAL: `equal: [namespace]` is load-bearing - without it one
             # namespace's info condition suppresses every info alert in the

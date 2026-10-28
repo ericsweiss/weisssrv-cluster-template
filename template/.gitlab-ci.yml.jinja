@@ -132,7 +132,7 @@ variables:
   # The project half of the same pin, so the gate checks the includes this
   # cluster actually resolves (a fork or mirror answers lib_project).
   LIB_PROJECT: "{{ lib_project }}"
-  PYYAML_VERSION: "6.0.2"
+  PYYAML_VERSION: "6.0.3"
   # Pre-seeded for check-doc-links' backticked-path pass; inert until the library
   # pin ships it.
   CHECK_DOC_LINKS_PATHS: "1"
@@ -143,7 +143,7 @@ variables:
   # Single source for the Ansible the local jobs pip-install. `include:` inputs
   # cannot read it (they resolve before this block exists), so the deploy-base
   # entry below repeats the literal — bump the two together.
-  ANSIBLE_VERSION: "14.4.0"
+  ANSIBLE_VERSION: "14.5.0"
   # kustomize for the cluster-verify server-side dry-run, pinned with the
   # sha256 the script verifies the downloaded tarball against. Same pin as
   # scripts/ci-fetch-tools.py, so one kustomize version runs in every job.
@@ -248,7 +248,7 @@ include:
       tags: ["{{ runner_tag }}"]
       image: python:3.14-slim
       # ruff is pinned here; include inputs resolve before job variables exist.
-      ruff_version: "0.16.7"
+      ruff_version: "0.17.3"
       # kubernetes/ is in the list for the Python a manifest delivers through a
       # configMapGenerator (the DDNS CronJob's program): a real file so ruff can
       # see it, which an inlined heredoc could not be.
@@ -511,7 +511,7 @@ include:
     inputs:
       tags: ["{{ runner_tag }}"]
       op_vault: "{{ secret_vault() }}"
-      ansible_version: "14.4.0"
+      ansible_version: "14.5.0"
 
   - project: {{ lib_project }}
     ref: $[[ inputs.lib_ref ]]

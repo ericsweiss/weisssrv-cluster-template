@@ -1,4 +1,4 @@
----
+{% raw %}---
 # Full k3s cluster deployment: base configuration, then servers, then agents.
 # The VMs must already exist (k3s-provision-vms.yml).
 
@@ -43,7 +43,7 @@
   roles:
     - weisssrv.infra.k3s
 
-# The tenant-local provisioner refuses a root without this marker, so a claim
+{% endraw %}{% if tenant_storage %}{% raw %}# The tenant-local provisioner refuses a root without this marker, so a claim
 # fails rather than landing on the boot disk when the zvol is not mounted.
 - name: Mark the mounted tenant-volumes zvol
   hosts: k3s_agents
@@ -84,7 +84,7 @@
         - tenant_volumes_disks | length > 0
         - tenant_volumes_mount.rc == 0
 
-- name: Deploy guest firewall rules
+{% endraw %}{% endif %}{% raw %}- name: Deploy guest firewall rules
   hosts: k3s
   gather_facts: false
   roles:
@@ -133,4 +133,4 @@
           k3s cluster deployment complete.
 
           Next: fetch the kubeconfig, then bootstrap Flux — every platform
-          controller and application reconciles from kubernetes/ in this repo.
+          controller and application reconciles from kubernetes/ in this repo.{% endraw %}

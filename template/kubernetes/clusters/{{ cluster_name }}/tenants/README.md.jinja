@@ -675,9 +675,10 @@ spec:
   per-pod memory limits, or the surge pod is rejected and the rollout stalls.
   `check-tenant-wiring` also requires `requests.ephemeral-storage` and
   `limits.ephemeral-storage` in the quota, and an `ephemeral-storage` entry
-  under the LimitRange's `default`, `defaultRequest` and `max`: emptyDir volumes and container
-  writable layers draw on the node's disk, and nothing else bounds them, so one
-  tenant pod could otherwise fill a node's boot disk and evict its neighbours.
+  under the LimitRange's `default`, `defaultRequest` and `max`: emptyDir volumes
+  and container writable layers draw on the node's disk, and nothing else bounds
+  them, so one tenant pod could otherwise fill a node's boot disk and evict its
+  neighbours.
 - **Metrics must not ride the public port.** A tenant route matches on hostname,
   not path, so a `/metrics` endpoint served on the port the tenant's own
   IngressRoute publishes is reachable from the internet. Require a separate
@@ -741,17 +742,18 @@ spec:
   in the cluster (the CVE-2020-8554 class). This policy and
   `tenant-traefik-ingress-refs` skip an UPDATE to a terminating Service that
   changes neither spec nor annotations, so a legacy LoadBalancer Service
-  admitted before them can shed its `service.kubernetes.io/load-balancer-cleanup`
-  finalizer and finish deleting. Every other policy that matches UPDATE on a
-  kind with a spec, bar `tenant-certificaterequests` (its Order rule admits the
-  garbage collector), carries the same condition, so a legacy Tailscale Ingress
-  sheds its operator's finalizer and a foreground-deleted workload its
-  garbage-collector one. Endpoints and EndpointSlices, which have no spec, carry
-  the same exemption keyed on their routing data, labels and annotations; the
-  CREATE-only policies never see such an update. Annotations are in that test because the
-  policies validate them and a tenant can hold its own Service in Terminating
-  with a finalizer it added; with spec and annotations unchanged, the update
-  changes only finalizers or labels, which neither policy reads.
+  admitted before them can shed its
+  `service.kubernetes.io/load-balancer-cleanup` finalizer and finish deleting.
+  Every other policy that matches UPDATE on a kind with a spec, bar
+  `tenant-certificaterequests` (its Order rule admits the garbage collector),
+  carries the same condition, so a legacy Tailscale Ingress sheds its operator's
+  finalizer and a foreground-deleted workload its garbage-collector one.
+  Endpoints and EndpointSlices, which have no spec, carry the same exemption
+  keyed on their routing data, labels and annotations; the CREATE-only policies
+  never see such an update. Annotations are in that test because the policies
+  validate them and a tenant can hold its own Service in Terminating with a
+  finalizer it added; with spec and annotations unchanged, the update changes
+  only finalizers or labels, which neither policy reads.
   `tenant-no-externalname-services` also refuses a Service carrying any
   `tailscale.com/*` annotation, and `tenant-traefik-hostnames` admits a
   tenant Ingress only for Traefik: `spec.ingressClassName` and the legacy
@@ -807,10 +809,10 @@ spec:
   (`internal/apis/certmanager/validation/certificaterequest.go` and
   `internal/apis/acme/validation/challenge.go` in v1.21.2). An Order's spec is
   frozen only in `spec.request` (`internal/apis/acme/validation/order.go`), so
-  Order UPDATE stays matched, with the garbage collector
-  (`system:serviceaccount:kube-system:generic-garbage-collector`) admitted
-  beside the controller for UPDATE only, so that removing a
-  `foregroundDeletion` finalizer cannot wedge a deletion; ACME Orders and
+  Order UPDATE stays matched. Beside the controller it admits the garbage
+  collector (`system:serviceaccount:kube-system:generic-garbage-collector`)
+  on Order UPDATE alone, the one verb its role could use here, so removing
+  a `foregroundDeletion` finalizer cannot wedge a deletion. ACME Orders and
   Challenges are created by cert-manager's controller only.
   Setting
   `global.rbac.aggregateClusterRoles: false` on the cert-manager release, and
@@ -847,27 +849,27 @@ spec:
   before it carried the `fluxcd.io/tenant` label, stays in place. Run
   `scripts/audit-tenant-admission.sh` (formerly `audit-tenant-services.sh`;
   needs `kubectl` against this cluster and `jq`) once at rollout and before
-  each onboarding. It lists, in every `fluxcd.io/tenant` namespace: ExternalName, NodePort and LoadBalancer
-  Services, Services with `externalIPs`, selectorless Services,
-  EndpointSlices not managed by `endpointslice-controller.k8s.io`, and
-  Endpoints with no selector Service; IngressRoutes and Ingresses whose hosts
-  are not all in the namespace's `flux-system/tenant-routing-<ns>` grant, or
-  that carry a refused annotation, a `name@provider` or cross-namespace
-  reference, `parentRefs`, `HostRegexp` or a priority above the grant; Middlewares whose
-  forwardAuth address is neither a Service in the namespace nor the platform
-  outpost; TraefikServices with cross-namespace or `@` references, including
-  per-service middlewares outside the namespace and the platform allowlist, or a
-  `failover`; Services and Ingresses carrying a `tailscale.com/*` annotation,
-  and Ingresses whose `ingressClassName` or `kubernetes.io/ingress.class`
-  annotation names a class other than `traefik`; any
-  IngressRouteTCP or IngressRouteUDP; Certificates whose names are not all
-  granted or whose issuer is not a platform ClusterIssuer or a core Issuer;
-  tenant-written CertificateRequests to anything but a core Issuer; and a
-  TLSOption or TLSStore named `default`; and Pods, Deployments, StatefulSets,
-  DaemonSets, ReplicaSets, Jobs and CronJobs with a volume outside the
-  restricted set, and PersistentVolumeClaims on a
-  StorageClass other than `tenant-local` or `""`. It does not audit ACME Orders or
-  Challenges: tenant RBAC grants no create on them, so that policy is defence
+  each onboarding. It lists, in every `fluxcd.io/tenant` namespace:
+  ExternalName, NodePort and LoadBalancer Services, Services with `externalIPs`,
+  selectorless Services, EndpointSlices not managed by
+  `endpointslice-controller.k8s.io`, and Endpoints with no selector Service;
+  IngressRoutes and Ingresses whose hosts are not all in the namespace's
+  `flux-system/tenant-routing-<ns>` grant, or that carry a refused annotation, a
+  `name@provider` or cross-namespace reference, `parentRefs`, `HostRegexp` or a
+  priority above the grant; Middlewares whose forwardAuth address is neither a
+  Service in the namespace nor the platform outpost; TraefikServices with
+  cross-namespace or `@` references, including per-service middlewares outside
+  the namespace and the platform allowlist, or a `failover`; Services and
+  Ingresses carrying a `tailscale.com/*` annotation, and Ingresses whose
+  `ingressClassName` or `kubernetes.io/ingress.class` annotation names a class
+  other than `traefik`; any IngressRouteTCP or IngressRouteUDP; Certificates
+  whose names are not all granted or whose issuer is not a platform
+  ClusterIssuer or a core Issuer; tenant-written CertificateRequests to anything
+  but a core Issuer; and a TLSOption or TLSStore named `default`; and Pods,
+  Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs and CronJobs with a
+  volume outside the restricted set, and PersistentVolumeClaims on a
+  StorageClass other than `tenant-local` or `""`. It does not audit ACME Orders
+  or Challenges: tenant RBAC grants no create on them, so that policy is defence
   in depth only. A missing or wildcard grant, or one whose `maxPriority` is not
   a plain whole number up to 2147483647, is one line per route, Ingress and
   Certificate. It exits non-zero while any remain.

@@ -942,8 +942,13 @@ def _captured(regex: str, tag: str) -> Optional[str]:
     return match.group(1) if match.lastindex else match.group(0)
 
 
+_DOCKERHUB_WINDOW_KNOBS = ("dockerhub_name_filter", "dockerhub_page_size", "dockerhub_max_pages")
+_LSIO_WINDOW_KNOBS = ("lsio_name_filter", "lsio_max_pages")
+
+
 def _require_window_reached_pin(
     image: str, regex: str, best: str, current: str, version_prefix: str,
+    knobs: tuple[str, ...] = _DOCKERHUB_WINDOW_KNOBS,
 ) -> None:
     """Raise when the tag window ended before the pinned tag.
 
@@ -962,12 +967,25 @@ def _require_window_reached_pin(
             f"{version_prefix!r}, whose newest tag is {best} — move the prefix "
             "with the pin"
         )
+    # knobs: the entry's name filter first, then the window-size settings.
+    name_filter, *widen = knobs
     raise RuntimeError(
         f"{image}: the newest tag in the fetched window is {best}, older "
         f"than the pin {current} — the window ended before the pinned tag; "
-        "add dockerhub_name_filter, or raise dockerhub_page_size or "
-        "dockerhub_max_pages"
+        f"add {name_filter}, or raise {' or '.join(widen)}"
     )
+
+
+def _pin_as_tag(regex: str, tag: str, pin: str) -> str:
+    """The tag `pin` would be: `tag` with its captured span replaced by `pin`.
+
+    LSIO pins store the captured version; the window check reads whole tags.
+    """
+    match = re.match(regex, tag)
+    if not pin or not match or not match.lastindex:
+        return pin
+    candidate = tag[:match.start(1)] + pin + tag[match.end(1):]
+    return candidate if re.match(regex, candidate) else pin
 
 
 def fetch_lsio_version(svc: dict) -> str:
@@ -978,19 +996,25 @@ def fetch_lsio_version(svc: dict) -> str:
     """
     image = svc["docker_image"]
     version_regex = svc["lsio_version_regex"]
-    best_version = _dockerhub_best_tag(
+    best_tag = _dockerhub_best_tag(
         image,
         version_regex,
         version_prefix=svc.get("version_prefix", ""),
+        return_full_tag=True,
         name_filter=svc.get("lsio_name_filter", ""),
         max_pages=svc.get("lsio_max_pages", 1),
     )
-    if best_version is None:
+    if best_tag is None:
         raise RuntimeError(
             f"No matching tags found for {image} "
             f"(regex: {version_regex})"
         )
-    return best_version
+    _require_window_reached_pin(
+        image, version_regex, best_tag,
+        _pin_as_tag(version_regex, best_tag, svc.get("_current_version", "")),
+        svc.get("version_prefix", ""), knobs=_LSIO_WINDOW_KNOBS,
+    )
+    return _captured(version_regex, best_tag) or best_tag
 
 
 def fetch_ghcr_version(svc: dict) -> str:

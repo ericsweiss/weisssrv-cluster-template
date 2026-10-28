@@ -124,7 +124,7 @@ def test_the_core_pin_tracks_the_renders_ansible_pin() -> None:
 
 @pytest.mark.parametrize(
     ("ansible_pin", "expected"),
-    [("14.4.0", "2.21"), ("11.6.0", "2.18")],
+    [("14.5.0", "2.21"), ("11.6.0", "2.18")],
     ids=["current", "older-line"],
 )
 def test_the_core_line_derivation_is_exercised(ansible_pin, expected) -> None:

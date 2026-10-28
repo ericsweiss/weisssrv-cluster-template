@@ -37,6 +37,8 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: authentik-postgres-data
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   namespace: authentik
 spec:
   accessModes:
@@ -87,6 +89,8 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: authentik-pg-dump
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
   namespace: authentik
 spec:
   accessModes:

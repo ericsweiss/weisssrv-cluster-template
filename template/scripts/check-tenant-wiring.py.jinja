@@ -67,20 +67,19 @@ PRUNE_GUARDED_KINDS = ("Namespace", *REQUIRED_CAPS)
 GRANT_PREFIX = "tenant-routing-"
 GRANT_POLICIES = ("tenant-traefik-hostnames", "tenant-certificates")
 DATABASE_PATH = "kubernetes/db"
-# Kinds with no namespace of their own; everything else lands somewhere.
-CLUSTER_SCOPED_KINDS = frozenset(
-    {
-        "Namespace",
-        "ClusterRole",
-        "ClusterRoleBinding",
-        "ClusterSecretStore",
-        "ClusterExternalSecret",
-        "ClusterIssuer",
-        "PriorityClass",
-        "CustomResourceDefinition",
-        "ValidatingAdmissionPolicyBinding",
-    }
-)
+# Kinds with no namespace of their own, by API group: a CRD may reuse one of
+# these names in another group, and that kind is namespaced like any other.
+CLUSTER_SCOPED_KINDS = {
+    "Namespace": "",
+    "ClusterRole": "rbac.authorization.k8s.io",
+    "ClusterRoleBinding": "rbac.authorization.k8s.io",
+    "ClusterSecretStore": "external-secrets.io",
+    "ClusterExternalSecret": "external-secrets.io",
+    "ClusterIssuer": "cert-manager.io",
+    "PriorityClass": "scheduling.k8s.io",
+    "CustomResourceDefinition": "apiextensions.k8s.io",
+    "ValidatingAdmissionPolicyBinding": "admissionregistration.k8s.io",
+}
 
 
 class Vacuous(Exception):
@@ -129,7 +128,17 @@ def listed_resources(root: Path) -> set[str]:
         raise Vacuous(f"{AGGREGATOR} unreadable: {exc}") from exc
     if not isinstance(doc, dict):
         raise Vacuous(f"{AGGREGATOR} is not a mapping, so it lists no resources")
-    return {_normalized(str(r)) for r in (doc.get("resources") or [])}
+    resources = doc.get("resources")
+    if resources is None:
+        return set()
+    if not isinstance(resources, list):
+        raise Vacuous(f"{AGGREGATOR} `resources` is not a list, so it names no tenant")
+    bad = [r for r in resources if not isinstance(r, str) or not r.strip()]
+    if bad:
+        raise Vacuous(
+            f"{AGGREGATOR} `resources` holds entries that are not file names: {bad!r}"
+        )
+    return {_normalized(r) for r in resources}
 
 
 def _of_kind(docs: list, kind: str) -> list[dict]:
@@ -198,9 +207,9 @@ def _store_problems(docs: list, rel: str, namespace, labels: dict) -> list[str]:
 
 
 def _caps_problems(docs: list, rel: str) -> list[str]:
-    """Both namespace caps are declared, the quota bounds claims and ephemeral
-    storage, and every Container limit bounds ephemeral storage by default and
-    at most, or the tenant can spend a node's disk."""
+    """Both caps are declared, the quota bounds claims and ephemeral storage, and
+    every Container limit bounds ephemeral storage and sets no CPU under `default`
+    or `max`: the apiserver copies a lone `max` into `default`, limiting every pod."""
     problems = []
     for kind in REQUIRED_CAPS:
         if not _of_kind(docs, kind):
@@ -240,6 +249,13 @@ def _caps_problems(docs: list, rel: str) -> list[str]:
                 "lands unbounded inside the quota"
             )
         for entry in entries:
+            cpu_keys = [k for k in ("default", "max") if "cpu" in (entry.get(k) or {})]
+            if cpu_keys:
+                problems.append(
+                    f"{rel}: LimitRange {name} sets cpu under "
+                    f"{', '.join(cpu_keys)} — every tenant container would be "
+                    "admitted with a CPU limit and CFS-throttled"
+                )
             # default supplies only the limit: without defaultRequest a container
             # with no resources block is charged the whole limit against the
             # requests quota and may be refused rather than defaulted.
@@ -270,8 +286,8 @@ def _is_database_tree(kustomization: dict) -> bool:
 
 
 def _prune_guard_problems(docs: list, rel: str) -> list[str]:
-    """A tenant's Namespace, caps, hostname grant and grant bindings outlive its
-    wiring, one rule for all."""
+    """Every Namespace in the file, its caps, hostname grant and grant bindings
+    outlive the wiring, one rule for all."""
     flux = [
         k for k in _of_kind(docs, "Kustomization")
         if "kustomize.toolkit" in str(k.get("apiVersion"))
@@ -316,6 +332,17 @@ def _prune_guard_problems(docs: list, rel: str) -> list[str]:
     return problems
 
 
+def _api_group(doc: dict) -> str:
+    """The group of `apiVersion`; the core group (`v1`) is the empty string."""
+    api = str(doc.get("apiVersion") or "")
+    return api.rsplit("/", 1)[0] if "/" in api else ""
+
+
+def _cluster_scoped(doc: dict) -> bool:
+    kind = str(doc.get("kind") or "")
+    return kind in CLUSTER_SCOPED_KINDS and _api_group(doc) == CLUSTER_SCOPED_KINDS[kind]
+
+
 def _placement_problems(docs: list, rel: str, namespace) -> list[str]:
     """Every namespaced document sits in the tenant namespace or flux-system.
 
@@ -325,7 +352,7 @@ def _placement_problems(docs: list, rel: str, namespace) -> list[str]:
     problems = []
     for doc in docs:
         kind = str(doc.get("kind") or "?")
-        if kind in CLUSTER_SCOPED_KINDS:
+        if _cluster_scoped(doc):
             continue
         name = ((doc.get("metadata") or {}).get("name")) or "?"
         where = (doc.get("metadata") or {}).get("namespace")
@@ -367,9 +394,15 @@ def check_file(path: Path, rel: str, listed: set[str],
     else:
         namespace = (namespaces[0].get("metadata") or {}).get("name")
         labels = (namespaces[0].get("metadata") or {}).get("labels") or {}
+    # Each Namespace in the file is admitted on its own labels, so each carries them.
+    for declared in namespaces:
+        metadata = declared.get("metadata") or {}
+        present = metadata.get("labels") or {}
         for label in REQUIRED_NS_LABELS:
-            if label not in labels:
-                problems.append(f"{rel}: namespace {namespace} has no {label} label")
+            if label not in present:
+                problems.append(
+                    f"{rel}: namespace {metadata.get('name')} has no {label} label"
+                )
 
     problems += _caps_problems(docs, rel)
     problems += _prune_guard_problems(docs, rel)
@@ -442,13 +475,44 @@ def _kustomization_problems(docs: list, label: str, kustomization: dict,
 
 def _substitute_problems(spec: dict, rel: str) -> list[str]:
     """Flux substitutes nothing a Kustomization does not ask for, so a tenant
-    without both ConfigMaps applies its ${...} placeholders literally."""
-    entries = {
-        str(entry["name"]): entry
-        for entry in ((spec.get("postBuild") or {}).get("substituteFrom") or [])
-        if isinstance(entry, dict) and entry.get("name")
-    }
+    without cluster-config applies its ${...} placeholders literally. Every
+    entry is one of the platform ConfigMaps, named once."""
     problems = []
+    entries: dict = {}
+    post_build = spec.get("postBuild") or {}
+    if not isinstance(post_build, dict):
+        problems.append(f"{rel}: postBuild is not a mapping, so nothing is substituted")
+        post_build = {}
+    sources = post_build.get("substituteFrom") or []
+    if not isinstance(sources, list):
+        problems.append(f"{rel}: substituteFrom is not a list, so nothing is substituted")
+        sources = []
+    for entry in sources:
+        if not isinstance(entry, dict):
+            problems.append(f"{rel}: substituteFrom entry {entry!r} is not a mapping")
+            continue
+        kind, name = entry.get("kind"), str(entry.get("name") or "")
+        if kind != "ConfigMap":
+            problems.append(
+                f"{rel}: substituteFrom {kind or 'entry with no kind'} {name or '?'} "
+                "is not a ConfigMap — a tenant substitutes from the platform "
+                "ConfigMaps only, never a Secret"
+            )
+            continue
+        if name not in ALLOWED_SUBSTITUTE_SOURCES:
+            problems.append(
+                f"{rel}: substituteFrom ConfigMap {name or '?'} is not one of "
+                f"{', '.join(ALLOWED_SUBSTITUTE_SOURCES)} — the platform publishes "
+                "no other substitution source to tenants"
+            )
+            continue
+        if name in entries:
+            problems.append(
+                f"{rel}: substituteFrom lists ConfigMap {name} more than once — "
+                "each platform source belongs in the list once"
+            )
+            continue
+        entries[name] = entry
     for name in REQUIRED_SUBSTITUTE_SOURCES:
         if name not in entries:
             problems.append(
@@ -456,7 +520,7 @@ def _substitute_problems(spec: dict, rel: str) -> list[str]:
                 "its ${...} placeholders would be applied literally"
             )
     for name in sorted(entries):
-        if name in ALLOWED_SUBSTITUTE_SOURCES and entries[name].get("optional") is not False:
+        if entries[name].get("optional") is not False:
             problems.append(
                 f"{rel}: substituteFrom ConfigMap {name} is not optional: false — "
                 "a missing ConfigMap would apply ${...} placeholders literally"
@@ -563,9 +627,15 @@ def check(root: Path) -> list[str]:
     for path in subjects(root, listed):
         problems += check_file(path, path.relative_to(root).as_posix(), listed, root=root)
     for resource in sorted(listed - SHARED):
-        if not (root / TENANTS_DIR / resource).exists():
+        target = root / TENANTS_DIR / resource
+        if not target.exists():
             problems.append(
                 f"{TENANTS_DIR}/{AGGREGATOR} lists {resource}, which does not exist"
+            )
+        elif not target.is_file():
+            problems.append(
+                f"{TENANTS_DIR}/{AGGREGATOR} lists {resource}, which is not a regular "
+                "file, so no tenant wiring in it is checked"
             )
     return problems
 

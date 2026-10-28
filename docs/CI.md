@@ -79,10 +79,9 @@ without them skips that arm and says so.
 `check-scrape-netpol` proves the namespace admits observability;
 `check-scrape-wiring` adds the port granularity, resolving each monitor through
 its Service to the container port and requiring a policy that admits that
-number. A peer narrowed by a `podSelector` keeps its credit with the narrowing
-recorded as unresolved — Prometheus is chart-installed, so its pod labels are in
-no manifest — which is the one case a `TargetDown` can still survive a green
-pipeline.
+number. A peer narrowed by a `podSelector` is credited only against the scraper
+labels declared to the gate — Prometheus is chart-installed, so its pod labels
+are in no manifest — and is otherwise named in the failure as unresolved.
 
 ### flux-lint
 

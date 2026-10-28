@@ -996,14 +996,14 @@ lib_ref:
     Never answer a tag OLDER than the default below: the generated playbooks are
     written against the role contracts of the release the template pins, and an
     older pin takes the role defaults silently rather than failing.
-  default: "v0.22.1"
+  default: "v0.23.0"
   validator: >-
     {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
     lib_ref must be a release TAG of the form vX.Y.Z (e.g. v1.2.3). A branch is
     never a valid pin: the generated repo's scripts/check-lib-pins.py enforces
     the same shape on the declared `lib_ref` input every `include:` entry reads,
     so a branch answered here fails the very first pipeline.
-    {% elif (lib_ref[1:].split('.') | map('int') | list) < [0, 22, 1] %}
+    {% elif (lib_ref[1:].split('.') | map('int') | list) < [0, 23, 0] %}
     lib_ref must be the release this template pins or newer. The generated
     playbooks are written against that release's role contracts: an older pin
     takes the role defaults silently rather than failing.

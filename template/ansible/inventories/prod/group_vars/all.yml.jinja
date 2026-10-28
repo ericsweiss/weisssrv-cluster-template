@@ -123,10 +123,6 @@ postfix_null_client_sasl_password: "{% raw %}{{ lookup('ansible.builtin.env', 'S
 alloy_host_loki_url: "https://loki.{% raw %}{{ internal_domain }}{% endraw %}/loki/api/v1/push"
 alloy_host_loki_user: "{% raw %}{{ lookup('ansible.builtin.env', 'LOKI_PUSH_USER') | default('', true) }}{% endraw %}"
 alloy_host_loki_password: "{% raw %}{{ lookup('ansible.builtin.env', 'LOKI_PUSH_PASSWORD') | default('', true) }}{% endraw %}"
-# Alloy >= 1.21.0 refuses a loki.write WAL below the experimental stability
-# level (grafana/alloy#7257); the role keeps the WAL on by default. Drop this
-# once the alloy_host role passes the flag itself (weisssrv-lib follow-up).
-alloy_host_extra_args: ["--stability.level=experimental"]
 
 # --- Overlay VPN ------------------------------------------------------------
 tailscale_enabled: {{ 'true' if vpn_tailscale else 'false' }}
@@ -169,13 +165,14 @@ alloy_host_version: "1.21.2-1"    # apt package version, not the chart version
 {%- if vpn_tailscale %}
 # apt package pin, read from a tasks-only maintenance play where the role
 # default is out of scope. Not helm_chart_versions.tailscale_operator.
-tailscale_version: "1.104.2"
+tailscale_version: "1.104.4"
 {%- endif %}
 
 # Debian cloud image every VM is built from, a DATED directory rather than
 # `latest/`. Keep the release id in the file NAME or a bump reuses the old image.
 proxmox_vm_cloud_image_url: "https://cloud.debian.org/images/cloud/trixie/20260914-2601/debian-13-generic-amd64-20260914-2601.qcow2"
 proxmox_vm_cloud_image_name: "debian-13-generic-amd64-20260914-2601.qcow2"
+# yamllint disable-line rule:line-length
 proxmox_vm_cloud_image_checksum: "sha512:a733e7d49442a03e70d03e4eb5aaf3967f3efc69ef70952f9bb10fc1ee2c4876eb95956b5ad2d31350e5fada768feb651352535fb8cd1233f61998a5a7d2e93c"
 
 k3s_version: "v1.37.1+k3s1"
@@ -207,14 +204,14 @@ helm_chart_versions:
   # Owns the monitoring.coreos.com CRDs; bump in lockstep with
   # kube_prometheus_stack so the CRDs match the operator.
   prometheus_operator_crds: "32.0.2"
-  kube_prometheus_stack: "92.14.0"
+  kube_prometheus_stack: "92.14.1"
   loki: "20.0.2"
   alloy: "1.14.3"
   prometheus_blackbox_exporter: "11.20.2"
   onepassword_connect: "2.4.3"
   vpa: "5.1.0"
   kured: "6.1.0"
-  reloader: "2.2.18"
+  reloader: "2.2.19"
 {%- if postgres_operator %}
   # CloudNativePG operator (chart 0.29.1 = operator 1.30.1) and its Barman
   # Cloud plugin (chart 0.8.1 = plugin v0.15.1); one chart repository.

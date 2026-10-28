@@ -106,7 +106,7 @@ section — read it before running `copier update`.
 
 `lib_ref` is an answer, so a generated cluster can pin any library tag it likes —
 but exactly **one** pair is ever proved to work: the `lib_ref` default in
-`copier.yml`, currently weisssrv-lib `v0.22.1`. `validate-rendered-cluster`
+`copier.yml`, currently weisssrv-lib `v0.23.0`. `validate-rendered-cluster`
 renders the template with the answer fixtures — which do not answer `lib_ref`,
 so they inherit that default — and runs the real toolchain over the output
 against a checkout of the library at that ref.
@@ -287,11 +287,10 @@ namespace, Traefik's `defaultTLSResourcesNamespace: traefik`, and the CNPG kinds
 in `tenant-crd-editor`. An update with default answers therefore installs them,
 and a render with `tenant_storage` and `postgres_operator` both `false` differs
 from the previous release by that set with the docs, gates and audit script
-that go with it, by the `lib_ref` default (weisssrv-lib v0.22.1, with the
-vendored copies that follow it), by the default version pins below, and by the
-tenant-volumes marker play in `ansible/playbooks/k3s.yml`, every task of which
-is skipped unless a VM disk mounts `/mnt/tenant-volumes`. It is not
-byte-identical.
+that go with it, by the `lib_ref` default (weisssrv-lib v0.23.0, with the
+vendored copies that follow it) and by the default version pins below. The
+tenant-volumes marker play in `ansible/playbooks/k3s.yml` renders only with
+`tenant_storage`. It is not byte-identical.
 
 The policies act on CREATE and UPDATE, so an object a tenant already holds
 stays until its next apply, which they then refuse. On the update branch,
@@ -404,8 +403,9 @@ What a tenant can no longer create or update:
   own namespace stays allowed);
 - an ACME Order or Challenge (`acme.cert-manager.io`) created by anyone but
   cert-manager's controller, or an Order updated by anyone but that controller
-  or the garbage collector; tenant RBAC already grants no Order create or
-  update, so this is defence in depth and refuses nothing a tenant does today.
+  or the garbage collector, whose role holds no create verb; tenant RBAC
+  already grants no Order create or update, so this is defence in depth and
+  refuses nothing a tenant does today.
   CertificateRequests and Challenges are matched on CREATE only, because
   cert-manager's webhook refuses their spec changes after creation, which
   keeps a finalizer removal from wedging their deletion;
@@ -456,14 +456,14 @@ drops the override. A bump rewrites tag and digest together.
 `copier update` with default answers moves these shipped defaults, which Flux
 reconciles on merge: external-secrets 2.14.0, Traefik 42.1.3 (42 is a major:
 read its release notes against any Traefik values the cluster overrides),
-kube-prometheus-stack 92.14.0 with the CRDs chart at 32.0.2 (operator 0.94.2),
-Loki 20.0.2 (a major), Alloy 1.14.3, cert-manager 1.21.3, the Blackbox exporter
-11.20.2, 1Password Connect 2.4.3, Tailscale and its operator 1.104.2, the
-tailnet CoreDNS 1.15.0, adguardhome-sync 0.9.5, Authentik 2026.8.5 and the
-GitLab runner chart 0.94.1. They are the pins the reference cluster already
-runs; a cluster that pinned its own values in `all.yml` keeps them, and
-`task maintenance:check-versions` reports the drift either way. MetalLB stays
-held at 0.15.3.
+kube-prometheus-stack 92.14.1 with the CRDs chart at 32.0.2 (operator 0.94.2),
+Loki 20.0.2 (a major), Alloy 1.14.3, cert-manager 1.21.3, the Blackbox
+exporter 11.20.2, 1Password Connect 2.4.3, Reloader 2.2.19, Tailscale 1.104.4
+and its operator 1.104.2, the tailnet CoreDNS 1.15.0, adguardhome-sync 0.9.5,
+Authentik 2026.8.5 and the GitLab runner chart 0.94.1. They are the pins the
+reference cluster already runs; a cluster that pinned its own values in
+`all.yml` keeps them, and `task maintenance:check-versions` reports the drift
+either way. MetalLB stays held at 0.15.3.
 
 ### Every tenant's Namespace, caps and hostname grant carry the prune guard
 
@@ -499,6 +499,26 @@ under `default`, `defaultRequest` and `max` in its LimitRange Container entry, s
 volumes and writable layers otherwise fill the node's disk unbounded. Before
 the update merges, add those keys to every existing tenant file, as the tenants
 README § Example shows, or `task lint:invariants` fails.
+
+### No tenant LimitRange sets CPU under `default` or `max`
+
+`scripts/check-tenant-wiring.py` now fails a tenant LimitRange Container entry
+that sets `cpu` under `default` or `max`. The apiserver copies a `max` with no
+matching `default` into `default`, so either key hands every tenant container a
+CPU limit and CFS throttling. A CPU `defaultRequest` stays allowed. The same
+release reads every Namespace in a tenant file for the required labels, not only
+the first. Remove those keys from every existing tenant file before the update
+merges, or `task lint:invariants` fails.
+
+### A statically bound claim carries the prune guard
+
+weisssrv-lib v0.23.0's `check-pvc-storageclass.py` fails a
+PersistentVolumeClaim that binds a `volumeName` without
+`kustomize.toolkit.fluxcd.io/prune: disabled`. A Flux prune would delete the
+claim and leave its PersistentVolume Released, which never rebinds without a
+hand edit of its `claimRef`. The shipped Authentik and Grafana claims carry the
+annotation. Add it to every other statically bound claim before the update
+merges, or `task flux:lint` fails.
 
 ## Related
 

@@ -5,7 +5,7 @@
 spec:
   inputs:
     lib_ref:
-      default: v0.22.1
+      default: v0.23.0
 ---
 # CI for the template itself. Generic jobs come from the shared library, and
 # every job is tag-less and non-root safe so it lands on the shared runner.
@@ -44,8 +44,8 @@ variables:
   # Library checkout the python-tests job clones into and tests/test_render.py
   # reads for the ruleset parity gate, which fails rather than skips in CI.
   WEISSSRV_LIB_PATH: "$CI_PROJECT_DIR/.tmp/weisssrv-lib"
-  COPIER_VERSION: "9.17.0"
-  PYYAML_VERSION: "6.0.2"
+  COPIER_VERSION: "9.19.1"
+  PYYAML_VERSION: "6.0.3"
   YAMLLINT_VERSION: "1.38.0"
   # The core line template/requirements.txt's `ansible==` pin resolves to:
   # the render's nested pytest drives ansible-playbook, so it must run the
@@ -127,7 +127,7 @@ include:
       test_dir: "tests"
       # ansible-core: the nested `pytest tests scripts` inside the render runs
       # test_deploy_preflight.py, which fails rather than skips without it.
-      pip_packages: "copier==9.17.0 ansible-core==2.21.5"
+      pip_packages: "copier==9.19.1 ansible-core==2.21.5"
       # The library checkout the ruleset parity gate compares against; the
       # python:3.14 image already ships git.
       setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" "$WEISSSRV_LIB_PATH"'

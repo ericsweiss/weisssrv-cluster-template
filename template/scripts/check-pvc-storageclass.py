@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Assert every claim, CNPG Cluster storage included, pins a storageClassName.
+"""Assert every claim pins a storageClassName and no volumeName bind is prunable.
 
-An unset field is rewritten by the DefaultStorageClass admission plugin at
-create time; a pinned static bind is not growable. Both: docs/SCRIPTS.md.
+An unset class is rewritten at admission; a pruned volumeName claim releases
+its PV for good. Both, and the static-bind resize trap: docs/SCRIPTS.md.
 """
 from __future__ import annotations
 
@@ -31,6 +31,26 @@ except ImportError:
 _CLASS_PIN_KEYS = ("storageClass", "storageClassName")
 _VOLUME_PIN_KEYS = ("existingClaim", "existingVolume")
 
+_PRUNE_ANNOTATION = "kustomize.toolkit.fluxcd.io/prune"
+
+
+def _prune_violation(doc: dict, where: str) -> str | None:
+    """A claim bound by spec.volumeName must opt out of Flux pruning."""
+    volume = (doc.get("spec") or {}).get("volumeName")
+    if not (isinstance(volume, str) and volume):
+        return None
+    annotations = (doc.get("metadata") or {}).get("annotations") or {}
+    if isinstance(annotations, dict) and annotations.get(_PRUNE_ANNOTATION) == "disabled":
+        return None
+    # Pruning deletes the claim and releases its PV; a Released volume never
+    # rebinds until someone hand-edits its claimRef.
+    return (
+        f"  {where}: binds volumeName {volume!r} without "
+        f'{_PRUNE_ANNOTATION}: "disabled" — a Flux prune deletes the claim and '
+        f"leaves the PersistentVolume Released, which never rebinds without a "
+        f"hand edit of its claimRef"
+    )
+
 
 def _cnpg_claim_spec(block: dict) -> dict:
     """A CNPG storage block as the claim spec CNPG renders from it: `storageClass`
@@ -51,6 +71,9 @@ def _claim_violations(docs: list[dict]) -> tuple[list[str], int]:
         claims: list[tuple[str, dict]] = []
         if kind == "PersistentVolumeClaim":
             claims.append((where, d.get("spec") or {}))
+            prune = _prune_violation(d, where)
+            if prune:
+                out.append(prune)
         elif kind == "Cluster" and str(d.get("apiVersion", "")).startswith("postgresql.cnpg.io/"):
             spec = d.get("spec") or {}
             for field in ("storage", "walStorage"):
@@ -135,9 +158,10 @@ def main() -> int:
     found, seen = violations(docs)
     if found:
         print(
-            "Claims without an explicit storageClassName — a missing field is "
-            "rewritten to the cluster-default StorageClass at admission, which is "
-            "how a PVC silently lands on an unbacked-up disk:",
+            "Claim policy violations — a missing storageClassName is rewritten "
+            "to the cluster-default StorageClass at admission (how a PVC silently "
+            "lands on an unbacked-up disk), and a prunable volumeName bind "
+            "strands its PersistentVolume:",
             file=sys.stderr,
         )
         print("\n".join(found), file=sys.stderr)
@@ -155,7 +179,7 @@ def main() -> int:
 
     print(
         f"storageClassName policy OK — {seen} claim(s) across {len(docs)} document(s) "
-        "(every claim pins its class)"
+        "(every claim pins its class, every volumeName bind is unprunable)"
     )
     return 0
 

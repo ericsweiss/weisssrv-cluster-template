@@ -77,7 +77,7 @@ repos:
         name: egress fence
         entry: python scripts/check-netpol-except-parity.py --config scripts/netpol-except.yaml kubernetes/
         language: python
-        additional_dependencies: ["pyyaml==6.0.2"]
+        additional_dependencies: ["pyyaml==6.0.3"]
         files: ^(kubernetes/|scripts/netpol-except\.yaml|scripts/check-netpol-except-parity\.py)
         pass_filenames: false
         always_run: true
@@ -85,7 +85,7 @@ repos:
         name: no literal domain, CIDR or VIP
         entry: python scripts/check-cluster-literals.py
         language: python
-        additional_dependencies: ["pyyaml==6.0.2"]
+        additional_dependencies: ["pyyaml==6.0.3"]
         files: ^(kubernetes/|ansible/inventories/prod/group_vars/|scripts/check-cluster-literals\.py)
         pass_filenames: false
         always_run: true
@@ -93,7 +93,7 @@ repos:
         name: every manifest is listed, every kustomization lists one
         entry: python scripts/check-kustomization-coverage.py kubernetes/
         language: python
-        additional_dependencies: ["pyyaml==6.0.2"]
+        additional_dependencies: ["pyyaml==6.0.3"]
         files: ^(kubernetes/|scripts/check-kustomization-coverage\.py)
         pass_filenames: false
         always_run: true
@@ -101,7 +101,7 @@ repos:
         name: one Flux version
         entry: python scripts/check-flux-version-pin.py
         language: python
-        additional_dependencies: ["pyyaml==6.0.2"]
+        additional_dependencies: ["pyyaml==6.0.3"]
         files: ^(kubernetes/|ansible/inventories/prod/group_vars/all\.yml|scripts/check-flux-version-pin\.py)
         pass_filenames: false
         always_run: true
@@ -109,7 +109,7 @@ repos:
         name: every pin is in the version registry
         entry: python scripts/check-versions.py --check-coverage
         language: python
-        additional_dependencies: ["pyyaml==6.0.2"]
+        additional_dependencies: ["pyyaml==6.0.3"]
         files: ^(ansible/inventories/prod/group_vars/all\.yml|scripts/version-registry\.py|scripts/check-versions\.py)
         pass_filenames: false
         always_run: true
@@ -117,7 +117,7 @@ repos:
         name: comment blocks within the house limit
         entry: python scripts/check-comment-length.py --config scripts/comment-length.yaml
         language: python
-        additional_dependencies: ["pyyaml==6.0.2"]
+        additional_dependencies: ["pyyaml==6.0.3"]
         files: ^(ansible/|docker/|kubernetes/|scripts/|taskfiles/|Taskfile\.yml)
         pass_filenames: false
         always_run: true
