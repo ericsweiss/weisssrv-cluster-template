@@ -29,9 +29,6 @@ x-preconditions:
       msg: "terraform not installed: https://developer.hashicorp.com/terraform/downloads"
     - sh: command -v op
       msg: "1Password CLI not installed"
-    # `op account list`, not `op whoami`: with the desktop-app integration
-    # whoami reports "not signed in" in the non-interactive shell Task uses
-    # here.
     - sh: op account list 2>/dev/null
       msg: "1Password CLI not authenticated. Run: eval $(op signin)"
 

@@ -118,8 +118,7 @@ ref each pipeline's `spec:` header declares, and refuses to compare at all when
 that ref and `copier.yml`'s `lib_ref` default disagree. It also runs the
 library's vendored-copy engine (`scripts/check-vendored-copies.py`) against
 [`scripts/vendored-manifest.yml`](../scripts/vendored-manifest.yml), which
-names the copies no directory walk reaches: the canonical
-`tests/test_check_lib_pins.py` suite, the secret-detection ruleset under
+names the copies no directory walk reaches: the secret-detection ruleset under
 `.gitlab/`, and the lint profiles this repository deliberately forks. The
 manifest is consumer-owned. The library publishes only an offer list
 (`scripts/vendorable-paths.yml`) bounding what a manifest may name, so moving a
@@ -136,15 +135,10 @@ generated after its release.
 
 ## Running the tests locally
 
+[README § Local gates](../README.md#local-gates) lists the gates to run before a
+merge request. To render once and validate the kept tree:
+
 ```bash
-python3 -m pytest tests -q                      # structure + copier schema
-python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
-  --self-checks                                 # every check above, plus this repo's own
-python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
-  --answers tests/answers-unlike.yml            # the contrast fixture
-python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
-  --answers tests/answers-unlike.yml \
-  --data vpn_tailscale=true --data gpu=none --data use_unifi=false   # mixed modules
 python3 tests/render_cluster.py --out /tmp/x    # just render, and keep it
 python3 tests/validate_render.py --render-dir /tmp/x --lib-path ~/src/weisssrv-lib
 ```

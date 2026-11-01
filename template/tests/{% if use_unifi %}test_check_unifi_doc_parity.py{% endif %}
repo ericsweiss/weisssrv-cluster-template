@@ -62,7 +62,7 @@ def test_a_matching_pair_passes(repo: Path) -> None:
 
 def test_a_flipped_documented_value_fails(repo: Path) -> None:
     write(repo, gate.DOC, DOC.replace('`"ips"`', '`"ids"`'))
-    problems, _inspected = gate.check(repo)
+    problems, _ = gate.check(repo)
     assert any("ips_mode" in p for p in problems)
     assert gate.main(["--repo-root", str(repo)]) == 1
 
@@ -79,7 +79,7 @@ def test_a_reordered_list_is_still_a_difference(repo: Path) -> None:
 
 def test_an_undocumented_setting_fails(repo: Path) -> None:
     write(repo, gate.DOC, DOC.replace("| `ips.ips_mode` | `\"ips\"` | inline blocking |\n", ""))
-    assert any("no docs" in p or "row names" in p for p in gate.check(repo)[0])
+    assert any("which no docs/unifi-network.md" in p and "row names" in p for p in gate.check(repo)[0])
 
 
 def test_two_matching_rows_are_ambiguous(repo: Path) -> None:
@@ -91,25 +91,51 @@ def test_two_matching_rows_are_ambiguous(repo: Path) -> None:
     assert any("ambiguous" in p for p in gate.check(repo)[0])
 
 
+IPS_LINE = '    ips_mode               = "ips"\n'
+
+
+def _with_extra(body: str) -> str:
+    assert IPS_LINE in MAIN_TF
+    return MAIN_TF.replace(IPS_LINE, IPS_LINE + body)
+
+
+def test_a_nested_map_is_not_a_setting(repo: Path) -> None:
+    """Its opening line assigns `{`, which no docs row can ever match."""
+    write(repo, gate.MAIN_TF, _with_extra("    nested = {\n      inner = 1\n    }\n"))
+    assert "nested" not in gate.terraform_settings((repo / gate.MAIN_TF).read_text())
+    assert gate.check(repo)[0] == []
+
+
+def test_a_single_line_nested_map_is_still_a_setting(repo: Path) -> None:
+    write(repo, gate.MAIN_TF, _with_extra("    nested = { inner = 1 }\n"))
+    assert gate.terraform_settings((repo / gate.MAIN_TF).read_text())["nested"] == "{ inner = 1 }"
+
+
+def test_a_hash_inside_a_quoted_value_is_not_a_comment(repo: Path) -> None:
+    write(repo, gate.MAIN_TF, _with_extra('    banner = "lab #1" # trailing comment\n'))
+    assert gate.terraform_settings((repo / gate.MAIN_TF).read_text())["banner"] == "lab #1"
+
+
+def test_a_key_inside_a_longer_setting_name_does_not_match(repo: Path) -> None:
+    """`mode` is a substring of `ips.ips_mode` but names no row of its own."""
+    write(repo, gate.MAIN_TF, _with_extra("    mode = true\n"))
+    problems = gate.check(repo)[0]
+    assert any("sets mode" in p and "row names" in p for p in problems), problems
+
+
+def test_an_enabled_suffix_still_names_the_key(repo: Path) -> None:
+    write(repo, gate.MAIN_TF, _with_extra("    upnp = false\n"))
+    write(repo, gate.DOC, DOC.replace(
+        "| `ips.ips_mode`", "| `usg.upnp_enabled` | `false` | declared forwards |\n| `ips.ips_mode`"
+    ))
+    assert gate.check(repo)[0] == []
+
+
 def test_a_missing_section_is_vacuous(repo: Path) -> None:
     write(repo, gate.DOC, "# Some other page\n")
     with pytest.raises(gate.Vacuous):
         gate.check(repo)
     assert gate.main(["--repo-root", str(repo)]) == 2
-
-
-def test_a_nested_map_opening_line_is_not_a_setting(repo: Path) -> None:
-    """A nested map assigns no documentable value, so no docs row can match it."""
-    write(repo, gate.MAIN_TF, MAIN_TF.replace(
-        '    ips_mode               = "ips"\n',
-        '    ips_mode               = "ips"\n'
-        "    radius_profile = {\n"
-        '      name = "default"\n'
-        "    }\n",
-    ))
-    settings = gate.terraform_settings((repo / gate.MAIN_TF).read_text())
-    assert "radius_profile" not in settings
-    assert gate.check(repo)[0] == []
 
 
 def test_a_missing_site_settings_map_is_vacuous(repo: Path) -> None:

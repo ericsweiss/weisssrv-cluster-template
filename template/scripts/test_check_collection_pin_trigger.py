@@ -1,87 +1,145 @@
 """Unit tests for scripts/check-collection-pin-trigger.py.
 
-Each test builds a pipeline file in a throwaway directory and asserts the exit
-code: 0 clean, 1 a deploy job missing the pin, 2 nothing inspected.
+Each case writes a pipeline file and asserts the exit code: 0 clean, 1 a deploy
+job that runs a playbook without triggering on the pin, 2 nothing inspected.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import subprocess
 import sys
 from pathlib import Path
 
-GATE = Path(__file__).resolve().parent / "check-collection-pin-trigger.py"
+import pytest
 
-CLEAN = """\
+GATE = Path(__file__).resolve().parent / "check-collection-pin-trigger.py"
+PIN = "ansible/requirements.yml"
+
+CLEAN = f"""\
 deploy-ansible-dns:
   stage: deploy
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
       changes:
         - ansible/playbooks/dns.yml
-        - ansible/requirements.yml
+        - {PIN}
   script:
     - ansible-playbook playbooks/dns.yml
 """
 
-MISSING = CLEAN.replace("        - ansible/requirements.yml\n", "")
-
-NO_DEPLOY_JOBS = """\
-lint:
-  stage: lint
-  script:
-    - task lint
+REFERENCED_CHANGES = """\
+.paths-ansible:
+  changes:
+    - ansible/playbooks/base.yml
+{extra}deploy-ansible-base:
+  stage: deploy
+  rules:
+    - changes: !reference [.paths-ansible, changes]
 """
 
+CASES = [
+    pytest.param(CLEAN, 0, f"triggers on {PIN}", id="clean"),
+    pytest.param(CLEAN.replace(f"        - {PIN}\n", ""), 1, "deploy-ansible-dns",
+                 id="pin-missing"),
+    # The `{paths: [...]}` long form must not read as an empty rule set.
+    pytest.param("""\
+deploy-ansible-base:
+  stage: deploy
+  rules:
+    - changes:
+        paths: [ansible/playbooks/base.yml]
+""", 1, "deploy-ansible-base", id="dict-form-changes"),
+    pytest.param("""\
+.deploy-base:
+  stage: deploy
+deploy-ansible-certs:
+  extends: .deploy-base
+  rules:
+    - changes: [ansible/playbooks/certs.yml]
+""", 1, "deploy-ansible-certs", id="stage-via-extends"),
+    # The last parent's rules are the effective ones, as in GitLab.
+    pytest.param(f"""\
+.rules-pinless:
+  rules:
+    - changes: [ansible/playbooks/base.yml]
+.rules-clean:
+  rules:
+    - changes: [ansible/playbooks/base.yml, {PIN}]
+deploy-ansible-inherited:
+  stage: deploy
+  extends: [.rules-clean, .rules-pinless]
+""", 1, "deploy-ansible-inherited", id="last-parent-rules"),
+    pytest.param(f"""\
+.deploy-base:
+  rules:
+    - changes: [ansible/playbooks/dns.yml, {PIN}]
+  script:
+    - ansible-playbook playbooks/dns.yml
+deploy-ansible-dns:
+  extends: .deploy-base
+""", 0, f"triggers on {PIN}", id="pin-inherited-through-extends"),
+    # The script, not the trigger paths, is what makes a job run a playbook.
+    pytest.param("""\
+.deploy-base:
+  before_script: [cd ansible]
+  script:
+    - op run -- ansible-playbook -i inventories/prod x.yml
+deploy-inventory-only:
+  stage: deploy
+  extends: .deploy-base
+  rules:
+    - changes: [ansible/inventories/prod/hosts.yml]
+""", 1, "deploy-inventory-only", id="script-not-path-trigger"),
+    pytest.param("""\
+deploy-terraform:
+  stage: deploy
+  script: [terraform apply]
+  rules:
+    - changes: [terraform/cloudflare/main.tf]
+""", 0, f"triggers on {PIN}", id="non-playbook-deploy-job"),
+    pytest.param(REFERENCED_CHANGES.format(extra=""), 1, "deploy-ansible-base",
+                 id="reference-changes-missing"),
+    pytest.param(REFERENCED_CHANGES.format(extra=f"    - {PIN}\n"), 0,
+                 f"triggers on {PIN}", id="reference-changes-present"),
+    # GitLab's `spec:` inputs header makes the file two documents.
+    pytest.param("""\
+spec:
+  inputs:
+    lib_ref:
+      default: v0.1.2
+---
+.acme-script:
+  script:
+    - ansible-playbook playbooks/acme.yml
+deploy-acme:
+  stage: deploy
+  script:
+    - !reference [.acme-script, script]
+""", 1, "deploy-acme", id="spec-header"),
+    pytest.param("lint:\n  stage: lint\n  script: [task lint]\n", 2, "inspected nothing",
+                 id="nothing-inspected"),
+]
 
-def _run(tmp_path: Path, ci_text: str) -> subprocess.CompletedProcess:
-    ci = tmp_path / ".gitlab-ci.yml"
-    ci.write_text(ci_text)
+
+def _gate(ci: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(GATE), str(ci)], capture_output=True, text=True, check=False
     )
 
 
-def test_a_job_that_triggers_on_the_pin_passes(tmp_path):
-    result = _run(tmp_path, CLEAN)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "triggers on ansible/requirements.yml" in result.stdout
-
-
-def test_a_job_missing_the_pin_fails(tmp_path):
-    """The mutation case: drop the pin from the changes list and the gate reds."""
-    result = _run(tmp_path, MISSING)
-    assert result.returncode == 1
-    assert "deploy-ansible-dns" in result.stdout
-
-
-def test_a_pipeline_with_no_deploy_job_is_an_error(tmp_path):
-    """Inspecting nothing must not read as a clean pipeline."""
-    result = _run(tmp_path, NO_DEPLOY_JOBS)
-    assert result.returncode == 2
-    assert "inspected nothing" in result.stderr
+@pytest.mark.parametrize("ci_text,expected_rc,fragment", CASES)
+def test_the_gate(tmp_path, ci_text, expected_rc, fragment):
+    ci = tmp_path / ".gitlab-ci.yml"
+    ci.write_text(ci_text)
+    result = _gate(ci)
+    output = result.stdout + result.stderr
+    assert result.returncode == expected_rc, output
+    assert fragment in output
+    assert "Traceback" not in result.stderr
 
 
 def test_an_unreadable_pipeline_file_is_an_error(tmp_path):
-    result = subprocess.run(
-        [sys.executable, str(GATE), str(tmp_path / "absent.yml")],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = _gate(tmp_path / "absent.yml")
     assert result.returncode == 2
-
-
-def test_the_pin_is_inherited_through_extends(tmp_path):
-    """A job with no rules of its own takes the parent's changes list."""
-    spec = importlib.util.spec_from_file_location("collection_pin", GATE)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    ci = {
-        ".deploy-base": {
-            "rules": [{"changes": ["ansible/playbooks/dns.yml", "ansible/requirements.yml"]}]
-        },
-        "deploy-ansible-dns": {"extends": ".deploy-base"},
-    }
-    assert module.jobs_missing_the_pin(ci) == []
+    assert "cannot read" in result.stderr
+    assert "Traceback" not in result.stderr

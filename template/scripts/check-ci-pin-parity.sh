@@ -32,16 +32,19 @@ derive_pins() {
     done
 }
 
-# Shell pins: `NAME="value"` inside a script: block. Names, then the distinct
+# Shell pins: `NAME_VERSION="value"` or `NAME_SHA256="value"` inside a script:
+# block, so key material is never read as a pin. Names, then the distinct
 # values one name carries across the file.
-shell_pin_names() { sed -n 's/^[[:space:]]*\([A-Z][A-Z0-9_]*\)="[^"]*"$/\1/p' "$CI_FILE" | sort -u; }
+shell_pin_names() {
+    sed -nE 's/^[[:space:]]*([A-Z][A-Z0-9_]*_(VERSION|SHA256))="[^"]*"$/\1/p' "$CI_FILE" | sort -u
+}
 shell_pin_values() { sed -n "s/^[[:space:]]*$1=\"\([^\"]*\)\"\$/\1/p" "$CI_FILE" | sort -u; }
 
 cmp_pin() {
     echo "$1: variables=${2:-<none>} include-input(s)=$(echo "$3" | tr '\n' ' ')"
     if [ -z "$2" ] || [ -z "$3" ]; then
         echo "  could not extract both sides"
-        rc=1
+        broken=1
         return
     fi
     if [ "$2" != "$3" ]; then

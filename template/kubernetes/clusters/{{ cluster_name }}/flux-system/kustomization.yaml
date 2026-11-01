@@ -1,16 +1,12 @@
 ---
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# gotk-components.yaml and gotk-sync.yaml are written by `flux bootstrap` and
-# do not exist until you run it. This kustomization is hand-authored, survives
-# bootstrap, and its patches are how the Flux install is customised.
 resources:
 - gotk-components.yaml
 - gotk-sync.yaml
 patches:
-# Enforce restricted PSA (bootstrap default is warn-only). kustomize-controller
-# and helm-controller hold cluster-admin, so this is the namespace that most
-# needs an admission guard; all four controllers are restricted-compliant.
+# Enforce restricted PSA (bootstrap ships warn-only). Patched here, not
+# hand-edited: flux install regenerates gotk-components.yaml.
 - target:
     kind: Namespace
     name: flux-system
@@ -21,9 +17,9 @@ patches:
     - op: add
       path: /metadata/labels/pod-security.kubernetes.io~1enforce-version
       value: latest
-# Bootstrap default 64Mi is well under the observed working set; the VPA
-# policies in infrastructure/configs/vpa/flux-system.yaml own the value from the
-# first pod recreation. Strategic merge, so a missing upstream request is added.
+# Bootstrap default 64Mi is too low; VPA Initial policies
+# (infrastructure/configs/vpa/flux-system.yaml) own the value from the first
+# pod recreation. Strategic merge, so a missing upstream request is added.
 - target:
     kind: Deployment
     name: (source-controller|kustomize-controller|helm-controller)
@@ -56,17 +52,17 @@ patches:
               resources:
                 requests:
                   memory: 128Mi
-# Drop the controllers' CPU limit: CPU is compressible, so a limit only adds
-# CFS throttling that hurts reconcile latency. The memory limit stays, and
-# op: remove stays fail-loud if a regenerated manifest ever drops the limit.
+# Drop the bootstrap CPU limit; the memory limit stays, and
+# check-hpa-vpa-invariant.py gates the policy. op: remove fails loud if a
+# regenerated manifest already drops it.
 - target:
     kind: Deployment
     name: (source-controller|kustomize-controller|helm-controller|notification-controller)
   patch: |
     - op: remove
       path: /spec/template/spec/containers/0/resources/limits/cpu
-# An undefined ${var} in a stage's postBuild is a reconcile error, not an empty
-# hostname, CIDR or VIP. A deliberate literal must be escaped $${var}.
+# An undefined ${var} in a stage's postBuild is a reconcile error, not an
+# empty string.
 - target:
     kind: Deployment
     name: kustomize-controller

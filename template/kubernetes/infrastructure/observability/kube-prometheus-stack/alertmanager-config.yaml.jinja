@@ -199,7 +199,7 @@ spec:
                 - alertname="InfoInhibitor"
               target_matchers:
                 - severity="info"
-                - alertname!~"NodeOutageStormControl|AlertmanagerNotificationsDropping{% endraw %}{% if storage_backend == 'zfs' %}|SwapCleanStoppedGuests{% endif %}{% raw %}"
+                - alertname!~"AlertmanagerNotificationsDropping{% endraw %}{% if storage_backend == 'zfs' %}|SwapCleanStoppedGuests{% endif %}{% raw %}"
               equal:
                 - namespace
             # While a node is down, NodeOutageStormControl suppresses per-pod

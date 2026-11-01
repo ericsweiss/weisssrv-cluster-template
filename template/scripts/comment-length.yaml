@@ -1,21 +1,15 @@
 ---
-# Scope for scripts/check-comment-length.py (`task lint:comment-length`). The
-# excluded paths are vendored from weisssrv-lib: an over-long block in one is
-# trimmed upstream, and the re-vendor carries the trim here.
+# Scope for scripts/check-comment-length.py (`task lint:comment-length`).
+# Excludes are exactly the `vendored:` copies in vendored-manifest.yml, whose
+# comments only a re-vendor can change. Every `forked:` copy is scanned.
 paths:
   - .
 exclude:
-  - .editorconfig
-  - .gitattributes
-  - .gitlab/secret-detection-ruleset.toml
-  - .gitleaks.toml
-  - .pre-commit-config.yaml
   - ansible/molecule/prepare-common.yml
   - ansible/molecule/tasks/container-warmup.yml
   - ansible/molecule/tasks/prepare-apt-disable.yml
   - ansible/molecule/tasks/prepare-base.yml
   - lint/yamllint-relaxed.yml
-  - ruff.toml
   - scripts/check-alertmanager-behaviour.py
   - scripts/check-backup-artifact-apps.py
   - scripts/check-cluster-invariants.py
@@ -27,7 +21,6 @@ exclude:
   - scripts/check-deploy-preflight.py
   - scripts/check-doc-links.py
   - scripts/check-ephemeral-storage-cap.py
-  - scripts/check-flux-version-pin.py
   - scripts/check-guest-endpoint-parity.py
   - scripts/check-helm-repo-parity.py
   - scripts/check-hpa-vpa-invariant.py
@@ -39,7 +32,6 @@ exclude:
   - scripts/check-role-inputs.py
   - scripts/check-scrape-wiring.py
   - scripts/check-scrape-netpol.py
-  - scripts/check-secret-rotation-coverage.py
   - scripts/check-secretstore-scope.py
   - scripts/check-taskfile.sh
   - scripts/check-version-checksums.py
@@ -52,7 +44,6 @@ exclude:
   - scripts/deploy-verify-lib.sh
   - scripts/extract-prometheus-config.py
   - scripts/find-reachable-host.sh
-  - scripts/flux-child-kustomizations.py
   - scripts/flux-env.sh
   - scripts/flux-lint.sh
   - scripts/flux-render.sh

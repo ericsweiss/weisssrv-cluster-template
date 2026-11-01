@@ -50,8 +50,4 @@ description = "{{ cluster_name }} synthetic test fixtures"
 regexes = [
   # cert-distribution molecule — mock acme.sh private keys.
   '''MIIEvgIBADANBgkqhkiGTestPrivateKey''',
-  # scripts/test_collect_state_lib.py — redaction-suite inputs, patterns not credentials.
-  '''^glpat-abc123def456$''',
-  '''^glrt-AbC_123-xyz$''',
-  '''7the8keymaterial''',
 ]

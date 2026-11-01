@@ -1,10 +1,7 @@
 ---
-# Shared RBAC for tenant Flux reconciliation. The built-in `admin` ClusterRole
-# does not cover traefik.io, monitoring.coreos.com or autoscaling.k8s.io, so a
-# tenant's first route, monitor or VPA fails Forbidden without this.
-
-# external-secrets.io and cert-manager.io are granted explicitly rather than
-# relying on admin's aggregated edit roles.
+# Shared RBAC for tenant Flux reconciliation: the CRD groups the built-in
+# `admin` ClusterRole does not aggregate. Bound per-tenant alongside `admin`
+# (see README.md); unbound it does nothing.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -37,6 +34,8 @@ rules:
     resources:
       - verticalpodautoscalers
     verbs: [get, list, watch, create, update, patch, delete, deletecollection]
+  # Explicit, though admin usually aggregates these, so a partial install still
+  # applies them.
   - apiGroups: ["external-secrets.io"]
     resources:
       - externalsecrets

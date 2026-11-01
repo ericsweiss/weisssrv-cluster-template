@@ -383,11 +383,6 @@ spec:
               - helmrepositories
               - helmcharts
             verbs: [list, watch]
-          - apiGroups:
-              - autoscaling.k8s.io
-            resources:
-              - verticalpodautoscalers
-            verbs: [list, watch]
       customResourceState:
         enabled: true
         config:
@@ -473,72 +468,6 @@ spec:
                           exported_namespace: [metadata, namespace]
                           ready: [status, conditions, "[type=Ready]", status]
                           suspended: [spec, suspend]
-              # The VPA components export no recommendation metrics, so this
-              # emits one series per container and resource for the capped and
-              # uncapped values. Consumed by VPARecommendationCapped below.
-              - groupVersionKind:
-                  group: autoscaling.k8s.io
-                  version: v1
-                  kind: VerticalPodAutoscaler
-                metricNamePrefix: vpa
-                labelsFromPath:
-                  verticalpodautoscaler: [metadata, name]
-                  exported_namespace: [metadata, namespace]
-                  target_kind: [spec, targetRef, kind]
-                  target_name: [spec, targetRef, name]
-                # valueFrom must resolve to a scalar quantity, so target and
-                # uncappedTarget are split into their cpu and memory members;
-                # commonLabels carry resource/unit so the series never collide.
-                metrics:
-                  - name: recommendation_target
-                    # Same metric family as the memory series below — HELP must match.
-                    help: VPA recommended resource request after minAllowed/maxAllowed capping (see resource/unit labels)
-                    commonLabels:
-                      resource: cpu
-                      unit: core
-                    each:
-                      type: Gauge
-                      gauge:
-                        path: [status, recommendation, containerRecommendations]
-                        labelsFromPath:
-                          container: [containerName]
-                        valueFrom: [target, cpu]
-                  - name: recommendation_target
-                    help: VPA recommended resource request after minAllowed/maxAllowed capping (see resource/unit labels)
-                    commonLabels:
-                      resource: memory
-                      unit: byte
-                    each:
-                      type: Gauge
-                      gauge:
-                        path: [status, recommendation, containerRecommendations]
-                        labelsFromPath:
-                          container: [containerName]
-                        valueFrom: [target, memory]
-                  - name: recommendation_uncappedtarget
-                    help: VPA recommended resource request ignoring minAllowed/maxAllowed (see resource/unit labels)
-                    commonLabels:
-                      resource: cpu
-                      unit: core
-                    each:
-                      type: Gauge
-                      gauge:
-                        path: [status, recommendation, containerRecommendations]
-                        labelsFromPath:
-                          container: [containerName]
-                        valueFrom: [uncappedTarget, cpu]
-                  - name: recommendation_uncappedtarget
-                    help: VPA recommended resource request ignoring minAllowed/maxAllowed (see resource/unit labels)
-                    commonLabels:
-                      resource: memory
-                      unit: byte
-                    each:
-                      type: Gauge
-                      gauge:
-                        path: [status, recommendation, containerRecommendations]
-                        labelsFromPath:
-                          container: [containerName]
-                        valueFrom: [uncappedTarget, memory]
 
     # Components k3s does not expose: it bundles kube-scheduler,
     # kube-controller-manager and kube-proxy into the server process with no
@@ -1065,16 +994,16 @@ spec:
                   summary: 'Node {{ $labels.node }} is under memory pressure'
                   description: 'Kubelet on {{ $labels.node }} has reported memory pressure for 5 minutes. Pods may be evicted.'
 
-              # Source for the node-outage inhibit in alertmanager-config.yaml. The 7d
-              # arm keeps a never-Ready node from muting alerts; both sides aggregate
-              # by node so a kube-state-metrics reschedule keeps the history.
+              # Null-routed source for the node-outage inhibit. The 7d arm keeps a
+              # never-Ready node from muting alerts; both sides aggregate by node so a
+              # kube-state-metrics reschedule keeps the history.
               - alert: NodeOutageStormControl
                 expr: >-
                   max by (node, condition, status) (kube_node_status_condition{condition="Ready", status="true"}) == 0
                   and max by (node, condition, status) (max_over_time(kube_node_status_condition{condition="Ready", status="true"}[7d])) == 1
                 for: 5m
                 labels:
-                  severity: info
+                  severity: none
                 annotations:
                   runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
                   summary: 'Node {{ $labels.node }} NotReady — workload alerts inhibited'
@@ -1347,45 +1276,6 @@ spec:
                     Ready=False for 15 minutes. Run `flux get all -A | grep -v True`
                     and `kubectl describe {{ $labels.customresource_kind }}
                     {{ $labels.name }} -n {{ $labels.exported_namespace }}`.
-
-              # Fed by the kube-state-metrics VPA customResourceState above:
-              # uncappedTarget over target means a recommendation clamped at
-              # maxAllowed. The floors and max by () keep noise and reschedules out.
-              - alert: VPARecommendationCapped
-                expr: >-
-                  (
-                    (
-                      max by (exported_namespace, verticalpodautoscaler, container, resource, unit)
-                        (vpa_recommendation_uncappedtarget{resource="memory"})
-                      > 1.25 * max by (exported_namespace, verticalpodautoscaler, container, resource, unit)
-                        (vpa_recommendation_target{resource="memory"})
-                      and
-                      max by (exported_namespace, verticalpodautoscaler, container, resource, unit)
-                        (vpa_recommendation_uncappedtarget{resource="memory"})
-                      - max by (exported_namespace, verticalpodautoscaler, container, resource, unit)
-                        (vpa_recommendation_target{resource="memory"}) > 134217728
-                    )
-                    or
-                    (
-                      max by (exported_namespace, verticalpodautoscaler, container, resource, unit)
-                        (vpa_recommendation_uncappedtarget{resource="cpu"})
-                      > 1.25 * max by (exported_namespace, verticalpodautoscaler, container, resource, unit)
-                        (vpa_recommendation_target{resource="cpu"})
-                    )
-                  )
-                for: 24h
-                labels:
-                  severity: warning
-                annotations:
-                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
-                  summary: >-
-                    VPA {{ $labels.exported_namespace }}/{{ $labels.verticalpodautoscaler }} recommendation capped at maxAllowed
-                  description: >-
-                    The recommendation for container {{ $labels.container }}
-                    ({{ $labels.resource }}) has been clamped by maxAllowed for 24
-                    hours — it wants {{ $value }} {{ $labels.unit }} uncapped.
-                    Raise the container's limit and re-derive maxAllowed from it
-                    in the same commit, or investigate the growth.
 
       platform-secrets:
         groups:

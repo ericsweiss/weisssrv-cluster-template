@@ -1,7 +1,6 @@
 ---
-# Cluster entrypoint: the flux-system Kustomization written by `flux bootstrap`
-# reconciles this path. It applies the Flux controllers, the infrastructure
-# stages, apps (parallel to observability) and the tenants folder.
+# Cluster entrypoint: the bootstrap flux-system Kustomization reconciles this
+# path. Stage order lives in each stage file's dependsOn.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

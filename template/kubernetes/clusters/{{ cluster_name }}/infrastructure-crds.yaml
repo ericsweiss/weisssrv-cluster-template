@@ -1,7 +1,7 @@
 ---
-# Stage 2/5 — CRD bootstrap. Installs the monitoring.coreos.com CRDs before the
-# controllers stage, whose charts fail to render ServiceMonitors without them.
-# wait:true holds the controllers stage until the CRDs are Established.
+# Installs the monitoring.coreos.com CRDs before the controllers stage, whose
+# charts fail to render ServiceMonitors without them. wait:true holds the
+# controllers stage until the CRDs are Established.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:

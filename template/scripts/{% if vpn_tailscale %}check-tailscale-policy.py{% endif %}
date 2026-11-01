@@ -165,6 +165,16 @@ def check(root: Path = REPO, doc: dict | None = None) -> list[str]:
         # The two checks below index those keys; without them there is nothing
         # meaningful left to say.
         return problems
+    shapes = {
+        "tagOwners": doc["tagOwners"],
+        "autoApprovers": doc["autoApprovers"],
+        "autoApprovers.routes": (doc["autoApprovers"].get("routes") or {})
+        if isinstance(doc["autoApprovers"], dict) else {},
+    }
+    wrong = sorted(k for k, v in shapes.items() if not isinstance(v, dict))
+    if wrong:
+        problems.append(f"{POLICY}: {', '.join(wrong)} must be a JSON object")
+        return problems
 
     declared = {t for t in doc["tagOwners"] if isinstance(t, str)}
     referenced = {m for s in _strings(doc) for m in TAG_RE.findall(s)}
@@ -176,7 +186,7 @@ def check(root: Path = REPO, doc: dict | None = None) -> list[str]:
             "nobody, so every rule naming it is dead."
         )
 
-    routes = (doc["autoApprovers"] or {}).get("routes") or {}
+    routes = shapes["autoApprovers.routes"]
     # A route key mapped to an empty approver list passes a key-existence check
     # while approving nothing at failover.
     bad = sorted(

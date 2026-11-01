@@ -17,9 +17,6 @@ x-preconditions:
       msg: "ansible-playbook not installed. pip install ansible, then: task ansible:install-collections"
     - sh: command -v op
       msg: "1Password CLI not installed: https://developer.1password.com/docs/cli/get-started/"
-    # `op account list`, not `op whoami`: with the desktop-app integration
-    # whoami reports "not signed in" in the non-interactive shell Task uses
-    # here.
     - sh: op account list 2>/dev/null
       msg: "1Password CLI not authenticated. Run: eval $(op signin)"
   # The version tasks need the vault but not Ansible: `op run` also exits 1 when
@@ -105,20 +102,9 @@ tasks:
 
   check-versions-json:
     desc: The same report as JSON
-    env: *version_env
-    preconditions: *check_versions_preconditions
     cmds:
-      # Same out-of-band rc handling as check-versions; stdout stays pure JSON.
-      - |
-        rc_file=$(mktemp)
-        trap 'rm -f "$rc_file"' EXIT
-        {% endraw %}{{ secret_runner() }}{% raw %} sh -c 'python3 ./scripts/check-versions.py --json {{.CLI_ARGS}}; echo $? > '"$rc_file" || true
-        rc=$(cat "$rc_file" 2>/dev/null || true)
-        if [ -z "$rc" ]; then
-          echo "ERROR: check-versions.py did not run to completion (secret runner / interpreter failure above)" >&2
-          exit 2
-        fi
-        [ "$rc" -le 1 ] || exit "$rc"
+      - task: check-versions
+        vars: {CLI_ARGS: "--json {{.CLI_ARGS}}"}
 
   update-version:
     desc: "Bump one tracked pin and regenerate the ConfigMap (SERVICE=<name>)"

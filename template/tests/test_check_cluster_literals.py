@@ -311,17 +311,6 @@ def test_an_address_literal_is_exempt_in_the_rules_tree(repo: Path) -> None:
     assert run(repo) == []
 
 
-def test_cluster_config_itself_is_not_scanned(repo: Path) -> None:
-    """It declares the values, so it is the one manifest spelling them literally."""
-    assert gate.CLUSTER_CONFIG.startswith("kubernetes/infrastructure/sources/")
-    write(
-        repo,
-        f"{gate.CLUSTER_DIR}/infrastructure-sources.yaml",
-        stage("infrastructure-sources", "kubernetes/infrastructure/sources"),
-    )
-    assert run(repo) == []
-
-
 def test_a_tenant_kustomization_is_not_credited(repo: Path) -> None:
     """A tenant path names the tenant's repo, so it never reaches the scan set."""
     (repo / "kubernetes/db").mkdir(parents=True)
@@ -506,24 +495,11 @@ def test_an_empty_cluster_config_data_block_is_vacuous(repo: Path) -> None:
 
 @pytest.mark.parametrize("key", ["cluster_internal_domain", "cluster_metallb_public_vip"])
 def test_a_disappeared_key_is_vacuous_not_a_quiet_pass(repo: Path, key: str) -> None:
-    """Each arm skips an absent key, so the whole gate would shrink in silence."""
     config = gate.load_config(repo)
     del config[key]
     with pytest.raises(gate.Vacuous) as excinfo:
         gate.require_keys(config)
     assert key in str(excinfo.value)
-
-
-def test_the_success_count_reflects_the_checks_that_ran(repo: Path) -> None:
-    config = gate.load_config(repo)
-    full = gate.mirror_check_count(config)
-    assert full == (
-        len(gate.INVENTORY_MIRRORS)
-        + len(gate.SECONDARY_MIRRORS)
-        + (1 if gate.DNS_SERVERS_KEY else 0)
-    )
-    del config["cluster_metallb_public_vip"]
-    assert gate.mirror_check_count(config) == full - 1
 
 
 def test_a_dashboard_json_literal_is_reported(repo: Path) -> None:

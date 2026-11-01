@@ -69,11 +69,12 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "count(count by (id) (pve_up{id=~\"node/.*\"}))",
+          "expr": "count(max by (id) (pve_up{id=~\"node/.*\"}) == 1)",
           "legendFormat": "hosts",
           "refId": "A"
         }
-      ]
+      ],
+      "description": "Proxmox hosts the exporter reports as up."
     },
     {
       "datasource": {
@@ -414,49 +415,7 @@
           "min": 0,
           "max": 100
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "limit"
-            },
-            "properties": [
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dash",
-                  "dash": [
-                    10,
-                    10
-                  ]
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 1
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 0
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              },
-              {
-                "id": "custom.hideFrom",
-                "value": {
-                  "legend": true,
-                  "tooltip": true,
-                  "viz": false
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 10,
@@ -527,49 +486,7 @@
           "min": 0,
           "max": 100
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "limit"
-            },
-            "properties": [
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dash",
-                  "dash": [
-                    10,
-                    10
-                  ]
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 1
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 0
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              },
-              {
-                "id": "custom.hideFrom",
-                "value": {
-                  "legend": true,
-                  "tooltip": true,
-                  "viz": false
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 10,
@@ -636,85 +553,14 @@
               "mode": "off"
             }
           },
-          "unit": "percent",
-          "min": 0,
-          "max": 100
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 16
-      },
-      "id": 9,
-      "options": {
-        "legend": {
-          "calcs": [
-            "mean",
-            "lastNotNull"
-          ],
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "title": "Node Root Filesystem Usage %",
-      "type": "timeseries",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "100 * (1 - node_filesystem_avail_bytes{job=\"node-exporter\", mountpoint=\"/\", fstype!=\"tmpfs\"} / node_filesystem_size_bytes{job=\"node-exporter\", mountpoint=\"/\", fstype!=\"tmpfs\"}) * on(instance) group_left(nodename) max by (instance, nodename) (node_uname_info)",
-          "legendFormat": "{{ nodename }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "",
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
           "unit": "Bps"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 24,
+        "x": 0,
         "y": 16
       },
       "id": 10,
@@ -936,9 +782,6 @@
               "Time 1": true,
               "Time 2": true,
               "Time 3": true,
-              "__name__ 1": true,
-              "__name__ 2": true,
-              "__name__ 3": true,
               "device 1": true,
               "device 2": true,
               "device 3": true,
@@ -1011,49 +854,7 @@
           "min": 0,
           "max": 100
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "limit"
-            },
-            "properties": [
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dash",
-                  "dash": [
-                    10,
-                    10
-                  ]
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 1
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 0
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              },
-              {
-                "id": "custom.hideFrom",
-                "value": {
-                  "legend": true,
-                  "tooltip": true,
-                  "viz": false
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -1100,7 +901,7 @@
       },
       "id": 207,
       "panels": [],
-      "title": "Virtual Machines (Proxmox QEMU)",
+      "title": "Guests (Proxmox VMs and LXCs)",
       "type": "row"
     },
     {
@@ -1209,7 +1010,7 @@
           }
         ]
       },
-      "title": "VM Status",
+      "title": "Guest Status",
       "type": "table",
       "targets": [
         {
@@ -1217,7 +1018,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (id) (pve_up{id=~\"qemu/.*\"}) * on(id) group_left(name) max by (id, name) (pve_guest_info{type=\"qemu\"})",
+          "expr": "max by (id) (pve_up{id=~\"(qemu|lxc)/.*\"}) * on(id) group_left(name, node) max by (id, name, node) (pve_guest_info)",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1228,7 +1029,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (id) (pve_uptime_seconds{id=~\"qemu/.*\"})",
+          "expr": "max by (id) (pve_uptime_seconds{id=~\"(qemu|lxc)/.*\"})",
           "format": "table",
           "instant": true,
           "legendFormat": "",
@@ -1248,27 +1049,6 @@
             "excludeByName": {
               "Time 1": true,
               "Time 2": true,
-              "__name__ 1": true,
-              "__name__ 2": true,
-              "container 1": true,
-              "container 2": true,
-              "endpoint 1": true,
-              "endpoint 2": true,
-              "instance 1": true,
-              "instance 2": true,
-              "job 1": true,
-              "job 2": true,
-              "namespace 1": true,
-              "namespace 2": true,
-              "node 1": true,
-              "pod 1": true,
-              "pod 2": true,
-              "service 1": true,
-              "service 2": true,
-              "target 1": true,
-              "target 2": true,
-              "template": true,
-              "type": true,
               "id": true
             },
             "indexByName": {
@@ -1344,7 +1124,7 @@
           "sort": "desc"
         }
       },
-      "title": "VM CPU Usage %",
+      "title": "Guest CPU Usage %",
       "type": "timeseries",
       "targets": [
         {
@@ -1352,7 +1132,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (id) (pve_cpu_usage_ratio{id=~\"qemu/.*\"}) * on(id) group_left(name) max by (id, name) (pve_guest_info{type=\"qemu\"}) * 100",
+          "expr": "max by (id) (pve_cpu_usage_ratio{id=~\"(qemu|lxc)/.*\"}) * on(id) group_left(name) max by (id, name) (pve_guest_info) * 100",
           "legendFormat": "{{ name }}",
           "refId": "A"
         }
@@ -1415,7 +1195,7 @@
           "sort": "desc"
         }
       },
-      "title": "VM Memory Usage %",
+      "title": "Guest Memory Usage %",
       "type": "timeseries",
       "targets": [
         {
@@ -1423,7 +1203,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (id) (pve_memory_usage_bytes{id=~\"qemu/.*\"}) / max by (id) (pve_memory_size_bytes{id=~\"qemu/.*\"}) * on(id) group_left(name) max by (id, name) (pve_guest_info{type=\"qemu\"}) * 100",
+          "expr": "max by (id) (pve_memory_usage_bytes{id=~\"(qemu|lxc)/.*\"}) / max by (id) (pve_memory_size_bytes{id=~\"(qemu|lxc)/.*\"}) * on(id) group_left(name) max by (id, name) (pve_guest_info) * 100",
           "legendFormat": "{{ name }}",
           "refId": "A"
         }
@@ -1487,7 +1267,7 @@
         }
       },
       "description": "VMs without the QEMU guest agent report 0% disk usage. Expected for appliance images that cannot install it.",
-      "title": "VM Disk Usage %",
+      "title": "Guest Disk Usage %",
       "type": "timeseries",
       "targets": [
         {
@@ -1495,7 +1275,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (id) (pve_disk_usage_bytes{id=~\"qemu/.*\"}) / max by (id) (pve_disk_size_bytes{id=~\"qemu/.*\"}) * on(id) group_left(name) max by (id, name) (pve_guest_info{type=\"qemu\"}) * 100",
+          "expr": "max by (id) (pve_disk_usage_bytes{id=~\"(qemu|lxc)/.*\"}) / max by (id) (pve_disk_size_bytes{id=~\"(qemu|lxc)/.*\"}) * on(id) group_left(name) max by (id, name) (pve_guest_info) * 100",
           "legendFormat": "{{ name }}",
           "refId": "A"
         }
@@ -1556,7 +1336,7 @@
           "sort": "desc"
         }
       },
-      "title": "VM Network Traffic",
+      "title": "Guest Network Traffic",
       "type": "timeseries",
       "targets": [
         {
@@ -1564,7 +1344,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (id) (irate(pve_network_receive_bytes{id=~\"qemu/.*\"}[$__rate_interval])) * on(id) group_left(name) max by (id, name) (pve_guest_info{type=\"qemu\"})",
+          "expr": "max by (id) (rate(pve_network_receive_bytes{id=~\"(qemu|lxc)/.*\"}[5m])) * on(id) group_left(name) max by (id, name) (pve_guest_info)",
           "legendFormat": "{{ name }} rx",
           "refId": "A"
         },
@@ -1573,7 +1353,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "-max by (id) (irate(pve_network_transmit_bytes{id=~\"qemu/.*\"}[$__rate_interval])) * on(id) group_left(name) max by (id, name) (pve_guest_info{type=\"qemu\"})",
+          "expr": "-max by (id) (rate(pve_network_transmit_bytes{id=~\"(qemu|lxc)/.*\"}[5m])) * on(id) group_left(name) max by (id, name) (pve_guest_info)",
           "legendFormat": "{{ name }} tx",
           "refId": "B"
         }
@@ -1586,494 +1366,6 @@
         "w": 24,
         "x": 0,
         "y": 62
-      },
-      "id": 208,
-      "panels": [],
-      "title": "LXC Containers",
-      "type": "row"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "red",
-                  "text": "Down"
-                },
-                "1": {
-                  "color": "green",
-                  "text": "Up"
-                }
-              },
-              "type": "value"
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Status"
-            },
-            "properties": [
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "basic",
-                  "type": "color-background"
-                }
-              },
-              {
-                "id": "custom.width",
-                "value": 80
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Uptime"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "s"
-              },
-              {
-                "id": "custom.width",
-                "value": 120
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 63
-      },
-      "id": 29,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "enablePagination": false,
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true,
-        "sortBy": [
-          {
-            "desc": false,
-            "displayName": "Name"
-          }
-        ]
-      },
-      "title": "LXC Container Status",
-      "type": "table",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "max by (id) (pve_up{id=~\"lxc/.*\"}) * on(id) group_left(name) max by (id, name) (pve_guest_info{type=\"lxc\"})",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "max by (id) (pve_uptime_seconds{id=~\"lxc/.*\"})",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "refId": "B"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "seriesToColumns",
-          "options": {
-            "byField": "id"
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time 1": true,
-              "Time 2": true,
-              "__name__ 1": true,
-              "__name__ 2": true,
-              "container 1": true,
-              "container 2": true,
-              "endpoint 1": true,
-              "endpoint 2": true,
-              "instance 1": true,
-              "instance 2": true,
-              "job 1": true,
-              "job 2": true,
-              "namespace 1": true,
-              "namespace 2": true,
-              "node 1": true,
-              "pod 1": true,
-              "pod 2": true,
-              "service 1": true,
-              "service 2": true,
-              "target 1": true,
-              "target 2": true,
-              "template": true,
-              "type": true,
-              "id": true
-            },
-            "indexByName": {
-              "name": 0,
-              "node 1": 1,
-              "Value #A": 2,
-              "Value #B": 3
-            },
-            "renameByName": {
-              "name": "Name",
-              "node 1": "Host",
-              "Value #A": "Status",
-              "Value #B": "Uptime"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "",
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "unit": "percent",
-          "min": 0,
-          "max": 100
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 63
-      },
-      "id": 30,
-      "options": {
-        "legend": {
-          "calcs": [
-            "mean",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "title": "LXC CPU Usage %",
-      "type": "timeseries",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "max by (id) (pve_cpu_usage_ratio{id=~\"lxc/.*\"}) * on(id) group_left(name) max by (id, name) (pve_guest_info{type=\"lxc\"}) * 100",
-          "legendFormat": "{{ name }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "",
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "unit": "percent",
-          "min": 0,
-          "max": 100
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 63
-      },
-      "id": 31,
-      "options": {
-        "legend": {
-          "calcs": [
-            "mean",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "title": "LXC Memory Usage %",
-      "type": "timeseries",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "max by (id) (pve_memory_usage_bytes{id=~\"lxc/.*\"}) / max by (id) (pve_memory_size_bytes{id=~\"lxc/.*\"}) * on(id) group_left(name) max by (id, name) (pve_guest_info{type=\"lxc\"}) * 100",
-          "legendFormat": "{{ name }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "",
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "unit": "percent",
-          "min": 0,
-          "max": 100
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 71
-      },
-      "id": 32,
-      "options": {
-        "legend": {
-          "calcs": [
-            "mean",
-            "lastNotNull"
-          ],
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "title": "LXC Disk Usage %",
-      "type": "timeseries",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "max by (id) (pve_disk_usage_bytes{id=~\"lxc/.*\"}) / max by (id) (pve_disk_size_bytes{id=~\"lxc/.*\"}) * on(id) group_left(name) max by (id, name) (pve_guest_info{type=\"lxc\"}) * 100",
-          "legendFormat": "{{ name }}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "",
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "unit": "Bps"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 71
-      },
-      "id": 33,
-      "options": {
-        "legend": {
-          "calcs": [
-            "mean",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "title": "LXC Network Traffic",
-      "type": "timeseries",
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "max by (id) (irate(pve_network_receive_bytes{id=~\"lxc/.*\"}[$__rate_interval])) * on(id) group_left(name) max by (id, name) (pve_guest_info{type=\"lxc\"})",
-          "legendFormat": "{{ name }} rx",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "-max by (id) (irate(pve_network_transmit_bytes{id=~\"lxc/.*\"}[$__rate_interval])) * on(id) group_left(name) max by (id, name) (pve_guest_info{type=\"lxc\"})",
-          "legendFormat": "{{ name }} tx",
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 79
       },
       "id": 202,
       "panels": [],
@@ -2118,7 +1410,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 80
+        "y": 63
       },
       "id": 11,
       "options": {
@@ -2163,7 +1455,7 @@
           "custom": {
             "axisBorderShow": false,
             "axisCenteredZero": false,
-            "axisLabel": "",
+            "axisLabel": "cores",
             "drawStyle": "line",
             "fillOpacity": 10,
             "gradientMode": "none",
@@ -2188,7 +1480,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 80
+        "y": 63
       },
       "id": 12,
       "options": {
@@ -2259,7 +1551,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 80
+        "y": 63
       },
       "id": 13,
       "options": {
@@ -2298,7 +1590,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 88
+        "y": 71
       },
       "id": 203,
       "panels": [],
@@ -2374,7 +1666,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 89
+        "y": 72
       },
       "id": 14,
       "options": {
@@ -2391,7 +1683,7 @@
         "sortBy": [
           {
             "desc": false,
-            "displayName": "id"
+            "displayName": "Host"
           }
         ]
       },
@@ -2415,10 +1707,7 @@
           "id": "organize",
           "options": {
             "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "instance": true,
-              "job": true
+              "Time": true
             },
             "renameByName": {
               "id": "Host",
@@ -2462,55 +1751,13 @@
           "min": 0,
           "max": 100
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "limit"
-            },
-            "properties": [
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dash",
-                  "dash": [
-                    10,
-                    10
-                  ]
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 1
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 0
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              },
-              {
-                "id": "custom.hideFrom",
-                "value": {
-                  "legend": true,
-                  "tooltip": true,
-                  "viz": false
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 89
+        "y": 72
       },
       "id": 15,
       "options": {
@@ -2575,55 +1822,13 @@
           "min": 0,
           "max": 100
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "limit"
-            },
-            "properties": [
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dash",
-                  "dash": [
-                    10,
-                    10
-                  ]
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 1
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 0
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "red"
-                }
-              },
-              {
-                "id": "custom.hideFrom",
-                "value": {
-                  "legend": true,
-                  "tooltip": true,
-                  "viz": false
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 89
+        "y": 72
       },
       "id": 16,
       "options": {
@@ -2660,7 +1865,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 97
+        "y": 80
       },
       "id": 204,
       "panels": [],
@@ -2736,7 +1941,7 @@
         "h": 10,
         "w": 10,
         "x": 0,
-        "y": 98
+        "y": 81
       },
       "id": 17,
       "options": {
@@ -2753,7 +1958,7 @@
         "sortBy": [
           {
             "desc": false,
-            "displayName": "instance"
+            "displayName": "Service"
           }
         ]
       },
@@ -2777,9 +1982,7 @@
           "id": "organize",
           "options": {
             "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "job": true
+              "Time": true
             },
             "renameByName": {
               "instance": "Service",
@@ -2841,7 +2044,7 @@
         "h": 10,
         "w": 14,
         "x": 10,
-        "y": 98
+        "y": 81
       },
       "id": 18,
       "options": {
@@ -2875,7 +2078,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 108
+        "y": 91
       },
       "id": 209,
       "panels": [],
@@ -2978,7 +2181,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 109
+        "y": 92
       },
       "id": 34,
       "options": {
@@ -2999,7 +2202,7 @@
           }
         ]
       },
-      "description": "PVC usage from kubelet volume stats. NFS-backed PVCs show the underlying share usage, not individual PVC consumption. hostPath PVCs (zvol mounts) do not report kubelet volume stats — see the ZFS Zvol Usage panel on the Infrastructure dashboard.",
+      "description": "PVC usage from kubelet volume stats. NFS-backed PVCs show the underlying share usage, not individual PVC consumption. hostPath PVCs (zvol mounts) do not report kubelet volume stats.",
       "title": "PVC Usage",
       "type": "table",
       "targets": [
@@ -3051,27 +2254,6 @@
               "Time 1": true,
               "Time 2": true,
               "Time 3": true,
-              "__name__ 1": true,
-              "__name__ 2": true,
-              "__name__ 3": true,
-              "endpoint 1": true,
-              "endpoint 2": true,
-              "endpoint 3": true,
-              "instance 1": true,
-              "instance 2": true,
-              "instance 3": true,
-              "job 1": true,
-              "job 2": true,
-              "job 3": true,
-              "metrics_path 1": true,
-              "metrics_path 2": true,
-              "metrics_path 3": true,
-              "node 1": true,
-              "node 2": true,
-              "node 3": true,
-              "service 1": true,
-              "service 2": true,
-              "service 3": true,
               "namespace 2": true,
               "namespace 3": true,
               "pvc_key": true,
@@ -3102,7 +2284,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 119
+        "y": 102
       },
       "id": 210,
       "panels": [],
@@ -3150,7 +2332,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 120
+        "y": 103
       },
       "id": 35,
       "options": {
@@ -3171,7 +2353,7 @@
         "sizing": "auto",
         "valueMode": "color"
       },
-      "description": "CPU requests as a percentage of allocatable CPU per node. Shows scheduling pressure — when this reaches 100%, no more pods with CPU requests can be scheduled on that node.",
+      "description": "CPU requests as a percentage of allocatable CPU per node. Shows scheduling pressure \u2014 when this reaches 100%, no more pods with CPU requests can be scheduled on that node.",
       "title": "CPU Requests vs Allocatable",
       "type": "bargauge",
       "targets": [
@@ -3180,7 +2362,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (node) (kube_pod_container_resource_requests{resource=\"cpu\"}) / sum by (node) (kube_node_status_allocatable{resource=\"cpu\"}) * 100",
+          "expr": "sum by (node) (kube_pod_container_resource_requests{resource=\"cpu\"} * on (namespace, pod) group_left() max by (namespace, pod) (kube_pod_status_phase{phase=~\"Pending|Running\"} == 1)) / sum by (node) (kube_node_status_allocatable{resource=\"cpu\"}) * 100",
           "legendFormat": "{{ node }}",
           "refId": "A",
           "instant": true
@@ -3228,7 +2410,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 120
+        "y": 103
       },
       "id": 36,
       "options": {
@@ -3249,7 +2431,7 @@
         "sizing": "auto",
         "valueMode": "color"
       },
-      "description": "Memory requests as a percentage of allocatable memory per node. Shows scheduling pressure — when this reaches 100%, no more pods with memory requests can be scheduled on that node.",
+      "description": "Memory requests as a percentage of allocatable memory per node. Shows scheduling pressure \u2014 when this reaches 100%, no more pods with memory requests can be scheduled on that node.",
       "title": "Memory Requests vs Allocatable",
       "type": "bargauge",
       "targets": [
@@ -3258,7 +2440,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (node) (kube_pod_container_resource_requests{resource=\"memory\"}) / sum by (node) (kube_node_status_allocatable{resource=\"memory\"}) * 100",
+          "expr": "sum by (node) (kube_pod_container_resource_requests{resource=\"memory\"} * on (namespace, pod) group_left() max by (namespace, pod) (kube_pod_status_phase{phase=~\"Pending|Running\"} == 1)) / sum by (node) (kube_node_status_allocatable{resource=\"memory\"}) * 100",
           "legendFormat": "{{ node }}",
           "refId": "A",
           "instant": true
@@ -3271,7 +2453,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 128
+        "y": 111
       },
       "id": 205,
       "panels": [],
@@ -3347,7 +2529,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 129
+        "y": 112
       },
       "id": 19,
       "options": {
@@ -3364,7 +2546,7 @@
         "sortBy": [
           {
             "desc": false,
-            "displayName": "node"
+            "displayName": "Node"
           }
         ]
       },
@@ -3440,7 +2622,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 129
+        "y": 112
       },
       "id": 20,
       "options": {
@@ -3513,7 +2695,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 129
+        "y": 112
       },
       "id": 21,
       "options": {

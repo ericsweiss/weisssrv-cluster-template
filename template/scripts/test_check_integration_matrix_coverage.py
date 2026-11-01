@@ -1,6 +1,6 @@
 """Unit tests for scripts/check-integration-matrix-coverage.py.
 
-Each test builds a throwaway CI file and integration-test tree, points the gate
+Each case builds a throwaway CI file and integration-test tree, points the gate
 at them through its flags, and asserts the exit code.
 """
 
@@ -22,7 +22,6 @@ integration-tests:
 {entries}
 """
 
-
 # The rules block the real job carries: a GitLab `!reference` tag the gate's
 # loader has to tolerate.
 REFERENCED_RULES = """  rules:
@@ -35,6 +34,7 @@ def _tree(tmp_path: Path, scenarios: list[str], in_matrix: list[str],
           referenced: bool = False) -> list[str]:
     """A scenario directory per name, and a CI file listing `in_matrix`."""
     it_dir = tmp_path / "integration-tests"
+    it_dir.mkdir(parents=True)
     for name in scenarios:
         (it_dir / name / "molecule" / "default").mkdir(parents=True)
         (it_dir / name / "molecule" / "default" / "molecule.yml").write_text("---\n")
@@ -65,27 +65,35 @@ def _with(args: list[str], flag: str, value: str) -> list[str]:
     return out
 
 
-def test_this_repository_passes_on_the_real_matrix():
-    """The invocation `task lint` and check-integration-matrix make: this
-    repository's own included job file and integration tree are the subject, and
-    a fixture cannot catch a rename in either of them."""
-    res = _run(["--ci-file", ".gitlab/ci/integration-jobs.yml"])
+def test_the_default_invocation_passes_on_this_repository():
+    """The invocation `task lint` and CI make: this repository's own job file
+    and integration tree, where a rename in either surfaces."""
+    res = _run([])
     assert res.returncode == 0, f"stdout:\n{res.stdout}\nstderr:\n{res.stderr}"
 
 
-def test_every_scenario_in_the_matrix_passes(tmp_path):
-    args = _tree(tmp_path, ["dns-stack", "mail-stack"], ["dns-stack", "mail-stack"])
+@pytest.mark.parametrize(
+    ("scenarios", "in_matrix", "override", "code", "named"),
+    [
+        (["dns-stack", "mail-stack"], ["dns-stack", "mail-stack"], None, 0, None),
+        # A directory that never runs reads as green because nothing ran it.
+        (["dns-stack", "mail-stack"], ["dns-stack"], None, 1, "mail-stack"),
+        # A deleted suite still listed fails inside the privileged DinD job.
+        (["dns-stack"], ["dns-stack", "gone-stack"], None, 1, "gone-stack"),
+        (["dns-stack"], ["dns-stack"], ("--integration-job", "not-a-job"), 2, None),
+        (["dns-stack"], ["dns-stack"], ("--integration-dir", "/nonexistent"), 2, None),
+        # Both sides empty would report "covers all 0 test dir(s)" and exit 0.
+        ([], [], None, 2, "inspected nothing"),
+    ],
+)
+def test_the_exit_code(tmp_path, scenarios, in_matrix, override, code, named):
+    args = _tree(tmp_path, scenarios, in_matrix)
+    if override:
+        args = _with(args, *override)
     res = _run(args)
-    assert res.returncode == 0, res.stderr
-
-
-def test_a_scenario_missing_from_the_matrix_fails(tmp_path):
-    # The mutation this gate exists for: a directory that never runs reads as
-    # green because nothing executed it.
-    args = _tree(tmp_path, ["dns-stack", "mail-stack"], ["dns-stack"])
-    res = _run(args)
-    assert res.returncode == 1
-    assert "mail-stack" in res.stderr
+    assert res.returncode == code, res.stdout + res.stderr
+    if named:
+        assert named in res.stdout + res.stderr
 
 
 def test_a_referenced_rules_block_does_not_break_the_matrix_read(tmp_path):
@@ -104,46 +112,3 @@ def test_a_directory_without_a_scenario_is_not_required(tmp_path):
     args = _tree(tmp_path, ["dns-stack"], ["dns-stack"])
     (Path(args[args.index("--integration-dir") + 1]) / "_shared").mkdir()
     assert _run(args).returncode == 0
-
-
-def test_a_missing_job_is_an_inspection_failure(tmp_path):
-    args = _tree(tmp_path, ["dns-stack"], ["dns-stack"])
-    res = _run(_with(args, "--integration-job", "not-a-job"))
-    assert res.returncode == 2
-
-
-def test_a_missing_integration_directory_is_an_inspection_failure(tmp_path):
-    args = _tree(tmp_path, ["dns-stack"], ["dns-stack"])
-    assert _run(_with(args, "--integration-dir", str(tmp_path / "absent"))).returncode == 2
-
-
-def test_a_matrix_entry_naming_no_directory_fails(tmp_path):
-    # The other direction: a renamed or deleted suite still listed in the matrix
-    # fails inside the privileged DinD job this lint runs before.
-    args = _tree(tmp_path, ["dns-stack"], ["dns-stack", "gone-stack"])
-    res = _run(args)
-    assert res.returncode == 1
-    assert "gone-stack" in res.stderr
-
-
-def test_an_explicitly_empty_integration_dir_disables_the_half(tmp_path):
-    # The opt-out for a cluster with no integration suites: without it the
-    # gate's vacuity guard turns "no suites at all" into an inspection failure.
-    args = _tree(tmp_path, [], [])
-    res = _run(_with(args, "--integration-dir", ""))
-    assert res.returncode == 0, res.stderr
-    assert "No integration suite declared" in res.stdout
-
-
-def test_no_suite_and_no_matrix_entry_is_an_inspection_failure(tmp_path):
-    # Both comparisons are empty here, so without the vacuity guard the gate
-    # reports "covers all 0 test dir(s)" and exits 0.
-    args = _tree(tmp_path, [], [])
-    Path(args[args.index("--integration-dir") + 1]).mkdir(parents=True, exist_ok=True)
-    res = _run(args)
-    assert res.returncode == 2
-    assert "inspected nothing" in res.stderr
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))

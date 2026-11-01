@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -10,20 +9,6 @@ import yaml
 from conftest import REPO, load_script
 
 gate = load_script("check-tenant-traefik-isolation.py")
-
-RELEASE_WITH_VALUES = textwrap.dedent(
-    """\
-    apiVersion: helm.toolkit.fluxcd.io/v2
-    kind: HelmRelease
-    metadata:
-      name: traefik
-    spec:
-      values:
-        providers:
-          kubernetesCRD:
-            allowCrossNamespace: {allow}
-    """
-)
 
 
 def routing_binding(ns: str, policy: str = "tenant-traefik-hostnames") -> dict:
@@ -76,9 +61,9 @@ def write_tenant(root: Path, resource: str, docs: list[dict]) -> None:
     path.write_text(yaml.safe_dump_all(docs, sort_keys=False))
 
 
-def build(tmp_path: Path, resources: list[str], release: str) -> Path:
-    """The tenants kustomization, each listed tenant file wired for routing
-    (namespace = file stem), and the Traefik release."""
+def build(tmp_path: Path, resources: list[str]) -> Path:
+    """The tenants kustomization and each listed tenant file wired for routing
+    (namespace = file stem)."""
     kustomization = tmp_path / gate.TENANTS_KUSTOMIZATION
     kustomization.parent.mkdir(parents=True, exist_ok=True)
     kustomization.write_text(
@@ -87,14 +72,11 @@ def build(tmp_path: Path, resources: list[str], release: str) -> Path:
     for resource in resources:
         if resource not in gate.BASELINE:
             write_tenant(tmp_path, resource, wiring(Path(resource).stem))
-    path = tmp_path / gate.TRAEFIK_RELEASE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(release)
     return tmp_path
 
 
 def test_baseline_only_passes(tmp_path):
-    root = build(tmp_path, ["tenant-crd-editor.yaml"], RELEASE_WITH_VALUES.format(allow="true"))
+    root = build(tmp_path, ["tenant-crd-editor.yaml"])
     write_policy(root, policy())
     assert gate.check(root) == []
 
@@ -102,82 +84,32 @@ def test_baseline_only_passes(tmp_path):
 def test_baseline_only_without_the_policies_fails(tmp_path):
     """A torn-down tenant's Namespace stays live with the tenant label, so the
     label-bound policies are required with no tenant wired as well."""
-    root = build(tmp_path, ["tenant-crd-editor.yaml"], RELEASE_WITH_VALUES.format(allow="true"))
+    root = build(tmp_path, ["tenant-crd-editor.yaml"])
     problems = gate.check(root)
     assert len(problems) == 1
     assert "wires no tenant" in problems[0]
 
 
-def test_a_tenant_with_cross_namespace_still_true_fails(tmp_path):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
-    problems = gate.check(root)
-    assert len(problems) == 1
-    assert "demo-tenant.yaml" in problems[0]
-
-
 # Plain-Ingress annotations, forwardAuth addresses and endpoint resolution do
 # not depend on allowCrossNamespace, so turning it off does not open the gate.
-def test_a_tenant_without_the_policies_fails_with_cross_namespace_off(tmp_path):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="false"),
-    )
+def test_a_tenant_without_the_policies_fails(tmp_path):
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     problems = gate.check(root)
     assert len(problems) == 1
     assert "demo-tenant.yaml" in problems[0]
     assert "even when providers.kubernetesCRD.allowCrossNamespace is false" in problems[0]
 
 
-def test_baseline_only_passes_with_cross_namespace_off(tmp_path):
-    root = build(tmp_path, ["tenant-crd-editor.yaml"], RELEASE_WITH_VALUES.format(allow="false"))
-    write_policy(root, policy())
-    assert gate.check(root) == []
-
-
-def test_a_tenant_passes_with_the_policies_and_cross_namespace_off(tmp_path):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="false"),
-    )
-    write_policy(root, policy())
-    assert gate.check(root) == []
-
-
-def test_a_null_values_block_is_reported_not_a_crash(tmp_path):
-    """`values:` with nothing under it must report, not raise AttributeError."""
-    release = textwrap.dedent(
-        """\
-        apiVersion: helm.toolkit.fluxcd.io/v2
-        kind: HelmRelease
-        metadata:
-          name: traefik
-        spec:
-          values:
-        """
-    )
-    root = build(tmp_path, ["tenant-crd-editor.yaml"], release)
-    problems = gate.check(root)
-    assert len(problems) == 1
-    assert "no HelmRelease spec.values" in problems[0]
-
-
 def test_an_empty_tenants_kustomization_is_reported(tmp_path):
-    root = build(tmp_path, [], RELEASE_WITH_VALUES.format(allow="true"))
+    root = build(tmp_path, [])
     assert "lists no resources" in gate.check(root)[0]
 
 
 # An unparseable input means the gate could not inspect its subject: exit 2
 # through Vacuous, never a traceback and never an isolation finding.
-@pytest.mark.parametrize("target", ["TENANTS_KUSTOMIZATION", "TRAEFIK_RELEASE"])
-def test_an_unparseable_input_is_vacuous_not_a_finding(tmp_path, target):
-    root = build(tmp_path, ["tenant-crd-editor.yaml"], RELEASE_WITH_VALUES.format(allow="false"))
-    (root / getattr(gate, target)).write_text("a: [1,\n  b: {\n")
+def test_an_unparseable_input_is_vacuous_not_a_finding(tmp_path):
+    root = build(tmp_path, ["tenant-crd-editor.yaml"])
+    (root / gate.TENANTS_KUSTOMIZATION).write_text("a: [1,\n  b: {\n")
     with pytest.raises(gate.Vacuous):
         gate.check(root)
     assert gate.main(["--repo", str(root)]) == 2
@@ -205,32 +137,21 @@ def write_policy(root: Path, body: str, listed: bool = True) -> None:
 
 
 def test_a_tenant_passes_when_the_admission_policies_pin_refs(tmp_path):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, policy())
     assert gate.check(root) == []
 
 
 def test_a_warn_only_binding_does_not_open_the_gate(tmp_path):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, policy("Warn"))
     assert len(gate.check(root)) == 1
 
 
 def test_a_policy_file_missing_one_binding_keeps_the_gate_closed(tmp_path):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
-    body = policy().rsplit("---\n", 1)[0]
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
+    body, dropped = policy().rsplit("---\n", 1)
+    assert "kind: ValidatingAdmissionPolicyBinding\n" in dropped
     write_policy(root, body)
     assert len(gate.check(root)) == 1
 
@@ -247,11 +168,7 @@ def test_a_policy_file_missing_one_binding_keeps_the_gate_closed(tmp_path):
     ids=["selector-key", "selector-operator", "policy-undefined"],
 )
 def test_a_binding_that_pins_no_tenant_keeps_the_gate_closed(tmp_path, old, new):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     body = policy()
     assert old in body
     write_policy(root, body.replace(old, new, 1))
@@ -261,11 +178,7 @@ def test_a_binding_that_pins_no_tenant_keeps_the_gate_closed(tmp_path, old, new)
 def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path):
     """A plain Ingress resolves name@provider annotations across namespaces, so
     the gate needs the Ingress policy and its binding too."""
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     body = policy()
     ingress_policy = body.rindex("---\n", 0, body.index("name: tenant-traefik-ingress-refs"))
     write_policy(root, body[:ingress_policy])
@@ -289,11 +202,7 @@ def test_a_policy_file_without_the_ingress_policy_keeps_the_gate_closed(tmp_path
     ],
 )
 def test_a_policy_file_without_a_service_refusal_keeps_the_gate_closed(tmp_path, kind, name):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     docs = policy().split("---\n")
     kept = [
         d for d in docs
@@ -307,11 +216,7 @@ def test_a_policy_file_without_a_service_refusal_keeps_the_gate_closed(tmp_path,
 @pytest.mark.parametrize("name", ["tenant-traefik-hostnames", "tenant-certificates"])
 def test_a_policy_file_without_a_per_tenant_policy_keeps_the_gate_closed(tmp_path, name):
     """The per-tenant bindings name a policy; without it they enforce nothing."""
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     docs = policy().split("---\n")
     kept = [d for d in docs if f"name: {name}\n" not in d]
     assert len(kept) == len(docs) - 1
@@ -319,8 +224,14 @@ def test_a_policy_file_without_a_per_tenant_policy_keeps_the_gate_closed(tmp_pat
     assert len(gate.check(root)) == 1
 
 
-def test_the_gate_pins_twelve_policies():
-    assert len(gate.REQUIRED_POLICIES) == 12
+def test_the_gate_pins_every_shipped_policy():
+    """The pinned set and the shipped file name the same policies."""
+    shipped = {
+        doc["metadata"]["name"]
+        for doc in yaml.safe_load_all((REPO / gate.TENANT_POLICY).read_text())
+        if isinstance(doc, dict) and doc.get("kind") == "ValidatingAdmissionPolicy"
+    }
+    assert set(gate.REQUIRED_POLICIES) == shipped
     assert "tenant-certificaterequests" in gate.REQUIRED_POLICIES
     assert "tenant-pod-volumes" in gate.REQUIRED_POLICIES
     assert "tenant-pvc-storageclasses" in gate.REQUIRED_POLICIES
@@ -382,11 +293,7 @@ def _drop_workloads(spec):
 def test_a_pod_volumes_policy_that_admits_nfs_or_drops_workloads_keeps_the_gate_closed(
     tmp_path, weakening
 ):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, _mutated("tenant-pod-volumes", weakening))
     assert len(gate.check(root)) == 1
 
@@ -430,11 +337,7 @@ def test_a_certificaterequests_policy_without_acme_writes_keeps_the_gate_closed(
     CertificateRequests alone drops that defence in depth."""
     rules = gate.REQUIRED_POLICIES["tenant-certificaterequests"]["resourceRules"]
     assert {"orders", "challenges"} <= {r for rule in rules for r in rule["resources"]}
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, _mutated("tenant-certificaterequests", _drop_acme_writes))
     assert len(gate.check(root)) == 1
 
@@ -517,8 +420,9 @@ def test_exactly_the_finalizing_policies_skip_a_finalizer_only_update():
     }
     # No spec to compare: the endpoints policy keys the same exemption on the
     # routing data, labels and annotations instead.
+    endpoints_expression = " ".join(gate.FINALIZING_UNCHANGED_ENDPOINTS[0][1].split())
     expected["tenant-no-manual-endpoints"] = [
-        ("enforce-unless-finalizing-unchanged", gate._cel(" ".join(gate.FINALIZING_UNCHANGED_ENDPOINTS[0][1].split())))
+        ("enforce-unless-finalizing-unchanged", gate._cel(endpoints_expression))
     ]
     assert pinned == expected
     assert shipped == expected
@@ -548,11 +452,7 @@ def _ignore_annotations(spec):
 def test_a_widened_finalizer_exemption_keeps_the_gate_closed(tmp_path, name, weakening):
     """Without the annotations clause a tenant could hold its own Service in
     Terminating and rewrite the annotations these policies validate."""
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, _mutated(name, weakening))
     assert len(gate.check(root)) == 1
 
@@ -572,11 +472,7 @@ def test_the_grant_policies_are_bound_per_tenant_not_by_label():
 
 def test_a_policy_file_the_configs_kustomization_does_not_list_keeps_the_gate_closed(tmp_path):
     """A policy file nothing applies pins nothing."""
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, policy(), listed=False)
     assert len(gate.check(root)) == 1
 
@@ -620,11 +516,7 @@ def test_the_shipped_policy_file_pins_tenants():
     ],
 )
 def test_a_binding_that_narrows_its_match_keeps_the_gate_closed(tmp_path, narrowing):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     body = policy()
     selector = (
         "  matchResources:\n    namespaceSelector:\n      matchExpressions:\n"
@@ -695,11 +587,7 @@ WEAKENINGS = {
 @pytest.mark.parametrize("weakening", sorted(WEAKENINGS))
 @pytest.mark.parametrize("name", sorted(gate.REQUIRED_POLICIES))
 def test_a_weakened_policy_keeps_the_gate_closed(tmp_path, name, weakening):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, _mutated(name, WEAKENINGS[weakening]))
     assert len(gate.check(root)) == 1
 
@@ -722,11 +610,7 @@ def test_a_widened_variable_keeps_the_gate_closed(tmp_path, name, variable):
             if v["name"] == variable:
                 v["expression"] = "'.*'"
 
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, _mutated(name, widen))
     assert len(gate.check(root)) == 1
 
@@ -738,22 +622,14 @@ def test_whitespace_in_an_expression_does_not_close_the_gate(tmp_path):
         for v in spec["validations"]:
             v["expression"] = v["expression"].replace(" ", "\n  ", 1)
 
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, _mutated("tenant-traefik-object-refs", reflow))
     assert gate.check(root) == []
 
 
 def test_the_unmutated_round_trip_still_opens_the_gate(tmp_path):
     """The YAML round trip the weakening cases use changes nothing by itself."""
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, _mutated("tenant-traefik-route-refs", lambda spec: None))
     assert gate.check(root) == []
 
@@ -791,21 +667,13 @@ BINDING_WEAKENINGS = {
 def test_a_binding_with_more_than_the_required_spec_keeps_the_gate_closed(
     tmp_path, name, weakening
 ):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, _mutated_binding(name, BINDING_WEAKENINGS[weakening]))
     assert len(gate.check(root)) == 1
 
 
 def test_the_unmutated_binding_round_trip_still_opens_the_gate(tmp_path):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, _mutated_binding("tenant-no-manual-endpoints", lambda spec: None))
     assert gate.check(root) == []
 
@@ -813,22 +681,14 @@ def test_the_unmutated_binding_round_trip_still_opens_the_gate(tmp_path):
 @pytest.mark.parametrize("name", ["tenant-traefik-hostnames", "tenant-certificates"])
 def test_a_grant_policy_without_its_param_kind_keeps_the_gate_closed(tmp_path, name):
     """Without paramKind the per-tenant paramRef is never read."""
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo-tenant.yaml"])
     write_policy(root, _mutated(name, lambda spec: spec.pop("paramKind")))
     assert len(gate.check(root)) == 1
 
 
 def _routed(tmp_path: Path, docs: list[dict]) -> list[str]:
     """The gate's findings for one tenant `demo` whose file holds `docs`."""
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo.yaml"],
-        RELEASE_WITH_VALUES.format(allow="false"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo.yaml"])
     write_policy(root, policy())
     write_tenant(root, "demo.yaml", docs)
     return gate.check(root)
@@ -983,11 +843,7 @@ def test_a_max_priority_number_is_accepted(tmp_path, ceiling):
 
 def test_another_tenants_binding_does_not_cover_a_tenant(tmp_path):
     """Each tenant namespace needs its own binding and grant."""
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "alpha.yaml", "beta.yaml"],
-        RELEASE_WITH_VALUES.format(allow="false"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "alpha.yaml", "beta.yaml"])
     write_policy(root, policy())
     beta = wiring("beta")
     beta[2] = routing_binding("alpha")
@@ -1001,11 +857,7 @@ def test_another_tenants_binding_does_not_cover_a_tenant(tmp_path):
 
 
 def test_a_listed_tenant_file_that_is_missing_fails(tmp_path):
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "demo.yaml"],
-        RELEASE_WITH_VALUES.format(allow="false"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "demo.yaml"])
     write_policy(root, policy())
     ((root / gate.TENANTS_KUSTOMIZATION).parent / "demo.yaml").unlink()
     problems = gate.check(root)
@@ -1021,11 +873,7 @@ def test_the_readme_example_wires_its_hostnames(tmp_path):
         b for b in re.findall(r"```yaml\n(.*?)```", readme, re.S)
         if "kind: Kustomization" in b and "serviceAccountName" in b
     )
-    root = build(
-        tmp_path,
-        ["tenant-crd-editor.yaml", "example-app.yaml"],
-        RELEASE_WITH_VALUES.format(allow="true"),
-    )
+    root = build(tmp_path, ["tenant-crd-editor.yaml", "example-app.yaml"])
     write_policy(root, policy())
     ((root / gate.TENANTS_KUSTOMIZATION).parent / "example-app.yaml").write_text(example)
     assert gate.check(root) == []

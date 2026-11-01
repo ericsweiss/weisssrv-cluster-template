@@ -256,9 +256,7 @@ TEMPLATE_OWNED = {
     "template/scripts/test_deploy_verify_script.py",
     "template/scripts/test_diagnose_network_issues.py",
     "template/scripts/test_flux_rotate_db_password.py",
-    "template/scripts/test_flux_secret_consumers.py",
     "template/scripts/test_maintenance_lib.py.jinja",
-    "template/scripts/test_maintenance_run_with_verify.py",
     "template/scripts/test_post_maintenance_verify.py",
     "template/scripts/test_taskfile_tree.py.jinja",
 }

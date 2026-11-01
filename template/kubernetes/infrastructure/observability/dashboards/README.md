@@ -13,16 +13,16 @@ file, so a re-import that changes them shows up in the diff.
 
 | File | Source | schema / version | Local changes |
 |---|---|---|---|
-| `alerts-overview.json` | hand-written | 39 / 1 | — |
 | `alertmanager-self.json` | grafana.com 9578 (rev 4) | 39 / 28 | uid `alertmanager-self`; datasource refs pinned to uid `prometheus`; materialized repeat clones removed; every selector scoped by the `$pod` variable; memory limit overlay added; a collapsed `Cluster (gossip)` row added; timezone `browser` |
+| `node-exporter-full.json` | grafana.com 1860 (rev 45) | 41 / 101 | uid `node-exporter-full`; `__inputs`/`__requires` stripped and datasource refs pinned to uid `prometheus`; tags and a `now-6h` default range; the IRQ Detail, TCP Stat Persistent, TCP Stat Transient and TCP Socket Queue panels removed and the `node_pressure_irq_stalled_seconds_total` and `node_netstat_Tcp_MaxConn` targets dropped, because those collectors are off; Entropy moved to x=0 to close the gap IRQ Detail left |
+| `prometheus-self.json` | grafana.com 19105 (rev 9) | 38 / 9 | uid `prometheus-self`; title `Prometheus`; `__inputs`/`__elements`/`__requires` stripped; the exported `datasource` variable dropped and every ref pinned to uid `prometheus`; timezone set to `browser` |
+| `traefik-official.json` | grafana.com 17347 (revision not recorded) | 37 / 7 | datasource refs pinned to uid `prometheus` |
+| `alerts-overview.json` | hand-written | 39 / 1 | — |
 | `blackbox.json` | hand-written | 39 / 1 | — |
 | `cert-manager.json` | hand-written | 39 / 1 | — |
 | `cluster-overview.json` | hand-written | 39 / 1 | — |
 | `flux-cluster.json` | hand-written | 39 / 1 | — |
 | `loki-self.json` | hand-written | 39 / 1 | — |
-| `node-exporter-full.json` | grafana.com 1860 (rev 45) | 41 / 101 | uid `node-exporter-full`; tags infrastructure/node/linux; time `now-6h`; `__inputs`/`__requires` stripped and datasource refs pinned to uid `prometheus`; panels IRQ Detail, TCP Stat Persistent, TCP Stat Transient and TCP Socket Queue removed, and the `node_pressure_irq_stalled_seconds_total` / `node_netstat_Tcp_MaxConn` targets dropped, because those collectors are off; Entropy moved to x=0 to close the gap IRQ Detail left |
-| `prometheus-self.json` | grafana.com 19105 (rev 9) | 38 / 9 | uid `prometheus-self`; title `Prometheus`; `__inputs`/`__elements`/`__requires` stripped; the exported `datasource` variable dropped and every ref pinned to uid `prometheus`; timezone set to `browser` |
-| `traefik-official.json` | grafana.com 17347 (revision not recorded) | 37 / 7 | datasource refs pinned to uid `prometheus` |
 
 A re-import downloads
 `https://grafana.com/api/dashboards/<id>/revisions/<rev>/download`, re-applies
@@ -41,8 +41,6 @@ revision in the same change.
 - The `uid` is stable and unique, and never changes after the first import. The
   sidecar keys the ConfigMap to the dashboard on it, which is also why
   `kustomization.yaml` sets `disableNameSuffixHash: true`. The uid need not
-  match the file name: three of these end in `-platform`.
+  match the file name.
 - `"timezone": "browser"`, so every dashboard in the set renders timestamps the
   same way.
-- A `"refresh"` interval is set, `"1m"` unless the panels are costly. Without it
-  a dashboard left open on a wall display never updates.

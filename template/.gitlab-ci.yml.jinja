@@ -1300,8 +1300,7 @@ deploy-ansible-mail:
     SMTP_RELAY_PASSWORD: "{{ secret_ref('SMTP Relay Auth', 'password') }}"
     SMTP_UPSTREAM_USER: "{{ secret_ref('SMTP Smarthost', 'username') }}"
     SMTP_UPSTREAM_PASSWORD: "{{ secret_ref('SMTP Smarthost', 'password') }}"
-    # base rewrites the relay's authorized_keys, so mail.yml re-seeds the
-    # cert-distribution key from the primary resolver afterwards.
+    # mail.yml re-seeds the cert-distribution key, which a re-provisioned relay loses.
     ACME_SSH_PUBLIC_KEY: "{{ secret_ref('Cert Distribution Key', 'public key') }}"
   script:
     - cd ansible

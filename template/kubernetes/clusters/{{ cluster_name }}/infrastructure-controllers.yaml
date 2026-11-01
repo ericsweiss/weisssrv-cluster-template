@@ -1,7 +1,5 @@
 ---
-# Stage 3/5 — platform controller HelmReleases (see the stage's
-# kustomization.yaml for the set). timeout 15m: a cold install of cert-manager
-# + ESO + their CRDs regularly exceeds 5m.
+# Platform controller HelmReleases; the stage's kustomization.yaml has the set.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
@@ -10,6 +8,7 @@ metadata:
 spec:
   interval: 10m
   retryInterval: 1m
+  # Headroom over the slowest release this stage waits on (cert-manager, 10m).
   timeout: 15m
   dependsOn:
     - name: infrastructure-sources

@@ -373,8 +373,8 @@ def test_a_missing_namespace_cap_fails(repo: Path, kind: str) -> None:
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
-# The tenant-local StorageClass ships only under tenant_storage; the gate
-# demands the claim caps exactly when it does.
+# The gate demands the claim caps exactly when the tenant-local StorageClass
+# ships.
 TENANT_LOCAL = (
     REPO / "kubernetes" / "infrastructure" / "controllers" / "local-path-provisioner"
     / "storageclass.yaml"

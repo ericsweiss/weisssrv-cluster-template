@@ -1,8 +1,4 @@
-"""The drift-plan jobs detect a console edit; they never reconcile one.
-
-The library include owns the job shape and its suite tests it; this file checks
-what each include here passes it.
-"""
+"""The drift-plan jobs detect a console edit; they never reconcile one."""
 
 from __future__ import annotations
 

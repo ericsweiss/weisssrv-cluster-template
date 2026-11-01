@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Assert docs/unifi-network.md § Site settings still says what terraform/unifi sets.
 
-Each `site_settings` key must match exactly one doc row whose first backticked
-Value equals the module input. Both files are read from git; no API call.
+Each `site_settings` key matches exactly one doc row whose first backticked
+Value equals the module input. Reads the working tree; no API call.
 """
 from __future__ import annotations
 
@@ -32,6 +32,28 @@ def normalize(value: str) -> str:
     return value.strip().strip('"').strip("'")
 
 
+def strip_comment(line: str) -> str:
+    """The line up to a `#` that sits outside a double-quoted string."""
+    in_string = False
+    for i, char in enumerate(line):
+        if char == '"' and (i == 0 or line[i - 1] != "\\"):
+            in_string = not in_string
+        elif char == "#" and not in_string:
+            return line[:i]
+    return line
+
+
+def setting_names(cell: str) -> set[str]:
+    """The keys a Setting cell names: each dotted segment of a backticked name,
+    with and without an `_enabled` suffix, so `usg.upnp_enabled` names `upnp`."""
+    names: set[str] = set()
+    for token in BACKTICKED.findall(cell):
+        for segment in token.split("."):
+            names.add(segment)
+            names.add(segment.removesuffix("_enabled"))
+    return names
+
+
 def terraform_settings(text: str) -> dict[str, str]:
     """The `site_settings = { ... }` map, comments dropped."""
     start = text.find("site_settings")
@@ -41,7 +63,7 @@ def terraform_settings(text: str) -> dict[str, str]:
     settings: dict[str, str] = {}
     depth = 0
     for line in body.splitlines():
-        stripped = line.split("#", 1)[0].strip()
+        stripped = strip_comment(line).strip()
         if not stripped:
             continue
         if depth == 0 and stripped.startswith("}"):
@@ -86,6 +108,7 @@ def doc_rows(text: str) -> list[tuple[str, str]]:
 
 
 def check(root: Path) -> tuple[list[str], int]:
+    """(one message per drifted setting, number of settings inspected)."""
     try:
         settings = terraform_settings((root / MAIN_TF).read_text())
         rows = doc_rows((root / DOC).read_text())
@@ -94,7 +117,7 @@ def check(root: Path) -> tuple[list[str], int]:
 
     problems = []
     for key, tf_value in sorted(settings.items()):
-        matches = [row for row in rows if key in row[0]]
+        matches = [row for row in rows if key in setting_names(row[0])]
         if not matches:
             problems.append(
                 f"{MAIN_TF} sets {key} = {tf_value!r}, which no {DOC} § {SECTION} row names"
@@ -122,16 +145,16 @@ def main(argv=None) -> int:
     root = Path(args.repo_root)
 
     try:
-        problems, inspected = check(root)
+        problems, count = check(root)
     except Vacuous as exc:
         print(f"check-unifi-doc-parity inspected nothing: {exc}", file=sys.stderr)
         return 2
     if problems:
-        print("The UniFi doc § Site settings has drifted from terraform/unifi:", file=sys.stderr)
+        print(f"{DOC} § Site settings has drifted from terraform/unifi:", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         return 1
-    print(f"{DOC} § {SECTION} agrees with {MAIN_TF} ({inspected} settings).")
+    print(f"{DOC} § {SECTION} agrees with {MAIN_TF} ({count} settings).")
     return 0
 
 

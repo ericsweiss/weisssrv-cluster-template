@@ -1,19 +1,14 @@
-"""scripts/comment-length.yaml must exclude every copy vendored from weisssrv-lib.
+"""scripts/comment-length.yaml excludes exactly the vendored weisssrv-lib copies.
 
-A vendored file's comments are the library's: a trim here is reverted by the next
-re-vendor, so the gate skips those copies and the library gates its own tree.
+A vendored file's comments are the library's; a fork's are its own and scanned.
 """
-
 from __future__ import annotations
 
-from pathlib import Path
-
 import yaml
+from conftest import REPO, SCRIPTS, vendored_consumer_paths
+from conftest import VENDORED_MANIFEST as MANIFEST
 
-REPO = Path(__file__).resolve().parent.parent
-GATE = "scripts/check-comment-length.py"
-CONFIG = REPO / "scripts" / "comment-length.yaml"
-MANIFEST = REPO / "scripts" / "vendored-manifest.yml"
+CONFIG = SCRIPTS / "comment-length.yaml"
 
 
 def _config() -> dict:
@@ -28,38 +23,32 @@ def _excludes() -> set[str]:
     return excluded
 
 
-def _vendored_paths() -> set[str]:
-    doc = yaml.safe_load(MANIFEST.read_text(encoding="utf-8")) or {}
-    paths = {
-        entry if isinstance(entry, str) else (entry.get("consumer") or entry["lib"])
-        for section in ("vendored", "forked")
-        for entry in doc.get(section) or []
-    }
-    assert paths, f"{MANIFEST} lists no vendored copies"
-    return paths
+def _drift(excluded: set[str], vendored: set[str]) -> tuple[list[str], list[str]]:
+    """(vendored copies left in scope, excludes that are no vendored copy)."""
+    return sorted(vendored - excluded), sorted(excluded - vendored)
 
 
-def _missing(excluded: set[str], vendored: set[str]) -> list[str]:
-    return sorted(vendored - excluded)
-
-
-def test_every_vendored_copy_is_excluded() -> None:
-    missing = _missing(_excludes(), _vendored_paths())
+def test_the_excludes_are_exactly_the_vendored_copies() -> None:
+    vendored = set(vendored_consumer_paths(("vendored",)))
+    assert vendored, f"{MANIFEST} lists no vendored copies"
+    missing, extra = _drift(_excludes(), vendored)
     assert not missing, (
-        f"{CONFIG.name} must exclude every path {MANIFEST.name} declares, or the gate "
+        f"{CONFIG.name} must exclude every path {MANIFEST.name} vendors, or the gate "
         f"fails on comments only a re-vendor can change: {missing}"
+    )
+    assert not extra, (
+        f"{CONFIG.name} exempts paths {MANIFEST.name} does not vendor — a local file "
+        f"or fork cannot be exempted: {extra}"
     )
 
 
-def test_an_unexcluded_vendored_copy_is_caught() -> None:
-    """Mutation case: the gate's claim is empty if a gap reads as clean."""
-    assert _missing({"scripts/shell-lib.sh"}, {"scripts/shell-lib.sh"}) == []
-    assert _missing(set(), {"scripts/shell-lib.sh"}) == ["scripts/shell-lib.sh"]
-
-
-def test_the_gate_excludes_itself() -> None:
-    """It is a library copy too, and its own docstring is over the limit."""
-    assert GATE in _excludes(), f"{CONFIG.name} must exclude {GATE}"
+def test_a_drifted_exclude_list_is_caught() -> None:
+    """Mutation case: a gap or a stray exclude must not read as clean."""
+    assert _drift({"scripts/a.py"}, {"scripts/a.py"}) == ([], [])
+    assert _drift({"scripts/a.py", "scripts/local.py"}, {"scripts/a.py", "scripts/b.py"}) == (
+        ["scripts/b.py"],
+        ["scripts/local.py"],
+    )
 
 
 def test_every_exclude_names_a_real_file() -> None:
@@ -72,6 +61,6 @@ def test_every_exclude_names_a_real_file() -> None:
 
 def test_the_whole_tree_is_in_scope() -> None:
     assert _config().get("paths") == ["."], (
-        f"{CONFIG.name} must scan the repository root: the comment rule applies to "
-        "every file, and a narrowed path list lets an over-long block land outside it"
+        f"{CONFIG.name} must scan the repository root: the comment rule applies to every "
+        f"file, and a narrowed path list lets an over-long block land outside it"
     )

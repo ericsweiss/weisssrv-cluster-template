@@ -68,6 +68,13 @@ provisioner:
           - domain: "test-b.molecule.local"
             answer: "192.0.2.11"
         adguard_home_user_rules: []
+        adguard_home_http_port: 3000
+        adguard_home_dns_port: 53
+        adguard_home_admin_user: admin
+        # The role bcrypts this password itself.
+        adguard_home_admin_password: password
+        unbound_port: 5335
+        unbound_interface: 127.0.0.1
         # TRAP: must stay at GROUP level so the explicit unbound apply and
         # adguard_home's `dependencies: [unbound]` re-apply see the same list.
         # An include_role `vars:` block reaches only the first.
@@ -76,14 +83,7 @@ provisioner:
           - {addr: "8.8.8.8", port: 853, name: "dns.google"}
 
       dns_primary:
-        adguard_home_http_port: 3000
-        adguard_home_dns_port: 53
-        adguard_home_admin_user: admin
-        # bcrypt hash is generated automatically from password by adguard_home role
-        adguard_home_admin_password: password
-        unbound_port: 5335
-        unbound_interface: 127.0.0.1
-        # Runs the rewrite/filtering API pass.
+        # Runs the rewrite and filtering API pass.
         adguard_home_is_primary: true
         # adguard_sync_features keeps the role default, the set production uses.
         adguard_sync_enabled: true
@@ -92,15 +92,6 @@ provisioner:
         adguard_sync_admin_password: password
         adguard_sync_origin: "http://dns-01:3000"
         adguard_sync_replica: "http://dns-02:3000"
-
-      dns_replica:
-        adguard_home_http_port: 3000
-        adguard_home_dns_port: 53
-        adguard_home_admin_user: admin
-        # bcrypt hash is generated automatically from password by adguard_home role
-        adguard_home_admin_password: password
-        unbound_port: 5335
-        unbound_interface: 127.0.0.1
 
 verifier:
   name: ansible

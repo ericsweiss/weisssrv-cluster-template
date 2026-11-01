@@ -143,58 +143,17 @@ lives in the local wrapper `scripts/flux-env.sh`, which is what both CI and
 
 Every suite under `tests/` and `scripts/` runs in this one job — the `test_dir`
 input in `.gitlab-ci.yml` is what it collects, so those two directories are the
-authoritative list. The rows below are the suites worth knowing about before you
-read one:
-
-| Suite | Fails when |
-|---|---|
-| `tests/test_authentik_import.py` | `terraform/authentik/import.sh --check` disagrees with `sso.tf`, so a disaster-recovery import names an address that no longer exists |
-| `tests/test_authentik_provider_lockstep.py` | the authentik provider pin, its lock file and `authentik_version` are not the same minor |
-| `tests/test_check_deploy_preflight.py` | a deploy job's script stops resolving, its `ansible-playbook` call stops parsing, or it names a playbook that does not exist |
-| `tests/test_check_guest_endpoint_parity.py` | a hand-written EndpointSlice names a LAN address that is not a real `ansible_host`, or the gate stops reading this tree's endpoints, k3s groups or NFS exports |
-| `tests/test_check_secret_rotation_coverage.py` | the secret-rotation gate stops failing on a credential the rotation doc does not cover |
-| `tests/test_check_tenant_wiring.py` | a tenant file is missing its `serviceAccountName`, `prune`, `targetNamespace`, `dependsOn`, namespace labels, RoleBindings, or its `kustomization.yaml` entry |
-{% if use_unifi %}| `tests/test_check_unifi_doc_parity.py` | the UniFi doc-parity gate stops failing when the doc and the Terraform tree disagree |
-{% endif %}| `tests/test_cloudflare_ddns.py` | the DDNS CronJob's program would write, or refuse to write, the wrong public record (skipped whole when `dns_backend` is not `cloudflare`) |
-| `tests/test_cluster_invariants.py` | the inventory, the substitution set or the deploy wiring is internally inconsistent — see below |
-| `tests/test_flux_corpus_gates.py` | `scripts/flux-corpus-gates.sh` skips a gate, or stops failing on a finding |
-| `tests/test_generate_host_log_staleness.py` | the host-log-staleness generator stops failing when its rules drift from the inventory |
-| `tests/test_gitlab_runner_overrides.py` | a shared-runner `*_overwrite_max_allowed` ceiling differs from its explicit default, so a job variable could grow a pod past the size the quota assumes |
-| `tests/test_gitlab_runner_reaper.py` | the reaper's guards would delete a live CI job pod, or an in-flight job's registry credential Secret |
-| `tests/test_grafana_dashboards.py` | a dashboard's JSON is unparseable or malformed, which `flux-lint` cannot see inside the ConfigMap that carries it, or a ruler rule-count panel turns green at a count other than the `LokiRulerRulesMissing` threshold |
-| `tests/test_helm_values_releases.py` | `scripts/helm-values-releases.yaml` misses a HelmRelease, or names a chart the sources do not declare, so its values block is validated against nothing |
-| `tests/test_inventory_defaults.py` | an inventory variable restates the role default it already gets |
-| `tests/test_lib_pins.py` | a library pin stops deriving from the declared `lib_ref` input — an `include: ref:`, the collection `version:`, a Terraform `?ref=` the site list names, or the Taskfile's `LIB_REF` |
-| `tests/test_local_gate_floors.py` | a local `task lint` gate that mirrors a CI include drops its linted-nothing floor, so it passes on a target list that matches nothing |
-| `tests/test_loki_out_of_order_window.py` | a host journal replay outruns Loki's out-of-order window, so the lines a restarted collector replays are rejected as `too_far_behind` |
-| `tests/test_namespace_psa.py` | a Namespace this repo declares carries no Pod Security Admission labels, which admits at `privileged` |
-| `tests/test_platform_releases.py` | a platform HelmRelease value would fail only once the cluster runs it: the Connect pod mounts a ServiceAccount token, the Grafana probe is not HTTP, metrics-server runs beside the k3s AddOn or dies with one node, or the controllers stage declares a chart-defined CR |
-| `tests/test_playbook_behaviour.py` | a playbook expression stops doing its job: postflight passes an unhealthy pool, an unmounted dataset or a missing export, autostart writes onboot on an HA-managed guest or runs the wrong guest CLI, or the cert re-seed skips a target it can reach |
-| `tests/test_playbook_extra_var_bools.py` | a `when:` reads an `-e` extra var without ending its filter chain in `\| bool`, which ansible-core refuses because the value arrives as a string |
-| `tests/test_prometheus_rule_coverage.py` | an alert rule has no promtool unit test and no declared exemption, or an exemption names an alert that is gone or now tested |
-| `tests/test_repo_hygiene.py` | a file the ignore rules exclude is tracked anyway |
-| `tests/test_runbook_coverage.py` | an alert's `runbook_url` points at a document, or an anchor, that does not name it |
-| `tests/test_script_literals.py` | a shell script under `scripts/` hard-codes a site domain instead of reading cluster-config |
-{% if secrets_backend == 'onepassword' %}| `tests/test_secret_store_reachability.py` | the ESO namespace denies egress with no allow that actually selects the secrets backend, so every ExternalSecret would stop syncing |
-{% endif %}| `tests/test_stage_timeouts.py` | a Flux stage's timeout is shorter than the slowest HelmRelease beneath its path |
-| `tests/test_supervised_apply_guard.py` | `scripts/supervised-apply-guard.sh` admits an unsupervised apply, or a supervised apply task stops running it first |
-| `tests/test_tenant_flux_policy.py` | `tenant-flux-impersonation` admits a tenant Kustomization or HelmRelease with no `serviceAccountName`, or with a source in another namespace |
-| `tests/test_vendored_byte_identity.py` | a file copied from the library differs from it at the pinned ref, or a declared fork has stopped differing, or the library changed under a fork that never absorbed it. The one suite that needs a library checkout, see below |
-| `tests/test_vpa_caps_vs_helm_limits.py` | a VPA `maxAllowed.memory` sits above the memory limit its chart declares, which `check-hpa-vpa-invariant.py` cannot see for a chart-rendered workload, or a Flux controller VPA is not `RequestsOnly` with its cap at the 1Gi gotk limit |
-| `scripts/test_check_flux_version_pin.py` | the Flux-version-pin gate stops failing on a bootstrap manifest that disagrees with the pinned version |
-| `scripts/test_check_integration_matrix_coverage.py` | the matrix-coverage gate stops failing on an integration stack no CI matrix entry runs |
-| `scripts/test_collect_state_lib.py` | the state collector would leak a secret into `CLUSTER_STATUS.txt`, or misclassifies a health check |
-| `scripts/test_deploy_verify_lib.py` | a `cluster-verify` classifier reads a recorded kubectl fixture as the wrong verdict |
-| `scripts/test_deploy_verify_script.py` | one of `deploy-verify.sh`'s own helpers changes behaviour |
+authoritative list. Each suite's docstring says what it fails on.
 
 #### What `test_cluster_invariants.py` asserts
 
-- No duplicate address or vmid in the inventory, and no address outside
-  `cluster_lan_cidr`.
 - Every `${placeholder}` in `kubernetes/` is a key one of the two ConfigMaps
   defines, and no manifest carries a site literal instead.
 - Every playbook is either wired to a deploy job or acknowledged in
   `scripts/deploy-coverage.conf`.
+
+`task lint:cluster-invariants` checks for duplicate addresses and vmids and for
+addresses outside `cluster_lan_cidr`.
 
 Each suite's `changes:` rule is derived from what it reads: `test_lib_pins.py`
 from `ansible/requirements.yml`, `Taskfile.yml` and `terraform/*/*.tf`;

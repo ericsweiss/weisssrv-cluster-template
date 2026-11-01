@@ -61,14 +61,12 @@ VALUE_KEYS = ("cluster_timezone",)
 
 
 def vip_keys(config: dict) -> tuple[str, ...]:
-    """Every `cluster_*_vip` key the config declares, ADDRESS_KEYS floor included.
+    """Every `cluster_*_vip` key the config declares.
 
     A VIP added to cluster-config alone would otherwise be scanned by no arm
     while the gate still reports OK.
     """
-    declared = {k for k in config if k.startswith("cluster_") and k.endswith("_vip")}
-    floor = {k for k in ADDRESS_KEYS if k.endswith("_vip")}
-    return tuple(sorted(declared | floor))
+    return tuple(sorted(k for k in config if k.startswith("cluster_") and k.endswith("_vip")))
 
 
 # cluster-config key -> where the same value lives in the Ansible inventory.
@@ -96,9 +94,8 @@ SECONDARY_MIRRORS: dict[str, tuple[str, str]] = {}
 DNS_SERVERS_KEY = "cluster_upstream_dns_servers"{% else %}# No tailnet resolver zone, so no cluster-config key mirrors `dns_servers`.
 DNS_SERVERS_KEY = None{% endif %}
 
-# Every key an arm of this gate consumes. Each arm is guarded by `if key not in
-# config`, so the whole set is asserted up front: a disappeared key is Vacuous
-# (exit 2), never a quiet pass over a smaller subject.
+# Every key an arm of this gate consumes, asserted before any arm runs: a
+# disappeared key is Vacuous (exit 2), never a quiet pass over a smaller subject.
 REQUIRED_KEYS = (
     set(DOMAIN_KEYS)
     | set(ADDRESS_KEYS)
@@ -209,23 +206,13 @@ def load_config(root: Path) -> dict:
 
 
 def require_keys(config: dict) -> None:
-    """Every key the gate's arms consume must be present, or it degrades silently."""
+    """Every key the gate's arms consume must be present before any arm runs."""
     missing = sorted(REQUIRED_KEYS - set(config))
     if missing:
         raise Vacuous(
             f"{CLUSTER_CONFIG} is missing key(s) this gate checks: {', '.join(missing)}. "
-            "Each arm skips an absent key, so the gate would pass while enforcing less. "
             "Re-add the key, or delete it from the gate's key lists deliberately."
         )
-
-
-def mirror_check_count(config: dict) -> int:
-    """How many inventory-mirror assertions actually ran (never a constant)."""
-    return (
-        len([k for k in INVENTORY_MIRRORS if k in config])
-        + len([k for k in SECONDARY_MIRRORS if k in config])
-        + (1 if DNS_SERVERS_KEY and DNS_SERVERS_KEY in config else 0)
-    )
 
 
 COMMENT_LINE = re.compile(r"^\s*#")
@@ -299,14 +286,11 @@ def scan_text(rel: str, text: str, domains: list[str], addresses: dict) -> list[
 
 def check_literals(root: Path, config: dict, trees: tuple[str, ...]) -> list[str]:
     violations = []
-    domains = [config[k] for k in DOMAIN_KEYS if k in config]
-    address_keys = tuple(sorted(set(ADDRESS_KEYS) | set(vip_keys(config))))
-    addresses = {config[k]: k for k in address_keys if k in config}
-    values = {config[k]: k for k in VALUE_KEYS if k in config}
+    domains = [config[k] for k in DOMAIN_KEYS]
+    addresses = {config[k]: k for k in sorted(set(ADDRESS_KEYS) | set(vip_keys(config)))}
+    values = {config[k]: k for k in VALUE_KEYS}
     for tree in trees:
         base = root / tree
-        if not base.is_dir():
-            continue
         for path in sorted(
             p
             for p in base.rglob("*")
@@ -320,10 +304,6 @@ def check_literals(root: Path, config: dict, trees: tuple[str, ...]) -> list[str
             )
         for path in manifests(base, recurse=True):
             rel = path.relative_to(root).as_posix()
-            # cluster-config is where the values are declared, so it is the one
-            # manifest that spells them literally.
-            if rel == CLUSTER_CONFIG:
-                continue
             in_rules = rel.startswith(RULES_TREE)
             # A manifest the gate cannot parse is a subject it did not inspect,
             # not literal drift: _read_yaml raises Vacuous and main() exits 2.
@@ -346,8 +326,6 @@ def check_inventory(root: Path, config: dict) -> list[str]:
     violations = []
     cache: dict[str, dict] = {}
     for key, (path, var) in list(INVENTORY_MIRRORS.items()) + list(SECONDARY_MIRRORS.items()):
-        if key not in config:
-            continue
         if path not in cache:
             cache[path] = _read_yaml(root / path, path)
         expected = cache[path].get(var)
@@ -363,12 +341,12 @@ def check_inventory(root: Path, config: dict) -> list[str]:
     # cannot see: name its inventory variable in INVENTORY_MIRRORS.
     mirrored = set(INVENTORY_MIRRORS) | set(SECONDARY_MIRRORS)
     for key in vip_keys(config):
-        if key in config and key not in mirrored:
+        if key not in mirrored:
             violations.append(
                 f"cluster-config {key}={config[key]!r} is mirrored by no arm of this "
                 "gate — add it to INVENTORY_MIRRORS with its inventory variable"
             )
-    if DNS_SERVERS_KEY and DNS_SERVERS_KEY in config:
+    if DNS_SERVERS_KEY:
         all_vars = cache.get(ANSIBLE_ALL) or _read_yaml(root / ANSIBLE_ALL, ANSIBLE_ALL)
         dns = all_vars.get("dns_servers")
         # A missing mirror is a violation, not a skip: silently dropping the
@@ -407,10 +385,13 @@ def main(argv=None) -> int:
         for violation in violations:
             print(f"  {violation}", file=sys.stderr)
         return 1
+    mirror_checks = (
+        len(INVENTORY_MIRRORS) + len(SECONDARY_MIRRORS) + (1 if DNS_SERVERS_KEY else 0)
+    )
     print(
         f"Cluster identity is placeholder-only across {len(trees)} substituted trees "
         f"({', '.join(trees)}), and cluster-config agrees with the Ansible inventory "
-        f"({mirror_check_count(config)} mirrored values checked)."
+        f"({mirror_checks} mirrored values checked)."
     )
     return 0
 

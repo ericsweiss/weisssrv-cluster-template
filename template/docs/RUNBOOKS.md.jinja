@@ -109,7 +109,6 @@ to read on:
 | `FluxReconciliationFailure` | a Kustomization or source stopped reconciling | When Flux is unhappy |
 | `FluxResourceNotReady` | a reconciled object never became ready | When Flux is unhappy |
 | `MetalLBSpeakerNotScheduled` | no metallb-speaker pod is scheduled, so no LoadBalancer VIP is announced | When Flux is unhappy, "A MetalLB VIP receives nothing" |
-| `VPARecommendationCapped` | a VPA wants more than its policy ceiling allows | Adding an application |
 | `ExternalSecretSyncFailure` | a Secret is no longer being produced from the vault | Rotating a secret |
 | `SecretsProviderDown` | the secrets backend itself is unreachable | Rotating a secret |
 | `RegistryCacheDown` | the pull-through registry cache is down or unscrapable | Registry pull-through cache |

@@ -1,10 +1,14 @@
 ---
 # Re-seed ONE cert-distribution target from the cert authority: re-provisioning
 # a guest drops the pinned key, and the loss only shows at the next renewal.
-# reseed_cert_target is one acme_certs_distribution_targets entry.
+# reseed_cert_target_host is the target's `host` value.
 
-- name: Reset the per-target re-seed state
+- name: Select the cert-distribution target entry
   ansible.builtin.set_fact:
+    reseed_cert_target: >-
+      {{ acme_certs_distribution_targets | default([])
+         | selectattr('host', 'equalto', reseed_cert_target_host)
+         | first | default({}) }}
     # seed-target.yml appends to this fact; main.yml normally initialises it.
     acme_certs_unreachable_targets: []
     # The inventory's acme_certs_ssh_key_path, else the role default: this play
@@ -38,7 +42,7 @@
          or (reseed_cert_authority_pubkey.content | default('') | b64decode | trim) }}
   when: reseed_cert_public_key is not defined
 
-- name: Re-seed the cert-distribution key on {{ reseed_cert_target.host }}
+- name: Re-seed the cert-distribution key on {{ reseed_cert_target_host }}
   ansible.builtin.include_role:
     name: weisssrv.infra.acme_certs
     tasks_from: seed-target
@@ -55,7 +59,7 @@
 - name: Report a re-seed skipped for want of the distribution pubkey
   ansible.builtin.debug:
     msg: >-
-      {{ reseed_cert_target.host }} was not re-seeded: neither
+      {{ reseed_cert_target_host }} was not re-seeded: neither
       ACME_SSH_PUBLIC_KEY nor {{ reseed_cert_pubkey_path }} on
       {{ inventory_hostname }} holds the distribution pubkey. Re-run through the
       task wrapper, or `task infra:deploy -- --tags acme_certs` to rewrite the
@@ -68,7 +72,7 @@
 - name: Report a target that could not be re-seeded
   ansible.builtin.debug:
     msg: >-
-      {{ reseed_cert_target.host }} did not answer, so its distribution key is
+      {{ reseed_cert_target_host }} did not answer, so its distribution key is
       still unpinned and the next cert push to it will fail. Re-run this
       playbook, or `task infra:deploy -- --tags acme_certs`, once it is back.
   when: acme_certs_unreachable_targets | length > 0

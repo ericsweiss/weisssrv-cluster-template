@@ -1,16 +1,40 @@
-"""Unit tests for scripts/check-ansible-service-names.py.
+"""Tests for scripts/check-ansible-service-names.py.
 
-Each test writes one playbook into a throwaway tree and asserts the exit code:
-0 clean, 1 a name that is not a systemd unit, 2 nothing scanned.
+Exit 0 clean, 1 a name that is not a systemd unit, 2 nothing scanned.
 """
-
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 GATE = Path(__file__).resolve().parent / "check-ansible-service-names.py"
+
+TASK = "- hosts: all\n  tasks:\n    - {}\n"
+
+CASES = [
+    ("bare_unit", TASK.format("systemd:\n        name: k3s-agent"), 0),
+    ("full_suffix", TASK.format("service:\n        name: nfs-server.service"), 0),
+    ("timer", TASK.format("systemd:\n        name: zfs-scrub.timer"), 0),
+    ("templated", TASK.format('systemd:\n        name: "{{ svc }}"'), 0),
+    ("include_role_is_not_a_unit",
+     TASK.format("ansible.builtin.include_role:\n        name: weisssrv.infra.k3s"), 0),
+    ("role_fqcn", TASK.format("ansible.builtin.systemd:\n        name: weisssrv.infra.k3s"), 1),
+    ("masked_failed_when",
+     TASK.format("systemd:\n        name: weisssrv.infra.k3s\n      failed_when: false"), 1),
+    ("list_of_units", TASK.format(
+        "systemd:\n        name:\n          - unbound.service\n          - weisssrv.infra.adguard"), 1),
+    ("free_form", TASK.format("systemd: name=weisssrv.infra.k3s state=restarted"), 1),
+    ("inside_a_block", TASK.format("block:\n        - service:\n            name: weisssrv.infra.k3s"), 1),
+    ("inventory_data_named_like_the_module",
+     "exporter:\n  service:\n    name: weisssrv.infra.node_exporter\n"
+     "  systemd:\n    name: some.dotted.value\n", 0),
+    ("vault_tag", "secret: !vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  6162\n", 0),
+    ("unparseable", "- hosts: all\n  tasks:\n   - bad: [\n", 2),
+]
 
 
 def _run(root: Path) -> subprocess.CompletedProcess:
@@ -22,96 +46,41 @@ def _run(root: Path) -> subprocess.CompletedProcess:
     )
 
 
-def _playbook(root: Path, body: str) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / "play.yml"
-    path.write_text(body)
-    return path
-
-
-def test_a_real_unit_name_passes(tmp_path):
-    _playbook(tmp_path, "- hosts: all\n  tasks:\n    - systemd:\n        name: k3s-agent\n")
+@pytest.mark.parametrize("body,rc", [c[1:] for c in CASES], ids=[c[0] for c in CASES])
+def test_playbook_shape(tmp_path, body, rc):
+    (tmp_path / "play.yml").write_text(body)
     result = _run(tmp_path)
-    assert result.returncode == 0, result.stdout
+    assert result.returncode == rc, result.stdout + result.stderr
+    if rc:
+        assert "play.yml" in result.stderr and "ERROR" not in result.stdout
 
 
-def test_a_full_unit_name_passes(tmp_path):
-    _playbook(tmp_path, "- hosts: all\n  tasks:\n    - service:\n        name: nfs-server.service\n")
-    assert _run(tmp_path).returncode == 0
-
-
-def test_a_role_fqcn_fails(tmp_path):
-    """The mutation case: a role FQCN resolves to no unit, and `failed_when:
-    false` would make that a permanent silent no-op."""
-    _playbook(
-        tmp_path,
-        "- hosts: all\n  tasks:\n    - ansible.builtin.systemd:\n        name: weisssrv.infra.unbound\n",
-    )
-    result = _run(tmp_path)
-    assert result.returncode == 1
-    assert "weisssrv.infra.unbound" in result.stderr
-    assert "weisssrv.infra.unbound" not in result.stdout
-
-
-def test_a_templated_name_is_skipped(tmp_path):
-    _playbook(tmp_path, "- hosts: all\n  tasks:\n    - systemd:\n        name: \"{{ svc }}\"\n")
-    assert _run(tmp_path).returncode == 0
-
-
-def test_an_empty_tree_is_an_error(tmp_path):
-    """Scanning nothing must not read as a clean tree."""
-    (tmp_path / "empty").mkdir()
-    result = _run(tmp_path / "empty")
-    assert result.returncode == 2
-
-
-def test_an_unparseable_file_is_an_error(tmp_path):
-    _playbook(tmp_path, "- hosts: all\n  tasks:\n   - bad: [\n")
-    result = _run(tmp_path)
-    assert result.returncode == 2
-    assert "could not parse" in result.stderr
-
-
-def test_a_task_inside_a_block_is_inspected(tmp_path):
-    _playbook(
-        tmp_path,
-        "- hosts: all\n  tasks:\n    - block:\n        - service:\n"
-        "            name: weisssrv.infra.k3s\n",
-    )
-    assert _run(tmp_path).returncode == 1
-
-
-def test_a_list_of_units_is_inspected(tmp_path):
-    _playbook(
-        tmp_path,
-        "- hosts: all\n  tasks:\n    - systemd:\n        name:\n"
-        "          - unbound.service\n          - weisssrv.infra.adguard\n",
-    )
-    assert _run(tmp_path).returncode == 1
-
-
-def test_free_form_args_are_inspected(tmp_path):
-    _playbook(tmp_path, "- hosts: all\n  tasks:\n    - systemd: name=weisssrv.infra.k3s\n")
-    assert _run(tmp_path).returncode == 1
-
-
-def test_inventory_data_named_like_the_module_is_not_a_task(tmp_path):
-    """A `service:` mapping in vars is data, not a module call."""
-    _playbook(
-        tmp_path,
-        "exporter:\n  service:\n    name: weisssrv.infra.node_exporter\n"
-        "  systemd:\n    name: some.dotted.value\n",
-    )
-    result = _run(tmp_path)
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_a_vault_tag_does_not_stop_the_scan(tmp_path):
-    _playbook(tmp_path, "secret: !vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  6162\n")
-    result = _run(tmp_path)
-    assert result.returncode == 0, result.stdout + result.stderr
+@pytest.mark.parametrize("sub", ["empty", "missing"])
+def test_an_empty_or_missing_tree_is_an_error(tmp_path, sub):
+    if sub == "empty":
+        (tmp_path / sub).mkdir()
+    assert _run(tmp_path / sub).returncode == 2
 
 
 def test_the_real_tree_is_clean():
     result = _run(GATE.parent.parent / "ansible")
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _gate():
+    spec = importlib.util.spec_from_file_location("service_names", GATE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("name,bad", [
+    ("weisssrv.infra.k3s", True),
+    ("k3s", False),
+    ("nfs-server.service", False),
+    ("systemd-networkd.socket", False),
+    ("home-eric.mount", False),
+    ("{{ svc_name }}", False),
+])
+def test_is_bad_unit(name, bad):
+    assert _gate().is_bad_unit(name) is bad

@@ -99,11 +99,6 @@ tasks:
     cmds:
       - task --list
 
-  kubernetes:lint:
-    desc: "Validate all Flux-managed Kubernetes manifests (alias for flux:lint)"
-    cmds:
-      - task: flux:lint
-
   # === Library checkout =================================================
   lib:sync:
     desc: "Clone/refresh .weisssrv-lib at LIB_REF — the source for the vendored copies"
@@ -171,8 +166,7 @@ tasks:
       SMTP_UPSTREAM_PASSWORD: {% endraw %}{{ secret_ref('SMTP Smarthost', 'password') }}{% raw %}
       LOKI_PUSH_USER: {% endraw %}{{ secret_ref('Loki Push Auth', 'username') }}{% raw %}
       LOKI_PUSH_PASSWORD: {% endraw %}{{ secret_ref('Loki Push Auth', 'password') }}{% raw %}
-      # base rewrites the relay's authorized_keys, so mail.yml re-seeds the
-      # cert-distribution key from the primary resolver afterwards.
+      # mail.yml re-seeds the cert-distribution key, which a re-provisioned relay loses.
       ACME_SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'public key') }}{% raw %}
     preconditions: *op_preconditions
     cmds:

@@ -32,46 +32,9 @@ Each module has a README covering what it does, when you want it, what to
 configure and how to remove it.
 {%- if git_backend == 'gitlab_selfhosted' %}
 
-### Before you register the privileged runner
-
-> **Register it as a PROJECT runner locked to this repository. Never an instance
-> runner; never a group runner over a group containing untrusted projects.**
-
-The registration *scope* is the security boundary, not the tag: tags are
-cooperative routing, and any project on the instance can write
-`tags: [{{ ci_runner_tag }}]` in its own
-`.gitlab-ci.yml`. Registered instance-wide, that one line gets an arbitrary
-authenticated user root + Docker-in-Docker execution on this cluster, on a runner
-that also holds SSH reach to the hosts. Nothing in this repository can check the
-scope, so it is verified by hand.
-
-Verify after registering, and after any re-registration or token rotation:
-
-```bash
-# Expect "project_type"
-curl -sH "PRIVATE-TOKEN: $TOKEN" "https://{{ git_host }}/api/v4/runners/<id>" | jq .runner_type
-```
-
-`gitlab-runner-privileged/README.md` has the full reasoning, the sizing model and
-the tenant-build alternative.
+Register the privileged runner as described in `gitlab-runner-privileged/README.md`
+§ The registration scope IS the security boundary.
 {%- endif %}
 
-## House style for a new module
-
-- A dedicated namespace with Pod Security Standards labels: `enforce` at the
-  strictest level the workload actually tolerates, `warn`/`audit` at
-  `restricted` so drift is visible without breaking admission.
-- `components/netpol-baseline` for default-deny ingress, plus the shared egress
-  components (`netpol-egress-dns`, `netpol-egress-public`,
-  `netpol-egress-apiserver`) rather than hand-written copies. Adding ANY egress
-  policy makes egress default-deny for the pods it selects — enumerate every
-  path the workload needs. The ingress deny is not optional:
-  `scripts/check-default-deny-coverage.py` fails `task flux:lint` for any
-  namespace that owns a workload without one, and the only declared exemption is
-  `flux-system`, whose gotk manifests carry their own policies.
-- A VPA (`Initial` for single-replica apps, `Off` for stateful ones you tune by
-  hand, and never CPU-controlled where an HPA owns CPU).
-- Its own ServiceMonitor/PodMonitor and PrometheusRule if it has metrics —
-  Prometheus discovers both in every namespace, so nothing needs editing in the
-  observability stage.
-- No literal domains, IPs or CIDRs: use the `${cluster_*}` substitution keys.
+The shape a new module follows, and the gates it has to pass, are in
+`.claude/skills/cluster-development/references/add-k8s-app.md`.

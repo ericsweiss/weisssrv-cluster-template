@@ -72,16 +72,10 @@ def main() -> int:
     parser.add_argument("--ci-file", default=DEFAULT_CI_FILE,
                         help=f"pipeline file holding the job (default: {DEFAULT_CI_FILE})")
     parser.add_argument("--integration-dir", default=DEFAULT_INTEGRATION_DIR,
-                        help="suite tree; an empty value declares no integration "
-                             f"suite (default: {DEFAULT_INTEGRATION_DIR})")
+                        help=f"suite tree (default: {DEFAULT_INTEGRATION_DIR})")
     parser.add_argument("--integration-job", default=DEFAULT_INTEGRATION_JOB,
                         help=f"job name to read (default: {DEFAULT_INTEGRATION_JOB})")
     opts = parser.parse_args()
-
-    if opts.integration_dir == "":
-        print('No integration suite declared (--integration-dir "") — matrix '
-              "comparison skipped.")
-        return 0
 
     ci_file = _resolve(opts.ci_file)
     try:
@@ -108,8 +102,7 @@ def main() -> int:
         print(
             f"ERROR: the gate inspected nothing — no molecule.yml under "
             f"{opts.integration_dir}/ and no {opts.integration_job} matrix entry "
-            f"in {opts.ci_file}.\n  Point the gate at the real tree and job name, "
-            'or declare the suite absent with --integration-dir "".',
+            f"in {opts.ci_file}.\n  Point the gate at the real tree and job name.",
             file=sys.stderr,
         )
         return 2

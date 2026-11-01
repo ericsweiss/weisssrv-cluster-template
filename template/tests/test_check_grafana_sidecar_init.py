@@ -60,11 +60,6 @@ class TestSidecarScan:
              "containers", "WATCH"),
         ]
 
-    def test_a_watching_init_container_is_reported(self, gate):
-        found = {name: method for _, name, _, method in
-                 gate.sidecars([_deployment("WATCH")])}
-        assert found["grafana-init-sc-datasources"] == "WATCH"
-
     def test_a_container_without_the_sidecar_marker_is_not_scanned(self, gate):
         """Mirrors the chart: only `*-sc-*` containers are k8s-sidecar."""
         names = [name for _, name, _, _ in
@@ -187,36 +182,27 @@ def _run(root: Path, bin_dir: Path, env_extra=None) -> subprocess.CompletedProce
     )
 
 
-def test_an_unset_watch_method_is_a_finding(tmp_path):
-    """Mutation case: an unset watchMethod defaults to WATCH in the init container."""
-    result = _run(_fixture_repo(tmp_path / "tree", None), _stub_helm(tmp_path))
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "init container grafana-init-sc-datasources" in result.stdout
-    assert "METHOD=WATCH, not LIST" in result.stdout
-
-
-def test_an_explicit_watch_is_a_finding(tmp_path):
-    result = _run(_fixture_repo(tmp_path / "tree", "WATCH"), _stub_helm(tmp_path))
-    assert result.returncode == 1, result.stdout + result.stderr
-
-
-def test_list_passes(tmp_path):
-    """LIST in init, WATCH long-running passes."""
-    result = _run(_fixture_repo(tmp_path / "tree", "LIST"), _stub_helm(tmp_path))
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_a_listing_long_running_sidecar_is_a_finding(tmp_path):
-    """LIST exits at once, so a long-running sidecar in it restarts in a loop."""
-    result = _run(_fixture_repo(tmp_path / "tree", "LIST", "LIST"), _stub_helm(tmp_path))
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "long-running container grafana-sc-dashboard" in result.stdout
-    assert "METHOD=LIST, not WATCH" in result.stdout
-
-
-def test_an_explicitly_watching_long_running_sidecar_passes(tmp_path):
-    result = _run(_fixture_repo(tmp_path / "tree", "LIST", "WATCH"), _stub_helm(tmp_path))
-    assert result.returncode == 0, result.stdout + result.stderr
+# An init sidecar that watches never exits; a long-running one that lists
+# crash-loops. An unset watchMethod renders the chart's default, WATCH.
+@pytest.mark.parametrize(
+    ("init_method", "dashboard_method", "rc", "fragments"),
+    [
+        pytest.param(None, None, 1, ("init container grafana-init-sc-datasources",
+                                     "METHOD=WATCH, not LIST"), id="init-unset"),
+        pytest.param("WATCH", None, 1, ("METHOD=WATCH, not LIST",), id="init-watch"),
+        pytest.param("LIST", None, 0, (), id="init-list-passes"),
+        pytest.param("LIST", "LIST", 1, ("long-running container grafana-sc-dashboard",
+                                         "METHOD=LIST, not WATCH"), id="long-running-list"),
+        pytest.param("LIST", "WATCH", 0, (), id="long-running-watch-passes"),
+    ],
+)
+def test_each_position_requires_its_mode(tmp_path, init_method, dashboard_method, rc,
+                                         fragments):
+    result = _run(_fixture_repo(tmp_path / "tree", init_method, dashboard_method),
+                  _stub_helm(tmp_path))
+    assert result.returncode == rc, result.stdout + result.stderr
+    for fragment in fragments:
+        assert fragment in result.stdout
 
 
 def test_a_missing_manifest_is_exit_2_not_a_finding(tmp_path):
@@ -294,32 +280,24 @@ class TestCannotInspect:
         bin_dir = _stub_shell_helm(tmp_path, "echo 'Error: chart not found' >&2\nexit 1")
         self._assert_clean_exit_2(_run(_fixture_repo(tmp_path / "tree", "LIST"), bin_dir))
 
-    def test_a_malformed_versions_configmap_is_not_a_finding(self, tmp_path):
-        """The reused validator exits 1 by itself, so its failures need wrapping."""
+    # The reused validator exits 1 by itself, so its failures need wrapping.
+    @pytest.mark.parametrize(
+        ("relpath", "content"),
+        [
+            pytest.param("kubernetes/infrastructure/sources/versions-configmap.yaml",
+                         "data: [unclosed\n", id="versions-malformed"),
+            pytest.param("kubernetes/infrastructure/sources/versions-configmap.yaml",
+                         "- a list, not a ConfigMap\n", id="versions-not-a-mapping"),
+            pytest.param("kubernetes/infrastructure/sources/cluster-config.yaml",
+                         "data: [unclosed\n", id="cluster-config-malformed"),
+            pytest.param("kubernetes/infrastructure/observability/kube-prometheus-stack/"
+                         "release.yaml", "---\nkind: ConfigMap\nmetadata:\n  name: nope\n",
+                         id="manifest-not-a-helmrelease"),
+        ],
+    )
+    def test_a_corrupt_input_file_is_not_a_finding(self, tmp_path, relpath, content):
         root = _fixture_repo(tmp_path / "tree", "LIST")
-        (root / "kubernetes/infrastructure/sources/versions-configmap.yaml").write_text(
-            "data: [unclosed\n"
-        )
-        self._assert_clean_exit_2(_run(root, _stub_helm(tmp_path)))
-
-    def test_a_versions_configmap_that_is_not_a_mapping_is_not_a_finding(self, tmp_path):
-        root = _fixture_repo(tmp_path / "tree", "LIST")
-        (root / "kubernetes/infrastructure/sources/versions-configmap.yaml").write_text(
-            "- a list, not a ConfigMap\n"
-        )
-        self._assert_clean_exit_2(_run(root, _stub_helm(tmp_path)))
-
-    def test_a_malformed_cluster_config_is_not_a_finding(self, tmp_path):
-        root = _fixture_repo(tmp_path / "tree", "LIST")
-        (root / "kubernetes/infrastructure/sources/cluster-config.yaml").write_text(
-            "data: [unclosed\n"
-        )
-        self._assert_clean_exit_2(_run(root, _stub_helm(tmp_path)))
-
-    def test_a_manifest_that_is_not_a_helmrelease_is_not_a_finding(self, tmp_path):
-        root = _fixture_repo(tmp_path / "tree", "LIST")
-        (root / "kubernetes/infrastructure/observability/kube-prometheus-stack"
-         / "release.yaml").write_text("---\nkind: ConfigMap\nmetadata:\n  name: nope\n")
+        (root / relpath).write_text(content)
         self._assert_clean_exit_2(_run(root, _stub_helm(tmp_path)))
 
 
@@ -358,15 +336,14 @@ def test_a_missing_helmrepository_is_exit_2_not_a_finding(tmp_path):
     assert "no HelmRepository 'prometheus-community'" in result.stderr
 
 
-# The two call sites that must run the gate: `task flux:lint` (through `task
-# lint`) and the CI flux-lint job's extra_validation. Both carry helm, which the
-# gate needs to render the chart.
+# `task flux:lint` and the CI flux-lint job's extra_validation must both run the
+# gate; both carry the helm it needs to render the chart.
 _CALLERS = ("taskfiles/flux.yml", ".gitlab-ci.yml")
 
 
 @pytest.mark.parametrize("caller", _CALLERS)
 def test_the_gate_is_wired_into_both_callers(caller):
-    """A gate nothing calls is prose: the wedged-pod shape would return unseen."""
+    """A gate nothing calls enforces nothing."""
     path = REPO / caller
     assert path.is_file(), f"{caller} is missing"
     assert "scripts/check-grafana-sidecar-init.py" in path.read_text(encoding="utf-8"), (

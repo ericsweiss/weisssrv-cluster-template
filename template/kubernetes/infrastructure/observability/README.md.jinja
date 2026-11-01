@@ -302,7 +302,7 @@ release upgrade rolls back on every reconcile.
 The node-outage inhibition suppresses per-pod and per-workload warnings
 **cluster-wide** — the target alertnames carry no node label, so no `equal:` is
 possible. Criticals, `EndpointDown` and `TargetDown` are never inhibited, and
-the source is the bounded `NodeOutageStormControl` rule, which stops firing 7d
+the source is the bounded, null-routed `NodeOutageStormControl` rule, which stops firing 7d
 after the node was last Ready. The `Watchdog` route is a dead man's switch: it
 must stay ahead of the `severity=none` null route, and the external heartbeat is
 the only signal that survives a total observability-plane outage, loss of DNS

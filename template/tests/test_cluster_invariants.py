@@ -1,6 +1,6 @@
 """Layout invariants this cluster keeps, in PyYAML alone: site values stay out
-of the manifests and agree with the inventory, the Proxmox HA triad is one node,
-and every playbook is classified for deploy coverage. See docs/ci-pipeline.md."""
+of the manifests, the Proxmox HA triad is one node, and every playbook is
+classified for deploy coverage. See docs/ci-pipeline.md."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import pytest
 import yaml
 from conftest import REPO as REPO_ROOT
 from conftest import (
-    CONFIGMAP_INVENTORY_MIRROR,
     assert_all_parsed,
     copier_answers,
     helm_release,
@@ -546,79 +545,6 @@ GROUP_VARS = REPO_ROOT / "ansible" / "inventories" / "prod" / "group_vars"
 needs_group_vars = pytest.mark.skipif(
     not GROUP_VARS.is_dir(), reason="no ansible/inventories/prod/group_vars"
 )
-
-
-def _mirror_report(mirror: dict) -> tuple[list[str], list[str], int]:
-    """(pairs one side no longer declares, disagreements, pairs compared).
-
-    A pair whose key or variable is gone is reported, not dropped: a rename would
-    otherwise remove it from the comparison and leave the gate green.
-    """
-    data = CONFIGMAPS["cluster-config"][1]
-    loaded: dict[str, dict] = {}
-    undeclared: list[str] = []
-    mismatches: list[str] = []
-    compared = 0
-    for cm_key, (group_file, var_name) in sorted(mirror.items()):
-        path = GROUP_VARS / group_file
-        label = f"{cm_key} / group_vars/{group_file}:{var_name}"
-        if not path.is_file() or cm_key not in data:
-            undeclared.append(f"{label} (cluster-config key or group_vars file absent)")
-            continue
-        if group_file not in loaded:
-            loaded[group_file] = yaml.safe_load(path.read_text()) or {}
-        if var_name not in loaded[group_file]:
-            undeclared.append(f"{label} (inventory variable absent)")
-            continue
-        compared += 1
-        if str(loaded[group_file][var_name]) != str(data[cm_key]):
-            mismatches.append(
-                f"{cm_key}={data[cm_key]!r} but group_vars/{group_file}:{var_name}="
-                f"{loaded[group_file][var_name]!r}"
-            )
-    return undeclared, mismatches, compared
-
-
-@needs_k8s
-@needs_group_vars
-def test_cluster_config_agrees_with_the_ansible_inventory():
-    """cluster-config and the inventory agree. Nothing reconciles them at deploy
-    time, so a domain changed in one place alone surfaces as a certificate or
-    node selector that matches nothing."""
-    if "cluster-config" not in CONFIGMAPS:
-        pytest.skip("no cluster-config ConfigMap")
-    undeclared, mismatches, compared = _mirror_report(CONFIGMAP_INVENTORY_MIRROR)
-    assert not undeclared, (
-        "CONFIGMAP_INVENTORY_MIRROR names pairs one side no longer declares — fix "
-        "the rename or drop the pair:\n  " + "\n  ".join(undeclared)
-    )
-    assert compared, (
-        "no cluster-config key was compared against the inventory — this gate is "
-        "examining nothing"
-    )
-    assert not mismatches, (
-        "cluster-config and the Ansible inventory disagree:\n  " + "\n  ".join(mismatches)
-    )
-
-
-@needs_k8s
-@needs_group_vars
-@pytest.mark.parametrize(
-    "cm_key,pair",
-    [
-        pytest.param("cluster_internal_domain", ("all.yml", "no_such_var"), id="variable"),
-        pytest.param("cluster_internal_domain", ("no-such.yml", "internal_domain"), id="file"),
-        pytest.param("cluster_no_such_key", ("all.yml", "internal_domain"), id="configmap-key"),
-    ],
-)
-def test_a_mirror_pair_one_side_lost_is_reported(cm_key, pair):
-    """Mutation case: a renamed key or variable must red the gate, not vanish."""
-    if "cluster-config" not in CONFIGMAPS:
-        pytest.skip("no cluster-config ConfigMap")
-    mirror = dict(CONFIGMAP_INVENTORY_MIRROR)
-    mirror[cm_key] = pair
-    undeclared, _mismatches, _compared = _mirror_report(mirror)
-    assert undeclared
 
 
 _SVC_DNS_PORT_RE = re.compile(

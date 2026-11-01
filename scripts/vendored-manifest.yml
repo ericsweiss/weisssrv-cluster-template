@@ -16,10 +16,6 @@ vendored:
   - scripts/ci_yaml.py
   - scripts/ci-fetch-tools.py
   - scripts/semantic-release.py
-  # The check-lib-pins suite is canonical in the library. This repository
-  # vendors it because its own pipeline is where the rewriter runs; a generated
-  # cluster carries the script plus its own smoke test, matching weisssrv.
-  - tests/test_check_lib_pins.py
   # --- copies rendered into the generated cluster ---
   # The shared molecule scaffolding. No directory walk reaches it: the walks
   # cover scripts/ trees only.
@@ -153,6 +149,8 @@ vendored:
   # tightened library rule cannot be left behind.
   - lib: lint/yamllint-relaxed.yml
     consumer: template/lint/yamllint-relaxed.yml
+  - lib: lint/yamllint-relaxed.yml
+    consumer: lint/yamllint-relaxed.yml
 
 forked:
   - lib: lint/ruff.toml
@@ -166,13 +164,6 @@ forked:
     consumer: .gitleaks.toml
     reason: Allowlist paths and fixture anchors are per-repo.
     reconciled_sha256: a70051101f8045b94172594a0a89c5cf7e17aa6ad56c184843ffc5eac29891ec
-  - lib: lint/yamllint-relaxed.yml
-    consumer: lint/yamllint-relaxed.yml
-    reason: >-
-      Repo-scoped header, plus a document-start note for the Jinja sources under
-      template/. The rules are the library's. Kept at lint/, not the repo-root
-      `.yamllint` the library documents, to match the generated cluster.
-    reconciled_sha256: 27bcd61c2e64c949a4e3da41633beecc8c8ee3933d4c6c0ab175c2f0828585d7
   - lib: lint/editorconfig
     consumer: .editorconfig
     reason: Per-repo file-type sections on a shared base.

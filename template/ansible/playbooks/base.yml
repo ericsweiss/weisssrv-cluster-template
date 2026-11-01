@@ -30,10 +30,9 @@
   tasks:
     - name: Re-seed each cert-distribution target
       ansible.builtin.include_tasks: tasks/_reseed-cert-target.yml
-      loop: "{{ acme_certs_distribution_targets | default([]) }}"
+      loop: "{{ acme_certs_distribution_targets | default([]) | map(attribute='host') | list }}"
       loop_control:
-        loop_var: reseed_cert_target
-        label: "{{ reseed_cert_target.host }}"
+        loop_var: reseed_cert_target_host
 
 - name: Gate on the reachability ledger
   ansible.builtin.import_playbook: _reachability-gate.yml

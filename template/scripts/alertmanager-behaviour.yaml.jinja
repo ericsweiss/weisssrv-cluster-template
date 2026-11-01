@@ -16,9 +16,8 @@ route_cases:
     labels: [alertname=ZFSPoolNotOnline, severity=critical]
   - receiver: chat-default
     labels: [alertname=DiskUsageWarning, severity=warning]
-  # severity=info has its own child route ahead of the root, carrying repeat_interval 24h.
-  - receiver: chat-default
-    labels: [alertname=NodeOutageStormControl, severity=info]
+  - receiver: "null"
+    labels: [alertname=NodeOutageStormControl, severity=none]
   - receiver: chat-default
     labels: [alertname=SomeUnlabelledAlert]
   # The durability and latch branches keep the root receivers, at a longer repeat.

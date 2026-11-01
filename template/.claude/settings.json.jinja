@@ -1,6 +1,6 @@
 {#- `kubectl apply --dry-run` allows only its read-only values: `=*` also matches
     `=none`. Destructive ZFS forms are denied bare and over ssh. `:**` keeps the
-    remote-delete deny from parsing as the trailing `:*` prefix form. -#}
+    remote-delete ask from parsing as the trailing `:*` prefix form. -#}
 {
   "permissions": {
     "allow": [
@@ -102,8 +102,6 @@
       "Bash(git push *:refs/heads/main:*)",
       "Bash(git push --force*)",
       "Bash(git push -f*)",
-      "Bash(git push * --delete*)",
-      "Bash(git push * :**)",
       "Bash(git reset --hard:*)",
       "Bash(git clean -fdx:*)",
       "Bash(sudo rm:*)",
@@ -164,7 +162,9 @@
       "Bash(git restore:*)",
       "Bash(git rm:*)",
       "Bash(git mv:*)",
-      "Bash(git pull:*)"
+      "Bash(git pull:*)",
+      "Bash(git push * --delete*)",
+      "Bash(git push * :**)"
     ]
   }
 }

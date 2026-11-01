@@ -12,7 +12,7 @@ from pathlib import Path
 
 GATE = Path(__file__).resolve().parent / "check-flux-version-pin.py"
 
-CI = 'cluster-verify:\n  script:\n    - |\n      FLUX_VERSION="{version}"\n'
+CI = 'deploy-verify:\n  script:\n    - |\n      FLUX_VERSION="{version}"\n'
 CM = "apiVersion: v1\ndata:\n  flux_version: {version}\nkind: ConfigMap\n"
 GOTK = (
     "---\n"
@@ -150,7 +150,7 @@ def test_a_second_gotk_header_that_disagrees_fails(tmp_path):
 
 def test_a_missing_pin_reports_that_it_inspected_nothing(tmp_path):
     root = _tree(tmp_path, gotk="2.9.0")
-    (root / ".gitlab-ci.yml").write_text("cluster-verify:\n  script:\n    - flux --version\n")
+    (root / ".gitlab-ci.yml").write_text("deploy-verify:\n  script:\n    - flux --version\n")
     res = _run(root)
     assert res.returncode == 2
     assert "no FLUX_VERSION" in res.stderr

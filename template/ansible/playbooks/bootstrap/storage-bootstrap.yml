@@ -212,6 +212,12 @@
         tasks_from: samba.yml
       when: nas_storage_samba_shares | default([]) | length > 0
 
+    - name: Configure the media mover
+      ansible.builtin.include_role:
+        name: weisssrv.infra.nas_storage
+        tasks_from: media_mover.yml
+      when: nas_storage_media_mover_enabled | default(false)
+
 - name: Verify and report the storage result
   hosts: nas
   become: true

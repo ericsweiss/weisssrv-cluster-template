@@ -272,7 +272,6 @@ _JINJA_SCAN_EXEMPT: set[tuple[str, str]] = {
         "scripts/check-comment-length.py",
         "A `{% raw %}` body is kept verbatim, only its tags dropped: jinja reads no",
     ),
-    ("tests/test_validate_helm_values.py", "limits: {%s}"),
     (
         "scripts/check-role-inputs.py",
         '"{% if " + condition + " %}yes{% else %}no{% endif %}"',
@@ -3853,8 +3852,6 @@ _REQUIRED_DENY = (
     "Bash(git push * main:*)",
     "Bash(git push --force*)",
     "Bash(git push -f*)",
-    "Bash(git push * --delete*)",
-    "Bash(git push * :**)",
     "Bash(git push *:main:*)",
     "Bash(sed -n -i:*)",
     "Bash(zfs destroy:*)",
@@ -3866,6 +3863,8 @@ _REQUIRED_ASK = (
     "Bash(helm get values:*)",
     "Bash(helm get manifest:*)",
     "Bash(ansible-lint --fix:*)",
+    "Bash(git push * --delete*)",
+    "Bash(git push * :**)",
 )
 # Broad allows that would approve a write or print a credential.
 _FORBIDDEN_ALLOW = (

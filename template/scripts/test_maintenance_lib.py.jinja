@@ -10,6 +10,8 @@ import subprocess
 from pathlib import Path
 
 LIB = Path(__file__).resolve().parent / "maintenance-lib.sh"
+# k8s.io/apimachinery/pkg/util/rand: no vowels, no y, and no 0, 1 or 3.
+SAFE_ENCODE = "bcdfghjklmnpqrstvwxz2456789"
 
 
 def _run(func_call: str, stdin: str = "") -> subprocess.CompletedProcess:
@@ -232,6 +234,10 @@ class TestDeploymentPodNodes:
         # so the verify can excuse it during a kured drain instead of ERRORing.
         rows = "metallb-controller-7d9f8c6b5-xkz\t\n"  # empty nodeName after the tab
         assert _run("deployment_pod_nodes metallb-controller", rows).stdout.strip() == "<unscheduled>"
+
+    def test_the_hash_match_is_the_safe_encode_alphabet(self):
+        rows = f"web-{SAFE_ENCODE}-abcde\tnode-1\nweb-yyy3-abcde\tnode-2\n"
+        assert _run("deployment_pod_nodes web", rows).stdout.split() == ["node-1"]
 
 
 class TestKuredRebootingFilter:

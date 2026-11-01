@@ -76,7 +76,6 @@ tasks:
     preconditions:
       - sh: command -v op
         msg: "1Password CLI not installed"
-      # `op account list`, not `op whoami`: see infra.yml's op preconditions.
       - sh: op account list 2>/dev/null
         msg: "1Password CLI not authenticated. Run: eval $(op signin)"
       - sh: kubectl cluster-info 2>/dev/null

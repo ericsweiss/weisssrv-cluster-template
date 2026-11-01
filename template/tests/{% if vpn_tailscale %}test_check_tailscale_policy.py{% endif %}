@@ -5,6 +5,7 @@ severs tailnet SSH to the whole cluster, so both semantic arms must be able to f
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,8 @@ def test_an_unusable_approver_list_is_reported(tmp_path: Path, bad: str) -> None
 
 def test_a_missing_policy_exits_2_not_1(tmp_path: Path) -> None:
     """rc 1 would read as a policy the gate judged unsafe; nothing was read."""
+    problems = gate.check(tmp_path)
+    assert problems and "cannot be read" in problems[0], problems
     assert gate.main(["--repo", str(tmp_path)]) == 2
 
 
@@ -71,3 +74,20 @@ def test_an_unparsable_inventory_var_file_is_an_operator_error(tmp_path: Path) -
     (var_dir / "routes.yml").write_text("tailscale_advertise_routes: [\n", encoding="utf-8")
     with pytest.raises(gate.OperatorError):
         gate.advertised_routes(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("tagOwners", ["tag:router"]),
+        ("tagOwners", "tag:router"),
+        ("autoApprovers", ["10.9.0.0/24"]),
+        ("autoApprovers", {"routes": ["10.9.0.0/24"]}),
+    ],
+)
+def test_a_malformed_policy_shape_is_a_finding(tmp_path: Path, key: str, value) -> None:
+    """A non-object value reports a finding instead of a traceback."""
+    doc = json.loads(gate.strip_hujson(GOOD))
+    root = _tree(tmp_path, json.dumps({**doc, key: value}))
+    assert any("must be a JSON object" in p for p in gate.check(root))
+    assert gate.main(["--repo", str(root)]) == 1
