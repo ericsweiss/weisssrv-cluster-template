@@ -1,0 +1,40 @@
+---
+# promtool unit test for HostSlabCacheGrowing, whose 24h delta needs a day of
+# input. Split out at a 30m interval so the host-exporter file stays fast.
+rule_files:
+  - rules.yaml
+evaluation_interval: 30m
+tests:
+  # A 10 GiB/24h ramp fires; a flat cache of the same size does not.
+  - interval: 30m
+    input_series:
+      - series: 'node_slab_object_bytes{job="node-exporter-host", instance="pve-01:9101", cache="skbuff_ext_cache"}'
+        values: '2147483648+223696213x60'
+      - series: 'node_slab_object_bytes{job="node-exporter-host", instance="pve-02:9101", cache="skbuff_ext_cache"}'
+        values: '8589934592+0x60'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: HostSlabCacheGrowing
+        exp_alerts: []
+      # The delta crosses 6 GiB at 14h30m, inside the 1h hold here.
+      - eval_time: 15h
+        alertname: HostSlabCacheGrowing
+        exp_alerts: []
+      - eval_time: 26h
+        alertname: HostSlabCacheGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'pve-01:9101'
+              cache: skbuff_ext_cache
+
+  # About 2 GiB a day stays under the threshold.
+  - interval: 30m
+    input_series:
+      - series: 'node_slab_object_bytes{job="node-exporter-host", instance="pve-01:9101", cache="file_lock_cache"}'
+        values: '2147483648+44739242x60'
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: HostSlabCacheGrowing
+        exp_alerts: []

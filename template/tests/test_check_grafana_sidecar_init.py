@@ -5,6 +5,7 @@ crash-loops, so the gate must report either; helm is stubbed, no chart pull.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -15,6 +16,7 @@ import yaml
 from conftest import REPO, SCRIPTS, load_script
 
 GATE = SCRIPTS / "check-grafana-sidecar-init.py"
+CHART_URL = "https://charts.example.test/prometheus-community"
 
 
 @pytest.fixture(scope="module")
@@ -95,7 +97,10 @@ def _fixture_repo(
         "spec": {
             "targetNamespace": "observability",
             "chart": {"spec": {"chart": "kube-prometheus-stack",
-                               "version": "${helm_chart_versions_kube_prometheus_stack}"}},
+                               "version": "${helm_chart_versions_kube_prometheus_stack}",
+                               "sourceRef": {"kind": "HelmRepository",
+                                             "name": "prometheus-community",
+                                             "namespace": "flux-system"}}},
             "values": values,
         },
     }
@@ -110,10 +115,15 @@ def _fixture_repo(
         "data": {"helm_chart_versions_kube_prometheus_stack": "92.1.1",
                  "k3s_version": "v1.37.1+k3s1"},
     }))
+    (sources / "prometheus-community.yaml").write_text(yaml.safe_dump({
+        "apiVersion": "source.toolkit.fluxcd.io/v1", "kind": "HelmRepository",
+        "metadata": {"name": "prometheus-community", "namespace": "flux-system"},
+        "spec": {"url": CHART_URL},
+    }))
     (sources / "cluster-config.yaml").write_text(yaml.safe_dump({
         "apiVersion": "v1", "kind": "ConfigMap",
         "metadata": {"name": "cluster-config"},
-        "data": {"cluster_internal_domain": "esweiss.test"},
+        "data": {"cluster_internal_domain": "example.test"},
     }))
     return tmp_path
 
@@ -168,7 +178,6 @@ def _stub_shell_helm(tmp_path: Path, body: str) -> Path:
 
 
 def _run(root: Path, bin_dir: Path, env_extra=None) -> subprocess.CompletedProcess:
-    import os
     env = dict(os.environ)
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
     env.update(env_extra or {})
@@ -179,7 +188,7 @@ def _run(root: Path, bin_dir: Path, env_extra=None) -> subprocess.CompletedProce
 
 
 def test_an_unset_watch_method_is_a_finding(tmp_path):
-    """Mutation case: the shape that wedged the grafana pod on 92.1.1."""
+    """Mutation case: an unset watchMethod defaults to WATCH in the init container."""
     result = _run(_fixture_repo(tmp_path / "tree", None), _stub_helm(tmp_path))
     assert result.returncode == 1, result.stdout + result.stderr
     assert "init container grafana-init-sc-datasources" in result.stdout
@@ -192,7 +201,7 @@ def test_an_explicit_watch_is_a_finding(tmp_path):
 
 
 def test_list_passes(tmp_path):
-    """The shape the real render has today: LIST in init, WATCH long-running."""
+    """LIST in init, WATCH long-running passes."""
     result = _run(_fixture_repo(tmp_path / "tree", "LIST"), _stub_helm(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -332,6 +341,21 @@ def test_the_real_release_pins_list_for_every_init_sidecar():
         "a grafana sidecar runs in init mode without watchMethod: LIST, so its init "
         f"container watches forever and the pod never leaves PodInitializing: {wrong}"
     )
+
+
+def test_the_render_uses_the_url_of_the_named_helmrepository(tmp_path):
+    bin_dir = _stub_shell_helm(tmp_path, f'echo "$@" > {tmp_path}/argv; exit 1')
+    _run(_fixture_repo(tmp_path / "tree", "LIST"), bin_dir)
+    argv = (tmp_path / "argv").read_text().split()
+    assert argv[argv.index("--repo") + 1] == CHART_URL
+
+
+def test_a_missing_helmrepository_is_exit_2_not_a_finding(tmp_path):
+    root = _fixture_repo(tmp_path / "tree", "LIST")
+    (root / "kubernetes/infrastructure/sources/prometheus-community.yaml").unlink()
+    result = _run(root, _stub_helm(tmp_path))
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "no HelmRepository 'prometheus-community'" in result.stderr
 
 
 # The two call sites that must run the gate: `task flux:lint` (through `task

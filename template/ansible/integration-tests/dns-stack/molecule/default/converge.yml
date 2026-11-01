@@ -1,6 +1,6 @@
 ---
-# DNS Stack Integration Test - Converge
-# Deploys unbound + adguard_home on both servers, then adguard_sync on dns-02
+# DNS stack integration test - converge.
+# unbound and adguard_home on both servers, adguard_sync on the primary.
 
 - name: Converge - DNS Stack
   hosts: all
@@ -18,7 +18,7 @@
           - groups['dns_primary'] | default([]) | length == 1
           - groups['dns_replica'] | default([]) | length == 1
         fail_msg: >-
-          molecule.yml no longer produces dns_primary and dns_replica, so the
+          molecule.yml does not produce dns_primary and dns_replica, so the
           guarded tasks in this scenario skip.
       run_once: true
 
@@ -32,7 +32,7 @@
           - ca-certificates
           - gnupg
           - systemd
-          - dnsutils  # For dig command in tests
+          - dnsutils
         state: present
 
   tasks:
@@ -50,16 +50,12 @@
       ansible.builtin.include_role:
         name: weisssrv.infra.adguard_home
       vars:
-        # Use local Unbound as upstream
         adguard_home_upstream_dns:
           - "127.0.0.1:5335"
-        # Note: rewrites, ports, admin credentials come from molecule.yml inventory
 
-    # Deploy AdGuard Sync on primary only (syncs TO replica)
     - name: Apply adguard_sync role
       ansible.builtin.include_role:
         name: weisssrv.infra.adguard_sync
       when:
         - "'dns_primary' in group_names"
         - adguard_sync_enabled | default(false)
-      # Note: All sync configuration comes from molecule.yml inventory

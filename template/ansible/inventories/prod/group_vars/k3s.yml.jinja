@@ -19,13 +19,14 @@ k3s_service_cidr: "{{ k3s_service_cidr }}"
 # lookup externally first.
 resolv_conf_search_domains: []
 
-# Replaced by MetalLB and the Traefik release in infrastructure/controllers/.
-# local-storage goes too, so a claim without a storageClassName goes Pending
-# rather than landing unbacked on a node bootdisk.
+# CRITICAL: k3s built-ins this cluster replaces. metrics-server here and the
+# HelmRelease in infrastructure/controllers/metrics-server/ are one unit.
+# Applying a change restarts the k3s servers - needs a healthy etcd quorum.
 k3s_disable:
-  - servicelb
-  - traefik
-  - local-storage
+  - servicelb       # MetalLB announces the VIPs
+  - traefik         # Traefik is a Flux HelmRelease
+  - local-storage   # No default class: an unclassed claim goes Pending
+  - metrics-server  # Replaced by the Flux HelmRelease (see above)
 
 # WireGuard-encrypted pod-to-pod traffic (UDP/51820). Changing it on a running
 # cluster needs a server-by-server restart.

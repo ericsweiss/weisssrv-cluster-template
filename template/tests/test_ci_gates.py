@@ -40,8 +40,25 @@ def python_tests_changes(doc: dict) -> list[str]:
     return []
 
 
+def _expand_braces(pattern: str) -> list[str]:
+    """Every pattern a `{a,b}` alternation spells, as GitLab's EXTGLOB reads it."""
+    group = re.search(r"\{([^{}]*)\}", pattern)
+    if not group:
+        return [pattern]
+    head, tail = pattern[: group.start()], pattern[group.end() :]
+    return [
+        expanded
+        for choice in group.group(1).split(",")
+        for expanded in _expand_braces(head + choice + tail)
+    ]
+
+
 def _glob_re(pattern: str) -> re.Pattern[str]:
-    """GitLab's `changes:` glob as a regex: `**` crosses directories, `*` does not."""
+    """GitLab's `changes:` glob as a regex: `**` crosses directories, `*` does not,
+    and a `{a,b}` brace is an alternation."""
+    alternatives = _expand_braces(pattern)
+    if len(alternatives) > 1:
+        return re.compile("|".join(_glob_re(alt).pattern for alt in alternatives))
     out = ""
     index = 0
     while index < len(pattern):
@@ -95,6 +112,13 @@ def test_the_glob_matcher_distinguishes_the_two_stars():
     assert unmatched(["lint/sub/x.yml"], globs) == ["lint/sub/x.yml"]
 
 
+def test_the_glob_matcher_expands_a_brace_alternation():
+    """Mutation case: a brace glob selects each member and nothing else."""
+    globs = ["lint/*.{yml,yaml}"]
+    assert unmatched(["lint/a.yml", "lint/b.yaml"], globs) == []
+    assert unmatched(["lint/c.json"], globs) == ["lint/c.json"]
+
+
 # ---------------------------------------------------------------------------
 # Tool provisioning for the jobs that touch live infrastructure
 # ---------------------------------------------------------------------------
@@ -143,7 +167,6 @@ PIP_MODULES = {"yaml": {"pyyaml", "ansible", "ansible-core"}, "requests": {"requ
 # repository alone where the tag does not change the tool set. An image absent
 # here provides nothing, so a job on a new image installs what its scripts call.
 IMAGE_TOOLS = {
-    "python:3.11-slim": frozenset(),
     "python:3.14-slim": frozenset(),
     "python:3.14": frozenset({"curl", "git", "ssh"}),
     "alpine:3.23": frozenset(),
@@ -162,10 +185,15 @@ def image_tools(image: str) -> frozenset:
 OFF_CI_PATH: dict[str, str] = {}
 
 # Fragments whose descendants deploy, verify or maintain the live estate.
-LIVE_BASES = (".deploy-base", ".terraform-drift-plan")
+LIVE_BASES = (".deploy-base",)
 LIVE_STAGES = ("deploy", "verify", "maintenance")
+# The library drift-plan include runs in validate and extends no local fragment,
+# so its jobs are selected by the job_name suffix every include passes.
+LIVE_SUFFIXES = ("-drift-plan",)
 # Anchors, so a rename cannot leave the gate inspecting an empty job set.
-LIVE_ANCHORS = ("deploy-ansible-base", "deploy-verify", "cluster-verify")
+LIVE_ANCHORS = (
+    "deploy-ansible-base", "deploy-verify", "cluster-verify", "authentik-drift-plan",
+)
 # The one live job that `!reference`s .kubectl-setup, so the fragment check
 # reads a job that really consumes it.
 KUBECTL_JOB = "cluster-verify"
@@ -394,8 +422,17 @@ def job_shell(doc: dict, name: str) -> tuple:
     """A job's image and the shell it runs. A job-level `before_script` replaces
     the inherited one, so the most derived definition of each block wins."""
     chain = extends_chain(doc, name)
+    default = doc.get("default") or {}
+    inherit = {}
+    for link in chain:
+        inherit.update(doc[link].get("inherit") or {})
+    from_default = inherit.get("default", True)
+
+    def inherits(key: str) -> bool:
+        return from_default is True or (isinstance(from_default, list) and key in from_default)
+
     variables = {k: str(v) for k, v in (doc.get("variables") or {}).items()}
-    image = (doc.get("default") or {}).get("image")
+    image = default.get("image") if inherits("image") else None
     for link in chain:
         variables.update(
             {k: str(v) for k, v in (doc[link].get("variables") or {}).items()}
@@ -410,6 +447,9 @@ def job_shell(doc: dict, name: str) -> tuple:
             if block in doc[link]:
                 lines += ci_yaml.script_lines(doc[link], doc, block)
                 break
+        else:
+            if block in default and inherits(block):
+                lines += ci_yaml.script_lines(default, doc, block)
 
     def expand(raw: str) -> str:
         return _VAR_REF.sub(
@@ -432,6 +472,7 @@ def live_jobs(doc: dict) -> list:
         and name not in CI_RESERVED
         and (
             body.get("stage") in LIVE_STAGES
+            or name.endswith(LIVE_SUFFIXES)
             or any(base in LIVE_BASES for base in extends_chain(doc, name))
         )
     )
@@ -469,7 +510,9 @@ class TestLiveJobToolProvisioning:
         jobs = live_jobs(pipeline_doc())
         assert len(jobs) > 5, f"only {len(jobs)} live jobs found — the gate read almost nothing"
         for anchor in LIVE_ANCHORS:
-            assert anchor in jobs, f"{anchor} is no longer a live job; fix LIVE_BASES/LIVE_STAGES"
+            assert anchor in jobs, (
+                f"{anchor} is no longer a live job; fix LIVE_BASES/LIVE_STAGES/LIVE_SUFFIXES"
+            )
 
     def test_the_library_fragments_resolve(self):
         """`!reference [.kubectl-setup, before_script]` must resolve, or every
@@ -532,3 +575,27 @@ class TestLiveJobToolProvisioning:
         probe = "nc -z -w 5 host 22"
         assert unprovisioned("python:3.14-slim", probe) == ["nc"]
         assert unprovisioned("python:3.14-slim", probe, excused={"nc"}) == []
+
+    def test_the_closure_excuses_only_a_declared_off_path_tool(self, tmp_path, monkeypatch):
+        """Mutation case: an OFF_CI_PATH entry reaches the gate through the
+        script closure, keyed by the script that offers the tool."""
+        (tmp_path / "probe.sh").write_text("nc -z -w 5 host 22\n")
+        monkeypatch.setitem(globals(), "SCRIPTS", tmp_path)
+        assert script_closure({"probe.sh"})["excused"] == set()
+        monkeypatch.setitem(OFF_CI_PATH, "probe.sh:nc", "only the manual branch probes")
+        assert script_closure({"probe.sh"})["excused"] == {"nc"}
+
+    def test_default_before_script_is_inherited_unless_opted_out(self):
+        """Mutation case: setup in the top-level `default:` reaches every job
+        that does not set `inherit: default: false`."""
+        doc = {
+            "default": {"image": "python:3.14-slim", "before_script": ["apt-get install -y jq"]},
+            "plain": {"script": ["jq ."]},
+            "opted-out": {"inherit": {"default": False}, "script": ["jq ."]},
+            "listed": {"inherit": {"default": ["image"]}, "script": ["jq ."]},
+        }
+        assert "jq" in shell_installs(job_shell(doc, "plain")[1])
+        assert job_shell(doc, "opted-out") == ("", "jq .")
+        image, text = job_shell(doc, "listed")
+        assert image == "python:3.14-slim"
+        assert "apt-get" not in text

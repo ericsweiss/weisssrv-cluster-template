@@ -113,17 +113,21 @@ def _references_of(body: dict) -> list[str]:
     return refs
 
 
-def test_every_task_reference_resolves():
-    """A `- task:` or `deps:` entry naming nothing is a runtime failure go-task
-    only reports when the task is invoked, so the tree is walked here instead."""
-    tasks = load_tasks()
-    dangling = [
+def _dangling(tasks: dict[str, dict]) -> list[str]:
+    """`<task> -> <reference>` for every reference that names no task."""
+    return sorted(
         f"{name} -> {ref}"
         for name, body in tasks.items()
         for ref in _references_of(body)
         if ref not in tasks
-    ]
-    assert not dangling, "task references that resolve to nothing: " + ", ".join(sorted(dangling))
+    )
+
+
+def test_every_task_reference_resolves():
+    """A `- task:` or `deps:` entry naming nothing is a runtime failure go-task
+    only reports when the task is invoked, so the tree is walked here instead."""
+    dangling = _dangling(load_tasks())
+    assert not dangling, "task references that resolve to nothing: " + ", ".join(dangling)
 
 
 # A script path a dir-scoped task would resolve against its own `dir:`.
@@ -277,19 +281,15 @@ def test_a_dangling_reference_is_caught(fake_tree: Path):
             version: '3'
             tasks:
               lint:
+                deps: [gone-dep]
                 cmds:
                   - task: :renamed-away
             """
         )
     )
-    tasks = load_tasks(fake_tree)
-    dangling = [
-        cmd["task"]
-        for body in tasks.values()
-        for cmd in body.get("cmds") or []
-        if isinstance(cmd, dict) and cmd.get("task") not in tasks
+    assert _dangling(load_tasks(fake_tree)) == [
+        "flux:lint -> flux:gone-dep", "flux:lint -> renamed-away",
     ]
-    assert dangling == ["renamed-away"]
 
 
 # A `scripts/...` command in run position with no interpreter in front: the
@@ -365,3 +365,12 @@ def test_an_interpreter_prefix_takes_a_script_out_of_scope():
         "scripts/find.sh": "substitution",
         "scripts/gen.py": "chained",
     }
+
+
+def test_update_cluster_bumps_on_a_branch_without_rolling_nodes():
+    """The bump lands through an MR, so the node rollout follows the merge."""
+    task = load_tasks()["maintenance:update-cluster"]
+    called = [c["task"] for c in task["cmds"] if isinstance(c, dict) and "task" in c]
+    assert called == ["maintenance:update-all-versions"], called
+    guards = [p.get("sh", "") for p in task.get("preconditions", []) if isinstance(p, dict)]
+    assert any("abbrev-ref HEAD" in g and "main" in g for g in guards), guards

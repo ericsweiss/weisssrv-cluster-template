@@ -1,7 +1,7 @@
 ---
-# Reconciles AFTER controllers/: every resource here is a CR whose CRD (and
-# cert-manager webhook) the controllers stage installs. The three NetworkPolicy
-# sets are built-in kinds kept here because nothing renders against them.
+# Reconciles AFTER controllers/: the CRs here need the CRDs and webhooks that
+# stage installs. The built-in kinds (NetworkPolicies, admission policies) sit
+# here because they fence objects the earlier stages create.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -13,6 +13,7 @@ resources:
   - traefik-tls-options.yaml
   - traefik-middlewares.yaml
   - tenant-traefik-policy.yaml
+  - tenant-flux-policy.yaml
   - wildcard-certificates.yaml
   - coredns
   - vpa
@@ -24,4 +25,7 @@ resources:
 {%- if dns_backend == 'cloudflare' %}
   - shared-dns-secrets
   - cloudflare-ddns
+{%- endif %}
+{%- if vpn_tailscale %}
+  - tailscale-operator
 {%- endif %}

@@ -1,7 +1,7 @@
 ---
 # Reconcile onboot + boot order on guests that already exist; the provisioning
-# roles do it for guests they create. HA-managed guests and the `services`
-# group are out of scope - docs/RUNBOOKS.md, Guest autostart and boot order.
+# roles do it for guests they create - docs/RUNBOOKS.md, Guest autostart and
+# boot order.
 
 # Precedence mirrors proxmox_lxc: the neutral proxmox_autostart_* names win, then
 # the per-container proxmox_lxc_* ones, then the role defaults.
@@ -26,22 +26,17 @@
         _proxmox_vm_probe_hosts: >-
           {{ [proxmox_host] + (groups['proxmox'] | difference([proxmox_host])) }}
 
-    # The two when: conditions are order-dependent: the length check is what
-    # keeps `from_json` from being handed the empty string. Do not reorder them
-    # or collapse them into one `and`.
+    # A guest absent from the answer leaves the fact unset for the fail below.
     - name: Set the container's Proxmox host
       vars:
         pve_container_entry: >-
-          {{ (_proxmox_vm_cluster_json | default('') | from_json)
+          {{ (_proxmox_vm_cluster_json | from_json)
              | selectattr('vmid', 'equalto', vmid | int) | list }}
       ansible.builtin.set_fact:
         container_pve_host: "{{ pve_container_entry | map(attribute='node') | first }}"
-      when:
-        - _proxmox_vm_cluster_json | default('') | length > 0
-        - pve_container_entry | length > 0
+      when: pve_container_entry | length > 0
 
-    # Terminal: an undetermined node means nothing below runs, and a silent
-    # green run here is how a guest ends up with onboot unset.
+    # Every task below needs the node, so an unresolved one fails the play.
     - name: Fail when the container's Proxmox node could not be determined
       ansible.builtin.fail:
         msg: >-
@@ -75,16 +70,16 @@
           onboot={{ lxc_onboot | ternary(1, 0) }},
           order={{ lxc_startup_order }}, delay={{ lxc_startup_delay }}s
 
-- name: Reconcile autostart and boot order for VMs
-  hosts: k3s:app_servers
+# `services` guests run no Ansible, so every task here is delegated. An LXC
+# outside lxc_containers, such as a services appliance, is reconciled with pct.
+- name: Reconcile autostart and boot order for VMs and app guests
+  hosts: k3s:app_servers:services:!lxc_containers
   gather_facts: false
   vars:
     desired_onboot: "onboot: {{ proxmox_autostart_enabled | default(true) | ternary(1, 0) }}"
     desired_startup: "startup: order={{ proxmox_startup_order | default(100) }},up={{ proxmox_startup_delay | default(0) }}"
   tasks:
-    # Terminal, not a `when: proxmox_host is defined` guard on every task below:
-    # such a guard makes a guest with no proxmox_host report green having
-    # reconciled nothing.
+    # proxmox_host seeds the probe order, so a guest without one fails here.
     - name: Assert the VM declares a Proxmox host
       ansible.builtin.assert:
         that:
@@ -105,19 +100,16 @@
         _proxmox_vm_probe_hosts: >-
           {{ [proxmox_host] + (groups['proxmox'] | difference([proxmox_host])) }}
 
-    # The two when: conditions are order-dependent: the length check is what
-    # keeps `from_json` from being handed the empty string. Do not reorder them
-    # or collapse them into one `and`.
+    # Same guard as the LXC play above.
     - name: Set the VM's Proxmox host
       vars:
         pve_vm_entry: >-
-          {{ (_proxmox_vm_cluster_json | default('') | from_json)
+          {{ (_proxmox_vm_cluster_json | from_json)
              | selectattr('vmid', 'equalto', vmid | int) | list }}
       ansible.builtin.set_fact:
         vm_pve_host: "{{ pve_vm_entry | map(attribute='node') | first }}"
-      when:
-        - _proxmox_vm_cluster_json | default('') | length > 0
-        - pve_vm_entry | length > 0
+        vm_guest_cli: "{{ 'pct' if (pve_vm_entry | first).type == 'lxc' else 'qm' }}"
+      when: pve_vm_entry | length > 0
 
     - name: Fail when the VM's Proxmox node could not be determined
       ansible.builtin.fail:
@@ -129,7 +121,7 @@
 
     - name: Read the current VM config
       delegate_to: "{{ vm_pve_host }}"
-      ansible.builtin.command: "qm config {{ vmid }}"
+      ansible.builtin.command: "{{ vm_guest_cli }} config {{ vmid }}"
       register: current_config
       changed_when: false
       check_mode: false
@@ -137,7 +129,7 @@
     - name: Apply autostart and boot order
       delegate_to: "{{ vm_pve_host }}"
       ansible.builtin.command: >-
-        qm set {{ vmid }}
+        {{ vm_guest_cli }} set {{ vmid }}
         --onboot {{ proxmox_autostart_enabled | default(true) | ternary(1, 0) }}
         --startup order={{ proxmox_startup_order | default(100) }},up={{ proxmox_startup_delay | default(0) }}
       changed_when: true

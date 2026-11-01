@@ -23,6 +23,8 @@ AGGREGATOR = "kustomization.yaml"
 SHARED = {"tenant-crd-editor.yaml"}
 FLUX_NAMESPACE = "flux-system"
 STORE_KIND = "ClusterSecretStore"
+VAULT_PROVIDERS = ("onepassword", "onepasswordSDK")
+STORE_PROVIDERS = (*VAULT_PROVIDERS, "gitlab")
 # The corpus gates reach only the stage paths, never this tree, so a tenant's
 # own store is scoped here or nowhere.
 SCOPE_GATE = Path(__file__).resolve().parent / "check-secretstore-scope.py"
@@ -180,7 +182,10 @@ def _store_problems(docs: list, rel: str, namespace, labels: dict) -> list[str]:
     admits = None
     for store in _of_kind(docs, STORE_KIND):
         name = ((store.get("metadata") or {}).get("name")) or "?"
-        conditions = ((store.get("spec") or {}).get("conditions")) or []
+        conditions = [
+            c for c in ((store.get("spec") or {}).get("conditions")) or []
+            if isinstance(c, dict)
+        ]
         if not conditions:
             problems.append(
                 f"{rel}: {STORE_KIND} {name} has no spec.conditions — a cluster-scoped "
@@ -215,7 +220,42 @@ def _store_problems(docs: list, rel: str, namespace, labels: dict) -> list[str]:
                 f"{namespace} ({reach}) — a tenant owns one namespace, so its store "
                 "is scoped to that namespace alone"
             )
+        problems += _vault_problems(store, rel, name, namespace)
     return problems
+
+
+def _vault_problems(store: dict, rel: str, name: str, namespace: str) -> list[str]:
+    """A tenant store has one known provider, and a 1Password one reads only the
+    vault named after its namespace."""
+    provider = ((store.get("spec") or {}).get("provider")) or {}
+    kinds = sorted(map(str, provider))
+    if len(kinds) != 1 or kinds[0] not in STORE_PROVIDERS:
+        return [
+            f"{rel}: {STORE_KIND} {name} uses provider {', '.join(kinds) or 'none'}, "
+            f"not exactly one of {', '.join(STORE_PROVIDERS)} — its reach cannot be "
+            "checked to stop at the tenant's own vault"
+        ]
+    kind = kinds[0]
+    if kind not in VAULT_PROVIDERS:
+        return []
+    config = provider[kind] or {}
+    if kind == "onepasswordSDK":
+        vault = config.get("vault")
+        if vault == namespace:
+            return []
+        return [
+            f"{rel}: {STORE_KIND} {name} reads vault {vault!r}, not the tenant vault "
+            f"{namespace} — a tenant store never reaches another vault"
+        ]
+    vaults = config.get("vaults") or {}
+    if not isinstance(vaults, dict):
+        return [f"{rel}: {STORE_KIND} {name} onepassword.vaults is not a mapping"]
+    if set(vaults) == {namespace}:
+        return []
+    return [
+        f"{rel}: {STORE_KIND} {name} reads vaults {sorted(map(str, vaults))}, not only "
+        f"the tenant vault {namespace} — a tenant store never reaches another vault"
+    ]
 
 
 def _caps_problems(docs: list, rel: str) -> list[str]:
@@ -298,8 +338,8 @@ def _is_database_tree(kustomization: dict) -> bool:
 
 
 def _prune_guard_problems(docs: list, rel: str) -> list[str]:
-    """Every Namespace in the file, its caps, hostname grant and grant bindings
-    outlive the wiring, one rule for all."""
+    """Every Namespace in the file, its caps, the hostname grant and its
+    bindings carry prune: disabled, so they outlive the wiring."""
     flux = [
         k for k in _of_kind(docs, "Kustomization")
         if "kustomize.toolkit" in str(k.get("apiVersion"))
@@ -381,6 +421,78 @@ def _placement_problems(docs: list, rel: str, namespace) -> list[str]:
     return problems
 
 
+# The fields each check reads, by kind, with the YAML type it expects. A field of
+# another type is a finding, which Flux and the apiserver reject too.
+METADATA_SHAPE = {"name": str, "namespace": str, "labels": dict, "annotations": dict}
+SPEC_SHAPES = {
+    "ClusterSecretStore": {"conditions": list, "provider": dict},
+    "ResourceQuota": {"hard": dict},
+    "LimitRange": {"limits": list},
+    "Kustomization": {
+        "serviceAccountName": str, "targetNamespace": str, "path": str,
+        "dependsOn": list, "sourceRef": dict,
+    },
+    "ValidatingAdmissionPolicyBinding": {"policyName": str},
+}
+CONDITION_SHAPE = {"namespaces": list, "namespaceRegexes": list, "namespaceSelector": dict}
+TYPE_NAMES = {str: "string", dict: "mapping", list: "list"}
+
+
+def _shape_problems(docs: list, rel: str) -> list[str]:
+    """Every field the checks read has the YAML type they expect."""
+    problems = []
+
+    def expect(value, want: type, where: str) -> bool:
+        if value is None or isinstance(value, want):
+            return True
+        problems.append(
+            f"{rel}: malformed manifest shape — {where} is a "
+            f"{type(value).__name__}, not a {TYPE_NAMES[want]}"
+        )
+        return False
+
+    def entries(items, where: str) -> list[tuple[int, dict]]:
+        return [
+            (i, item) for i, item in enumerate(items or [])
+            if expect(item, dict, f"{where}[{i}]") and item is not None
+        ]
+
+    for doc in docs:
+        kind = str(doc.get("kind") or "?")
+        metadata = doc.get("metadata")
+        if not expect(metadata, dict, f"{kind} metadata"):
+            continue
+        metadata = metadata or {}
+        for field, want in METADATA_SHAPE.items():
+            expect(metadata.get(field), want, f"{kind} metadata.{field}")
+        label = f"{kind} {metadata.get('name') or '?'}"
+        spec = doc.get("spec")
+        if not expect(spec, dict, f"{label} spec"):
+            continue
+        spec = spec or {}
+        shape = SPEC_SHAPES.get(kind, {})
+        ok = [expect(spec.get(f), w, f"{label} spec.{f}") for f, w in shape.items()]
+        if not all(ok):
+            continue
+        for i, condition in entries(spec.get("conditions"), f"{label} spec.conditions"):
+            for field, want in CONDITION_SHAPE.items():
+                expect(condition.get(field), want, f"{label} spec.conditions[{i}].{field}")
+        for field in ("kind", "name", "namespace"):
+            expect((spec.get("sourceRef") or {}).get(field), str,
+                   f"{label} spec.sourceRef.{field}")
+        for provider in VAULT_PROVIDERS:
+            expect((spec.get("provider") or {}).get(provider), dict,
+                   f"{label} spec.provider.{provider}")
+        for i, limit in entries(spec.get("limits"), f"{label} spec.limits"):
+            for field in ("default", "defaultRequest", "max"):
+                expect(limit.get(field), dict, f"{label} spec.limits[{i}].{field}")
+        entries(spec.get("dependsOn"), f"{label} spec.dependsOn")
+        if kind == "RoleBinding" and expect(doc.get("roleRef"), dict, f"{label} roleRef"):
+            if expect(doc.get("subjects"), list, f"{label} subjects"):
+                entries(doc.get("subjects"), f"{label} subjects")
+    return problems
+
+
 def check_file(path: Path, rel: str, listed: set[str],
                root: Path | None = None) -> list[str]:
     problems = []
@@ -397,6 +509,9 @@ def check_file(path: Path, rel: str, listed: set[str],
             f"{rel}: not listed in {AGGREGATOR} resources — Kustomize does not "
             "auto-discover, so this tenant is never applied"
         )
+    shape = _shape_problems(docs, rel)
+    if shape:
+        return problems + shape
 
     namespaces = _of_kind(docs, "Namespace")
     namespace = None
@@ -404,8 +519,9 @@ def check_file(path: Path, rel: str, listed: set[str],
     if not namespaces:
         problems.append(f"{rel}: declares no Namespace")
     else:
-        namespace = (namespaces[0].get("metadata") or {}).get("name")
-        labels = (namespaces[0].get("metadata") or {}).get("labels") or {}
+        landing = _landing_namespace(docs, namespaces)
+        namespace = (landing.get("metadata") or {}).get("name")
+        labels = (landing.get("metadata") or {}).get("labels") or {}
     # Each Namespace in the file is admitted on its own labels, so each carries them.
     for declared in namespaces:
         metadata = declared.get("metadata") or {}
@@ -432,6 +548,20 @@ def check_file(path: Path, rel: str, listed: set[str],
             docs, f"{rel} [{name}]", kustomization, namespace, root
         )
     return problems
+
+
+def _landing_namespace(docs: list, namespaces: list) -> dict:
+    """The Namespace a Flux Kustomization targets, else the first one declared,
+    so document order does not pick the tenant namespace."""
+    targets = {
+        (k.get("spec") or {}).get("targetNamespace")
+        for k in _of_kind(docs, "Kustomization")
+        if "kustomize.toolkit" in str(k.get("apiVersion"))
+    }
+    for declared in namespaces:
+        if (declared.get("metadata") or {}).get("name") in targets:
+            return declared
+    return namespaces[0]
 
 
 def _kustomization_problems(docs: list, label: str, kustomization: dict,
@@ -637,7 +767,8 @@ def check(root: Path) -> list[str]:
     listed = listed_resources(root)
     problems = []
     for path in subjects(root, listed):
-        problems += check_file(path, path.relative_to(root).as_posix(), listed, root=root)
+        rel = path.relative_to(root).as_posix()
+        problems += check_file(path, rel, listed, root=root)
     for resource in sorted(listed - SHARED):
         target = root / TENANTS_DIR / resource
         if not target.exists():

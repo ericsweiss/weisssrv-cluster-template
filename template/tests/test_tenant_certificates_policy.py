@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 import yaml
-from conftest import REPO
+from conftest import REPO, cel, policy_bindings, policy_spec
 
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
 ISSUERS = REPO / "kubernetes" / "infrastructure" / "configs" / "cluster-issuer.yaml"
@@ -63,21 +63,8 @@ GRANT = {"hosts": "demo.apps.test\n  demo.home.test \n\n"}
 ISSUER = {"name": "letsencrypt-prod", "kind": "ClusterIssuer", "group": "cert-manager.io"}
 
 
-def _docs(kind: str, name: str) -> list[dict]:
-    return [
-        d for d in yaml.safe_load_all(POLICY.read_text())
-        if isinstance(d, dict) and d.get("kind") == kind and d["metadata"]["name"] == name
-    ]
-
-
-def _cel(text: str) -> str:
-    return " ".join(text.split())
-
-
 def test_the_certificate_policy_is_the_shape_the_mirror_evaluates():
-    found = _docs("ValidatingAdmissionPolicy", NAME)
-    assert len(found) == 1
-    spec = found[0]["spec"]
+    spec = policy_spec(POLICY, "ValidatingAdmissionPolicy", NAME)
     assert spec["failurePolicy"] == "Fail"
     assert spec["paramKind"] == {"apiVersion": "v1", "kind": "ConfigMap"}
     assert spec["matchConstraints"] == {
@@ -87,21 +74,17 @@ def test_the_certificate_policy_is_the_shape_the_mirror_evaluates():
         ]
     }
     assert [
-        {"name": v["name"], "expression": _cel(v["expression"])} for v in spec["variables"]
+        {"name": v["name"], "expression": cel(v["expression"])} for v in spec["variables"]
     ] == VARIABLES
     assert [
-        {"expression": _cel(v["expression"]), "message": v["message"]}
+        {"expression": cel(v["expression"]), "message": v["message"]}
         for v in spec["validations"]
     ] == VALIDATIONS
 
 
 def test_the_certificate_policy_has_no_shared_binding():
     """Each tenant's binding names its own grant, so none ships here."""
-    assert not [
-        d for d in yaml.safe_load_all(POLICY.read_text())
-        if isinstance(d, dict) and d.get("kind") == "ValidatingAdmissionPolicyBinding"
-        and d["spec"]["policyName"] == NAME
-    ]
+    assert not policy_bindings(POLICY, NAME)
 
 
 def test_the_platform_issuers_are_the_cluster_issuers_shipped():

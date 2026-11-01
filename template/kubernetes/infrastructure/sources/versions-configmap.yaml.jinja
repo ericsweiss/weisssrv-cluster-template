@@ -30,10 +30,13 @@ data:
   helm_chart_versions_kured: 6.1.0
   helm_chart_versions_loki: 20.0.2
   helm_chart_versions_metallb: 0.15.3
+  helm_chart_versions_metrics_server: 3.14.0
 {%- if gpu == 'nvidia' %}
   helm_chart_versions_nvidia_device_plugin: 0.20.1
 {%- endif %}
+{%- if secrets_backend == 'onepassword' %}
   helm_chart_versions_onepassword_connect: 2.4.3
+{%- endif %}
 {%- if postgres_operator %}
   helm_chart_versions_plugin_barman_cloud: 0.8.1
 {%- endif %}

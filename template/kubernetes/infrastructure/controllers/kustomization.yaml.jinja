@@ -1,4 +1,7 @@
 ---
+# metrics-server/ is NOT listed here: its own Flux Kustomization
+# (clusters/<name>/infrastructure-metrics-server.yaml) reconciles it, so its
+# wait cannot freeze this stage and the two prunes never share an object.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

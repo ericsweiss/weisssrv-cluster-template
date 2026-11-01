@@ -1,8 +1,6 @@
-"""A VPA memory cap never sits above the chart container's own memory limit.
-
-check-hpa-vpa-invariant.py reads pod-spec kinds only, so it skips every VPA whose
-target a HelmRelease renders. This covers those, matched by container name.
-"""
+"""A chart container's VPA caps memory at its limit, and an applying policy keeps
+that limit fixed with RequestsOnly. check-hpa-vpa-invariant.py reads pod-spec
+kinds only, so these chart-rendered targets are matched here by container name."""
 
 from __future__ import annotations
 
@@ -23,6 +21,8 @@ _SUFFIXES = (
 # Resolved container policies below this are a broken resolver, not a shrunk
 # estate: the platform controllers alone land here under every answer set.
 RESOLVED_FLOOR = 6
+# Modes in which the admission controller writes the recommendation into pods.
+APPLYING_MODES = {"Auto", "Initial", "Recreate", "InPlaceOrRecreate"}
 
 
 def _quantity(value) -> float:
@@ -101,6 +101,7 @@ def cap_violations(raw, releases, vpas) -> tuple:
         if release is None:
             continue
         name = (vpa.get("metadata") or {}).get("name")
+        mode = (spec.get("updatePolicy") or {}).get("updateMode", "Auto")
         policies = (spec.get("resourcePolicy") or {}).get("containerPolicies") or []
         for policy in policies:
             container = policy.get("containerName")
@@ -119,6 +120,12 @@ def cap_violations(raw, releases, vpas) -> tuple:
                 problems.append(
                     f"{where}: RequestsOnly keeps {limit} as the OOM ceiling, so "
                     f"maxAllowed.memory must equal it, not {cap}"
+                )
+            if mode in APPLYING_MODES and policy.get("controlledValues") != "RequestsOnly":
+                problems.append(
+                    f"{where}: updateMode {mode} under RequestsAndLimits rescales the "
+                    f"{limit} limit with every recommendation, so the ceiling moves "
+                    "and the pod is evicted again; set controlledValues: RequestsOnly"
                 )
     return problems, resolved
 
@@ -170,6 +177,26 @@ def test_a_requests_only_cap_below_its_limit_is_reported():
     problems, resolved = cap_violations(set(), releases, vpas)
     assert resolved == 1
     assert any("must equal it" in p for p in problems)
+
+
+@pytest.mark.parametrize("mode,flagged", [("Auto", True), ("Initial", True), ("Off", False)])
+def test_an_applying_policy_without_requests_only_is_reported(mode, flagged):
+    """Mutation case: the cap equals the limit, but the limit itself moves."""
+    releases = {"demo": {"resources": {"limits": {"memory": "512Mi"}}}}
+    vpas = [{
+        "kind": "VerticalPodAutoscaler",
+        "metadata": {"name": "demo"},
+        "spec": {
+            "targetRef": {"kind": "Deployment", "name": "demo"},
+            "updatePolicy": {"updateMode": mode},
+            "resourcePolicy": {"containerPolicies": [{
+                "containerName": "*",
+                "maxAllowed": {"memory": "512Mi"},
+            }]},
+        },
+    }]
+    problems, _ = cap_violations(set(), releases, vpas)
+    assert any("set controlledValues: RequestsOnly" in p for p in problems) is flagged
 
 
 def test_a_raw_workload_target_is_left_to_the_vendored_gate():

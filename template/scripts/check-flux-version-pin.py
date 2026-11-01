@@ -90,7 +90,10 @@ def main() -> int:
 
     for gotk in gotk_files:
         rel = gotk.relative_to(root)
-        text = _read(gotk) or ""
+        text = _read(gotk)
+        if text is None:
+            print(f"ERROR: {rel} is unreadable — the gate inspected nothing", file=sys.stderr)
+            return 2
         headers = sorted({m.group(1) for m in GOTK_RE.finditer(text)})
         if not headers:
             print(f"{rel} has no '# Flux Version:' header.")
@@ -101,8 +104,8 @@ def main() -> int:
             failed = True
         components = [m.group(1).strip() for m in COMPONENTS_RE.finditer(text)]
         if not components:
-            print(f"{rel} lists <no '# Components:' header>, not {args.components}.")
-            print("A cluster bootstrapped with --components-extra passes the matching --components.")
+            print(f"{rel} has no '# Components:' header; expected {args.components}.")
+            print("Re-export it with `flux install --export`, which writes the header.")
             failed = True
         for listed in (c for c in components if c != args.components):
             print(f"{rel} lists {listed}, not {args.components}.")

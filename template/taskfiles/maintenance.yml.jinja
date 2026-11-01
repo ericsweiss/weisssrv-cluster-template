@@ -125,6 +125,7 @@ tasks:
     vars:
       SERVICE: '{{.SERVICE | default ""}}'
     env: *version_env
+    preconditions: *check_versions_preconditions
     cmds:
       - |
         if [ -z "{{.SERVICE}}" ]; then
@@ -139,16 +140,23 @@ tasks:
   update-all-versions:
     desc: Bump every outdated tracked pin and regenerate the ConfigMap
     env: *version_env
+    preconditions: *check_versions_preconditions
     cmds:
       - {% endraw %}{{ secret_runner() }}{% raw %} python3 scripts/check-versions.py --update-all
       - task: :flux:sync-versions
       - echo "Pins updated. Commit all.yml + the versions ConfigMap and raise an MR."
 
   update-cluster:
-    desc: Full cluster update pass — k3s nodes, then version pins
+    desc: Bump every outdated version pin and regenerate the ConfigMap, then stop for the MR (node rollout follows the merge)
+    preconditions:
+      - sh: '[ "$(git rev-parse --abbrev-ref HEAD)" != main ]'
+        msg: "Check out a feature branch first: the bump lands through an MR, never on main."
     cmds:
-      - task: update-k3s-nodes
-      - task: check-versions
       - task: update-all-versions
-      - 'echo "Commit and push so Flux reconciles the new versions, then run task flux:status"'
+      - |
+        echo ""
+        echo "Commit all.yml and versions-configmap.yaml on this branch and raise the MR."
+        echo "After the merge, Flux rolls every in-cluster pin within about a minute."
+        echo "If k3s_version moved, run 'task maintenance:update-k3s-nodes' from main after the merge."
+        echo "Verify with 'task flux:status' and 'task k3s:status'."
 {%- endraw %}

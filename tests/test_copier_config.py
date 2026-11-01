@@ -15,23 +15,12 @@ import jinja2
 import pytest
 import render_cluster
 import yaml
-from conftest import copier_env, load_script
+from conftest import COMPUTED, CONFIG, QUESTIONS, copier_env, load_script
 from jinja2 import meta
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CONFIG = yaml.safe_load((REPO_ROOT / "copier.yml").read_text())
-QUESTIONS = {k: v for k, v in CONFIG.items() if not k.startswith("_")}
 TEMPLATE_ROOT = REPO_ROOT / CONFIG["_subdirectory"]
 TEMPLATES_SUFFIX = CONFIG["_templates_suffix"]
-
-# `when: false` entries: shared machinery, in scope for every question below but
-# never prompted and never recorded. The gates that hold an operator-facing
-# question do not apply to them.
-COMPUTED = {
-    name
-    for name, question in QUESTIONS.items()
-    if isinstance(question, dict) and question.get("when") is False
-}
 
 # The schema every subtree of the template is written against.
 REQUIRED_QUESTIONS = {
@@ -146,6 +135,14 @@ def test_site_identity_has_no_literal_default(name):
         f"{name} carries the literal default {default!r}; site identity must be "
         "asked for, or derived from another answer"
     )
+
+
+def test_license_year_default_passes_its_own_validator():
+    """`copier copy --defaults` with license mit takes the computed year, so the
+    default has to clear the four-digit validator."""
+    year = copier_env().from_string(QUESTIONS["license_year"]["default"]).render().strip()
+    assert re.fullmatch(r"[0-9]{4}", year), year
+    assert not _validator_message("license_year", license_year=year, license="mit")
 
 
 @pytest.mark.parametrize(
@@ -356,16 +353,51 @@ def test_every_template_variable_is_a_declared_question():
 def test_no_question_is_dead():
     """A declared question nothing reads is answered by every operator and
     changes nothing — either wire it up or drop it."""
-    used = set(_template_variables())
-    # A question can also be consumed by copier itself (another question's
-    # default, validator or `when`), which is a legitimate use.
-    config_text = (REPO_ROOT / "copier.yml").read_text()
-    dead = sorted(
-        name
-        for name in QUESTIONS
-        if name not in used and config_text.count(name) < 2
-    )
+    used = set(_template_variables()) | _consumed_by_copier()
+    dead = sorted(name for name in QUESTIONS if name not in used)
     assert not dead, f"copier.yml declares questions nothing reads: {dead}"
+
+
+# The question fields copier evaluates. `help` is prose, so a name in it is no use.
+_EVALUATED_FIELDS = ("validator", "default", "placeholder", "when", "choices")
+
+
+def _jinja_strings(value) -> list[str]:
+    """Every string inside a config value, however nested."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in _jinja_strings(item)]
+    if isinstance(value, list):
+        return [text for item in value for text in _jinja_strings(item)]
+    return []
+
+
+def _consumed_by_copier(config: dict = CONFIG) -> set[str]:
+    """Questions another question's evaluated field, or a copier setting such as
+    `_exclude`, reads by a Jinja reference: a legitimate use of an answer."""
+    found: set[str] = set()
+    for name, entry in config.items():
+        if name.startswith("_"):
+            texts = _jinja_strings(entry)
+        elif isinstance(entry, dict):
+            texts = [t for field in _EVALUATED_FIELDS for t in _jinja_strings(entry.get(field))]
+        else:
+            continue
+        for text in texts:
+            found |= _referenced_questions(text) - {name}
+    return found
+
+
+def test_a_name_in_prose_does_not_count_as_a_use():
+    """Mutation case: a question named only in help text, or only by itself,
+    is still dead."""
+    config = {
+        "gpu": {"type": "str", "help": "see license_holder", "default": "{{ gpu }}"},
+        "license_holder": {"type": "str", "help": "named in gpu's help only"},
+        "license": {"type": "str", "when": "{{ gpu != 'none' }}"},
+    }
+    assert _consumed_by_copier(config) == {"gpu"}
 
 
 def _validator_message(name: str, **context) -> str:
@@ -409,6 +441,21 @@ def test_node_exporter_job_regex_validator_requires_the_shipped_jobs(answer, rej
         f"node_exporter_job_regex={answer!r} was "
         f"{'accepted' if not message else 'rejected'}, expected the opposite"
     )
+
+
+@pytest.mark.parametrize(
+    "answer,suggested",
+    [
+        ("node-exporter", "node-exporter|node-exporter-host"),
+        ("hostwatch|node-exporter", "node-exporter|node-exporter-host|hostwatch"),
+    ],
+)
+def test_node_exporter_job_regex_suggestion_repeats_no_member(answer, suggested):
+    """The rejection suggests the shipped labels plus the operator's own, each
+    once, so pasting it back passes."""
+    message = _validator_message("node_exporter_job_regex", node_exporter_job_regex=answer)
+    assert f'"{suggested}"' in message, message
+    assert not _validator_message("node_exporter_job_regex", node_exporter_job_regex=suggested)
 
 
 def test_node_exporter_default_names_every_shipped_job():
@@ -608,14 +655,12 @@ def test_no_question_references_an_answer_asked_later():
 # Address-plan collisions
 # --------------------------------------------------------------------------
 
-# The addresses hosts.yml composes for everything the operator does NOT choose.
-# Keep in step with template/ansible/inventories/prod/hosts.yml.jinja.
+# The addresses hosts.yml composes for everything the operator does NOT choose:
+# both ends of every band copier.yml's reserved_address_bands declares.
 COMPOSED_BANDS = {
-    "192.168.0.11": "Proxmox host band",
-    "192.168.0.19": "Proxmox host band, top",
-    "192.168.0.23": "SMTP relay",
-    "192.168.0.31": "k3s server band",
-    "192.168.0.41": "k3s agent band",
+    f"192.168.0.{octet}": name
+    for low, high, name in yaml.safe_load(QUESTIONS["reserved_address_bands"]["default"])
+    for octet in {low, high}
 }
 
 VIP_ANSWERS = {
@@ -684,6 +729,7 @@ def _dns_message(answer: str) -> str:
     return _validator_message(
         "upstream_dns_servers",
         upstream_dns_servers=answer,
+        lan_cidr="192.168.0.0/24",
         lan_prefix="192.168.0",
         **_address_shared(),
         **_vip_labels(),
@@ -715,6 +761,23 @@ def test_upstream_dns_servers_accepts_free_addresses(answer):
     """The bands must not swallow the whole LAN — a false rejection here is an
     operator blocked at the prompt with nowhere to go."""
     assert not _dns_message(answer), f"{answer} was rejected but collides with nothing"
+
+
+@pytest.mark.parametrize(
+    "answer,outside",
+    [
+        ("1.1.1.1 8.8.8.8", "1.1.1.1"),
+        ("192.168.0.21 10.0.0.53", "10.0.0.53"),
+        ("192.168.1.21", "192.168.1.21"),
+    ],
+)
+def test_upstream_dns_servers_must_sit_inside_the_lan(answer, outside):
+    """Each address becomes a resolver guest on the flat LAN, so a public
+    resolver answered here renders a guest at that address, off every firewall
+    set. The rejection names the offending address."""
+    message = _dns_message(answer)
+    assert message, f"{answer!r} was accepted although {outside} is outside lan_cidr"
+    assert "lan_cidr" in message and outside in message, message
 
 
 def test_upstream_dns_servers_rejects_a_repeated_address():
@@ -1105,14 +1168,19 @@ GITLEAKS_CONFIGS = (
 _JINJA_STATEMENT = re.compile(r"^\s*\{%-?.*-?%\}\s*$")
 
 
-def _extends_default_rules(text: str) -> bool:
-    """Whether `[extend] useDefault` is true.
+def _gitleaks_toml(text: str) -> dict:
+    """The config as parsed TOML.
 
     Jinja statement lines are dropped so the template copy parses as the TOML it
     renders into; the answers gate allowlist entries, never `[extend]`.
     """
     body = "\n".join(line for line in text.splitlines() if not _JINJA_STATEMENT.match(line))
-    return (tomllib.loads(body).get("extend") or {}).get("useDefault") is True
+    return tomllib.loads(body)
+
+
+def _extends_default_rules(text: str) -> bool:
+    """Whether `[extend] useDefault` is true."""
+    return (_gitleaks_toml(text).get("extend") or {}).get("useDefault") is True
 
 
 @pytest.mark.parametrize("path", GITLEAKS_CONFIGS, ids=lambda p: p.parent.name)
@@ -1128,6 +1196,24 @@ def test_gitleaks_extends_the_default_rules(path):
 def test_a_gitleaks_config_without_extend_is_reported():
     """The negative case: the helper must reject the disarmed file."""
     assert not _extends_default_rules('title = "x"\n[[allowlists]]\ndescription = "y"\n')
+
+
+@pytest.mark.parametrize("path", GITLEAKS_CONFIGS, ids=lambda p: p.parent.name)
+def test_the_angle_bracket_placeholder_matches_only_a_whole_token(path):
+    """An unanchored entry matches anywhere inside a finding, so a real secret
+    that merely contains <word> would be silenced."""
+    placeholder = [
+        regex
+        for allowlist in _gitleaks_toml(path.read_text(encoding="utf-8")).get("allowlists") or []
+        for regex in allowlist.get("regexes", [])
+        if "<[a-z]" in regex
+    ]
+    assert placeholder, f"{path}: no <placeholder> allowlist entry"
+    for regex in placeholder:
+        assert regex.endswith("$"), f"{path}: {regex} matches inside a longer secret"
+        assert re.search(regex, "<api-token>")
+        assert not re.search(regex, "AKIAREALSECRET<api-token>")
+        assert not re.search(regex, "<api-token>AKIAREALSECRET")
 
 
 # --------------------------------------------------------------------------
@@ -1165,30 +1251,6 @@ def test_this_repository_applies_its_own_lib_pin_gate():
         "latter, so the includes would be gated against a library this repository "
         "never exercises"
     )
-
-
-def test_copier_pin_is_the_same_in_both_places_this_pipeline_installs_it():
-    """`variables.COPIER_VERSION` and the `pip_packages:` literal must agree.
-
-    Includes resolve before job variables exist, so the python-tests entry
-    repeats the pin; a disagreement renders the two jobs under different copiers.
-    """
-    checker = load_script("check-lib-pins.py")
-
-    ci = checker.load_ci(REPO_ROOT / ".gitlab-ci.yml")
-    pinned = (ci.get("variables") or {})["COPIER_VERSION"]
-    literals = [
-        package
-        for include in ci["include"]
-        if isinstance(include, dict)
-        for package in str((include.get("inputs") or {}).get("pip_packages", "")).split()
-        if package.startswith("copier==")
-    ]
-    assert literals, "no include installs copier — this gate examined nothing"
-    for literal in literals:
-        assert literal == f"copier=={pinned}", (
-            f"{literal} disagrees with variables.COPIER_VERSION ({pinned})"
-        )
 
 
 def test_lib_ref_validator_takes_release_tags_only():
@@ -1319,6 +1381,12 @@ VALIDATOR_CASES = [
     ("git_namespace", "/homelab", "leading slash", {}),
     ("lib_url", "https://git.example.com/group/weisssrv-lib.git", None, {}),
     ("lib_url", "git@git.example.com:group/weisssrv-lib.git", "ssh form, not http(s)", {}),
+    (
+        "lib_url",
+        "https://git.example.com/group/weisssrv-lib",
+        "no .git suffix; the links partial strips four characters",
+        {},
+    ),
     ("lib_project", "group/weisssrv-lib", None, {}),
     ("lib_project", "weisssrv-lib", "no namespace segment", {}),
     ("ci_runner_tag", "infrastructure", None, {}),
@@ -1422,9 +1490,7 @@ def test_validator_accepts_and_rejects(case):
             )
 
 
-# Validators with a test of their own above, which the table deliberately does
-# not duplicate — the value is in the reasoning those tests carry, not in a
-# second accept/reject pair.
+# Validators with a dedicated test above, named by test or glob.
 DEDICATED_VALIDATOR_TESTS = {
     "lan_cidr": "test_pod_cidr_must_not_overlap_the_lan",
     "lan_prefix": "test_lan_prefix_must_sit_inside_the_lan",

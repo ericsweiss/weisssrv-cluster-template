@@ -1,0 +1,37 @@
+---
+# promtool unit tests for the two Loki discard alerts, split by reason class
+# because the remedies differ. Each catches a short burst, and neither answers
+# for the other's reasons.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'loki_discarded_samples_total{job="observability/loki", reason="too_far_behind", tenant="fake"}'
+        values: '0+1000x8 8000+0x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: LokiDiscardsOutOfOrder
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: too_far_behind
+      - eval_time: 8m
+        alertname: LokiDiscardsRateLimited
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'loki_discarded_samples_total{job="observability/loki", reason="rate_limited", tenant="fake"}'
+        values: '0+1000x8 8000+0x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: LokiDiscardsRateLimited
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: rate_limited
+      - eval_time: 8m
+        alertname: LokiDiscardsOutOfOrder
+        exp_alerts: []

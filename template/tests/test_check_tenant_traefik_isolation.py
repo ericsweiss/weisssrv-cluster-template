@@ -111,12 +111,12 @@ def test_baseline_only_without_the_policies_fails(tmp_path):
 def test_a_tenant_with_cross_namespace_still_true_fails(tmp_path):
     root = build(
         tmp_path,
-        ["tenant-crd-editor.yaml", "hermes-tenant.yaml"],
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
         RELEASE_WITH_VALUES.format(allow="true"),
     )
     problems = gate.check(root)
     assert len(problems) == 1
-    assert "hermes-tenant.yaml" in problems[0]
+    assert "demo-tenant.yaml" in problems[0]
 
 
 # Plain-Ingress annotations, forwardAuth addresses and endpoint resolution do
@@ -124,12 +124,12 @@ def test_a_tenant_with_cross_namespace_still_true_fails(tmp_path):
 def test_a_tenant_without_the_policies_fails_with_cross_namespace_off(tmp_path):
     root = build(
         tmp_path,
-        ["tenant-crd-editor.yaml", "hermes-tenant.yaml"],
+        ["tenant-crd-editor.yaml", "demo-tenant.yaml"],
         RELEASE_WITH_VALUES.format(allow="false"),
     )
     problems = gate.check(root)
     assert len(problems) == 1
-    assert "hermes-tenant.yaml" in problems[0]
+    assert "demo-tenant.yaml" in problems[0]
     assert "even when providers.kubernetesCRD.allowCrossNamespace is false" in problems[0]
 
 

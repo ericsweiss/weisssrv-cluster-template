@@ -195,10 +195,10 @@ def test_a_missing_pyyaml_names_pyyaml_not_a_missing_ci_yaml(tmp_path: Path):
         source.replace("import yaml", "import yaml_not_installed_here", 1),
         encoding="utf-8",
     )
-    for companion in ("deploy-preflight.py", "ci_playbook_invocations.py"):
+    for companion in ("check-deploy-preflight.py", "ci_playbook_invocations.py"):
         shutil.copy(SCRIPTS / companion, tmp_path)
     proc = subprocess.run(
-        [sys.executable, str(tmp_path / "deploy-preflight.py")],
+        [sys.executable, str(tmp_path / "check-deploy-preflight.py")],
         cwd=tmp_path, capture_output=True, text=True,
     )
     assert proc.returncode == 2, f"{proc.stdout}{proc.stderr}"

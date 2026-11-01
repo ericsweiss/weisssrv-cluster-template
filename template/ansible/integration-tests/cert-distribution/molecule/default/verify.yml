@@ -10,7 +10,6 @@
     - ../../../../inventories/prod/group_vars/all.yml
 
   tasks:
-    # acme.sh Installation Verification
     - name: Check acme.sh is installed
       ansible.builtin.stat:
         path: /root/.acme.sh/acme.sh
@@ -24,16 +23,6 @@
         fail_msg: "acme.sh not installed"
         success_msg: "acme.sh is installed"
 
-    - name: Check acme.sh account configuration
-      ansible.builtin.stat:
-        path: /root/.acme.sh/account.conf
-      register: acme_account
-
-    - name: Log acme.sh account status
-      ansible.builtin.debug:
-        msg: "acme.sh account configured: {{ acme_account.stat.exists }}"
-
-    # Certificate Files Verification
     - name: Check certificate directories exist
       ansible.builtin.stat:
         path: "/root/.acme.sh/{{ item.domain }}"
@@ -79,7 +68,6 @@
         success_msg: "Private key exists with correct permissions for {{ item.item.domain }}"
       loop: "{{ key_files.results }}"
 
-    # SSH Key Setup Verification (matches role output)
     - name: Check SSH private key for distribution
       ansible.builtin.stat:
         path: /home/{{ admin_user }}/.ssh/id_ed25519_certs
@@ -165,7 +153,6 @@
     - ../../../../inventories/prod/group_vars/all.yml
 
   tasks:
-    # Certificate Directory Verification
     - name: Check certificate directory exists
       ansible.builtin.stat:
         path: /etc/ssl/certs/wildcard
@@ -179,7 +166,6 @@
         fail_msg: "Certificate directory not created"
         success_msg: "Certificate directory exists"
 
-    # Distributed Certificate Verification
     - name: Check for distributed fullchain certificate
       ansible.builtin.stat:
         path: /etc/ssl/certs/wildcard/fullchain.pem
@@ -208,31 +194,6 @@
         fail_msg: "Private key not distributed or wrong permissions (expected 0600)"
         success_msg: "Private key distributed with correct permissions"
 
-    - name: Verify certificate content is valid (contains BEGIN CERTIFICATE)
-      ansible.builtin.command: grep -q "BEGIN CERTIFICATE" /etc/ssl/certs/wildcard/fullchain.pem
-      register: cert_content_check
-      changed_when: false
-
-    - name: Assert certificate content is valid
-      ansible.builtin.assert:
-        that:
-          - cert_content_check.rc == 0
-        fail_msg: "Distributed certificate does not contain valid PEM content"
-        success_msg: "Distributed certificate contains valid PEM content"
-
-    - name: Verify private key content is valid (contains BEGIN)
-      ansible.builtin.command: grep -q "BEGIN" /etc/ssl/certs/wildcard/privkey.pem
-      register: key_content_check
-      changed_when: false
-
-    - name: Assert private key content is valid
-      ansible.builtin.assert:
-        that:
-          - key_content_check.rc == 0
-        fail_msg: "Distributed private key does not contain valid PEM content"
-        success_msg: "Distributed private key contains valid PEM content"
-
-    # SSH Connectivity Verification
     - name: Check SSH service is running
       ansible.builtin.systemd:
         name: ssh
@@ -266,7 +227,6 @@
         fail_msg: "cert-distribution pubkey missing from {{ admin_user }}'s authorized_keys"
         success_msg: "cert-distribution key present in authorized_keys ({{ authorized_key_check.stdout }})"
 
-    # Forced-command receiver hardening verification
     - name: Check the forced-command receiver was deployed
       ansible.builtin.stat:
         path: /usr/local/sbin/cert-receive
@@ -331,3 +291,23 @@
           - "'DNS:*.' in distributed_cert_san.stdout"
         fail_msg: "Distributed cert has no wildcard SAN"
         success_msg: "Distributed cert is a valid wildcard cert"
+
+    - name: Read the distributed private key's public half
+      ansible.builtin.command: >-
+        openssl pkey -in /etc/ssl/certs/wildcard/privkey.pem -pubout
+      register: distributed_key_pub
+      changed_when: false
+
+    - name: Read the distributed cert's public key
+      ansible.builtin.command: >-
+        openssl x509 -in /etc/ssl/certs/wildcard/fullchain.pem -noout -pubkey
+      register: distributed_cert_pub
+      changed_when: false
+
+    - name: Assert the distributed key parses and matches the distributed cert
+      ansible.builtin.assert:
+        that:
+          - "'BEGIN PUBLIC KEY' in distributed_key_pub.stdout"
+          - distributed_key_pub.stdout == distributed_cert_pub.stdout
+        fail_msg: "Distributed privkey.pem is not a key for the distributed cert"
+        success_msg: "Distributed key parses and matches the distributed cert"

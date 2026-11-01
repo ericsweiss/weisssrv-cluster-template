@@ -1,6 +1,6 @@
 {%- set runner_tag = ci_runner_tag -%}
 {%- set cpu_selector = ci_cpu_selector -%}
-{#- Exact patch tag: a two-component tag floats, so a Terraform minor release
+{#- Exact patch tag: a two-component tag floats, so a Terraform patch release
     lands mid-pipeline between plan and apply. -#}
 {%- set terraform_image = 'hashicorp/terraform:1.15.9' -%}
 {%- set cluster_dir = 'kubernetes/clusters/' ~ cluster_name -%}
@@ -22,6 +22,7 @@
         'ansible/inventories/prod/host_vars/**/*',
         'ansible/playbooks/base.yml',
         'ansible/playbooks/site.yml',
+        'ansible/playbooks/tasks/_reseed-cert-target.yml',
         'ansible/requirements.yml',
       ],
       'dns': [
@@ -37,6 +38,7 @@
       'mail': [
         'ansible/inventories/prod/group_vars/mail.yml',
         'ansible/playbooks/mail.yml',
+        'ansible/playbooks/tasks/_reseed-cert-target.yml',
         'ansible/requirements.yml',
       ],
       'k3s': [
@@ -121,8 +123,8 @@ workflow:
     - if: '$CI_COMMIT_BRANCH == "main"'
       auto_cancel:
         on_new_commit: none
-    # Every schedule creates a pipeline; each opt-in job selects itself on
-    # $SCHEDULE_TYPE.
+    # Every schedule creates a pipeline. The opt-in jobs select themselves on
+    # $SCHEDULE_TYPE; the drift plans run on every schedule.
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
@@ -133,8 +135,7 @@ variables:
   # cluster actually resolves (a fork or mirror answers lib_project).
   LIB_PROJECT: "{{ lib_project }}"
   PYYAML_VERSION: "6.0.3"
-  # Pre-seeded for check-doc-links' backticked-path pass; inert until the library
-  # pin ships it.
+  # Turns on check-doc-links' backticked-path pass.
   CHECK_DOC_LINKS_PATHS: "1"
   # fnmatch exceptions for cited paths that are not files here: the library's own
   # docs, the forge-hosted terraform states, a gitignored plan file, and the
@@ -273,8 +274,8 @@ include:
       tags: ["{{ runner_tag }}"]
       image: python:3.14
       # jq: test_collect_state_lib.py drives the collector's jq filters.
-      # ansible-core: test_deploy_preflight.py fails rather than skips without it,
-      # and the pin is the core line requirements.txt's `ansible==` resolves to.
+      # ansible-core: the core line requirements.txt's `ansible==` resolves to,
+      # so a suite that reaches for ansible runs the deployed version.
       apt_packages: "jq"
       pip_packages: "ansible-core==2.21.5"
       test_dir: "tests scripts"
@@ -305,6 +306,8 @@ include:
         - ".pre-commit-config.yaml"
         - ".gitattributes"
         - "ansible/molecule/**/*"
+        # tests/test_check_skill_refs.py reads the agent skill tree.
+        - ".claude/**/*"
         - ".gitlab-ci.yml"
 
   - project: {{ lib_project }}
@@ -318,6 +321,64 @@ include:
       changes:
         - "terraform/**/*"
         - ".gitlab-ci.yml"
+
+  # One read-only `terraform plan -detailed-exitcode` per supervised root, on a
+  # schedule and on main. It never applies; docs/ci-pipeline.md § Drift plans.
+  # Each secrets_exports line names one variable the root declares.
+{%- if vpn_tailscale %}
+  - project: {{ lib_project }}
+    ref: $[[ inputs.lib_ref ]]
+    file: /ci/validate/terraform-drift-plan.yml
+    inputs:
+      image: $TF_JOB_IMAGE
+      job_name: tailscale-drift-plan
+      module_dir: "terraform/tailscale"
+      state_name: "tailscale"
+      tags: ["{{ runner_tag }}"]
+      changes:
+        - "terraform/tailscale/**/*"
+      secrets_exports: |
+        TF_VAR_tailscale_oauth_client_id=$({{ secret_read("Tailscale OAuth", "client id") }})
+        TF_VAR_tailscale_oauth_client_secret=$({{ secret_read("Tailscale OAuth", "credential") }})
+        export TF_VAR_tailscale_oauth_client_id TF_VAR_tailscale_oauth_client_secret
+{%- endif %}
+
+  - project: {{ lib_project }}
+    ref: $[[ inputs.lib_ref ]]
+    file: /ci/validate/terraform-drift-plan.yml
+    inputs:
+      image: $TF_JOB_IMAGE
+      job_name: authentik-drift-plan
+      module_dir: "terraform/authentik"
+      state_name: "authentik"
+      tags: ["{{ runner_tag }}"]
+      changes:
+        - "terraform/authentik/**/*"
+      secrets_exports: |
+        TF_VAR_authentik_token=$({{ secret_read("Authentik Terraform Token", "credential") }})
+        TF_VAR_oauth2_client_secret_grafana=$({{ secret_read("Grafana SSO", "oidc-client-secret") }})
+        export TF_VAR_authentik_token TF_VAR_oauth2_client_secret_grafana
+{%- if use_unifi %}
+
+  # The console is not published, so a runner off the LAN fails this plan.
+  - project: {{ lib_project }}
+    ref: $[[ inputs.lib_ref ]]
+    file: /ci/validate/terraform-drift-plan.yml
+    inputs:
+      image: $TF_JOB_IMAGE
+      job_name: unifi-drift-plan
+      module_dir: "terraform/unifi"
+      state_name: "unifi"
+      tags: ["{{ runner_tag }}"]
+      changes:
+        - "terraform/unifi/**/*"
+      secrets_exports: |
+        TF_VAR_unifi_api_url=$({{ secret_read("UniFi Controller", "url") }})
+        TF_VAR_unifi_api_key=$({{ secret_read("UniFi Controller", "api-key") }})
+        TF_VAR_wlan_passphrase_iot=$({{ secret_read("WiFi IoT", "password") }})
+        TF_VAR_wlan_passphrase_guest=$({{ secret_read("WiFi Guest", "password") }})
+        export TF_VAR_unifi_api_url TF_VAR_unifi_api_key TF_VAR_wlan_passphrase_iot TF_VAR_wlan_passphrase_guest
+{%- endif %}
 
   # flux-lint in substitute mode. flux_render_script is scripts/flux-env.sh, the
   # wrapper that adds the second ConfigMap this cluster substitutes from;
@@ -529,8 +590,7 @@ include:
 # CRITICAL: GitLab evaluates `rules:changes` as TRUE for every pipeline source
 # but push and merge_request_event, so without the `web` arm below a "Run
 # pipeline" button on main fires every deploy job unattended. Pulled in as
-# `- !reference [.skip-schedule-web, rules]`; `.drift-schedule-rule` further
-# down is the schedule-only twin the read-only drift jobs use.
+# `- !reference [.skip-schedule-web, rules]`.
 .skip-schedule-web:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
@@ -967,7 +1027,9 @@ check-deploy-playbooks:
     # would preflight against the previous release's roles after a pin bump.
     - for i in 1 2 3; do ansible-galaxy collection install --force -r ansible/requirements.yml && break; [ "$i" = 3 ] && exit 1; echo "galaxy install failed (attempt $i) - retrying in 20s"; sleep 20; done
   script:
-    - python3 scripts/deploy-preflight.py
+    # No --require-tag-selections: the deploy jobs run whole playbooks and
+    # select no tags, so every run resolves zero selections by design.
+    - python3 scripts/check-deploy-preflight.py
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
@@ -980,8 +1042,10 @@ check-deploy-playbooks:
         - "ansible/inventories/prod/**/*"
         - "ansible/requirements.yml"
         - "ansible/ansible.cfg"
-        - "scripts/deploy-preflight.py"
+        - "scripts/check-deploy-preflight.py"
+        # Imported from its own directory by the gate.
         - "scripts/ci_yaml.py"
+        - "scripts/ci_playbook_invocations.py"
         - ".gitlab-ci.yml"
     - if: '$CI_COMMIT_BRANCH == "main"'
       changes: *deploy_preflight_paths
@@ -1080,6 +1144,12 @@ validation-gate:
     - job: check-integration-matrix
       optional: true
     - job: check-role-inputs
+      optional: true
+    - job: kubectl-version-pin
+      optional: true
+    - job: version-checksums
+      optional: true
+    - job: comment-length
       optional: true
     # Expands to one need per matrix instance, well under GitLab's 50-need cap.
     - job: integration-tests
@@ -1398,118 +1468,6 @@ deploy-terraform:
 {%- endfor %}
       when: manual
       allow_failure: false
-{% endif %}
-# CRITICAL: no {{ gate_var }} guard here. A guard REMOVES the job
-# when the credential is revoked or rescoped, so out-of-band drift goes
-# undetected behind a green pipeline; unguarded, the vault read reds the job.
-.drift-schedule-rule:
-  rules:
-    # No changes: filter, so it catches an admin-console edit made when nothing
-    # in-repo moved.
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
-
-# Shared shape of the read-only terraform drift-plan jobs. Each job adds
-# TF_DRIFT_DIR, its own TF_HTTP_* state paths, the vault reads and the plan, and
-# its own rules.
-.terraform-drift-plan:
-  stage: validate
-  extends: .terraform-http-backend
-  needs: []
-  tags: ["{{ runner_tag }}"]
-  image:
-    name: $TF_JOB_IMAGE
-    entrypoint: [""]
-  before_script:
-    - !reference [.install-1password-alpine, before_script]
-    - cd "$TF_DRIFT_DIR"
-    # -lockfile=readonly: provider hashes are committed; CI rewriting them would
-    # mask supply-chain drift.
-    - terraform init -lockfile=readonly
-  # Exit 2 is the drift signal and stays advisory; exit 1 is a broken plan and
-  # turns the job red.
-  allow_failure:
-    exit_codes: [2]
-
-{%- if vpn_tailscale %}
-# Read-only drift plan for the tailnet ACL. It never applies — that stays
-# supervised (terraform/tailscale/README.md) — so a console hot-fix would
-# otherwise sit undetected until someone happened to plan.
-tailscale-drift-plan:
-  extends: .terraform-drift-plan
-  variables:
-    TF_DRIFT_DIR: "terraform/tailscale"
-    TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/tailscale"
-    TF_HTTP_LOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/tailscale/lock"
-    TF_HTTP_UNLOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/tailscale/lock"
-  script:
-    - |
-      set -eo pipefail
-      TF_VAR_tailscale_oauth_client_id=$({{ secret_read("Tailscale OAuth", "client id") }})
-      TF_VAR_tailscale_oauth_client_secret=$({{ secret_read("Tailscale OAuth", "credential") }})
-      export TF_VAR_tailscale_oauth_client_id TF_VAR_tailscale_oauth_client_secret
-      terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
-  rules:
-    - !reference [.drift-schedule-rule, rules]
-    # Post-merge, before the supervised apply. No merge_request_event rule:
-    # this materializes vault secrets into a job running an unmerged branch's
-    # own code, and an advisory signal does not justify that.
-    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
-      changes:
-        - "terraform/tailscale/**/*"
-{% endif %}
-# Read-only drift plan for the SSO objects. The apply is `task
-# terraform:authentik-apply`, which refuses to run non-interactively, so this job
-# is the only thing that notices an admin-UI edit. Own state name below.
-authentik-drift-plan:
-  extends: .terraform-drift-plan
-  variables:
-    TF_DRIFT_DIR: "terraform/authentik"
-    TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/authentik"
-    TF_HTTP_LOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/authentik/lock"
-    TF_HTTP_UNLOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/authentik/lock"
-  script:
-    - |
-      set -eo pipefail
-      # One line per client-secret variable the root declares: a missing one
-      # fails the plan, which is the intended behaviour, not drift.
-      TF_VAR_authentik_token=$({{ secret_read("Authentik Terraform Token", "credential") }})
-      TF_VAR_oauth2_client_secret_grafana=$({{ secret_read("Grafana SSO", "oidc-client-secret") }})
-      export TF_VAR_authentik_token TF_VAR_oauth2_client_secret_grafana
-      terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
-  rules:
-    - !reference [.drift-schedule-rule, rules]
-    # No merge_request_event rule: this job reads every OIDC client secret.
-    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
-      changes:
-        - "terraform/authentik/**/*"
-{% if use_unifi %}
-# Read-only drift plan for the gateway's own segmentation. The apply is `task
-# terraform:unifi-apply`, which refuses to run non-interactively. It reads the
-# console over the LAN, so a runner off the LAN fails the plan.
-unifi-drift-plan:
-  extends: .terraform-drift-plan
-  variables:
-    TF_DRIFT_DIR: "terraform/unifi"
-    TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/unifi"
-    TF_HTTP_LOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/unifi/lock"
-    TF_HTTP_UNLOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/unifi/lock"
-  script:
-    - |
-      set -eo pipefail
-      # One line per WLAN passphrase variable the root declares: a missing one
-      # fails the plan, which is the intended behaviour, not drift.
-      TF_VAR_unifi_api_url=$({{ secret_read("UniFi Controller", "url") }})
-      TF_VAR_unifi_api_key=$({{ secret_read("UniFi Controller", "api-key") }})
-      TF_VAR_wlan_passphrase_iot=$({{ secret_read("WiFi IoT", "password") }})
-      TF_VAR_wlan_passphrase_guest=$({{ secret_read("WiFi Guest", "password") }})
-      export TF_VAR_unifi_api_url TF_VAR_unifi_api_key TF_VAR_wlan_passphrase_iot TF_VAR_wlan_passphrase_guest
-      terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
-  rules:
-    - !reference [.drift-schedule-rule, rules]
-    # No merge_request_event rule: this job reads every WLAN passphrase.
-    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
-      changes:
-        - "terraform/unifi/**/*"
 {% endif %}
 # ==============================================================================
 # VERIFY STAGE — verification only, runs after the deploy stage whatever it did.

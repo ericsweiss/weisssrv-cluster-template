@@ -114,11 +114,12 @@ Violating one of these breaks production or fails review.
 | A Kubernetes application | `references/add-k8s-app.md`, then the closest existing directory under `kubernetes/apps/` | mirror its shape: namespace, workload, storage, ExternalSecret, certificate, ingress route, NetworkPolicy, autoscaling policy |
 | A host or guest | `references/add-vm-app.md`, `ansible/inventories/prod/` and the [role's README in the library]({{ links.lib_tree() }}{{ lib_ref }}/ansible_collections/weisssrv/infra/roles) | inventory first, playbook second; per-host facts go inline on the host entry in `hosts.yml` (there is no `host_vars/` unless you create one) |
 | Storage: pools, datasets, exports | `ansible/inventories/prod/group_vars/nas.yml` | declare only what exists — Ansible never creates or destroys a pool; a NEW or empty pool goes through `docs/RUNBOOKS.md` § Storage bootstrap first; per-guest zvols are `vm_additional_disks` in `hosts.yml` |
-| Terraform state (DNS, tailnet, SSO) | the module directory and its README | plan, review, apply; SSO objects are a supervised apply |
+| Terraform state (DNS, SSO{% if vpn_tailscale %}, tailnet{% endif %}{% if use_unifi %}, gateway networks{% endif %}) | the root under `terraform/` and its README | plan, review, apply; SSO objects{% if vpn_tailscale %}, the tailnet policy{% endif %}{% if use_unifi %} and the gateway{% endif %} are a supervised apply |
 | A version pin or an upgrade | `references/maintenance-upgrades.md`, `docs/RUNBOOKS.md` § Upgrades | `task maintenance:check-versions`, then bump, `task flux:sync-versions`, commit both files |
 | An incident | `references/debugging.md`, `docs/RUNBOOKS.md` § Where to look first, then the service's dashboard and logs | `task flux:status`, `task infra:verify`, `task k3s:status` |
 | Cluster access or a credential | `references/cluster-access.md`, `docs/RUNBOOKS.md` § Rotating a secret | `task flux:rotate-secret -- <ns>/<name>`, or re-run the task that injects it host-side |
 | An alert or a dashboard | `references/add-k8s-app.md` § Alert rules, `kubernetes/infrastructure/observability/README.md` | an app's rules are a standalone `PrometheusRule` in that app's directory, not an addition to the platform map; every rule carries a `runbook_url` anchoring a heading that exists in `docs/RUNBOOKS.md`; validate with `task lint:prometheus-config` |
+| A tenant: an application deployed from its own repository | `kubernetes/clusters/{{ cluster_name }}/tenants/README.md` | it is the canonical wiring and the operator's onboarding steps; the ONBOARDING page in the tenant's own repository renders its values into that shape |
 | A platform (role / CI / Terraform-module) change | [weisssrv-lib]({{ links.lib_home() }}) | it changes upstream and this repo bumps `lib_ref`; never vendor a role here |
 
 ### Where the generic half of a change goes
@@ -173,18 +174,19 @@ cross-namespace call carries a leading colon (`:flux:sync-versions`).
 - **Commit subjects are Conventional Commits** — `type(scope): summary`, with
   `feat|fix|chore|docs|refactor|ci|test` as the types in use. Nothing enforces
   it; the history is the contract.
-- **Run the review loop to convergence before raising the merge request**:
-  self-review, then the AI reviewer and any requested reviewer, address every
-  valid finding, and repeat until none remain.
-- Resolve every valid review finding and re-run the gates before merging. Fold
+- **Run one review round before raising the merge request**: self-review, then
+  the AI reviewer and any requested reviewer. Fix every valid finding and
+  re-run the gates. When only medium or lower findings remain, fix them, run
+  the targeted checks and stop rather than starting another full round. Fold
   any available version bumps into the same revision rather than opening a
   separate one.
 - Merge request descriptions state what was tested, in the past tense — not a
   checklist of intentions.
-- **Serialize merges.** Merging a second change while the first one's deploy
-  pipeline is still running cancels that deploy, and a manual deploy against a
-  target whose CI job is in flight races it. Wait, then reconcile the pipeline
-  against the live state.
+- **Merges are serialized per deploy target, not per pipeline.** Let a
+  default-branch pipeline finish before merging the next change that touches
+  the same targets, and never hand-run a deploy task while its CI deploy job is
+  in flight. `docs/ci-pipeline.md` § Cancellation policy has the mechanism and
+  its limits.
 - After merge: Flux reconciles `kubernetes/` within about a minute
   (`task flux:reconcile` forces it) and the deploy jobs run the Ansible side.
   Verify with `task flux:status`, `task infra:verify`, `task k3s:status`.

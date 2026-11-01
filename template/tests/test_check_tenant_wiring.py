@@ -146,8 +146,8 @@ STORE = textwrap.dedent(
         - namespaces:
             - demo-app
       provider:
-        fake:
-          data: []
+        gitlab:
+          projectID: "1"
     """
 )
 
@@ -181,6 +181,8 @@ def drop(body: str, needle: str) -> str:
 
 
 def test_a_complete_tenant_file_passes(repo: Path) -> None:
+    """The app tree carries no deletionPolicy; only the database tree is held to Orphan."""
+    assert "deletionPolicy" not in TENANT
     assert gate.check(repo) == []
     assert gate.main(["--repo-root", str(repo)]) == 0
 
@@ -707,7 +709,96 @@ def test_a_store_with_a_namespace_selector_fails(repo: Path) -> None:
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
-def test_an_empty_tree_the_aggregator_agrees_with_passes(tmp_path: Path) -> None:
+GITLAB = '    gitlab:\n      projectID: "1"\n'
+ONEPASSWORD = "    onepassword:\n      vaults:\n        demo-app: 1\n"
+
+
+def onepassword_store(vaults: str = "        demo-app: 1\n") -> str:
+    """STORE with a 1Password provider whose vault entries are `vaults`."""
+    return STORE.replace(
+        GITLAB,
+        ONEPASSWORD.replace("        demo-app: 1\n", vaults),
+    )
+
+
+def test_a_onepassword_store_reading_its_own_vault_passes(repo: Path) -> None:
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + onepassword_store())
+    assert gate.check(repo) == []
+
+
+def test_a_onepassword_store_reading_the_platform_vault_fails(repo: Path) -> None:
+    """The cross-tenant read: a tenant store that also lists the platform vault."""
+    body = TENANT + onepassword_store("        demo-app: 1\n        Platform: 2\n")
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    assert any("reads vaults ['Platform', 'demo-app']" in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_onepassword_store_reading_another_vault_fails(repo: Path) -> None:
+    body = TENANT + onepassword_store("        other-app: 1\n")
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    assert any("not only the tenant vault demo-app" in p for p in problems), problems
+
+
+def test_a_onepassword_store_with_a_list_of_vaults_fails(repo: Path) -> None:
+    body = TENANT + onepassword_store("        - demo-app\n")
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    assert any("onepassword.vaults is not a mapping" in p for p in problems), problems
+
+
+def onepassword_sdk_store(vault: str) -> str:
+    """STORE with a 1Password SDK provider reading `vault`."""
+    return STORE.replace(GITLAB, f"    onepasswordSDK:\n      vault: {vault}\n")
+
+
+def test_a_onepassword_sdk_store_reading_its_own_vault_passes(repo: Path) -> None:
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + onepassword_sdk_store("demo-app"))
+    assert gate.check(repo) == []
+
+
+@pytest.mark.parametrize("vault", ["Platform", "other-app"])
+def test_a_onepassword_sdk_store_reading_another_vault_fails(repo: Path, vault: str) -> None:
+    """The SDK provider names one vault; the platform vault is a cross-tenant read."""
+    body = TENANT + onepassword_sdk_store(vault)
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    assert any(f"reads vault '{vault}', not the tenant vault demo-app" in p
+               for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+@pytest.mark.parametrize(
+    ("provider", "shown"),
+    [
+        ("    fake:\n      data: []\n", "uses provider fake,"),
+        (GITLAB + "    onepassword:\n      vaults:\n        demo-app: 1\n",
+         "uses provider gitlab, onepassword,"),
+        ("    {}\n", "uses provider none,"),
+    ],
+    ids=["unknown-provider", "two-providers", "no-provider"],
+)
+def test_a_store_without_exactly_one_known_provider_fails(
+    repo: Path, provider: str, shown: str
+) -> None:
+    """An unchecked provider could read any vault, so it is a finding, not a pass."""
+    body = TENANT + STORE.replace("  provider:\n" + GITLAB, "  provider:\n" + provider)
+    assert body != TENANT + STORE
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    assert any(shown in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_null_condition_entry_is_skipped_not_a_traceback(repo: Path) -> None:
+    body = TENANT + STORE.replace("    - namespaces:\n", "    - null\n    - namespaces:\n", 1)
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    assert gate.check(repo) == []
+
+
+def test_an_empty_tree_the_aggregator_agrees_with_passes(tmp_path: Path, capsys) -> None:
     """The shipped state: nothing onboarded, so the gate says so instead of
     reporting OK on zero inspected files."""
     write(
@@ -717,6 +808,9 @@ def test_an_empty_tree_the_aggregator_agrees_with_passes(tmp_path: Path) -> None
     )
     write(tmp_path, f"{gate.TENANTS_DIR}/tenant-crd-editor.yaml", "kind: ClusterRole\n")
     assert gate.main(["--repo-root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "no tenant onboarded" in out
+    assert "Tenant wiring OK" not in out
 
 
 def test_an_empty_tree_with_an_empty_aggregator_passes(tmp_path: Path) -> None:
@@ -884,6 +978,8 @@ GUARD = "  annotations:\n    kustomize.toolkit.fluxcd.io/prune: disabled\n"
 
 
 def test_a_confined_second_kustomization_passes(repo: Path) -> None:
+    """The database Kustomization carries `deletionPolicy: Orphan`, which the gate accepts."""
+    assert "deletionPolicy: Orphan" in CONFINED_SECOND
     write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + CONFINED_SECOND)
     assert gate.check(repo) == []
 
@@ -941,6 +1037,14 @@ def test_a_second_complete_namespace_passes(repo: Path) -> None:
     assert gate.check(repo) == []
 
 
+def test_the_targeted_namespace_is_the_tenant_namespace_whatever_the_order(
+    repo: Path,
+) -> None:
+    """A Namespace declared ahead of the targeted one does not become the tenant's."""
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", EXTRA_NAMESPACE + TENANT)
+    assert gate.check(repo) == []
+
+
 @pytest.mark.parametrize("value", [None, "enabled"], ids=["absent", "enabled"])
 def test_a_second_namespace_without_the_prune_guard_fails(
     repo: Path, value: str | None
@@ -968,14 +1072,6 @@ def test_a_second_namespace_without_a_label_fails(repo: Path, label: str) -> Non
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
-def test_a_database_kustomization_that_orphans_on_deletion_passes(repo: Path) -> None:
-    """The database Kustomization carries `deletionPolicy: Orphan`, so deleting its
-    wiring leaves the database whole; the gate must accept the field."""
-    assert "deletionPolicy: Orphan" in CONFINED_SECOND
-    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + CONFINED_SECOND)
-    assert gate.check(repo) == []
-
-
 @pytest.mark.parametrize(
     "policy", [None, "Delete", "MirrorPrune", "WaitForTermination"],
     ids=["absent", "delete", "mirror-prune", "wait"],
@@ -999,13 +1095,6 @@ def test_a_database_kustomization_without_orphan_fails(
     assert len(problems) == 1, problems
     assert "deletionPolicy: Orphan" in problems[0], problems
     assert gate.main(["--repo-root", str(repo)]) == 1
-
-
-def test_an_app_kustomization_needs_no_orphan(repo: Path) -> None:
-    """Only the database tree is held to Orphan; the app tree prunes normally."""
-    assert "deletionPolicy" not in TENANT
-    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT)
-    assert gate.check(repo) == []
 
 
 ROUTING = textwrap.dedent(
@@ -1105,3 +1194,95 @@ def test_an_unrelated_configmap_or_binding_needs_no_prune_guard(repo: Path) -> N
     )
     write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + other)
     assert gate.check(repo) == []
+
+
+@pytest.mark.parametrize(
+    ("body", "old", "new"),
+    [
+        (
+            "TENANT",
+            "  name: demo-app\n  annotations:\n    kustomize.toolkit.fluxcd.io/prune: disabled\n",
+            "  name: demo-app\n  annotations: [x]\n",
+        ),
+        (
+            "TENANT",
+            "subjects:\n  - kind: ServiceAccount\n    name: demo-app-flux\n"
+            "    namespace: flux-system\nroleRef:\n  kind: ClusterRole\n  name: admin\n",
+            "subjects:\n  - not-a-mapping\nroleRef:\n  kind: ClusterRole\n  name: admin\n",
+        ),
+        ("STORE", "    - namespaces:\n        - demo-app\n", "    - not-a-mapping\n"),
+        ("STORE", "    - namespaces:\n        - demo-app\n", "    - namespaces: demo-app\n"),
+        ("STORE", "    - namespaces:\n        - demo-app\n",
+         "    - namespaces: [demo-app]\n      namespaceRegexes: 7\n"),
+        ("TENANT", "metadata:\n  name: demo-app-flux\n  namespace: flux-system\n",
+         "metadata:\n  - name: demo-app-flux\n  - namespace: flux-system\n"),
+        ("TENANT", "spec:\n  limits:\n    - type: Container\n",
+         "spec:\n  limits:\n    - 7\n    - type: Container\n"),
+        ("TENANT", "      default:\n        memory: 512Mi\n        ephemeral-storage: 512Mi\n",
+         "      default: [512Mi]\n"),
+        ("TENANT", "spec:\n  hard:\n", "spec:\n  hard: []\n  unused:\n"),
+        ("TENANT", "  dependsOn:\n    - name: infrastructure-configs\n",
+         "  dependsOn:\n    - infrastructure-configs\n"),
+        ("TENANT", "  targetNamespace: demo-app\n", "  targetNamespace: [demo-app]\n"),
+        ("TENANT", "    name: demo-app\n  path:", "    name: [demo-app]\n  path:"),
+        ("TENANT", "spec:\n  dependsOn:", "spec: []\nunused:\n  dependsOn:"),
+    ],
+    ids=[
+        "list-annotations", "scalar-subject", "scalar-store-condition",
+        "scalar-condition-namespaces", "scalar-condition-regexes", "list-metadata",
+        "scalar-limit-entry", "list-limit-default", "list-quota-hard",
+        "scalar-depends-on", "list-target-namespace", "list-source-name", "list-spec",
+    ],
+)
+def test_a_malformed_entry_is_a_finding_not_a_traceback(repo: Path, body, old, new) -> None:
+    tenant = TENANT + STORE if body == "STORE" else TENANT
+    assert old in tenant
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", tenant.replace(old, new, 1))
+    problems = gate.check(repo)
+    assert any("malformed manifest shape" in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "where"),
+    [
+        (STORE.replace(GITLAB, "    onepassword: x\n"),
+         "spec.provider.onepassword is a str, not a mapping"),
+        (STORE.replace(GITLAB, "    onepasswordSDK: x\n"),
+         "spec.provider.onepasswordSDK is a str, not a mapping"),
+        (STORE.replace("    - namespaces:\n", "    - null\n    - namespaces: demo-app\n", 1)
+         .replace("        - demo-app\n", "", 1),
+         "spec.conditions[1].namespaces is a str, not a list"),
+    ],
+    ids=["string-onepassword", "string-onepassword-sdk", "index-after-null-entry"],
+)
+def test_a_mistyped_field_names_the_field(repo: Path, body: str, where: str) -> None:
+    """The shape check names the field, and its index in the list as written."""
+    assert body != STORE
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT + body)
+    problems = gate.check(repo)
+    assert any("malformed manifest shape" in p and where in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_gate_bug_is_a_traceback_not_a_manifest_finding(repo: Path, monkeypatch) -> None:
+    """Mutation case: a broad except reported the gate's own fault against the tenant."""
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", TENANT)
+
+    def broken(*_args, **_kwargs):
+        raise TypeError("gate bug")
+
+    monkeypatch.setattr(gate, "_caps_problems", broken)
+    with pytest.raises(TypeError, match="gate bug"):
+        gate.check(repo)
+
+
+def test_every_mistyped_spec_field_is_reported_in_one_run(repo: Path) -> None:
+    """Two bad fields on one Kustomization are both named, not one per run."""
+    body = TENANT.replace(
+        "  serviceAccountName: demo-app-flux\n", "  serviceAccountName: 7\n", 1
+    ).replace("  path: ./kubernetes/flux\n", "  path: 8\n", 1)
+    write(repo, f"{gate.TENANTS_DIR}/demo-app.yaml", body)
+    problems = gate.check(repo)
+    assert any("spec.serviceAccountName is a int" in p for p in problems), problems
+    assert any("spec.path is a int" in p for p in problems), problems

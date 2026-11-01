@@ -119,7 +119,7 @@ def test_count_is_the_rule_count(repo: Path, capsys) -> None:
     assert capsys.readouterr().out.strip() == "4"
 
 
-def test_a_group_resolving_to_nothing_is_vacuous(repo: Path) -> None:
+def test_a_group_the_inventory_never_declares_is_vacuous(repo: Path) -> None:
     write(
         repo,
         gen.HOSTS_YML,
@@ -128,6 +128,39 @@ def test_a_group_resolving_to_nothing_is_vacuous(repo: Path) -> None:
     with pytest.raises(gen.Vacuous):
         gen.alloy_hosts(repo)
     assert gen.main(["--repo-root", str(repo), "--check"]) == 2
+
+
+def test_a_declared_but_empty_group_contributes_no_hosts(repo: Path) -> None:
+    """A group declared with no hosts yet is real; only an undeclared one is a fault."""
+    write(
+        repo,
+        gen.HOSTS_YML,
+        HOSTS.replace("      hosts:\n        app-one:\n", "      hosts: {}\n"),
+    )
+    assert gen.alloy_hosts(repo) == ["pve-one", "pve-two"]
+
+
+def test_exclusions_are_reported_separately_from_inclusions(repo: Path) -> None:
+    assert gen.target_groups(repo / gen.SITE_YML) == (
+        ["base_managed", "extra_servers"],
+        ["deploy_skipped"],
+    )
+
+
+def test_an_inventory_group_cycle_exits_2(repo: Path, capsys) -> None:
+    """A group that contains itself has no host set, which is an operator
+    error rather than a traceback or an empty rule file."""
+    write(
+        repo,
+        gen.HOSTS_YML,
+        HOSTS + "    loop_a:\n      children:\n        loop_b:\n"
+        "    loop_b:\n      children:\n        loop_a:\n",
+    )
+    write(repo, gen.SITE_YML, SITE.replace("extra_servers", "loop_a"))
+    with pytest.raises(gen.Vacuous):
+        gen.alloy_hosts(repo)
+    assert gen.main(["--repo-root", str(repo), "--check"]) == 2
+    assert "loop_a" in capsys.readouterr().err
 
 
 def test_an_excluded_group_gets_no_rule(repo: Path) -> None:
@@ -149,6 +182,14 @@ def test_two_alloy_host_plays_are_vacuous(repo: Path) -> None:
     write(repo, gen.SITE_YML, SITE + SITE)
     with pytest.raises(gen.Vacuous):
         gen.alloy_hosts(repo)
+
+
+def test_a_play_without_hosts_exits_2(repo: Path) -> None:
+    """An unreadable source is exit 2, never the exit 1 --check reports for drift."""
+    write(repo, gen.SITE_YML, SITE.replace("  hosts: base_managed:extra_servers:!deploy_skipped\n", ""))
+    with pytest.raises(gen.Vacuous):
+        gen.alloy_hosts(repo)
+    assert gen.main(["--repo-root", str(repo), "--check"]) == 2
 
 
 def test_an_unparseable_site_yml_exits_2_naming_the_file(repo: Path, capsys) -> None:

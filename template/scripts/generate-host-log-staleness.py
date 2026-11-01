@@ -94,7 +94,9 @@ def target_groups(site_yml: Path) -> tuple[list[str], list[str]]:
     matches = [p for p in (plays or []) if isinstance(p, dict) and ROLE in _role_names(p)]
     if len(matches) != 1:
         raise Vacuous(f"{SITE_YML}: expected exactly one {ROLE} play, found {len(matches)}")
-    expression = matches[0]["hosts"]
+    expression = matches[0].get("hosts")
+    if not expression:
+        raise Vacuous(f"{SITE_YML}: the {ROLE} play names no hosts")
     parts = expression if isinstance(expression, list) else [expression]
     tokens = [t for part in parts for t in str(part).split(":") if t]
     return (

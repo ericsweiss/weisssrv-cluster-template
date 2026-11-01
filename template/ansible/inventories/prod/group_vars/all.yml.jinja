@@ -208,13 +208,18 @@ helm_chart_versions:
   loki: "20.0.2"
   alloy: "1.14.3"
   prometheus_blackbox_exporter: "11.20.2"
+{%- if secrets_backend == 'onepassword' %}
   onepassword_connect: "2.4.3"
+{%- endif %}
   vpa: "5.1.0"
   kured: "6.1.0"
   reloader: "2.2.19"
+  # Replaces the k3s AddOn, which k3s_disable turns off on the servers
+  # (infrastructure/controllers/metrics-server/release.yaml).
+  metrics_server: "3.14.0"
 {%- if postgres_operator %}
-  # CloudNativePG operator (chart 0.29.1 = operator 1.30.1) and its Barman
-  # Cloud plugin (chart 0.8.1 = plugin v0.15.1); one chart repository.
+  # CloudNativePG operator and its Barman Cloud plugin, from one chart
+  # repository. Both pins are chart versions, not app versions.
   cloudnative_pg: "0.29.1"
   plugin_barman_cloud: "0.8.1"
 {%- endif %}

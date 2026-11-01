@@ -96,7 +96,16 @@ if kind == "pods":
 
 if kind == "deployment":
     name, ns = args[2], flag("-n")
-    avail, desired = state.get("deployments", {}).get(f"{ns}/{name}", [1, 1])
+    answer = state.get("deployments", {}).get(f"{ns}/{name}", [1, 1])
+    # A list of answers is served in order, one per read; null fails that read.
+    if any(a is None or isinstance(a, list) for a in answer):
+        counter = f"{os.environ['STUB_STATE']}.{ns}.{name}.reads"
+        n = int(open(counter).read()) if os.path.exists(counter) else 0
+        open(counter, "w").write(str(n + 1))
+        answer = answer[min(n, len(answer) - 1)]
+        if answer is None:
+            sys.exit(1)
+    avail, desired = answer
     print(f"{avail} {desired}")
     sys.exit(0)
 
@@ -193,6 +202,21 @@ def test_an_under_replicated_deployment_fails(tmp_path):
     assert "traefik" in res.stdout and "VERIFICATION FAILED" in res.stdout
 
 
+def test_a_deployment_still_short_after_grace_reports_the_reread_count(tmp_path):
+    state = {**HEALTHY, "deployments": {"traefik/traefik": [[0, 2], [1, 2]]}}
+    res = run_verify(tmp_path, state)
+    assert res.returncode == 1
+    assert "ERROR: traefik (traefik): 1/2 available after the grace period" in res.stdout
+
+
+def test_a_deployment_whose_grace_reread_fails_keeps_the_first_count(tmp_path):
+    state = {**HEALTHY, "deployments": {"traefik/traefik": [[0, 2], None]}}
+    res = run_verify(tmp_path, state)
+    assert res.returncode == 1
+    assert ("ERROR: traefik (traefik): 0/2 available "
+            "(re-read after the grace period failed)") in res.stdout
+
+
 def test_a_failed_job_fails(tmp_path):
     state = {**HEALTHY,
              "jobs": [{"ns": "flux-system", "name": "pg-dump-1", "owner": "<none>",
@@ -233,3 +257,4 @@ def test_the_suite_notices_a_lost_kured_excuse(tmp_path):
                                    "annot": "2026-01-01T12:00:00Z", "cordoned": True}]}
     res = run_verify(tmp_path, state, script=mutant)
     assert res.returncode == 1, "mutated script still passed — the test proves nothing"
+    assert "ERROR: node k3s-agent-01 not Ready" in res.stdout, res.stdout + res.stderr

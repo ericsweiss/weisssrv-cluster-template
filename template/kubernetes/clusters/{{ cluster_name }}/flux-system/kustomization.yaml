@@ -74,3 +74,17 @@ patches:
     - op: add
       path: /spec/template/spec/containers/0/args/-
       value: --feature-gates=StrictPostBuildSubstitutions=true
+    # A tenant tree builds from its own reviewed source only, never a remote
+    # base fetched by the cluster-admin controller.
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --no-remote-bases=true
+# A tenant holds admin over notification.toolkit.fluxcd.io in its namespace, so
+# its Alerts and Receivers must not name flux-system objects.
+- target:
+    kind: Deployment
+    name: notification-controller
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/args/-
+      value: --no-cross-namespace-refs=true

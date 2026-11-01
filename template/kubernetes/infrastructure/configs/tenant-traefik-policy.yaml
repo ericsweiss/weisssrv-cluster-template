@@ -18,7 +18,7 @@ spec:
         operations: ["CREATE", "UPDATE"]
         resources: ["ingressroutes", "ingressroutetcps", "ingressrouteudps"]
   # A finalizer's removal from a terminating object is an UPDATE that changes
-  # neither spec nor annotations; refusing it strands a legacy object in
+  # neither spec nor annotations; refusing it strands the object in
   # Terminating, and admitting it admits nothing new.
   matchConditions:
     - name: enforce-unless-finalizing-unchanged
@@ -35,12 +35,31 @@ spec:
       expression: >-
         ['traefik/lan-tailscale-only', 'traefik/lan-tailscale-strict',
         'traefik/hsts-header', 'traefik/security-headers', 'authentik/authentik-auth']
+    - name: internalDomain
+      expression: "'${cluster_internal_domain}'.lowerAscii()"
+    # A quoted hostname on the internal domain ends in one of these, and a
+    # domain that merely contains the internal one does not.
+    - name: internalHostEnds
+      expression: >-
+        ['.' + variables.internalDomain + '`', '`' + variables.internalDomain + '`',
+        '.' + variables.internalDomain + '"', '"' + variables.internalDomain + '"']
+    - name: internalAllowlists
+      expression: "['lan-tailscale-only', 'lan-tailscale-strict']"
   validations:
     - expression: >-
         !has(object.spec.routes) || object.spec.routes.all(r,
         !has(r.services) || r.services.all(s,
         !has(s.namespace) || s.namespace == variables.ns))
       message: "a tenant route may reference Services only in its own namespace"
+    # Both VIPs serve the same entrypoints, so only the route's own allowlist
+    # middleware keeps an internal hostname off the public VIP.
+    - expression: >-
+        !has(object.spec.routes) || object.spec.routes.all(r,
+        !has(r.match) || !variables.internalHostEnds.exists(e, r.match.lowerAscii().contains(e))
+        || (has(r.middlewares) && r.middlewares.exists(m,
+        has(m.namespace) && m.namespace == 'traefik'
+        && m.name in variables.internalAllowlists)))
+      message: "a tenant route on the internal domain must list traefik/lan-tailscale-only or traefik/lan-tailscale-strict"
     - expression: >-
         !has(object.spec.routes) || object.spec.routes.all(r,
         !has(r.middlewares) || r.middlewares.all(m,
@@ -107,9 +126,7 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["middlewares", "traefikservices"]
-  # A finalizer's removal from a terminating object is an UPDATE that changes
-  # neither spec nor annotations; refusing it strands a legacy object in
-  # Terminating, and admitting it admits nothing new.
+  # Finalizer-only UPDATEs pass, as on tenant-traefik-route-refs.
   matchConditions:
     - name: enforce-unless-finalizing-unchanged
       expression: >-
@@ -263,9 +280,7 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["services"]
-  # A finalizer's removal from a terminating object is an UPDATE that changes
-  # neither spec nor annotations; refusing it strands a legacy object in
-  # Terminating, and admitting it admits nothing new.
+  # Finalizer-only UPDATEs pass, as on tenant-traefik-route-refs.
   matchConditions:
     - name: enforce-unless-finalizing-unchanged
       expression: >-
@@ -280,6 +295,12 @@ spec:
         ['traefik-lan-tailscale-only@kubernetescrd', 'traefik-lan-tailscale-strict@kubernetescrd',
         'traefik-hsts-header@kubernetescrd', 'traefik-security-headers@kubernetescrd',
         'authentik-authentik-auth@kubernetescrd']
+    - name: internalDomain
+      expression: "'${cluster_internal_domain}'.lowerAscii()"
+    - name: internalAllowlistRefs
+      expression: "['traefik-lan-tailscale-only@kubernetescrd', 'traefik-lan-tailscale-strict@kubernetescrd']"
+    - name: routerMiddlewares
+      expression: "'traefik.ingress.kubernetes.io/router.middlewares'"
   validations:
     - expression: >-
         !has(object.metadata.annotations) || object.metadata.annotations.all(k,
@@ -287,6 +308,21 @@ spec:
         || object.metadata.annotations[k].split(',').all(v,
         !v.contains('@') || v.trim() in variables.platformRefs))
       message: "a tenant Traefik annotation may use a name@provider reference only from the platform allowlist"
+    # Both VIPs serve an Ingress too, so an internal host needs the allowlist in a
+    # router.middlewares key with Traefik's exact prefix, and in every key that
+    # differs from it only in case.
+    - expression: >-
+        request.resource.resource != 'ingresses' || !has(object.spec) || !has(object.spec.rules)
+        || !object.spec.rules.exists(r, has(r.host)
+        && (r.host.lowerAscii() == variables.internalDomain
+        || r.host.lowerAscii().endsWith('.' + variables.internalDomain)))
+        || (has(object.metadata.annotations)
+        && object.metadata.annotations.exists(k, k.startsWith('traefik.ingress.kubernetes.io/')
+        && k.lowerAscii() == variables.routerMiddlewares)
+        && object.metadata.annotations.all(k, k.lowerAscii() != variables.routerMiddlewares
+        || object.metadata.annotations[k].split(',').exists(v,
+        v.trim() in variables.internalAllowlistRefs)))
+      message: "a tenant Ingress on the internal domain must list traefik-lan-tailscale-only@kubernetescrd or traefik-lan-tailscale-strict@kubernetescrd in router.middlewares"
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -316,9 +352,7 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["services"]
-  # A finalizer's removal from a terminating object is an UPDATE that changes
-  # neither spec nor annotations; refusing it strands a legacy object in
-  # Terminating, and admitting it admits nothing new.
+  # Finalizer-only UPDATEs pass, as on tenant-traefik-route-refs.
   matchConditions:
     - name: enforce-unless-finalizing-unchanged
       expression: >-
@@ -377,7 +411,7 @@ spec:
         operations: ["CREATE", "UPDATE"]
         resources: ["endpointslices"]
   # A finalizer's removal from a terminating object changes neither its routing
-  # data nor its labels or annotations; refusing it strands a legacy object in
+  # data nor its labels or annotations; refusing it strands the object in
   # Terminating, and admitting it admits nothing new.
   matchConditions:
     - name: enforce-unless-finalizing-unchanged
@@ -511,7 +545,7 @@ spec:
         'traefik.ingress.kubernetes.io/router.rulesyntax']))
       message: "tenant Ingresses may not override the routing rule or priority by annotation; use spec.rules with granted hosts"
     # Another ingress operator (Tailscale's: class tailscale, tailscale.com/ keys)
-    # would publish the Ingress with no Traefik, installed today or later.
+    # would publish the Ingress with no Traefik.
     - expression: >-
         variables.isRoute || ((!has(object.spec) || !has(object.spec.ingressClassName)
         || object.spec.ingressClassName == 'traefik')
@@ -538,9 +572,7 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["certificates"]
-  # A finalizer's removal from a terminating object is an UPDATE that changes
-  # neither spec nor annotations; refusing it strands a legacy object in
-  # Terminating, and admitting it admits nothing new.
+  # Finalizer-only UPDATEs pass, as on tenant-traefik-route-refs.
   matchConditions:
     - name: enforce-unless-finalizing-unchanged
       expression: >-
@@ -650,9 +682,7 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["ingressroutetcps", "ingressrouteudps"]
-  # A finalizer's removal from a terminating object is an UPDATE that changes
-  # neither spec nor annotations; refusing it strands a legacy object in
-  # Terminating, and admitting it admits nothing new.
+  # Finalizer-only UPDATEs pass, as on tenant-traefik-route-refs.
   matchConditions:
     - name: enforce-unless-finalizing-unchanged
       expression: >-
@@ -693,9 +723,7 @@ spec:
         apiVersions: ["*"]
         operations: ["CREATE", "UPDATE"]
         resources: ["tlsoptions", "tlsstores"]
-  # A finalizer's removal from a terminating object is an UPDATE that changes
-  # neither spec nor annotations; refusing it strands a legacy object in
-  # Terminating, and admitting it admits nothing new.
+  # Finalizer-only UPDATEs pass, as on tenant-traefik-route-refs.
   matchConditions:
     - name: enforce-unless-finalizing-unchanged
       expression: >-
@@ -754,9 +782,7 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["cronjobs"]
-  # A finalizer's removal from a terminating object is an UPDATE that changes
-  # neither spec nor annotations; refusing it strands a legacy object in
-  # Terminating, and admitting it admits nothing new.
+  # Finalizer-only UPDATEs pass, as on tenant-traefik-route-refs.
   matchConditions:
     - name: enforce-unless-finalizing-unchanged
       expression: >-
@@ -820,9 +846,7 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["persistentvolumeclaims"]
-  # A finalizer's removal from a terminating object is an UPDATE that changes
-  # neither spec nor annotations; refusing it strands a legacy object in
-  # Terminating, and admitting it admits nothing new.
+  # Finalizer-only UPDATEs pass, as on tenant-traefik-route-refs.
   matchConditions:
     - name: enforce-unless-finalizing-unchanged
       expression: >-

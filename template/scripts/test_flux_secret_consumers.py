@@ -16,9 +16,9 @@ HELPER = Path(__file__).resolve().parent / "flux-secret-consumers.py"
 def _workload(name, kind="Deployment", managed=False, volumes=None, env_from=None,
               env=None, pull=None, match_labels=None):
     labels = {"kustomize.toolkit.fluxcd.io/name": "apps"} if managed else {}
-    selector = {} if match_labels is None else {"matchLabels": match_labels}
-    if match_labels is None:
-        selector = {"matchLabels": {"app.kubernetes.io/name": name}}
+    selector = {
+        "matchLabels": {"app.kubernetes.io/name": name} if match_labels is None else match_labels
+    }
     container = {"name": name}
     if env_from:
         container["envFrom"] = [{"secretRef": {"name": s}} for s in env_from]

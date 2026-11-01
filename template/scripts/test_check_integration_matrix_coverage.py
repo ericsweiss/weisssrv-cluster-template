@@ -128,7 +128,7 @@ def test_a_matrix_entry_naming_no_directory_fails(tmp_path):
 
 def test_an_explicitly_empty_integration_dir_disables_the_half(tmp_path):
     # The opt-out for a cluster with no integration suites: without it the
-    # vacuity guard below turns "no suites at all" into an inspection failure.
+    # gate's vacuity guard turns "no suites at all" into an inspection failure.
     args = _tree(tmp_path, [], [])
     res = _run(_with(args, "--integration-dir", ""))
     assert res.returncode == 0, res.stderr

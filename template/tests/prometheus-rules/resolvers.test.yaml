@@ -1,0 +1,122 @@
+---
+# promtool unit tests for platform.resolvers: the Unbound rules read from
+# unbound_exporter (job="unbound-exporter") on each resolver guest.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # UnboundDown: the exporter reads no control socket on one resolver.
+  - interval: 1m
+    input_series:
+      - series: 'unbound_up{job="unbound-exporter", instance="192.0.2.21:9167"}'
+        values: '0+0x20'
+      - series: 'unbound_up{job="unbound-exporter", instance="192.0.2.22:9167"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: UnboundDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: UnboundDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: unbound-exporter
+              instance: '192.0.2.21:9167'
+
+  # UnboundExporterDown: one scrape failing fires for that resolver only.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="unbound-exporter", instance="192.0.2.21:9167"}'
+        values: '0+0x30'
+      - series: 'up{job="unbound-exporter", instance="192.0.2.22:9167"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: UnboundExporterDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: UnboundExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: unbound-exporter
+              instance: '192.0.2.21:9167'
+
+  # No healthy target at all, the job gone included, is the absent() arm.
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: UnboundExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+
+  # UnboundSERVFAILRatioHigh: 10% SERVFAIL fires and 4% does not. On .23 the
+  # ratio is 6% only with nodata out of the denominator, where it belongs.
+  - interval: 1m
+    input_series:
+      - series: 'unbound_answer_rcodes_total{job="unbound-exporter", instance="192.0.2.21:9167", rcode="SERVFAIL"}'
+        values: '0+10x50'
+      - series: 'unbound_answer_rcodes_total{job="unbound-exporter", instance="192.0.2.21:9167", rcode="NOERROR"}'
+        values: '0+90x50'
+      - series: 'unbound_answer_rcodes_total{job="unbound-exporter", instance="192.0.2.22:9167", rcode="SERVFAIL"}'
+        values: '0+4x50'
+      - series: 'unbound_answer_rcodes_total{job="unbound-exporter", instance="192.0.2.22:9167", rcode="NOERROR"}'
+        values: '0+96x50'
+      - series: 'unbound_answer_rcodes_total{job="unbound-exporter", instance="192.0.2.23:9167", rcode="SERVFAIL"}'
+        values: '0+6x50'
+      - series: 'unbound_answer_rcodes_total{job="unbound-exporter", instance="192.0.2.23:9167", rcode="NOERROR"}'
+        values: '0+94x50'
+      - series: 'unbound_answer_rcodes_total{job="unbound-exporter", instance="192.0.2.23:9167", rcode="nodata"}'
+        values: '0+90x50'
+    alert_rule_test:
+      # Inside the 15m hold.
+      - eval_time: 10m
+        alertname: UnboundSERVFAILRatioHigh
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: UnboundSERVFAILRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: '192.0.2.21:9167'
+          - exp_labels:
+              severity: warning
+              instance: '192.0.2.23:9167'
+
+  # Extended statistics off on .22: Unbound answers the exporter but exports no
+  # rcode counters, so the guard arm fires for that resolver alone.
+  - interval: 1m
+    input_series:
+      - series: 'unbound_up{job="unbound-exporter", instance="192.0.2.21:9167"}'
+        values: '1+0x45'
+      - series: 'unbound_up{job="unbound-exporter", instance="192.0.2.22:9167"}'
+        values: '1+0x45'
+      - series: 'unbound_answer_rcodes_total{job="unbound-exporter", instance="192.0.2.21:9167", rcode="SERVFAIL"}'
+        values: '0+1x45'
+      - series: 'unbound_answer_rcodes_total{job="unbound-exporter", instance="192.0.2.21:9167", rcode="NOERROR"}'
+        values: '0+99x45'
+    alert_rule_test:
+      # Inside the 15m hold.
+      - eval_time: 10m
+        alertname: UnboundSERVFAILRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: UnboundSERVFAILRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: '192.0.2.22:9167'
+
+  # A resolver whose control socket is dead exports no counters either; that is
+  # UnboundDown's page, so the guard arm stays quiet.
+  - interval: 1m
+    input_series:
+      - series: 'unbound_up{job="unbound-exporter", instance="192.0.2.21:9167"}'
+        values: '0+0x45'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: UnboundSERVFAILRatioHigh
+        exp_alerts: []

@@ -1,10 +1,10 @@
-{#- Only two things are interpolated: the kubelet image-gc watermark, which must
-    equal the one group_vars/k3s.yml gives the kubelet, and the storage_backend gate
-    on the ZFSPool rules. The alert annotations are Go templates Jinja must not touch. -#}
+{#- Interpolated: the kubelet image-gc watermark, which must equal the one
+    group_vars/k3s.yml gives the kubelet, and the module gates on rule groups and
+    rule text. The alert annotations are Go templates Jinja must not touch. -#}
 {% raw %}---
 # kube-prometheus-stack — Prometheus, Alertmanager, Grafana, node-exporter and
-# kube-state-metrics. Chart version and every site value are substituted at
-# reconcile time (cluster-versions / cluster-config ConfigMaps).
+# kube-state-metrics. Flux substitutes the chart version and site values from
+# cluster-versions and cluster-config; copier renders the rest.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -142,12 +142,14 @@ spec:
         replicas: 2
         priorityClassName: platform
         configSecret: alertmanager-config
+        # The alertmanager VPA maxAllowed.memory in observability/vpa.yaml
+        # equals this limit; move both together.
         resources:
           requests:
             cpu: 50m
-            memory: 64Mi
+            memory: 96Mi
           limits:
-            memory: 128Mi
+            memory: 192Mi
 
     # -------------------------------------------------------------------------
     # Grafana
@@ -298,13 +300,13 @@ spec:
       initChownData:
         enabled: false
 
-      # NFS-ESTALE self-heal: stat the mount instead of httpGet, so a stale
-      # handle or a hung hard-mount restarts the pod. httpGet MUST be nulled —
-      # Helm merges into the subchart probe and a two-handler probe is rejected.
+      # HTTP, not exec: the chart's grafana image is distroless, so an exec
+      # probe has no shell to run. A stale NFS handle or a dead DB answers
+      # /api/health 503, so the restart still covers both.
       livenessProbe:
-        httpGet: null
-        exec:
-          command: ["stat", "/var/lib/grafana"]
+        httpGet:
+          path: /api/health
+          port: 3000
         initialDelaySeconds: 30
         periodSeconds: 30
         timeoutSeconds: 10
@@ -547,6 +549,24 @@ spec:
       enabled: false
     kubeControllerManager:
       enabled: false
+
+    # On a k3s server, :10250/metrics serves the whole embedded registry, so
+    # those series are stored twice; dropping the server copies trims the head.
+    # Helm replaces this list rather than merging, so the chart default repeats.
+    kubelet:
+      serviceMonitor:
+        metricRelabelings:
+          # The chart default; keep it in step with the chart on a bump.
+          - action: drop
+            sourceLabels: [__name__, le]
+            regex: (csi_operations|storage_operation_duration)_seconds_bucket;(0.25|2.5|15|25|120|600)(\.0)?
+          # rest_client_* stays: the chart's Kubelet dashboard plots it under
+          # job="kubelet". The node pattern names the k3s_servers group; the
+          # cluster-invariants suite fails when a renamed server leaves it.
+          - action: drop
+            sourceLabels: [__name__, node]
+            separator: ;
+            regex: (apiserver|etcd|scheduler|workqueue|lasso)_.*;k3s-srv-.*
     # etcd is the one component whose failure loses the cluster. k3s serves its
     # metrics on :2381; enabling this component also enables the upstream etcd
     # alert rules. endpoints is a JSON flow sequence (Helm needs a real list).
@@ -566,6 +586,15 @@ spec:
         # A 5m hold pages critical on one transient webhook timeout.
         # Replaced by the 15m copy in platform-monitoring below.
         AlertmanagerClusterFailedToSendAlerts: true
+        # Replaced by the *NonCI copies in platform-resources below, which leave
+        # out the gitlab-runner* namespaces a CI runner quota over-requests in.
+        KubeCPUQuotaOvercommit: true
+        KubeMemoryQuotaOvercommit: true
+        # Both select job="node-exporter", which runs without the systemd
+        # collector. Every node_systemd_* series carries job="node-exporter-host"
+        # instead, which is what platform-host-exporter below selects.
+        NodeSystemdServiceFailed: true
+        NodeSystemdServiceCrashlooping: true
 
     # Platform-wide alert rules only; app-specific rules belong in a
     # PrometheusRule next to the app. Every rule carries a runbook_url, and
@@ -640,11 +669,9 @@ spec:
                     Only {{ $value | printf "%.1f" }}% of inodes are free
                     on {{ $labels.instance }} mount {{ $labels.mountpoint }}.
 
-              # CRITICAL: the threshold must stay under DiskUsageWarning's
-              # 80%, or that alert's inhibit rule in alertmanager-config.yaml
-              # mutes this one permanently. It sits up to 5 points above
-              # k3s_image_gc_high_threshold (capped at 79) so a node where GC is
-              # simply doing its job does not page.
+              # Stays under DiskUsageWarning's 80%, whose inhibit would mute it,
+              # and up to 5 points above k3s_image_gc_high_threshold (capped at
+              # 79) so a node where GC is doing its job does not page.
               - alert: KubeletImageGCIneffective
                 expr: >-
                   100 * (1 - node_filesystem_avail_bytes{job="node-exporter", mountpoint="/"}
@@ -1038,13 +1065,13 @@ spec:
                   summary: 'Node {{ $labels.node }} is under memory pressure'
                   description: 'Kubelet on {{ $labels.node }} has reported memory pressure for 5 minutes. Pods may be evicted.'
 
-              # Source for the node-outage inhibit in alertmanager-config.yaml;
-              # info-tier so the operator sees the mute is active. The
-              # max_over_time arm bounds it: a node never Ready, or 7d gone, stops.
+              # Source for the node-outage inhibit in alertmanager-config.yaml. The 7d
+              # arm keeps a never-Ready node from muting alerts; both sides aggregate
+              # by node so a kube-state-metrics reschedule keeps the history.
               - alert: NodeOutageStormControl
                 expr: >-
-                  kube_node_status_condition{condition="Ready", status="true"} == 0
-                  and max_over_time(kube_node_status_condition{condition="Ready", status="true"}[7d]) == 1
+                  max by (node, condition, status) (kube_node_status_condition{condition="Ready", status="true"}) == 0
+                  and max by (node, condition, status) (max_over_time(kube_node_status_condition{condition="Ready", status="true"}[7d])) == 1
                 for: 5m
                 labels:
                   severity: info
@@ -1055,6 +1082,23 @@ spec:
                     {{ $labels.node }} has been NotReady for under 7 days, so
                     per-pod and per-workload warnings are inhibited while it
                     recovers. The critical tier is never inhibited.
+
+              # A blip shorter than KubeNodeNotReady's 15m hold is two changes, so one
+              # a day stays quiet. Summed by node, so the count survives a
+              # kube-state-metrics reschedule.
+              - alert: KubeNodeReadyFlapping
+                expr: >-
+                  sum by (node) (changes(kube_node_status_condition{condition="Ready", status="true"}[1d])) > 2
+                for: 10m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hypervisor-and-cluster-alerts'
+                  summary: 'Node {{ $labels.node }} Ready condition flapped {{ $value }} times in 24h'
+                  description: >-
+                    The Ready condition of {{ $labels.node }} changed {{ $value
+                    }} times in 24 hours, each NotReady spell too short for
+                    KubeNodeNotReady to page.
 
               - alert: NodeStuckCordoned
                 expr: kube_node_spec_unschedulable == 1
@@ -1231,6 +1275,44 @@ spec:
                     KubePodCrashLooping, so this is the only signal. Raise the
                     limit in git and, where the workload has a VPA, its
                     maxAllowed alongside.
+
+              # The chart's quota-overcommit pair minus any gitlab-runner*
+              # namespace: a CI runner quota over-requests for burst CI.
+              - alert: KubeCPUQuotaOvercommitNonCI
+                expr: >-
+                  sum(min without (resource) (kube_resourcequota{job="kube-state-metrics", type="hard",
+                  resource=~"(cpu|requests.cpu)", namespace!~"gitlab-runner.*"}))
+                  /
+                  sum(kube_node_status_allocatable{job="kube-state-metrics", resource="cpu"})
+                  > 1.5
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Non-CI ResourceQuotas promise more than 1.5x the cluster CPU'
+                  description: >-
+                    The hard CPU of every ResourceQuota outside the CI runner
+                    namespaces sums to {{ $value | humanizePercentage }} of
+                    allocatable CPU.
+
+              - alert: KubeMemoryQuotaOvercommitNonCI
+                expr: >-
+                  sum(min without (resource) (kube_resourcequota{job="kube-state-metrics", type="hard",
+                  resource=~"(memory|requests.memory)", namespace!~"gitlab-runner.*"}))
+                  /
+                  sum(kube_node_status_allocatable{job="kube-state-metrics", resource="memory"})
+                  > 1.5
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Non-CI ResourceQuotas promise more than 1.5x the cluster memory'
+                  description: >-
+                    The hard memory of every ResourceQuota outside the CI runner
+                    namespaces sums to {{ $value | humanizePercentage }} of
+                    allocatable memory.
 
       platform-gitops:
         groups:
@@ -1650,12 +1732,50 @@ spec:
                     ruler has discovered no Alertmanager at all, so a firing log
                     alert never reaches a receiver.
 
+              # Discards are unrecoverable (RF=1, senders do not retry a 4xx) and
+              # arrive in bursts, so each rule pairs a burst-rate arm with an hourly
+              # volume arm. Split by reason: a limits_config cap vs the accept window.
+              - alert: LokiDiscardsRateLimited
+                expr: >-
+                  sum by (reason) (rate(loki_discarded_samples_total{job="observability/loki",
+                  reason=~"rate_limited|per_stream_rate_limit"}[5m])) > 0
+                  or
+                  sum by (reason) (increase(loki_discarded_samples_total{job="observability/loki",
+                  reason=~"rate_limited|per_stream_rate_limit"}[1h])) > 10000
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Loki is rate-limiting ingestion ({{ $labels.reason }})'
+                  description: >-
+                    Loki is dropping pushed lines with reason {{ $labels.reason
+                    }} against its limits_config caps, and those lines are lost.
+
+              - alert: LokiDiscardsOutOfOrder
+                expr: >-
+                  sum by (reason) (rate(loki_discarded_samples_total{job="observability/loki",
+                  reason=~"too_far_behind|greater_than_max_sample_age"}[5m])) > 0
+                  or
+                  sum by (reason) (increase(loki_discarded_samples_total{job="observability/loki",
+                  reason=~"too_far_behind|greater_than_max_sample_age"}[1h])) > 10000
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md'
+                  summary: 'Loki is rejecting out-of-order or too-old lines ({{ $labels.reason }})'
+                  description: >-
+                    Loki is dropping lines with reason {{ $labels.reason }}
+                    because they arrived behind its out-of-order window or past
+                    its maximum sample age.
+
       platform-monitoring:
         groups:
           - name: platform.monitoring
             rules:
-              # Disabled upstream. for: 15m rides out a transient receiver
-              # timeout; the inner `> 0` keeps a healthy gossip peer from flooring min().
+              # Replaces the chart's copy, which defaultRules.disabled turns off.
+              # for: 15m rides out a transient receiver timeout.
               # Taken from kube-prometheus-stack 92.14.1
               - alert: AlertmanagerClusterFailedToSendAlerts
                 expr: >-
@@ -1701,6 +1821,38 @@ spec:
                     exists, usually because no node carries the
                     ${cluster_node_label_domain}/ingress label. MetalLB still assigns EXTERNAL-IPs from the pools, but
                     every VIP is unreachable.
+
+              # An unassigned ingress VIP presents as an EndpointDown flood with no
+              # stated cause. One rule per Service, so the alert names the VIP.
+              - alert: TraefikPublicVipMissing
+                expr: >-
+                  absent(kube_service_status_load_balancer_ingress{namespace="traefik",
+                  service="traefik", ip="${cluster_metallb_public_vip}"})
+                for: 10m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#a-traefik-vip-is-not-assigned'
+                  summary: 'Traefik public VIP ${cluster_metallb_public_vip} is not assigned'
+                  description: >-
+                    The traefik LoadBalancer Service no longer carries
+                    ${cluster_metallb_public_vip}, so every public route is
+                    unreachable.
+
+              - alert: TraefikInternalVipMissing
+                expr: >-
+                  absent(kube_service_status_load_balancer_ingress{namespace="traefik",
+                  service="traefik-internal", ip="${cluster_metallb_internal_vip}"})
+                for: 10m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#a-traefik-vip-is-not-assigned'
+                  summary: 'Traefik internal VIP ${cluster_metallb_internal_vip} is not assigned'
+                  description: >-
+                    The traefik-internal LoadBalancer Service no longer carries
+                    ${cluster_metallb_internal_vip}, so every internal route is
+                    unreachable.
 
       platform-backups:
         groups:
@@ -1949,6 +2101,24 @@ spec:
                     The newest dump for {{ $labels.app }} is more than 50 hours
                     old, or its series has gone missing while the tier is enabled.
 
+              # Four days is two more failed nightly cycles past the warning, with
+              # no dump reaching the offsite chain. Absence and the never-landed
+              # mtime 0 stay warning-tier.
+              - alert: BackupArtifactStaleCritical
+                expr: >-
+                  backup_artifact_last_mtime_seconds > 0
+                  and time() - backup_artifact_last_mtime_seconds > 86400 * 4
+                for: 1h
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#backups-and-restore'
+                  summary: 'Backup artifact for {{ $labels.app }} has not landed in over 4 days'
+                  description: >-
+                    The newest dump for {{ $labels.app }} is more than 4 days
+                    old, so nothing for that app has entered the offsite chain
+                    in four nights.
+
               # mtime 0 is the collector saying nothing matched the app's glob, so
               # no dump has EVER landed. The window outlasts a full schedule
               # interval, and unlike a 26h `for:` it survives a restart.
@@ -2101,4 +2271,943 @@ spec:
                   description: >-
                     The instance has never completed a base backup, so there is
                     nothing to restore from; the first nightly run was missed.
+{%- endraw %}{% endif %}{% raw %}
+
+      platform-host-exporter:
+        groups:
+          - name: platform.host-exporter
+            rules:
+              # One host's exporter dying is otherwise invisible: TargetDown needs
+              # over 10% of the job down, and every collector-stale rule stops
+              # evaluating once its series goes stale.
+              - alert: HostExporterDown
+                expr: >-
+                  up{job="node-exporter-host"} == 0
+                  or absent(up{job="node-exporter-host"})
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-node-exporter-alerts'
+                  summary: 'Host node_exporter {{ $labels.instance }} is down'
+                  description: >-
+                    Prometheus has not scraped node_exporter on {{
+                    $labels.instance }} for 15 minutes, so that host's other
+                    alerts stop evaluating.
+
+              # NIC error ratio at 1% for an hour. Both arms stay on [5m]: at a
+              # 60s scrape a shorter window lets one missed scrape empty rate().
+              - alert: HostNetworkTransmitErrs
+                expr: >-
+                  rate(node_network_transmit_errs_total{job="node-exporter-host", device=~"(nic|eth|bond)[0-9]+|en[a-z0-9]+"}[5m])
+                  / rate(node_network_transmit_packets_total{job="node-exporter-host", device=~"(nic|eth|bond)[0-9]+|en[a-z0-9]+"}[5m])
+                  > 0.01
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-network-alerts'
+                  summary: 'NIC {{ $labels.device }} on {{ $labels.instance }} is dropping transmits'
+                  description: >-
+                    {{ $labels.device }} on {{ $labels.instance }} has failed {{
+                    $value | humanizePercentage }} of its transmits for an hour.
+
+              - alert: HostNetworkReceiveErrs
+                expr: >-
+                  rate(node_network_receive_errs_total{job="node-exporter-host", device=~"(nic|eth|bond)[0-9]+|en[a-z0-9]+"}[5m])
+                  / rate(node_network_receive_packets_total{job="node-exporter-host", device=~"(nic|eth|bond)[0-9]+|en[a-z0-9]+"}[5m])
+                  > 0.01
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-network-alerts'
+                  summary: 'NIC {{ $labels.device }} on {{ $labels.instance }} is dropping receives'
+                  description: >-
+                    {{ $labels.device }} on {{ $labels.instance }} has failed {{
+                    $value | humanizePercentage }} of its receives for an hour.
+
+              # At a 60s scrape a 2m window holds three samples and can show at
+              # most two changes, so the window is 10m. Over 4 changes is at least
+              # three bounces; a clean link event contributes two.
+              - alert: HostNetworkInterfaceFlapping
+                expr: >-
+                  changes(node_network_up{job="node-exporter-host", device=~"(nic|eth|bond)[0-9]+|en[a-z0-9]+"}[10m]) > 4
+                for: 2m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-network-alerts'
+                  summary: 'NIC {{ $labels.device }} on {{ $labels.instance }} is flapping'
+                  description: >-
+                    Link state on {{ $labels.device }} on {{ $labels.instance }}
+                    changed more than four times in 10 minutes.
+
+              - alert: HostBondingDegraded
+                expr: >-
+                  (node_bonding_slaves{job="node-exporter-host"} - node_bonding_active{job="node-exporter-host"}) != 0
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-network-alerts'
+                  summary: 'Bond {{ $labels.master }} on {{ $labels.instance }} has a failed slave'
+                  description: >-
+                    {{ $labels.master }} on {{ $labels.instance }} has fewer
+                    active slaves than configured, so the host runs without NIC
+                    redundancy.
+
+              # node_exporter skips a malformed .prom file. The collector-stale
+              # rules only catch a collector that stopped, not one whose output no
+              # longer parses while its timer reports success.
+              - alert: HostTextfileCollectorScrapeError
+                expr: node_textfile_scrape_error{job="node-exporter-host"} == 1
+                for: 10m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-node-exporter-alerts'
+                  summary: 'node_exporter textfile collector is failing on {{ $labels.instance }}'
+                  description: >-
+                    node_exporter on {{ $labels.instance }} cannot parse a file
+                    in its textfile directory, so the alerts reading that file
+                    evaluate against nothing.
+
+              # etcd and corosync both fail hard on clock skew.
+              - alert: HostClockNotSynchronising
+                expr: >-
+                  min_over_time(node_timex_sync_status{job="node-exporter-host"}[5m]) == 0
+                  and node_timex_maxerror_seconds{job="node-exporter-host"} >= 16
+                for: 10m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-node-exporter-alerts'
+                  summary: 'Clock on {{ $labels.instance }} is not synchronising'
+                  description: >-
+                    {{ $labels.instance }} has had no NTP sync for 10 minutes
+                    and its maximum error has grown past 16s.
+
+              # The post-I/O-error state: everything looks up and nothing writes.
+              - alert: HostFilesystemReadOnly
+                expr: >-
+                  node_filesystem_readonly{job="node-exporter-host", fstype!~"tmpfs|overlay|squashfs|efivarfs|devtmpfs|iso9660"} == 1
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-node-exporter-alerts'
+                  summary: '{{ $labels.mountpoint }} on {{ $labels.instance }} is mounted read-only'
+                  description: >-
+                    {{ $labels.mountpoint }} on {{ $labels.instance }} has been
+                    read-only for 5 minutes, usually the kernel remounting after
+                    an I/O error.
+
+              # The warning floor, which a standing slab leak may inhibit. The
+              # critical below is never an inhibit target.
+              - alert: HostMemAvailableLow
+                expr: >-
+                  (node_memory_MemAvailable_bytes{job="node-exporter-host"} / node_memory_MemTotal_bytes{job="node-exporter-host"}) < 0.08
+                for: 30m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-memory-and-slab-alerts'
+                  summary: 'Available memory below 8% on {{ $labels.instance }} for 30m'
+                  description: >-
+                    Only {{ $value | humanizePercentage }} of RAM on {{
+                    $labels.instance }} has been available for 30 minutes.
+
+              - alert: HostMemAvailableCritical
+                expr: >-
+                  (node_memory_MemAvailable_bytes{job="node-exporter-host"} / node_memory_MemTotal_bytes{job="node-exporter-host"}) < 0.02
+                for: 15m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-memory-and-slab-alerts'
+                  summary: 'Available memory below 2% on {{ $labels.instance }} for 15m'
+                  description: >-
+                    Only {{ $value | humanizePercentage }} of RAM on {{
+                    $labels.instance }} has been available for 15 minutes, so
+                    the kernel is about to swap hard or OOM-kill.
+
+              - alert: HostConntrackEntriesHigh
+                expr: >-
+                  (node_nf_conntrack_entries{job="node-exporter-host"} / node_nf_conntrack_entries_limit{job="node-exporter-host"}) > 0.75
+                for: 10m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-node-exporter-alerts'
+                  summary: 'conntrack table {{ $value | humanizePercentage }} full on {{ $labels.instance }}'
+                  description: >-
+                    The connection-tracking table on {{ $labels.instance }} is
+                    {{ $value | humanizePercentage }} full, and at 100% new
+                    connections are dropped silently.
+
+              # The host exporter is the only node_systemd_* emitter. The gettys
+              # restart forever on headless guests, and each other excluded unit
+              # owns a *_last_run_success alert that reports the same failure.
+              - alert: NodeSystemdServiceFailed
+                expr: >-
+                  node_systemd_unit_state{job="node-exporter-host", state="failed",
+                  name!~"getty@tty1\\.service|serial-getty@ttyS0\\.service",
+                  name!~"(archive-backup|restic-offsite|pve-cluster-backup|swap-clean|homelab-cert-check)\\.service"} == 1
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-node-exporter-alerts'
+                  summary: 'systemd unit {{ $labels.name }} failed on {{ $labels.instance }}'
+                  description: >-
+                    {{ $labels.name }} has been in the failed state on {{
+                    $labels.instance }} for 15 minutes.
+
+              - alert: NodeSystemdServiceCrashlooping
+                expr: >-
+                  increase(node_systemd_service_restart_total{job="node-exporter-host",
+                  name!~"getty@tty1\\.service|serial-getty@ttyS0\\.service"}[5m]) > 2
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-node-exporter-alerts'
+                  summary: 'systemd unit {{ $labels.name }} is restarting on {{ $labels.instance }}'
+                  description: >-
+                    {{ $labels.name }} on {{ $labels.instance }} has restarted
+                    more than twice in every 5 minutes for 15 minutes.
+
+              # A failing collector still answers HTTP 200 with node_systemd_*
+              # absent, so the two rules above cannot fire for that host.
+              - alert: NodeExporterSystemdCollectorFailed
+                expr: >-
+                  node_scrape_collector_success{job="node-exporter-host", collector="systemd"} == 0
+                for: 30m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-node-exporter-alerts'
+                  summary: "node_exporter's systemd collector is failing on {{ $labels.instance }}"
+                  description: >-
+                    The systemd collector errors on {{ $labels.instance }}, so
+                    NodeSystemdServiceFailed and NodeSystemdServiceCrashlooping
+                    are blind there.
+
+              # The witness for EncryptedSwapPlaintextFallback and
+              # EncryptedSwapRestoreFailed: finalize writes the gauges at boot, so
+              # absence is the signal. The 7d arm keeps unencrypted hosts quiet.
+              - alert: EncryptedSwapMetricsMissing
+                expr: >-
+                  (
+                    up{job="node-exporter-host"} == 1
+                    unless on (instance) encrypted_swap_finalize_last_run_seconds
+                  )
+                  and on (instance)
+                  (max_over_time(encrypted_swap_finalize_last_run_seconds[7d]) > 0)
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-memory-and-slab-alerts'
+                  summary: 'Encrypted-swap gauges have disappeared on {{ $labels.instance }}'
+                  description: >-
+                    {{ $labels.instance }} published the encrypted-swap gauges
+                    and no longer does, so the encrypted-swap alerts are blind
+                    there.
+
+              # Fires on any cache the opt-in slabinfo collector publishes. 6 GiB
+              # in 24h is a leak, not a working set settling.
+              - alert: HostSlabCacheGrowing
+                expr: >-
+                  delta(node_slab_object_bytes{job="node-exporter-host"}[24h])
+                  > 6 * 1024 * 1024 * 1024
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-memory-and-slab-alerts'
+                  summary: 'Slab cache {{ $labels.cache }} grew {{ $value | humanize1024 }}B in 24h on {{ $labels.instance }}'
+                  description: >-
+                    The {{ $labels.cache }} slab on {{ $labels.instance }} grew
+                    by more than 6 GiB in 24 hours, and only a reboot reclaims
+                    leaked kernel memory.
+
+              # The witness for HostSlabCacheGrowing: a failed read, a dead timer,
+              # a vanished cache name or a vanished textfile. The last arm needs
+              # the collector seen within 7d, so a host without it stays quiet.
+              - alert: SlabinfoCollectorDegraded
+                expr: >-
+                  node_slabinfo_collector_success{job="node-exporter-host"} == 0
+                  or (time() - node_slabinfo_collector_last_success_seconds{job="node-exporter-host"}) > 1800
+                  or count by (job, instance) (node_slab_cache_present{job="node-exporter-host"} == 0) > 0
+                  or (
+                    (
+                      up{job="node-exporter-host"} == 1
+                      unless on (instance) node_slabinfo_collector_success
+                    )
+                    and on (instance) (max_over_time(node_slabinfo_collector_success[7d]) > 0)
+                  )
+                for: 30m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-memory-and-slab-alerts'
+                  summary: 'slabinfo collector is not producing usable series on {{ $labels.instance }}'
+                  description: >-
+                    The slabinfo collector on {{ $labels.instance }} has stopped
+                    producing usable series, so HostSlabCacheGrowing is blind
+                    there.
+
+      platform-hypervisors:
+        groups:
+          - name: platform.hypervisors
+            rules:
+              # The corosync collector runs on every Proxmox host, so its sentinel
+              # seen within 7d marks a hypervisor. A dark hypervisor also fires
+              # HostExporterDown, which the inhibit in alertmanager-config mutes.
+              - alert: ProxmoxHostDown
+                expr: >-
+                  up{job="node-exporter-host"} == 0
+                  and on (instance)
+                  (max_over_time(proxmox_corosync_health_collector_last_success_seconds[7d]) > 0)
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hypervisor-and-cluster-alerts'
+                  summary: 'Proxmox host {{ $labels.instance }} is down'
+                  description: >-
+                    The Proxmox host {{ $labels.instance }} has not answered a
+                    scrape for 5 minutes, so its guests are down or failing
+                    over.
+
+              # corosync pinned near 100% CPU with the process alive: pmxcfs is
+              # frozen while the host and its unit both look healthy. Normal
+              # corosync CPU is 1-2%; membership-change spikes end inside 10m.
+              - alert: CorosyncWedged
+                expr: avg_over_time(proxmox_corosync_cpu_percent[10m]) > 90
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hypervisor-and-cluster-alerts'
+                  summary: 'corosync stuck at high CPU on {{ $labels.instance }}'
+                  description: >-
+                    corosync on {{ $labels.instance }} has averaged {{ $value |
+                    printf "%.1f" }}% CPU over 10 minutes, so pmxcfs replication
+                    has likely stopped on this node.
+
+              # The HA manager rewrites /etc/pve/ha/manager_status every few
+              # seconds. A deleted file reads mtime 0 and fires; the 7d arm keeps a
+              # cluster that never ran HA quiet.
+              - alert: PmxcfsStale
+                expr: >-
+                  time() - proxmox_pmxcfs_manager_status_mtime_seconds > 600
+                  and on (instance)
+                  (max_over_time(proxmox_pmxcfs_manager_status_mtime_seconds[7d]) > 0)
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hypervisor-and-cluster-alerts'
+                  summary: 'pmxcfs on {{ $labels.instance }} appears stale'
+                  description: >-
+                    /etc/pve/ha/manager_status on {{ $labels.instance }} has not
+                    changed in {{ $value | humanizeDuration }}, so this node's
+                    view of the cluster is frozen.
+
+              # Silent when the metric was never written: HostExporterDown covers a
+              # dark exporter.
+              - alert: CorosyncHealthCollectorStale
+                expr: >-
+                  time() - proxmox_corosync_health_collector_last_success_seconds > 300
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hypervisor-and-cluster-alerts'
+                  summary: 'corosync-health-collector is degraded on {{ $labels.instance }}'
+                  description: >-
+                    The corosync health collector on {{ $labels.instance }} has
+                    not succeeded in over 5 minutes, so CorosyncWedged and
+                    PmxcfsStale read stale inputs there.
+
+              # PSI is the earliest saturation signal on a hypervisor. The 15m
+              # hold rides out a nightly backup burst; a real freeze lasts longer.
+              - alert: ProxmoxHostIOPressure
+                expr: >-
+                  rate(node_pressure_io_waiting_seconds_total{job="node-exporter-host"}[5m]) > 0.20
+                  and on (instance) proxmox_corosync_health_collector_last_success_seconds
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hypervisor-and-cluster-alerts'
+                  summary: 'Proxmox host {{ $labels.instance }} is I/O-pressure stalled'
+                  description: >-
+                    {{ $labels.instance }} has spent {{ $value |
+                    humanizePercentage }} of the last 5 minutes with tasks
+                    stalled on disk I/O.
+
+              - alert: ProxmoxHostMemoryPressure
+                expr: >-
+                  rate(node_pressure_memory_waiting_seconds_total{job="node-exporter-host"}[5m]) > 0.10
+                  and on (instance) proxmox_corosync_health_collector_last_success_seconds
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hypervisor-and-cluster-alerts'
+                  summary: 'Proxmox host {{ $labels.instance }} is under memory-reclaim pressure'
+                  description: >-
+                    {{ $labels.instance }} has spent {{ $value |
+                    humanizePercentage }} of the last 5 minutes with tasks
+                    stalled on memory reclaim.
+
+              # Zero threads means nfsd is not serving. The second arm catches a
+              # host that served NFS within 7d and no longer reports nfsd at all.
+              - alert: NFSServerDown
+                expr: >-
+                  node_nfsd_server_threads{job="node-exporter-host"} == 0
+                  or (
+                    (
+                      up{job="node-exporter-host"} == 1
+                      unless on (instance) node_nfsd_server_threads{job="node-exporter-host"}
+                    )
+                    and on (instance)
+                    (max_over_time(node_nfsd_server_threads{job="node-exporter-host"}[7d]) > 0)
+                  )
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#nfs-server-down'
+                  summary: 'NFS server on {{ $labels.instance }} is not serving'
+                  description: >-
+                    nfsd on {{ $labels.instance }} has had no threads, or
+                    reported none at all, for 5 minutes, so every NFS-backed PV
+                    is stalled.
+
+      platform-cluster-health:
+        groups:
+          - name: platform.cluster-health
+            rules:
+              # Past 6h a node outage is an incident, not maintenance churn. The
+              # storm-control inhibit never mutes a critical.
+              - alert: NodeNotReadyProlonged
+                expr: kube_node_status_condition{condition="Ready", status="true"} == 0
+                for: 6h
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hypervisor-and-cluster-alerts'
+                  summary: 'Node {{ $labels.node }} has been NotReady for over 6 hours'
+                  description: >-
+                    {{ $labels.node }} has been NotReady for more than 6 hours.
+
+              # Any discovered member down eats into etcd's fault tolerance, and
+              # upstream's etcdInsufficientMembers fires only once quorum is gone.
+              # absent() covers the whole job being down.
+              - alert: EtcdQuorumAtRisk
+                expr: >-
+                  count(up{job="kube-etcd"} == 1) < count(up{job="kube-etcd"})
+                  or absent(up{job="kube-etcd"} == 1)
+                for: 6h
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hypervisor-and-cluster-alerts'
+                  summary: 'k3s etcd has been running a member short for 6h'
+                  description: >-
+                    At least one etcd member has been unreachable for 6 hours,
+                    so every further server loss brings the cluster closer to
+                    losing quorum.
+
+      platform-temperature:
+        groups:
+          - name: platform.temperature
+            rules:
+              # hwmon from the hypervisors only: an LXC reads its host's sensors,
+              # so an unscoped rule pages twice for one sensor. The corosync
+              # sentinel marks a hypervisor.
+              - alert: SATADriveTempWarning
+                expr: >-
+                  max by (instance, chip) (
+                    node_hwmon_temp_celsius{job="node-exporter-host"}
+                    * on (instance, chip) group_left(chip_name)
+                    node_hwmon_chip_names{job="node-exporter-host", chip_name=~"drivetemp.*"}
+                  ) >= 50
+                  and on (instance) proxmox_corosync_health_collector_last_success_seconds
+                for: 15m
+                labels:
+                  severity: warning
+                  component: storage
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hardware-temperature-alerts'
+                  summary: 'SATA drive {{ $labels.chip }} on {{ $labels.instance }} at {{ $value | printf "%.0f" }}C'
+                  description: >-
+                    SATA drive {{ $labels.chip }} on {{ $labels.instance }} has
+                    been at {{ $value | printf "%.0f" }}C for 15 minutes,
+                    against a 50C warning.
+
+              - alert: SATADriveTempCritical
+                expr: >-
+                  max by (instance, chip) (
+                    node_hwmon_temp_celsius{job="node-exporter-host"}
+                    * on (instance, chip) group_left(chip_name)
+                    node_hwmon_chip_names{job="node-exporter-host", chip_name=~"drivetemp.*"}
+                  ) >= 55
+                  and on (instance) proxmox_corosync_health_collector_last_success_seconds
+                for: 5m
+                labels:
+                  severity: critical
+                  component: storage
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hardware-temperature-alerts'
+                  summary: 'SATA drive {{ $labels.chip }} on {{ $labels.instance }} at {{ $value | printf "%.0f" }}C'
+                  description: >-
+                    SATA drive {{ $labels.chip }} on {{ $labels.instance }} is
+                    at {{ $value | printf "%.0f" }}C, the common HDD ceiling.
+
+              # A two-step NVMe ladder: the 75-80C band is null-routed, and 80C
+              # is where the drives start throttling.
+              - alert: NVMeDriveTempHigh
+                expr: >-
+                  max by (instance, chip) (
+                    node_hwmon_temp_celsius{job="node-exporter-host"}
+                    * on (instance, chip) group_left(chip_name)
+                    node_hwmon_chip_names{job="node-exporter-host", chip_name="nvme"}
+                  ) >= 75
+                  and on (instance) proxmox_corosync_health_collector_last_success_seconds
+                for: 10m
+                labels:
+                  severity: none
+                  component: storage
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hardware-temperature-alerts'
+                  summary: 'NVMe drive {{ $labels.chip }} on {{ $labels.instance }} at {{ $value | printf "%.0f" }}C'
+                  description: >-
+                    NVMe drive {{ $labels.chip }} on {{ $labels.instance }} has
+                    been at {{ $value | printf "%.0f" }}C for 10 minutes, below
+                    the 80C throttle point.
+
+              - alert: NVMeDriveTempCritical
+                expr: >-
+                  max by (instance, chip) (
+                    node_hwmon_temp_celsius{job="node-exporter-host"}
+                    * on (instance, chip) group_left(chip_name)
+                    node_hwmon_chip_names{job="node-exporter-host", chip_name="nvme"}
+                  ) >= 80
+                  and on (instance) proxmox_corosync_health_collector_last_success_seconds
+                for: 2m
+                labels:
+                  severity: critical
+                  component: storage
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hardware-temperature-alerts'
+                  summary: 'NVMe drive {{ $labels.chip }} on {{ $labels.instance }} at {{ $value | printf "%.0f" }}C'
+                  description: >-
+                    NVMe drive {{ $labels.chip }} on {{ $labels.instance }} is at
+                    {{ $value | printf "%.0f" }}C, the thermal-throttle point where
+                    the drive slows itself to shed heat.
+
+              # coretemp is Intel, k10temp AMD. Desktop CPUs spike toward TJunction
+              # under load, so the thresholds and holds target sustained heat.
+              - alert: CPUTempWarning
+                expr: >-
+                  max by (instance) (
+                    node_hwmon_temp_celsius{job="node-exporter-host"}
+                    * on (instance, chip) group_left(chip_name)
+                    node_hwmon_chip_names{job="node-exporter-host", chip_name=~"coretemp|k10temp"}
+                  ) >= 90
+                  and on (instance) proxmox_corosync_health_collector_last_success_seconds
+                for: 15m
+                labels:
+                  severity: warning
+                  component: cpu
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hardware-temperature-alerts'
+                  summary: 'CPU on {{ $labels.instance }} sustained {{ $value | printf "%.0f" }}C'
+                  description: >-
+                    CPU on {{ $labels.instance }} has been at or above 90C for
+                    15 minutes.
+
+              - alert: CPUTempCritical
+                expr: >-
+                  max by (instance) (
+                    node_hwmon_temp_celsius{job="node-exporter-host"}
+                    * on (instance, chip) group_left(chip_name)
+                    node_hwmon_chip_names{job="node-exporter-host", chip_name=~"coretemp|k10temp"}
+                  ) >= 95
+                  and on (instance) proxmox_corosync_health_collector_last_success_seconds
+                for: 5m
+                labels:
+                  severity: critical
+                  component: cpu
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hardware-temperature-alerts'
+                  summary: 'CPU on {{ $labels.instance }} at {{ $value | printf "%.0f" }}C'
+                  description: >-
+                    CPU on {{ $labels.instance }} hit {{ $value | printf "%.0f"
+                    }}C, close to TJunction, so thermal throttling is imminent.
+
+              # Host-side hwmon GPU sensors. A passed-through GPU reports from
+              # its guest instead, through the DCGM exporter where one is deployed.
+              - alert: HostGpuTempWarning
+                expr: >-
+                  max by (instance, chip_name) (
+                    node_hwmon_temp_celsius{job="node-exporter-host"}
+                    * on (instance, chip) group_left(chip_name)
+                    node_hwmon_chip_names{job="node-exporter-host", chip_name=~"xe|i915|nouveau|nvidia|amdgpu|radeon"}
+                  ) >= 85
+                  and on (instance) proxmox_corosync_health_collector_last_success_seconds
+                for: 5m
+                labels:
+                  severity: warning
+                  component: gpu
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hardware-temperature-alerts'
+                  summary: 'GPU ({{ $labels.chip_name }}) on {{ $labels.instance }} at {{ $value | printf "%.0f" }}C'
+                  description: >-
+                    GPU ({{ $labels.chip_name }}) on {{ $labels.instance }} has been
+                    at or above 85C for 5 minutes.
+
+              - alert: HostGpuTempCritical
+                expr: >-
+                  max by (instance, chip_name) (
+                    node_hwmon_temp_celsius{job="node-exporter-host"}
+                    * on (instance, chip) group_left(chip_name)
+                    node_hwmon_chip_names{job="node-exporter-host", chip_name=~"xe|i915|nouveau|nvidia|amdgpu|radeon"}
+                  ) >= 95
+                  and on (instance) proxmox_corosync_health_collector_last_success_seconds
+                for: 1m
+                labels:
+                  severity: critical
+                  component: gpu
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hardware-temperature-alerts'
+                  summary: 'GPU ({{ $labels.chip_name }}) on {{ $labels.instance }} at {{ $value | printf "%.0f" }}C'
+                  description: >-
+                    GPU ({{ $labels.chip_name }}) on {{ $labels.instance }} is at
+                    {{ $value | printf "%.0f" }}C, near the usual thermal-shutdown
+                    point for consumer GPUs.
+
+              # Fires only where node_exporter publishes a NIC sensor chip.
+              - alert: NICTempWarning
+                expr: >-
+                  max by (instance, chip_name) (
+                    node_hwmon_temp_celsius{job="node-exporter-host"}
+                    * on (instance, chip) group_left(chip_name)
+                    node_hwmon_chip_names{job="node-exporter-host", chip_name=~"nic.*"}
+                  ) >= 90
+                  and on (instance) proxmox_corosync_health_collector_last_success_seconds
+                for: 10m
+                labels:
+                  severity: warning
+                  component: network
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hardware-temperature-alerts'
+                  summary: 'NIC on {{ $labels.instance }} at {{ $value | printf "%.0f" }}C'
+                  description: >-
+                    NIC {{ $labels.chip_name }} on {{ $labels.instance }} has
+                    been at or above 90C for 10 minutes.
+
+      platform-resolvers:
+        groups:
+          - name: platform.resolvers
+            rules:
+              # unbound_up is the exporter's verdict on the control socket, so it
+              # separates a dead resolver from a dead exporter. One resolver down
+              # is a warning while the others still recurse.
+              - alert: UnboundDown
+                expr: unbound_up{job="unbound-exporter"} == 0
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#recursive-resolver-alerts'
+                  summary: 'Unbound is not answering the exporter on {{ $labels.instance }}'
+                  description: >-
+                    unbound_exporter on {{ $labels.instance }} has not been able
+                    to read Unbound's control socket for 5 minutes, so that
+                    resolver cannot recurse.
+
+              # A dead exporter otherwise looks healthy: unbound_up just stops
+              # existing. The EndpointSlice is cluster-config's resolver roster.
+              - alert: UnboundExporterDown
+                expr: >-
+                  up{job="unbound-exporter"} == 0
+                  or absent(up{job="unbound-exporter"} == 1)
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#recursive-resolver-alerts'
+                  summary: 'unbound_exporter is not being scraped on {{ $labels.instance }}'
+                  description: >-
+                    Prometheus has not scraped unbound_exporter on a resolver
+                    for 15 minutes, so the Unbound alerts are blind there.
+
+              # nodata is a subset of NOERROR, so it leaves the denominator. The
+              # -1 arm fires where Unbound answers the exporter but exports no
+              # rcode counters, which needs extended-statistics on.
+              - alert: UnboundSERVFAILRatioHigh
+                expr: >-
+                  (
+                    sum by (instance) (rate(unbound_answer_rcodes_total{job="unbound-exporter", rcode="SERVFAIL"}[15m]))
+                    / sum by (instance) (rate(unbound_answer_rcodes_total{job="unbound-exporter", rcode!="nodata"}[15m]))
+                    > 0.05
+                  )
+                  or
+                  (
+                    -1 * count by (instance) (unbound_up{job="unbound-exporter"} == 1)
+                    unless on (instance)
+                    count by (instance) (unbound_answer_rcodes_total{job="unbound-exporter"})
+                  )
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#recursive-resolver-alerts'
+                  summary: >-
+                    {{ if lt $value 0.0 }}Unbound on {{ $labels.instance }} exports no rcode counters{{ else }}Unbound on {{ $labels.instance }} is answering {{ $value | humanizePercentage }} SERVFAIL{{ end }}
+                  description: >-
+                    {{ if lt $value 0.0 }}Unbound on {{ $labels.instance }}
+                    exports no unbound_answer_rcodes_total, so the SERVFAIL
+                    ratio cannot be measured.{{ else }}More than 5% of Unbound's
+                    answers on {{ $labels.instance }} were SERVFAIL for 15
+                    minutes.{{ end }}
+
+
+      platform-mail:
+        groups:
+          - name: platform.mail
+            rules:
+              # A wedged upstream hop queues mail silently while the relay and
+              # postfix both stay up, so only the queue depth shows the break.
+              - alert: PostfixQueueBacklog
+                expr: postfix_queue_depth > 5
+                for: 30m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#mail-relay'
+                  summary: 'Postfix queue backing up on {{ $labels.instance }}'
+                  description: >-
+                    The relay on {{ $labels.instance }} has held more than 5
+                    queued messages for 30 minutes, so the upstream hop is
+                    likely refusing it.
+
+              - alert: PostfixDown
+                expr: postfix_up == 0
+                for: 10m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#mail-relay'
+                  summary: 'Postfix is not active on {{ $labels.instance }}'
+                  description: >-
+                    postfix has been down on the relay for 10 minutes, so alert
+                    email and host notifications are not leaving the cluster.
+
+              # The absent() arm makes an undeployed collector loud, so the two
+              # rules above never read stale inputs unnoticed.
+              - alert: PostfixQueueCollectorStale
+                expr: >-
+                  (time() - postfix_queue_collector_last_success_seconds > 900)
+                  or absent(postfix_queue_collector_last_success_seconds)
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#mail-relay'
+                  summary: 'postfix-queue collector is degraded or missing on the relay'
+                  description: >-
+                    The postfix-queue collector has not succeeded in 15 minutes
+                    or has never run, so the Postfix alerts read stale or no
+                    inputs.
+
+      platform-self-monitoring:
+        groups:
+          - name: platform.self-monitoring
+            rules:
+              # Loki runs one replica and senders do not buffer, so a sustained
+              # 5xx rate on push or query loses logs silently.
+              - alert: LokiRequestFailures
+                expr: >-
+                  sum(rate(loki_request_duration_seconds_count{status_code=~"5..",
+                  job="observability/loki"}[5m]))
+                  /
+                  sum(rate(loki_request_duration_seconds_count{job="observability/loki"}[5m]))
+                  > 0.05
+                  and sum(rate(loki_request_duration_seconds_count{job="observability/loki"}[5m])) > 0
+                for: 15m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: 'Loki is returning 5xx on more than 5% of requests'
+                  description: >-
+                    Loki is serving HTTP 5xx on {{ $value | humanizePercentage
+                    }} of requests, and senders do not buffer.
+
+              # A drop rate under the critical rule's 1%-for-15m is otherwise
+              # invisible. Exempted from InfoInhibitor: it carries no namespace.
+              - alert: AlertmanagerNotificationsDropping
+                expr: >-
+                  sum by (integration) (
+                    increase(alertmanager_notifications_failed_total{job="kube-prometheus-stack-alertmanager",
+                    container="alertmanager", namespace="observability"}[6h])
+                  ) > 0
+                for: 1h
+                labels:
+                  severity: info
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#where-to-look-first'
+                  summary: '{{ $value | printf "%.0f" }} notifications to {{ $labels.integration }} failed in the last 6h'
+                  description: >-
+                    Alertmanager dropped notifications on {{ $labels.integration
+                    }} over 6 hours without crossing the ratio that pages.
+{%- endraw %}
+{%- if storage_backend == 'zfs' %}{% raw %}
+
+      platform-zfs-capacity:
+        groups:
+          - name: platform.zfs-capacity
+            rules:
+              # node_filesystem math cannot stand in for a pool: a dataset shrinks
+              # as zvols fill the pool, so DiskUsage* stays low on a nearly full
+              # pool. Pools share names across hosts, so the inhibit keys on both.
+              - alert: ZFSPoolSpaceWarning
+                expr: (zfs_pool_status_allocated_bytes / zfs_pool_status_size_bytes) * 100 > 80
+                for: 10m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#zfs-pool-capacity'
+                  summary: 'ZFS pool {{ $labels.pool }} on {{ $labels.instance }} above 80% capacity'
+                  description: 'ZFS pool {{ $labels.pool }} on {{ $labels.instance }} is at {{ $value | printf "%.1f" }}% capacity.'
+
+              - alert: ZFSPoolSpaceCritical
+                expr: (zfs_pool_status_allocated_bytes / zfs_pool_status_size_bytes) * 100 > 90
+                for: 5m
+                labels:
+                  severity: critical
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#zfs-pool-capacity'
+                  summary: 'ZFS pool {{ $labels.pool }} on {{ $labels.instance }} above 90% capacity'
+                  description: >-
+                    ZFS pool {{ $labels.pool }} on {{ $labels.instance }} is at
+                    {{ $value | printf "%.1f" }}% capacity, where ZFS slows
+                    sharply.
+
+              # The corosync sentinel witnesses a hypervisor whose pool collector
+              # never wrote. The success arm catches a collector publishing no
+              # pools; its 7d guard keeps a pool-less host quiet.
+              - alert: ZFSPoolCollectorStale
+                expr: >-
+                  (time() - zfs_pool_status_collector_last_success_seconds > 900)
+                  or on (instance) (
+                    proxmox_corosync_health_collector_last_success_seconds
+                    unless on (instance) zfs_pool_status_collector_last_success_seconds
+                  )
+                  or (
+                    zfs_pool_status_collector_success == 0
+                    and on (instance) (
+                      max_over_time(zfs_pool_status_collector_success[7d]) > 0
+                    )
+                  )
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#zfs-pool-capacity'
+                  summary: 'zpool-status-collector is degraded or missing on {{ $labels.instance }}'
+                  description: >-
+                    The pool collector on {{ $labels.instance }} is stale, has
+                    never written, or reports no pool, so the ZFS pool alerts
+                    read stale or no inputs.
+
+              # SUnreclaim minus ARC: nearly all legitimate unreclaimable slab on
+              # a ZFS host is the ARC, so the remainder is the leak. 16 GiB for
+              # 24h is early enough to schedule the reboot window.
+              - alert: HostSlabLeakSuspected
+                expr: >-
+                  (node_memory_SUnreclaim_bytes{job="node-exporter-host"} - node_zfs_arc_size{job="node-exporter-host"}) > 16 * 1024 * 1024 * 1024
+                for: 24h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-memory-and-slab-alerts'
+                  summary: 'Unreclaimable slab far above ARC on {{ $labels.instance }}'
+                  description: >-
+                    SUnreclaim on {{ $labels.instance }} has exceeded the ARC by
+                    {{ $value | humanize1024 }}B for 24 hours, and only a reboot
+                    reclaims it.
+
+              # Swap that never dropped below 2 GiB across two nightly cycles: the
+              # reset keeps aborting. Scoped to the hosts that run swap-clean.
+              - alert: NASSwapNotClearing
+                expr: >-
+                  min_over_time(
+                    (node_memory_SwapTotal_bytes{job="node-exporter-host"}
+                    - node_memory_SwapFree_bytes{job="node-exporter-host"})[2d:30m]
+                  ) > 2 * 1024 * 1024 * 1024
+                  and on (instance) swap_clean_last_run_success
+                for: 1h
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-memory-and-slab-alerts'
+                  summary: 'Swap not clearing: above 2 GiB for 2 days on {{ $labels.instance }}'
+                  description: >-
+                    Swap on {{ $labels.instance }} has stayed above 2 GiB for 2
+                    days, so swap-clean is aborting for lack of headroom.
+
+              # No swap has no usage to accumulate, so the rule above cannot see
+              # it. Defers to EncryptedSwapRestoreFailed where that gauge exists.
+              - alert: NASSwapGone
+                expr: >-
+                  node_memory_SwapTotal_bytes{job="node-exporter-host"} == 0
+                  and on (instance) swap_clean_last_run_success
+                  unless on (instance) encrypted_swap_any_swap_active
+                for: 30m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-memory-and-slab-alerts'
+                  summary: 'No swap configured on {{ $labels.instance }}'
+                  description: >-
+                    {{ $labels.instance }} reports no swap while it runs
+                    swap-clean, so the host has no safety margin.
+
+              # A guest swap-clean stopped did not come back. The gauge is rewritten
+              # every run, so the guest's own alerts are the persistent signal.
+              - alert: SwapCleanGuestRestartFailed
+                expr: swap_clean_guest_restart_failures > 0
+                for: 5m
+                labels:
+                  severity: warning
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-memory-and-slab-alerts'
+                  summary: 'swap-clean failed to restart a stopped guest on {{ $labels.instance }}'
+                  description: >-
+                    swap-clean stopped {{ $value | printf "%.0f" }} guest(s) on
+                    {{ $labels.instance }} that did not restart.
+
+              # A notice: ARC shrink alone no longer covers the swap. Exempted
+              # from InfoInhibitor by name; [6h] keeps it from latching.
+              - alert: SwapCleanStoppedGuests
+                expr: max_over_time(swap_clean_guests_stopped_count[6h]) > 0
+                for: 5m
+                labels:
+                  severity: info
+                annotations:
+                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-memory-and-slab-alerts'
+                  summary: 'swap-clean stopped guests to reclaim swap on {{ $labels.instance }}'
+                  description: >-
+                    swap-clean stopped and restarted {{ $value | printf "%.0f"
+                    }} guest(s) in the last 6 hours to free RAM, so the host is
+                    short on RAM.
 {%- endraw %}{% endif %}

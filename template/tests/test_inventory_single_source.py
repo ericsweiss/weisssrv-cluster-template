@@ -12,7 +12,8 @@ import pytest
 import yaml
 from conftest import REPO, reported
 
-GROUP_VARS = REPO / "ansible" / "inventories" / "prod" / "group_vars"
+INVENTORY = REPO / "ansible" / "inventories" / "prod"
+GROUP_VARS = INVENTORY / "group_vars"
 ALL_YML = GROUP_VARS / "all.yml"
 SOURCE_KEY = "lan_gateway"
 # The keys whose declared value IS the gateway: the declaration itself and the
@@ -40,16 +41,25 @@ def key_of(line: str) -> str:
     return key.strip().lstrip("- ") if sep else ""
 
 
+def inventory_files(root) -> list:
+    """hosts.yml plus every group_vars and host_vars file, both YAML suffixes."""
+    paths = {path for path in (root / "hosts.yml", root / "hosts.yaml") if path.is_file()}
+    for sub in ("group_vars", "host_vars"):
+        for suffix in ("*.yml", "*.yaml"):
+            paths |= set((root / sub).rglob(suffix))
+    return sorted(paths)
+
+
 def restatements(root, address: str, mirrors=MIRROR_KEYS) -> list[str]:
     """`path:line` for every bare gateway literal outside the mirrored keys."""
     pattern = address_re(address)
     found = []
-    for path in sorted(root.glob("*.yml")):
+    for path in inventory_files(root):
         for number, line in enumerate(path.read_text().splitlines(), 1):
             code = line.split("#", 1)[0]
             if not pattern.search(code) or key_of(code) in mirrors:
                 continue
-            found.append(f"{path.name}:{number}")
+            found.append(f"{path.relative_to(root).as_posix()}:{number}")
     return found
 
 
@@ -63,8 +73,9 @@ def test_the_gateway_is_declared_where_the_gate_reads_it():
 
 
 @needs_group_vars
-def test_no_group_vars_file_restates_the_gateway():
-    found = restatements(GROUP_VARS, gateway())
+def test_no_inventory_file_restates_the_gateway():
+    assert inventory_files(INVENTORY), f"no inventory file under {reported(INVENTORY)}"
+    found = restatements(INVENTORY, gateway())
     assert not found, (
         f"the gateway address is spelled out again in {found} — reference "
         f"`{{{{ {SOURCE_KEY} }}}}` instead, so a renumber moves one line."
@@ -72,8 +83,9 @@ def test_no_group_vars_file_restates_the_gateway():
 
 
 def test_a_hand_written_gateway_in_a_firewall_rule_is_reported(tmp_path):
-    """Mutation case: the security-group form the fix was written for."""
-    (tmp_path / "all.yml").write_text(
+    """Mutation case: a literal gateway in a security-group rule is reported."""
+    (tmp_path / "group_vars").mkdir()
+    (tmp_path / "group_vars" / "all.yml").write_text(
         f"{SOURCE_KEY}: 10.9.0.1\n"
         'proxmox_lxc_gateway: "{{ lan_gateway }}"\n'
         "proxmox_firewall_security_groups:\n"
@@ -81,13 +93,25 @@ def test_a_hand_written_gateway_in_a_firewall_rule_is_reported(tmp_path):
         '    rules:\n'
         '      - "IN ACCEPT -source 10.9.0.1 -dest 10.9.0.162 -p udp -dport 514"\n'
     )
-    assert restatements(tmp_path, "10.9.0.1") == ["all.yml:6"]
+    assert restatements(tmp_path, "10.9.0.1") == ["group_vars/all.yml:6"]
+
+
+def test_host_vars_subdirectories_and_hosts_yml_are_scanned(tmp_path):
+    """Mutation case: a literal outside top-level group_vars is still found."""
+    (tmp_path / "host_vars" / "dns-01").mkdir(parents=True)
+    (tmp_path / "host_vars" / "dns-01" / "net.yaml").write_text("dns_upstream: 10.9.0.1\n")
+    (tmp_path / "hosts.yml").write_text("all:\n  vars:\n    router: 10.9.0.1\n")
+    assert restatements(tmp_path, "10.9.0.1") == [
+        "host_vars/dns-01/net.yaml:1",
+        "hosts.yml:3",
+    ]
 
 
 def test_a_longer_address_and_a_cidr_are_not_the_gateway(tmp_path):
     """Mutation case: `10.9.0.1` must not match `10.9.0.160` or `10.9.0.1/24`,
     and a commented-out line is not shipped configuration."""
-    (tmp_path / "k3s.yml").write_text(
+    (tmp_path / "group_vars").mkdir()
+    (tmp_path / "group_vars" / "k3s.yml").write_text(
         "k3s_api_vip: 10.9.0.160\n"
         "lan_cidr: 10.9.0.1/24\n"
         "# old gateway was 10.9.0.1\n"

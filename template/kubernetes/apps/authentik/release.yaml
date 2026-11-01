@@ -34,9 +34,7 @@ spec:
     remediation:
       retries: 3
       remediateLastFailure: true
-  # Image tags substituted from the cluster-versions ConfigMap. Values stay
-  # inline: HelmRelease.spec.valuesFrom has no namespace field, so a referenced
-  # ConfigMap would have to live in this namespace.
+  # Image tags are substituted from the cluster-versions ConfigMap.
   values:
     # Canonical origin: the OIDC issuer is always the EXTERNAL host, even for
     # internal-only apps (AUTHENTIK_WEB__BASE_URL in server.env/worker.env).
@@ -106,9 +104,7 @@ spec:
         tag: "${authentik_version}"
 
       env:
-        # Base URL (scheme+host only): advisory in 2026.8, REQUIRED from 2026.11.
-        # The canonical origin is the EXTERNAL issuer host — the OIDC issuer is
-        # always auth.<external> even for internal-only apps.
+        # Scheme and host only: the canonical origin above.
         - name: AUTHENTIK_WEB__BASE_URL
           value: "https://auth.${cluster_external_domain}"
         - name: AUTHENTIK_SECRET_KEY
@@ -171,9 +167,7 @@ spec:
       image:
         tag: "${authentik_version}"
 
-      # The worker's healthcheck writes a PID file to /dev/shm; without this
-      # volume it fails with "open /dev/shm/authentik-worker.pid: no such file".
-      # The chart's keys are additionalVolumes/additionalVolumeMounts, not volumes.
+      # The worker's healthcheck writes its PID file to /dev/shm.
       additionalVolumes:
         - name: shm
           emptyDir:
@@ -206,9 +200,7 @@ spec:
         failureThreshold: 30
 
       env:
-        # Base URL (scheme+host only): advisory in 2026.8, REQUIRED from 2026.11.
-        # The canonical origin is the EXTERNAL issuer host — the OIDC issuer is
-        # always auth.<external> even for internal-only apps.
+        # Scheme and host only: the canonical origin above.
         - name: AUTHENTIK_WEB__BASE_URL
           value: "https://auth.${cluster_external_domain}"
         - name: AUTHENTIK_SECRET_KEY
@@ -239,8 +231,7 @@ spec:
         limits:
           memory: 1536Mi
 
-    # Bundled PostgreSQL. Move to an external/HA database if this becomes
-    # load-bearing for more than SSO.
+    # Bundled PostgreSQL, single instance.
     postgresql:
       enabled: true
       image:

@@ -27,9 +27,10 @@ interval is roughly 4400 evaluations of every rule, which dominates the lint
 job.
 
 So pick the largest interval that still gives two or three evaluations inside
-the shortest `for:` the file exercises, and keep the input `interval` equal to
+the shortest `for:` the file exercises. Keep the input `interval` at or below
 it. A sparser input goes stale past Prometheus' 5-minute lookback and resets the
-`for:` window mid-test.
+`for:` window mid-test. A finer input is fine when the case needs sample-level
+timing.
 
 When one alert in a family needs a multi-day horizon, split it into its own
 `*-long-horizon.test.yaml` at a 30-minute interval rather than slowing the whole

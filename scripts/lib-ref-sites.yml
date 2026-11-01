@@ -1,11 +1,12 @@
 ---
 # Every file beyond .gitlab-ci.yml that repeats the library release tag, read
-# by the vendored scripts/check-lib-pins.py; the paths are this repo's site data.
+# by the vendored scripts/check-lib-pins.py. The paths are site data, so the
+# list lives here rather than in the script.
+
+# Each entry is a repo-root glob and a one-group regex capturing the ref; the
+# gate's own docstring owns the rest of the contract.
 sites:
-  # The copier default a generated cluster starts from; its validator floor is
-  # the version list on the line after and moves by hand with it.
+  # The copier default a generated cluster starts from. Its validator floor is
+  # the version list in the validator's `elif` and moves by hand with it.
   - path: copier.yml
     pattern: '\n  default: "(v\d+\.\d+\.\d+)"\n  validator: >-\n    \{% if not \(lib_ref'
-  # The current release the versioning doc names.
-  - path: docs/VERSIONING.md
-    pattern: 'currently weisssrv-lib `(v\d+\.\d+\.\d+)`'

@@ -4,7 +4,6 @@
 The copy declares `# Taken from <chart> <version>`, matched against the
 inventory's chart pins. Exit 0 clean, 1 drifted, 2 cannot inspect.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -14,7 +13,7 @@ from pathlib import Path
 
 try:
     import yaml
-except ImportError:
+except ImportError:  # pragma: no cover - environment guard
     print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
     raise SystemExit(2) from None
 
@@ -31,14 +30,26 @@ _ALERT_LINE = re.compile(r"^\s*-\s*alert:\s*(?P<name>\S+)\s*$")
 CHART_KEYS = {"kube-prometheus-stack": "kube_prometheus_stack"}
 # Both suffixes: a rule file written as `.yml` is rendered just the same.
 RULE_GLOBS = ("*.yaml", "*.yml")
-# Disabled upstream but replaced by a rule selecting different series, so there
-# is no upstream expr to stay in step with. Each entry carries its reason.
-NOT_MIRRORED: dict[str, str] = {}
+# Disabled upstream but replaced by a rule that selects different series, so
+# there is no upstream expr to stay in step with.
+NOT_MIRRORED = {
+    "NodeSystemdServiceFailed": "selects job=node-exporter-host",
+    "NodeSystemdServiceCrashlooping": "selects job=node-exporter-host",
+    "KubeCPUQuotaOvercommit": "replaced by KubeCPUQuotaOvercommitNonCI",
+    "KubeMemoryQuotaOvercommit": "replaced by KubeMemoryQuotaOvercommitNonCI",
+}
 
 
 class OperatorError(RuntimeError):
     """A subject the gate cannot inspect — exit 2, never the exit 1 a caller
     reads as a mirror that fell behind its chart."""
+
+
+def _read(path: Path, root: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise OperatorError(f"{path.relative_to(root)} could not be read: {exc}") from exc
 
 
 def pinned_versions(vars_text: str) -> dict[str, str]:
@@ -108,15 +119,15 @@ def in_tree_problems(root: Path, pinned: dict[str, str]) -> list[str]:
     required = disabled - set(NOT_MIRRORED)
     if not required:
         raise OperatorError(
-            f"every alert {CHART_RELEASE} disables is in NOT_MIRRORED — "
-            "the in-tree check would pass vacuously"
+            f"every alert {CHART_RELEASE} disables is in NOT_MIRRORED — the "
+            "in-tree check would pass vacuously"
         )
     tree = root / RULE_TREE
     scanned = sorted({p for glob in RULE_GLOBS for p in tree.rglob(glob)})
     seen: set[str] = set()
     for path in scanned:
         rel = path.relative_to(root)
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = _read(path, root).splitlines()
         for index, line in enumerate(lines):
             match = _ALERT_LINE.match(line)
             if not match or match.group("name") not in required:
@@ -147,13 +158,13 @@ def in_tree_problems(root: Path, pinned: dict[str, str]) -> list[str]:
 def mirror_problems(root: Path, pinned: dict[str, str]) -> list[str]:
     """Supplementary promtool rule files each name their chart version.
 
-    The directory ships only *.test.yaml until a hand-copied upstream group is
-    needed beside them, so an empty result is the normal state.
+    The in-tree arm carries the vacuity guard, so a directory with no hand-copied
+    upstream group is a normal state here.
     """
     problems = []
     for mirror in sorted((root / MIRROR_DIR).glob("*.rules.yaml")):
         rel = mirror.relative_to(root)
-        match = _TAKEN.search(mirror.read_text(encoding="utf-8"))
+        match = _TAKEN.search(_read(mirror, root))
         if not match:
             problems.append(f"{rel}: no `# Taken from <chart> <version>` line")
             continue
@@ -164,12 +175,7 @@ def mirror_problems(root: Path, pinned: dict[str, str]) -> list[str]:
 
 
 def check(root: Path = REPO) -> list[str]:
-    vars_path = root / VARS_FILE
-    try:
-        vars_text = vars_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise OperatorError(f"{VARS_FILE} could not be read: {exc}") from exc
-    pinned = pinned_versions(vars_text)
+    pinned = pinned_versions(_read(root / VARS_FILE, root))
     return mirror_problems(root, pinned) + in_tree_problems(root, pinned)
 
 

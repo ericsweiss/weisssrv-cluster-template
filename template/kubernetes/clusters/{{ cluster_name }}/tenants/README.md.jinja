@@ -1,9 +1,17 @@
 # Tenant wiring
 
+This page is the canonical tenant wiring for this cluster: the shape of a
+tenant file, why each object is in it, and every step the operator takes. A
+tenant generated from weisssrv-app-template carries a `docs/ONBOARDING.md` that
+renders that tenant's values into this shape. When the two disagree, this page
+wins.
+
 Each external repo that deploys into this cluster gets one YAML file here plus a
-matching entry in `kustomization.yaml` (Kustomize requires explicit resource
-listings). The file carries the tenant's secret store, Flux `GitRepository`,
-reconciliation `ServiceAccount` + RoleBindings, and top-level `Kustomization`.
+matching entry in `kustomization.yaml`, because Kustomize requires explicit
+resource listings. The file carries the tenant's Namespace and caps, its secret
+store, its Flux `GitRepository`, the reconciliation `ServiceAccount` and its
+RoleBindings, the hostname grant, the read-only identity and the top-level
+`Kustomization`.
 
 Removal is the inverse: delete the file and its `kustomization.yaml` line. Flux
 prunes the Kustomization (and everything it created, including ESO-owned
@@ -11,6 +19,10 @@ Secrets), the GitRepository and the secret store — in that order.
 `creationPolicy: Owner` puts an ownerReference from each ExternalSecret onto its
 Secret, so the Secrets go with the ExternalSecrets; deleting a store on its own
 removes nothing and only pushes its ExternalSecrets into `SecretSyncError`.
+Flux never owned the bootstrap Secrets, so remove the tenant's
+unmanaged-secrets allowlist entries in the same change. Then revoke its
+backend token and its git credential{% if secrets_backend == 'onepassword' %},
+and revoke its vault's Connect grant with `op connect vault revoke`{% endif %}.
 
 Every tenant's Namespace, ResourceQuota and LimitRange carry
 `kustomize.toolkit.fluxcd.io/prune: disabled` and outlive the wiring, database
@@ -38,14 +50,15 @@ reconciling `./kubernetes/db`) that does not set `deletionPolicy: Orphan`.
 
 ## The tenant side of the contract
 
-A tenant repo needs a `kubernetes/flux/` directory that `kustomize build`
+A tenant repo needs a `./kubernetes/flux/` directory that `kustomize build`
 resolves cleanly, and CI that lints it.
 **[weisssrv-app-template](https://github.com/ericsweiss/weisssrv-app-template)**
-generates exactly that — manifests, lint + kubeconform + secret-scan pipeline,
-and the namespace/PSS conventions this cluster expects. Point new tenants at it
-rather than at a hand-rolled tree.
+generates exactly that: manifests, a lint, kubeconform and secret-scan
+pipeline, and the namespace and Pod Security conventions this cluster expects.
+Its `docs/ONBOARDING.md` renders the tenant's own values into the wiring below.
+Point new tenants at it rather than at a hand-rolled tree.
 
-Two things the tenant must match, and one this repo owes them:
+What the tenant must match, and what this repo owes it:
 
 - **Path.** The `Kustomization.spec.path` below is `./kubernetes/flux`; the
   app-template puts manifests there. Change one and change the other.
@@ -61,7 +74,7 @@ Two things the tenant must match, and one this repo owes them:
   reconcile fails. Escape a literal as `$${...}`.
 
 Nothing about tenant onboarding requires the app-template — a hand-authored
-`kubernetes/flux/` works identically. It just means writing the pipeline and the
+`./kubernetes/flux/` works identically. It just means writing the pipeline and the
 conventions again, including the one the cluster mandates: a namespace-wide
 ingress default-deny NetworkPolicy plus a scrape-allow from `observability`. The
 platform's default-deny coverage gate reads only this repository, so a tenant
@@ -134,7 +147,7 @@ afterwards:
 
 | `ci_shape` | What the tenant repo carries |
 |---|---|
-| `gitlab_selfhosted` | a `.gitlab-ci.yml` that lints and kubeconforms `kubernetes/flux/` |
+| `gitlab_selfhosted` | a `.gitlab-ci.yml` that lints and kubeconforms `./kubernetes/flux/` |
 | `github` | the same gates as GitHub Actions workflows |
 | `none` | no pipeline at all |
 
@@ -204,6 +217,43 @@ The `url:` on the GitRepository then stays `https://…`, with the same
 `secretRef.name`. Either way, rotating the credential is re-running the command;
 nothing in git changes.
 
+The Secret carries no controller owner, so the unmanaged-secrets gate flags it.
+Add `"flux-system/example-app-git-auth": "tenant git credential"` to the
+`ALLOWLIST` in `scripts/check-unmanaged-secrets.py` in the same change that
+creates it.
+
+## Onboarding a tenant
+
+The operator's steps, in order. Each names the section that carries the detail.
+
+1. **Secret backend.** Create the tenant's own vault and a Connect token scoped
+   to it ("Per-tenant vault" under Example), or take the GitLab-variables store
+   ("Example: GitLab-variables secret store"). Never use the cluster's own
+   vault.
+2. **Bootstrap Secret.** Write the token Secret into the tenant namespace and
+   add `example-app/onepassword-connect-token`, or
+   `example-app/gitlab-api-token`, to the unmanaged-secrets `ALLOWLIST` in the
+   same change as the wiring file.
+3. **Git credential.** For a private tenant repository, create the
+   `example-app-git-auth` Secret and its allowlist entry ("Private tenant
+   repositories" above).
+4. **CI library access.** A tenant on the `gitlab_selfhosted` CI shape clones
+   `{{ lib_project }}` with its `CI_JOB_TOKEN`. Unless that project is public, a
+   maintainer of `{{ lib_project }}` adds the tenant project to its job-token
+   allowlist under Settings > CI/CD > Job token permissions. Each developer who
+   runs the tenant pipeline also needs read access to `{{ lib_project }}`,
+   because `include:` resolves with that user's permissions.
+5. **Wiring file.** Copy the Example below to `<slug>.yaml`, substitute the
+   slug, size the caps, write the hostname grant, and list the file in
+   `kustomization.yaml`.
+6. **Probes and DNS.** Add the tenant's hostnames to the blackbox targets. When
+   the tenant routes an internal hostname, add its rewrite to the internal
+   ingress VIP under `_dns_service_rewrites` in
+   `ansible/inventories/prod/group_vars/dns.yml` and run the DNS play.
+7. **Read access.** Hand the tenant a read-only kubeconfig ("Tenant read
+   access" below).
+8. **Merge** once the tenant repository carries a real image tag.
+
 ## Example
 
 The comments in the file below stay within the three-line comment rule, so a
@@ -218,11 +268,19 @@ copy passes `task lint:comment-length`. The longer reasons live here:
   the tenant, and a Connect token scoped to that vault alone, so a compromised
   tenant namespace cannot read platform items. The token Secret is bootstrap
   state (not Flux-managed) and scoped to this tenant, so revoking it is
-  independent of every other tenant. Creating it and rotating it are the same
-  commands:
+  independent of every other tenant. Look the vault up first:
 
   ```bash
-  op vault create example-app
+  op vault get example-app
+  ```
+
+  Create it only when that reports the vault does not exist. Stop on any other
+  error and fix it first. 1Password allows two vaults with one name, so a
+  second create splits the grant and the items across two vaults. Then grant
+  the vault and mint the token:
+
+  ```bash
+  op vault create example-app   # only when the lookup found none
   op connect vault grant --server <EXISTING_SERVER_ID> --vault example-app
   op connect token create {{ cluster_name }}-example-app-eso \
     --server <EXISTING_SERVER_ID> --vaults example-app
@@ -231,9 +289,12 @@ copy passes `task lint:comment-length`. The longer reasons live here:
     | kubectl apply -f -
   ```
 
+  Rotation re-runs only the `op connect token create` and `kubectl` commands.
+
   The Secret has no controller owner, so the unmanaged-secrets gate must
   allowlist `example-app/onepassword-connect-token` in the same change as the
-  tenant file, and lose the entry when the tenant goes.
+  tenant file, and lose the entry when the tenant goes. Create the tenant's
+  items in its own vault, titled `example-app: <Item Name>`.
 - **Private repository.** Add `secretRef: {name: example-app-git-auth}` to the
   GitRepository and create that Secret with `flux create secret git`, as in
   "Private tenant repositories" above. It is bootstrap state and lives in
@@ -275,6 +336,11 @@ copy passes `task lint:comment-length`. The longer reasons live here:
   `system:serviceaccount:<Kustomization namespace>:<name>`. The RoleBindings
   then grant that ServiceAccount rights in the tenant namespace and nowhere
   else.
+- **Read-only identity.** `example-app-reader` is the identity behind the
+  kubeconfig the tenant receives. `view` in the tenant namespace reads its
+  workloads, events and logs but never its Secrets. A Role in `flux-system`
+  reads the tenant's own Kustomization and GitRepository, so `flux get` works,
+  and grants no patch, so `flux reconcile` is refused.
 
 ```yaml
 # {{ cluster_name }}/tenants/example-app.yaml
@@ -381,9 +447,8 @@ spec:
             name: onepassword-connect-token
             namespace: example-app
             key: token
-# This is the 1Password shape. A tenant generated by weisssrv-app-template picks
-# its own `secrets_backend`, and its docs/ONBOARDING.md step O1 is the
-# authoritative wiring for whichever it chose - follow that file, not this block.
+# The 1Password store. A GitLab-variables tenant swaps in the store from
+# "Example: GitLab-variables secret store" in the tenants README.
 ---
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
@@ -498,6 +563,64 @@ roleRef:
   name: tenant-crd-editor
   apiGroup: rbac.authorization.k8s.io
 ---
+# The identity behind the tenant's read-only kubeconfig ("Tenant read access").
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: example-app-reader
+  namespace: example-app
+---
+# `view` reads the namespace's workloads, events and logs, never its Secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: example-app-reader-view
+  namespace: example-app
+subjects:
+  - kind: ServiceAccount
+    name: example-app-reader
+    namespace: example-app
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+---
+# Read on this tenant's own Flux objects, so `flux get` reports its reconcile
+# state. No patch, so `flux reconcile` is refused.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: example-app-reader
+  namespace: flux-system
+rules:
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    resourceNames:
+      - example-app
+{%- if postgres_operator %}
+      - example-app-db
+{%- endif %}
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["gitrepositories"]
+    resourceNames:
+      - example-app
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: example-app-reader
+  namespace: flux-system
+subjects:
+  - kind: ServiceAccount
+    name: example-app-reader
+    namespace: example-app
+roleRef:
+  kind: Role
+  name: example-app-reader
+  apiGroup: rbac.authorization.k8s.io
+---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
@@ -561,6 +684,108 @@ spec:
         optional: false
 {%- endif %}
 ```
+
+## Example: GitLab-variables secret store
+
+ESO's GitLab provider reads a tenant's secrets from the CI/CD variables of a
+GitLab project, which suits a tenant that already keeps its values there and
+holds no 1Password account. The app template offers this as its `gitlab`
+secret backend.
+
+The tenant creates a project access token on that project with the
+**Maintainer** role and the `api` scope. Reading project CI/CD variables needs
+Maintainer, and the provider needs `api`, not `read_api`. The token Secret is
+bootstrap state, and re-running the command rotates it:
+
+```bash
+kubectl -n example-app create secret generic gitlab-api-token \
+  --from-literal=token=<PROJECT_ACCESS_TOKEN> --dry-run=client -o yaml \
+  | kubectl apply -f -
+```
+
+Allowlist `example-app/gitlab-api-token` in the unmanaged-secrets gate in the
+same change. The store below replaces the 1Password `ClusterSecretStore` in the
+tenant file, and the tenant's ExternalSecrets name `gitlab-example-app`. Every
+other object in the file stays as in the Example.
+
+```yaml
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: gitlab-example-app
+spec:
+  # Scoped to this tenant's namespace, like every tenant store.
+  conditions:
+    - namespaces:
+        - example-app
+  provider:
+    gitlab:
+      # The provider defaults to gitlab.com, so a self-hosted project names
+      # its instance here.
+      url: https://{{ git_host }}
+      projectID: "<NUMERIC_PROJECT_ID>"
+      auth:
+        # Capital S is the CRD's field name; `secretRef` is pruned as unknown.
+        SecretRef:
+          accessToken:
+            name: gitlab-api-token
+            namespace: example-app
+            key: token
+      environment: "*"
+```
+
+## Tenant read access
+
+The tenant sees its deployment state through a kubeconfig bound to
+`example-app-reader` from the Example. Build it from the cluster CA and a
+bound token. Revoking a token early means deleting and recreating the
+ServiceAccount, and re-running the commands issues a new one.
+
+```bash
+kubectl -n kube-system get configmap kube-root-ca.crt \
+  -o jsonpath='{.data.ca\.crt}' > example-app-ca.crt
+TOKEN=$(kubectl -n example-app create token example-app-reader --duration=2160h)
+KC=example-app.kubeconfig
+kubectl --kubeconfig "$KC" config set-cluster {{ cluster_name }} \
+  --server=https://{{ k3s_api_vip }}:6443 \
+  --certificate-authority=example-app-ca.crt --embed-certs
+kubectl --kubeconfig "$KC" config set-credentials example-app-reader --token="$TOKEN"
+kubectl --kubeconfig "$KC" config set-context example-app \
+  --cluster={{ cluster_name }} --user=example-app-reader --namespace=example-app
+kubectl --kubeconfig "$KC" config use-context example-app
+```
+
+Hand the file over through a channel you would trust with a password. `view`
+includes the namespace's ConfigMaps and pod logs, so neither may carry a
+secret.
+
+The API answers on `{{ k3s_api_vip }}:6443`, a LAN address.
+{%- if vpn_tailscale %}
+A tenant outside the LAN reaches it over Tailscale.
+Invite the tenant to the tailnet as a user: a shared node does not carry its
+subnet routes. Then add a group and one rule to the existing `groups` and
+`acls` in `terraform/tailscale/policy.hujson`, and apply it supervised as
+`terraform/tailscale/README.md` describes:
+
+```hujson
+"groups": {
+  "group:tenant-example-app": ["<tenant's tailnet login>"],
+},
+"acls": [
+  {
+    "action": "accept",
+    "src":    ["group:tenant-example-app"],
+    "dst":    ["{{ k3s_api_vip }}:6443"],
+  },
+],
+```
+
+The rule grants the API port alone. The tenant's routes are public hostnames
+and need no tailnet access.
+{%- else %}
+This cluster renders no overlay VPN, so a tenant outside the LAN needs a VPN
+of your choosing that reaches that address and port alone.
+{%- endif %}
 
 ## Before onboarding the first tenant
 
@@ -725,7 +950,13 @@ spec:
   is refused whole; use weighted services. On a plain
   Ingress or Service, a `traefik.ingress.kubernetes.io/*` annotation may use
   `name@provider` only for an allowlisted platform middleware. Add any shared
-  middleware a tenant needs to both allowlists. A tenant `forwardAuth`
+  middleware a tenant needs to both allowlists. Both VIPs serve the same
+  entrypoints, so a tenant route on the internal domain must carry a LAN
+  allowlist. An IngressRoute lists `traefik/lan-tailscale-only` or
+  `traefik/lan-tailscale-strict`. An Ingress names
+  `traefik-lan-tailscale-only@kubernetescrd` or
+  `traefik-lan-tailscale-strict@kubernetescrd` in its
+  `traefik.ingress.kubernetes.io/router.middlewares` annotation. A tenant `forwardAuth`
   middleware may call only the platform's Authentik outpost or a Service in its
   own namespace, and a tenant `rateLimit` middleware may not name a Redis
   backend, another address Traefik would open itself. Traefik makes that call,
@@ -818,13 +1049,7 @@ spec:
   `global.rbac.aggregateClusterRoles: false` on the cert-manager release, and
   granting tenants Certificate and Issuer rights explicitly, would close the
   same path by authorization instead; the platform keeps the chart default and
-  the policy. In full, the set is twelve: `tenant-traefik-route-refs`,
-  `tenant-traefik-object-refs`, `tenant-traefik-ingress-refs`,
-  `tenant-traefik-hostnames`, `tenant-certificates`,
-  `tenant-certificaterequests`, `tenant-no-tcp-udp-routes`,
-  `tenant-traefik-tls-defaults`, `tenant-no-externalname-services`,
-  `tenant-no-manual-endpoints`, `tenant-pod-volumes` ("Pod volumes" above) and
-  `tenant-pvc-storageclasses` ("Claim classes" above).
+  the policy. "Admission policies" below lists the whole set.
   Whether or not a tenant is wired, `task lint:tenant-traefik-isolation` fails if
   the policies or their bindings go missing, if a binding narrows its match
   below every tenant namespace, or if a policy fails open, narrows its resources,
@@ -847,42 +1072,91 @@ spec:
 - **Audit what predates the policies.** The policies act on CREATE and UPDATE
   only, so an object written before they were applied, or into a namespace
   before it carried the `fluxcd.io/tenant` label, stays in place. Run
-  `scripts/audit-tenant-admission.sh` (formerly `audit-tenant-services.sh`;
-  needs `kubectl` against this cluster and `jq`) once at rollout and before
-  each onboarding. It lists, in every `fluxcd.io/tenant` namespace:
-  ExternalName, NodePort and LoadBalancer Services, Services with `externalIPs`,
-  selectorless Services, EndpointSlices not managed by
-  `endpointslice-controller.k8s.io`, and Endpoints with no selector Service;
-  IngressRoutes and Ingresses whose hosts are not all in the namespace's
-  `flux-system/tenant-routing-<ns>` grant, or that carry a refused annotation, a
-  `name@provider` or cross-namespace reference, `parentRefs`, `HostRegexp` or a
-  priority above the grant; Middlewares whose forwardAuth address is neither a
-  Service in the namespace nor the platform outpost; TraefikServices with
-  cross-namespace or `@` references, including per-service middlewares outside
-  the namespace and the platform allowlist, or a `failover`; Services and
-  Ingresses carrying a `tailscale.com/*` annotation, and Ingresses whose
-  `ingressClassName` or `kubernetes.io/ingress.class` annotation names a class
-  other than `traefik`; any IngressRouteTCP or IngressRouteUDP; Certificates
-  whose names are not all granted or whose issuer is not a platform
-  ClusterIssuer or a core Issuer; tenant-written CertificateRequests to anything
-  but a core Issuer; and a TLSOption or TLSStore named `default`; and Pods,
-  Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs and CronJobs with a
-  volume outside the restricted set, and PersistentVolumeClaims on a
-  StorageClass other than `tenant-local` or `""`. It does not audit ACME Orders
-  or Challenges: tenant RBAC grants no create on them, so that policy is defence
-  in depth only. A missing or wildcard grant, or one whose `maxPriority` is not
-  a plain whole number up to 2147483647, is one line per route, Ingress and
-  Certificate. It exits non-zero while any remain.
+  `scripts/audit-tenant-admission.sh` once at rollout and before each
+  onboarding. It needs `kubectl` against this cluster and `jq`, and it reads
+  `cluster_internal_domain` from the `flux-system/cluster-config` ConfigMap.
+  It lists, in every `fluxcd.io/tenant` namespace:
+
+  - ExternalName, NodePort and LoadBalancer Services, Services with
+    `externalIPs`, and selectorless Services.
+  - EndpointSlices not managed by `endpointslice-controller.k8s.io`, and
+    Endpoints with no selector Service.
+  - IngressRoutes and Ingresses whose hosts are not all in the namespace's
+    `flux-system/tenant-routing-<ns>` grant. The same goes for one that carries
+    a refused annotation, a `name@provider` or cross-namespace reference,
+    `parentRefs`, `HostRegexp` or a priority above the grant.
+  - IngressRoutes and Ingresses on the internal domain that list neither LAN
+    middleware.
+  - Middlewares whose forwardAuth address is neither a Service in the
+    namespace nor the platform outpost.
+  - TraefikServices with cross-namespace or `@` references, a `failover`, or
+    per-service middlewares outside the namespace and the platform allowlist.
+  - Services and Ingresses carrying a `tailscale.com/*` annotation.
+  - Ingresses whose `ingressClassName` or `kubernetes.io/ingress.class`
+    annotation names a class other than `traefik`.
+  - Any IngressRouteTCP or IngressRouteUDP.
+  - Certificates whose names are not all granted, or whose issuer is not a
+    platform ClusterIssuer or a core Issuer.
+  - Tenant-written CertificateRequests to anything but a core Issuer.
+  - A TLSOption or TLSStore named `default`.
+  - Pods, Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs and
+    CronJobs with a volume outside the restricted set.
+  - PersistentVolumeClaims on a StorageClass other than `tenant-local` or `""`.
+  - Kustomizations and HelmReleases with no `spec.serviceAccountName`, or with
+    a source in another namespace.
+
+  It does not audit ACME Orders or Challenges. Tenant RBAC grants no create on
+  them, so that policy is defence in depth only. A missing or wildcard grant,
+  or one whose `maxPriority` is not a plain whole number up to 2147483647, is
+  one line per route, Ingress and Certificate. It exits non-zero while any
+  remain.
+
   It does not trust labels, which a tenant can write: every EndpointSlice must
   name an existing selector Service through `kubernetes.io/service-name`, and
   every EndpointSlice and Endpoints address must be the IP of a live (not
   Succeeded or Failed) Pod in the same namespace that the Service's selector
   picks.
-  Fix each one before the tenant's wiring merges. A cluster that takes the
-  policies through `copier update` follows the migration in the template's
-  [VERSIONING.md § Upgrade notes](https://github.com/ericsweiss/weisssrv-cluster-template/blob/main/docs/VERSIONING.md#upgrade-notes):
-  the audit, then each tenant's hostname grant and binding before its routes
-  reconcile, and the list of what tenants can no longer create.
-- **Namespace ownership** is cooperative: nothing stops a tenant manifest from
-  targeting a platform namespace today. An admission policy engine
-  (Kyverno/OPA) is the durable fix.
+  Fix each one before the tenant's wiring merges. Run it again on the branch
+  of any `copier update` that changes the policies, and fix what it lists
+  before that update merges. The release notes of that update name any other
+  hand work it brings.
+- **Namespace ownership.** Each tenant owns exactly one namespace, and RBAC
+  enforces it on the apply path. The tenant Kustomization impersonates its
+  ServiceAccount, whose RoleBindings exist only in the tenant namespace, so a
+  manifest aimed at any other namespace fails to apply. A tenant may still run
+  its own Kustomizations and HelmReleases, which the controllers would apply
+  with their own cluster-admin identity unless one names a ServiceAccount.
+  `tenant-flux-impersonation` closes that: it requires
+  `spec.serviceAccountName`, which resolves in the tenant namespace, and a
+  source in the same namespace. kustomize-controller runs with
+  `--no-remote-bases=true`, so a tenant tree builds only from its own source.
+  notification-controller runs with `--no-cross-namespace-refs=true`, so a
+  tenant Alert or Receiver cannot name a platform Flux object.
+
+## Admission policies
+
+Every policy below is Deny-bound on every `fluxcd.io/tenant` namespace, except
+`tenant-traefik-hostnames` and `tenant-certificates`, which each tenant file
+binds to its own namespace with its hostname grant. Together they are the
+contract a tenant writes against: each row is something a tenant cannot create
+or update.
+
+| Policy | File under `infrastructure/configs/` | Refuses |
+|---|---|---|
+| `tenant-traefik-route-refs` | `tenant-traefik-policy.yaml` | an IngressRoute, IngressRouteTCP or IngressRouteUDP service, middleware or TLS reference outside the namespace and the platform middleware allowlist, a `name@provider` reference, `parentRefs`, and a route on the internal domain that lists neither `traefik/lan-tailscale-only` nor `traefik/lan-tailscale-strict` |
+| `tenant-traefik-object-refs` | `tenant-traefik-policy.yaml` | a Middleware or TraefikService reference outside the namespace and the allowlist, a forwardAuth address other than a Service in the namespace or the platform outpost, a rateLimit Redis backend, and any `failover` service |
+| `tenant-traefik-ingress-refs` | `tenant-traefik-policy.yaml` | a `traefik.ingress.kubernetes.io/*` annotation on an Ingress or Service naming `name@provider` outside the allowlist, and an Ingress on the internal domain whose `router.middlewares` annotation names neither LAN allowlist |
+| `tenant-traefik-hostnames` | `tenant-traefik-policy.yaml` | an IngressRoute or Ingress on a hostname the grant does not list, a route not opening with `Host()`, `||`, `HostRegexp`, an ungranted priority, a non-`traefik` Ingress class and a `tailscale.com/*` annotation on an Ingress |
+| `tenant-certificates` | `tenant-traefik-policy.yaml` | a Certificate naming an ungranted hostname, a wildcard, IP, URI, email, otherName or `literalSubject`, or an issuer other than a platform ClusterIssuer or a core Issuer in the namespace |
+| `tenant-certificaterequests` | `tenant-traefik-policy.yaml` | a tenant-written CertificateRequest to anything but a core Issuer in the namespace, and an ACME Order or Challenge not written by cert-manager |
+| `tenant-no-tcp-udp-routes` | `tenant-traefik-policy.yaml` | any IngressRouteTCP or IngressRouteUDP |
+| `tenant-traefik-tls-defaults` | `tenant-traefik-policy.yaml` | a TLSOption or TLSStore named `default` |
+| `tenant-no-externalname-services` | `tenant-traefik-policy.yaml` | an ExternalName, NodePort or LoadBalancer Service, `externalIPs`, a selectorless Service, and a `tailscale.com/*` annotation on a Service |
+| `tenant-no-manual-endpoints` | `tenant-traefik-policy.yaml` | an Endpoints or EndpointSlice the control plane did not write |
+| `tenant-pod-volumes` | `tenant-traefik-policy.yaml` | a Pod or workload pod template with a volume outside the restricted set ("Pod volumes" above) |
+| `tenant-pvc-storageclasses` | `tenant-traefik-policy.yaml` | a claim on any class but `tenant-local`, a `""` claim outside the `<namespace>-<purpose>` volume names, and a `volumeType` annotation ("Claim classes" above) |
+| `tenant-flux-impersonation` | `tenant-flux-policy.yaml` | a Kustomization or HelmRelease with no `spec.serviceAccountName`, or one whose source or chart source sits in another namespace ("Namespace ownership" above) |
+
+The policies act on CREATE and UPDATE, so an object written before them stays
+until its next apply, which they then refuse. "Audit what predates the
+policies" above finds those objects.

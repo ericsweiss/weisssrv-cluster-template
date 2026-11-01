@@ -150,8 +150,8 @@
   hosts: proxmox:dns:mail:app_servers:k3s_servers:!deploy_skipped
   become: true
   # An application VM provisioned by its own playbook does not exist on a first
-  # run; skipping it here keeps that from failing the whole base deploy. A
-  # genuinely down host surfaces through alerting, not through this play.
+  # run, so an unreachable host is skipped instead of failing the base deploy.
+  # The post_tasks below name every host it skipped.
   ignore_unreachable: true
   roles:
     - role: weisssrv.infra.node_exporter_host

@@ -50,7 +50,7 @@ Consequences worth internalising:
 | External state | Terraform | public DNS zone, tailnet ACL, SSO objects |
 
 No Ansible role is vendored into a generated cluster. Playbooks address the
-collection's 40 roles as `weisssrv.infra.<role>` by fully-qualified name, and
+collection's roles as `weisssrv.infra.<role>` by fully-qualified name, and
 `ansible/requirements.yml` pins the collection at `lib_ref` — so a platform
 upgrade is a one-line, reviewable bump, and a role fix benefits every cluster
 generated from the template. Site data is an **input** to those roles rather
@@ -61,12 +61,14 @@ entry, so a missed rename fails the play instead of rendering an empty string.
 
 ## The Flux stage graph
 
-Six top-level `Kustomization`s in `flux-system`, reconciled in `dependsOn` order:
+Seven top-level `Kustomization`s in `flux-system`, reconciled in `dependsOn`
+order:
 
 ```
              infrastructure-sources          HelmRepository CRs,
                       │                      cluster-config + cluster-versions
-                      ▼
+                      ├──────────────────▶   infrastructure-metrics-server
+                      ▼                      (off the chain, nothing depends on it)
              infrastructure-crds             CRDs that later stages reference
                       │                      (wait: true — Established before use)
                       ▼
@@ -92,6 +94,13 @@ Why it is split this way:
   the controllers install.
 - **Applications branch off configs, not observability.** A failing metrics stack
   upgrade must not freeze application reconciliation.
+- **metrics-server hangs off sources alone.** Its readiness depends on the
+  `metrics-server` entry in `k3s_disable`. A gap between that inventory change
+  and `task k3s:deploy` therefore cannot freeze the chain. Until `task k3s:deploy`
+  runs, the k3s AddOn keeps serving the Resource Metrics API and this stage stays
+  not Ready on Helm's ownership check. After that run the API is down until the
+  HelmRelease installs. The generated `kubernetes/README.md` § Reconciliation
+  order has the reconcile step that closes that window.
 
 Each stage's `kustomization.yaml` is the authoritative membership list. Tenant
 repositories — applications that live in their own git repository, generated from
@@ -126,20 +135,10 @@ Manifests reference the keys as `${cluster_internal_domain}`,
 resolves them at reconcile time.
 
 `cluster-config` carries the site's identity. The file itself is the
-authoritative list; the groups are:
+authoritative key list, and the table in the rendered `kubernetes/README.md` is
+the per-key reference.
 
-| Group | Keys |
-|---|---|
-| Identity | `cluster_name` |
-| Zones | `cluster_internal_domain`, `cluster_external_domain`, `cluster_node_label_domain` |
-| Networks | `cluster_lan_cidr`, `cluster_pod_cidr`, `cluster_service_cidr`, `cluster_tailnet_cidr` (Tailscale module only) |
-| Addresses | `cluster_api_vip` (and its reserved `cluster_k3s_api_vip` alias), `cluster_apiserver_egress_cidr`, `cluster_metallb_public_vip`, `cluster_metallb_internal_vip` |
-| Certificates | `cluster_issuer`, `cluster_acme_email` |
-| Secrets | `cluster_secret_store`, `cluster_secrets_vault`, `cluster_secrets_provider_namespace`, `cluster_secrets_provider_deployment` |
-| Git | `cluster_git_host`, `cluster_runbook_base_url` |
-| Host services | `cluster_nas_host`, `cluster_smtp_host`, `cluster_alert_email` |
-
-Two of these have teeth. `cluster_node_label_domain` must match the prefix the
+Two keys have teeth. `cluster_node_label_domain` must match the prefix the
 Ansible k3s layer actually applies to nodes, or every affinity rule silently
 matches nothing. `cluster_apiserver_egress_cidr` must be a single CIDR that
 covers the **server node addresses**, not the API VIP — kube-proxy rewrites the
@@ -163,11 +162,10 @@ exists to catch it before merge, not as the only catch.
 `cluster-versions` is generated from `group_vars/all.yml` by
 `task flux:sync-versions` and drift-gated by the generated pipeline's
 `check-generated-files` job (and by `task lint:repo-sync` locally), which
-regenerates it and diffs — so a
-version can only change in one place. Without that gate the stale case is
-silent: this file is what `flux-lint` substitutes *from*, so it renders and
-passes on the old value, while `maintenance:check-versions` reads `all.yml` and
-reports the pin as current.
+regenerates it and diffs, so a version can only change in one place. Without
+that gate the stale case is silent: this file is what `flux-lint` substitutes
+*from*, so it renders and passes on the old value, while
+`maintenance:check-versions` reads `all.yml` and reports the pin as current.
 
 The division of labour: **copier fills the ConfigMap and genuinely structural
 spots** — a directory named after the cluster, a Terraform variable file, an
@@ -372,9 +370,9 @@ provider holds ciphertext and the object-store credentials are scoped so they
 cannot delete — deletions happen through a lifecycle policy, not through the key
 the backup job holds.
 
-**The bottom two layers of that diagram are opt-in and ship off.** A generated
-cluster gives you local snapshots, per-application logical dumps and
-hypervisor-level guest backups; the archive replication
+**The archive replication and offsite restic layers are opt-in and ship
+off.** A generated cluster gives you local snapshots, per-application logical
+dumps and hypervisor-level guest backups; the archive replication
 (`nas_storage_archive_backup_enabled: false`) and the offsite restic link
 (`restic_offsite_enabled: false`, both in `group_vars/nas.yml`) are switches you
 turn on once you have somewhere to send them. The template cannot know your
@@ -424,13 +422,14 @@ a small number of touchpoints; the "provide" column is the contract a new
 implementation has to satisfy. [README.md](../README.md) § Backends is the same
 inventory in operator form, so the two are edited together.
 
-| Seam | Today | Touchpoints | A new backend must provide |
+| Seam | Implemented | Touchpoints | A new backend must provide |
 |---|---|---|---|
 | Secrets (`secrets_backend`) | 1Password | the macros in `partials/secrets.jinja`, which every reference in the generated Taskfile **and** `.gitlab-ci.yml` is composed from, the library deploy fragment the CI file includes, one `ClusterSecretStore`, one controller | a store the operator supports, a run-time injection mechanism for host tooling, and the two bootstrap credentials |
+| Internal DNS | AdGuard Home + Unbound | `ansible/playbooks/dns.yml` (the `adguard_home`, `unbound`, `unbound_exporter` and `adguard_sync` roles), the resolver guests in `hosts.yml`, `group_vars/dns.yml`, `upstream_dns_servers`, the unbound-exporter scrape and `cluster_unbound_exporter_addresses` | filtering and split-horizon rewrites for the internal zone, a validating recursive resolver, a way to sync the pair, and an exporter |
 | DNS (`dns_backend`) | Cloudflare | the `solvers` stanza in `infrastructure/configs/cluster-issuer.yaml`, `infrastructure/controllers/external-dns/release.yaml` (provider, extraArgs, token env), the `dns_backend` block in `infrastructure/configs/kustomization.yaml.jinja` (shared-dns-secrets, cloudflare-ddns), `terraform/cloudflare/`, and `copier.yml`'s validator | provider credentials, a Terraform module of the same shape, an operator-supported DNS-01 solver |
-| Git / CI | self-hosted GitLab | `.gitlab-ci.yml`, Flux `GitRepository`, in-cluster runners and agent | a pipeline definition, a Flux source the controller supports, a token model for both |
+| Git / CI | self-hosted GitLab | `.gitlab-ci.yml`, Flux `GitRepository`, in-cluster runners and agent, the Terraform state backend | a pipeline definition, a Flux source the controller supports, a token model for both, and somewhere to keep Terraform state |
 | Overlay VPN | Tailscale (optional) | host role, in-cluster operator, ACL Terraform module, firewall admin set | node enrolment, a way to publish cluster services, policy as code |
-| SSO | Authentik | one application namespace, forward-auth middleware, Terraform object inventory | an OIDC/forward-auth provider and a declarative object model |
+| SSO | Authentik | one application namespace, forward-auth middleware, Terraform object inventory, the tenant policy's outpost and middleware allowlist | an OIDC/forward-auth provider and a declarative object model |
 | GPU | NVIDIA (optional) | VFIO host prep, node driver, device plugin, telemetry (operator-added) | passthrough prep, a device plugin, a scheduling label |
 | Virtualization | Proxmox VE | `proxmox_*` roles, guest definitions in the inventory | guest lifecycle, HA, backup, firewall primitives |
 | Storage (`storage_backend`) | ZFS + NFS + zvols | storage role, static PVs, encryption units, the pool scrape | pools or their equivalent, a PV mechanism, an at-rest encryption story |
@@ -438,14 +437,24 @@ inventory in operator form, so the two are edited together.
 | Ingress | Traefik + cert-manager | `infrastructure/controllers`, `infrastructure/configs`, the IngressRoute and middleware shapes every app copies | an ingress controller Flux can install, a certificate issuer, a forward-auth mechanism |
 
 All but Virtualization and Storage are genuine seams: swapping one is a bounded
-change to a named set of files. Those two are **structural** — Proxmox and ZFS run through the
-inventory model, the guest lifecycle and the storage layer, so an alternative is
-a second role family and a second storage playbook rather than a different value
-in an existing one. `storage_backend` exists to mark where that boundary runs
-(and to gate the ZFS-only pool scrape); virtualization has no
-equivalent answer because nothing in the generated tree would be left to
+change to a named set of files. Those two are **structural**. Proxmox and ZFS
+run through the inventory model, the guest lifecycle and the storage layer, so
+an alternative is a second role family and a second storage playbook rather
+than a different value in an existing one. `storage_backend` exists to mark
+where that boundary runs and to gate the ZFS-only pool scrape. Virtualization
+has no equivalent answer because nothing in the generated tree would be left to
 select. If either is a problem, this template is the wrong starting point, and
 it is better to know now.
+
+SSO is partly structural too: `infrastructure/configs/tenant-traefik-policy.yaml`
+names the Authentik outpost and its forward-auth middleware as literals, so a
+second identity provider also edits that policy and the gate that pins it.
+
+Every Terraform root keeps its state in GitLab-managed HTTP state, through the
+`backend "http" {}` block in its `versions.tf` and the `TF_HTTP_*` variables the
+`terraform:*` tasks and the drift jobs set. A different forge therefore also
+replaces the state backend. The rendered `terraform/README.md` holds the
+configuration.
 
 `copier.yml` exposes every selectable seam as an enumeration carrying exactly the
 values that are implemented; anything else fails during generation rather than
@@ -457,12 +466,12 @@ files behind it.
 ### What a different backend swaps
 
 The role-side half of every seam is contracted in the library's
-[docs/EXTENSIBILITY.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/EXTENSIBILITY.md):
+[docs/EXTENSIBILITY.md](https://github.com/ericsweiss/weisssrv-lib/blob/main/docs/EXTENSIBILITY.md):
 which variables exist so an alternative can be selected without a fork, which
 roles *are* a backend (and so get a sibling role family instead of a flag), and
 the rules a contributed alternative follows — role-prefixed variables, a default
-that reproduces today's behaviour byte-for-byte, molecule coverage. Three worked
-cases, cluster side:
+that reproduces the existing behaviour byte-for-byte, molecule coverage. Three
+worked cases, cluster side:
 
 | Wanted instead | Library side | This template's side |
 |---|---|---|
@@ -470,25 +479,15 @@ cases, cluster side:
 | GitHub rather than self-hosted GitLab | the `ci/` templates are GitLab YAML and are not included; the scripts they call are forge-neutral except `version-bump-mr.py`, which is GitLab-only (a GitHub client is additive, not a restructure), and `semantic-release.py --platform github` covers the release path | `.gitlab-ci.yml` is replaced by workflows, the Flux source becomes a GitHub `GitRepository`, the in-cluster runner manifests become whatever executes the jobs, and two values stop being GitLab-shaped: `cluster_runbook_base_url` in `sources/cluster-config.yaml.jinja` (the `/-/blob/` path shape is GitLab's, GitHub's is `/blob/`) and `REGISTRY_PROXY_REMOTEURL` in `apps/registry-cache/deployment.yaml` |
 | A secrets store that is not 1Password | nothing to change for host-side roles — they take **values**, resolved by the caller before Ansible starts; the one exception is `zfs_encryption`, whose boot-time fetch is behind `zfs_encryption_key_command` | a branch in each of the macros in `partials/secrets.jinja` (below), the library `ci/deploy/deploy-base.yml` include that fetches the deploy SSH key, that provider's `ClusterSecretStore` under `infrastructure/configs`, and whatever replaces the two hand-made bootstrap Secrets |
 
-> **Planned, on the GitHub row:** the reusable Actions cluster pipeline (deploy
-> matrix, validation-gate → deploy → verify graph, integration fan-out) is a
-> tracked weisssrv-lib addition — see its `docs/EXTENSIBILITY.md` § Forge
-> portability, PLANNED entry. It is the library-side half only. `git_backend:
-> github` stays validator-blocked on **two** blockers, which is exactly what
-> `copier.yml`'s validator says: the generated pipeline *and* the Flux bootstrap
-> task are GitLab-shaped. So the template still owes the GitHub bootstrap path
-> (`flux bootstrap github` in `taskfiles/flux.yml.jinja`, a GitHub `GitRepository` as
-> the Flux source) and the in-cluster runner manifests — the third column of that
-> row is the template-side scope.
+`git_backend: github` stays validator-blocked on two blockers, exactly as
+`copier.yml`'s validator says: the generated pipeline and the Flux bootstrap
+task are GitLab-shaped. The library tracks the Actions cluster pipeline as a
+known gap in its `docs/EXTENSIBILITY.md` § Forge portability. The template side
+of the GitHub row still owes the `flux bootstrap github` path in
+`taskfiles/flux.yml.jinja`, a GitHub `GitRepository` as the Flux source and the
+in-cluster runner manifests.
 
-> **Instance-local on the GitHub row:** a cluster mirrored to GitHub while
-> GitLab stays canonical also wants an inert `.github/workflows/` stub (`on: {}`,
-> `if: false`) so the mirror cannot run a surprise pipeline. The template does
-> not ship one — a mirror is a per-cluster choice, not a seam — so add the file
-> by hand in the generated repository and keep it out of `copier update`'s way
-> by leaving it unanswered here.
-
-None of these ships today. What each one has is a written boundary — the files
+None of these three ships. What each one has is a written boundary — the files
 it touches and the contract its replacement satisfies — which is the difference
 between a fork and a contribution.
 
@@ -513,11 +512,11 @@ nothing.
 
 The Taskfile's wrapper passes the go-task `{{.OP_VAULT}}` variable as the vault
 rather than the resolved name, so `task secrets:show`, which reads the Taskfile
-tree as text, matches the variable. The pipeline has no such variable and emits the
-name.
+tree as text, matches the variable. The pipeline has no such variable and emits
+the name.
 
-Four things are backend-specific by nature and deliberately not routed through
-the macros: the `op_preconditions` anchor, `op:check` and `secrets:show`, the
+Four things are backend-specific by nature and are not routed through the
+macros: the `op_preconditions` anchor, `op:check` and `secrets:show`, the
 `flux:bootstrap-secrets` task, and the library deploy fragment that fetches the
 SSH key with `op read` itself.
 
@@ -546,9 +545,9 @@ memory limits, and two cores stay with the platform pods co-tenanting those
 agents. The quota dimensions are the per-job cost doubled, because a Terminating
 pod still counts and a thin buffer 403s under churn, which GitLab reports as
 `runner_system_failure`, plus slack for the manager pod. `requests.*` are the
-scheduler's reservation; `limits.memory` is an admission ceiling deliberately
-above what the pool can resident-hold, which is why job pods carry the
-`ci-jobs` PriorityClass.
+scheduler's reservation; `limits.memory` is an admission ceiling set above what
+the pool can resident-hold, which is why job pods carry the `ci-jobs`
+PriorityClass.
 
 On the shared tier memory is the governor. A job is cheap on CPU (build 500m,
 helper 100m) and expensive on memory: 1.25Gi of requests (1Gi plus the
@@ -559,10 +558,10 @@ the doubled per-job cost plus manager slack; `limits.memory` and `pods` do not
 double, because at 5Gi a job that would put the ceiling above the whole pool, so
 churn gets two extra slots instead.
 
-Both quotas deliberately omit a `cpu` / `limits.cpu` dimension. It would force
-every pod in the namespace to declare a CPU limit, which rejects the runner
-manager — it runs without one, to avoid CFS throttling. CPU is bounded through
-`requests.cpu`, memory through both.
+Both quotas omit a `cpu` / `limits.cpu` dimension. It would force every pod in
+the namespace to declare a CPU limit, which rejects the runner manager — it runs
+without one, to avoid CFS throttling. CPU is bounded through `requests.cpu`,
+memory through both.
 
 ---
 
@@ -580,28 +579,8 @@ them.
 
 ## Repository map
 
-```
-<cluster>/
-├── .copier-answers.yml         what this cluster was generated from
-├── ansible/
-│   ├── requirements.yml        weisssrv.infra pinned at lib_ref
-│   ├── inventories/prod/       hosts.yml + group_vars/ — the site's data
-│   └── playbooks/              site, base, dns, storage, k3s, proxmox-*, maintenance/
-├── terraform/                  DNS zone, tailnet ACL, SSO objects, gateway networks
-├── kubernetes/
-│   ├── clusters/<name>/        Flux entrypoint, stage Kustomizations, tenants/
-│   ├── components/             reusable kustomize components
-│   ├── infrastructure/         sources, crds, controllers, configs, observability
-│   └── apps/                   one directory per application
-├── scripts/                    verification, generators, the version registry
-├── docs/                       RUNBOOKS.md (what every alert links to),
-│                               ci-pipeline.md, plus anything you add
-├── Taskfile.yml                every operation, grouped by namespace
-├── taskfiles/                  one file per namespace, included by Taskfile.yml
-└── .gitlab-ci.yml              lint, validate, deploy — from the library's templates
-```
-
-Notice what is **not** there: `ansible/roles/`. Playbooks address
+[README.md](../README.md) § What you get is the tree of a generated repository.
+Notice what is **not** in it: `ansible/roles/`. Playbooks address
 `weisssrv.infra.<role>` by FQCN and the collection is installed from
 `requirements.yml` at `lib_ref`, so the generated tree carries no role source at
 all. That is the single biggest reason a generated cluster stays small, and the
@@ -623,18 +602,18 @@ issued under one host is rejected under the other.
 ## Where the platform is documented
 
 A generated repository documents *one cluster*. Everything it is assembled from
-is documented in [weisssrv-lib](https://git.ericsweiss.com/eric/weisssrv-lib),
+is documented in [weisssrv-lib](https://github.com/ericsweiss/weisssrv-lib),
 and both the generated docs and the generated agent skill link there rather than
 restating it:
 
 | What | Where in weisssrv-lib |
 |---|---|
-| Role variables and behaviour | [`ansible_collections/weisssrv/infra/roles/<role>/README.md`](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles) |
-| The inventory-wide variables roles alias (the "Use" table) | [collection README](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/ansible_collections/weisssrv/infra/README.md) |
-| CI template inputs | [docs/INCLUDE-CONTRACT.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/INCLUDE-CONTRACT.md) |
-| What a `lib_ref` bump can break | [docs/VERSIONING.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/VERSIONING.md) |
-| The upstream of the vendored `scripts/` copies | [docs/SCRIPTS.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/SCRIPTS.md) |
-| The seam contract behind § Backend seams | [docs/EXTENSIBILITY.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/EXTENSIBILITY.md) |
+| Role variables and behaviour | [`ansible_collections/weisssrv/infra/roles/<role>/README.md`](https://github.com/ericsweiss/weisssrv-lib/tree/main/ansible_collections/weisssrv/infra/roles) |
+| The inventory-wide variables roles alias (the "Use" table) | [collection README](https://github.com/ericsweiss/weisssrv-lib/blob/main/ansible_collections/weisssrv/infra/README.md) |
+| CI template inputs | [docs/INCLUDE-CONTRACT.md](https://github.com/ericsweiss/weisssrv-lib/blob/main/docs/INCLUDE-CONTRACT.md) |
+| What a `lib_ref` bump can break | [docs/VERSIONING.md](https://github.com/ericsweiss/weisssrv-lib/blob/main/docs/VERSIONING.md) |
+| The upstream of the vendored `scripts/` copies | [docs/SCRIPTS.md](https://github.com/ericsweiss/weisssrv-lib/blob/main/docs/SCRIPTS.md) |
+| The seam contract behind § Backend seams | [docs/EXTENSIBILITY.md](https://github.com/ericsweiss/weisssrv-lib/blob/main/docs/EXTENSIBILITY.md) |
 
 Filling in the inventory — the step [SETUP.md](SETUP.md) § 2 calls the one part
 no template can generate — is done against those role READMEs. Reaching them

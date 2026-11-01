@@ -1,7 +1,7 @@
 ---
-# promtool unit tests for the two memory alerts. ContainerMemoryNearLimit is a
-# ratio against the container's own limit, read on RSS so reclaimable page cache
-# never counts; ContainerOOMKilled catches the kill RSS cannot see coming.
+# promtool unit tests for the container memory alerts and the non-CI quota
+# overcommit pair. ContainerMemoryNearLimit reads RSS against the container's
+# own limit; the quota pair excludes the gitlab-runner* namespaces.
 rule_files:
   - rules.yaml
 evaluation_interval: 1m
@@ -118,4 +118,103 @@ tests:
     alert_rule_test:
       - eval_time: 140m
         alertname: ContainerOOMKilled
+        exp_alerts: []
+
+  # Non-CI quotas at 10 of 6 allocatable CPUs (1.67x) fire; the gitlab-runner
+  # quota, 100 CPUs on its own, is excluded and never counts.
+  - interval: 1m
+    input_series:
+      - series: 'kube_resourcequota{job="kube-state-metrics", type="hard", resource="requests.cpu", namespace="apps", resourcequota="apps"}'
+        values: '10+0x15'
+      - series: 'kube_resourcequota{job="kube-state-metrics", type="hard", resource="requests.cpu", namespace="gitlab-runner", resourcequota="ci"}'
+        values: '100+0x15'
+      - series: 'kube_node_status_allocatable{job="kube-state-metrics", resource="cpu", node="node-1"}'
+        values: '4+0x15'
+      - series: 'kube_node_status_allocatable{job="kube-state-metrics", resource="cpu", node="node-2"}'
+        values: '2+0x15'
+    alert_rule_test:
+      # Inside the 5m hold.
+      - eval_time: 3m
+        alertname: KubeCPUQuotaOvercommitNonCI
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: KubeCPUQuotaOvercommitNonCI
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+
+  # Just inside the budget: 8.9 of 6 CPUs (1.48x) stays silent however large
+  # the CI quota is.
+  - interval: 1m
+    input_series:
+      - series: 'kube_resourcequota{job="kube-state-metrics", type="hard", resource="requests.cpu", namespace="apps", resourcequota="apps"}'
+        values: '8.9+0x15'
+      - series: 'kube_resourcequota{job="kube-state-metrics", type="hard", resource="requests.cpu", namespace="gitlab-runner-privileged", resourcequota="ci"}'
+        values: '100+0x15'
+      - series: 'kube_node_status_allocatable{job="kube-state-metrics", resource="cpu", node="node-1"}'
+        values: '6+0x15'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: KubeCPUQuotaOvercommitNonCI
+        exp_alerts: []
+
+  # One quota declaring both cpu and requests.cpu at 5 counts once: 5 of 6
+  # CPUs (0.83x) is silent, where a double count (1.67x) would fire.
+  - interval: 1m
+    input_series:
+      - series: 'kube_resourcequota{job="kube-state-metrics", type="hard", resource="cpu", namespace="apps", resourcequota="apps"}'
+        values: '5+0x15'
+      - series: 'kube_resourcequota{job="kube-state-metrics", type="hard", resource="requests.cpu", namespace="apps", resourcequota="apps"}'
+        values: '5+0x15'
+      - series: 'kube_node_status_allocatable{job="kube-state-metrics", resource="cpu", node="node-1"}'
+        values: '6+0x15'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: KubeCPUQuotaOvercommitNonCI
+        exp_alerts: []
+
+  # The same for memory: 10 declared twice against 12 counts once (0.83x).
+  - interval: 1m
+    input_series:
+      - series: 'kube_resourcequota{job="kube-state-metrics", type="hard", resource="memory", namespace="apps", resourcequota="apps"}'
+        values: '10+0x15'
+      - series: 'kube_resourcequota{job="kube-state-metrics", type="hard", resource="requests.memory", namespace="apps", resourcequota="apps"}'
+        values: '10+0x15'
+      - series: 'kube_node_status_allocatable{job="kube-state-metrics", resource="memory", node="node-1"}'
+        values: '12+0x15'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: KubeMemoryQuotaOvercommitNonCI
+        exp_alerts: []
+
+  # Memory: 20 of 12 allocatable (1.67x) fires; 17.9 of 12 (1.49x) does not,
+  # however large the CI quota is.
+  - interval: 1m
+    input_series:
+      - series: 'kube_resourcequota{job="kube-state-metrics", type="hard", resource="requests.memory", namespace="apps", resourcequota="apps"}'
+        values: '20+0x15'
+      - series: 'kube_resourcequota{job="kube-state-metrics", type="hard", resource="requests.memory", namespace="gitlab-runner", resourcequota="ci"}'
+        values: '500+0x15'
+      - series: 'kube_node_status_allocatable{job="kube-state-metrics", resource="memory", node="node-1"}'
+        values: '12+0x15'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: KubeMemoryQuotaOvercommitNonCI
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: KubeMemoryQuotaOvercommitNonCI
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+  - interval: 1m
+    input_series:
+      - series: 'kube_resourcequota{job="kube-state-metrics", type="hard", resource="requests.memory", namespace="apps", resourcequota="apps"}'
+        values: '17.9+0x15'
+      - series: 'kube_resourcequota{job="kube-state-metrics", type="hard", resource="requests.memory", namespace="gitlab-runner-privileged", resourcequota="ci"}'
+        values: '500+0x15'
+      - series: 'kube_node_status_allocatable{job="kube-state-metrics", resource="memory", node="node-1"}'
+        values: '12+0x15'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: KubeMemoryQuotaOvercommitNonCI
         exp_alerts: []

@@ -49,14 +49,11 @@ spec:
     - Egress
   egress:
     - to:
+        # The internal VIP is DNATed to a Traefik pod before the policy is
+        # evaluated, so the traefik namespace is the peer that matches.
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: traefik
-        # Belt-and-braces: the namespaceSelector matches post-DNAT; the VIP
-        # ipBlock also admits the pre-DNAT form so a CNI change cannot silently
-        # break the fetch.
-        - ipBlock:
-            cidr: ${cluster_metallb_internal_vip}/32
       ports:
         - protocol: TCP
           port: 443

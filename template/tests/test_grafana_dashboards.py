@@ -251,7 +251,7 @@ def test_generator_entries_and_files_are_one_to_one() -> None:
     registered = set(listed)
     absent = sorted(name for name in registered if not (DASHBOARDS / name).is_file())
     assert not absent, f"kustomization.yaml registers files that do not exist: {absent}"
-    on_disk = {path.relative_to(DASHBOARDS).as_posix() for path in DASHBOARDS.glob("*.json")}
+    on_disk = {path.relative_to(DASHBOARDS).as_posix() for path in DASHBOARDS.rglob("*.json")}
     orphans = sorted(on_disk - registered)
     assert not orphans, (
         f"on disk but in no configMapGenerator `files:` entry, so they never "
@@ -377,6 +377,19 @@ def test_orphan_dashboard_file_is_detected(tmp_path, monkeypatch) -> None:
     )
     monkeypatch.setattr("test_grafana_dashboards.DASHBOARDS", tmp_path)
     with pytest.raises(AssertionError, match="orphan.json"):
+        test_generator_entries_and_files_are_one_to_one()
+
+
+def test_an_orphan_in_a_subdirectory_is_detected(tmp_path, monkeypatch) -> None:
+    """Mutation case: an unregistered dashboard one level down never ships either."""
+    (tmp_path / "kept.json").write_text("{}")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "orphan.json").write_text("{}")
+    monkeypatch.setattr(
+        "test_grafana_dashboards.KUSTOMIZATION", _kustomization(tmp_path, ["kept.json"])
+    )
+    monkeypatch.setattr("test_grafana_dashboards.DASHBOARDS", tmp_path)
+    with pytest.raises(AssertionError, match="sub/orphan.json"):
         test_generator_entries_and_files_are_one_to_one()
 
 

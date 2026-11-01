@@ -36,12 +36,20 @@ a release tag, then a pin bump here.
 3. `task lib:sync` to refresh the local checkout, re-vendor the byte-identical
    copies, and re-run the gates. A vendored copy edited here is reverted by the
    next re-vendor and reds the byte-identity gate meanwhile.
-4. `task ansible:install-collections` — the installer will not refresh an
-   already-installed collection without being forced.
-5. Land the inventory changes a renamed or emptied variable needs in the SAME
+4. `task ansible:install-collections` reinstalls the collection at the new pin.
+   It passes `--force` itself, because the installer skips a collection that is
+   already installed.
+5. `scripts/check-role-default-flips.py --from <installed tag> --to <new tag>`
+   reports role defaults that flip between the two tags with no inventory value
+   pinning them, and fails on one declared for some hosts only. Declare each one
+   in the inventory, or pass `--allow <key>` once the new default is adopted on
+   purpose. `--allow-partial` accepts the partly declared ones after a review
+   that the other hosts want the new default. No pipeline runs it, because it
+   needs both tags side by side.
+6. Land the inventory changes a renamed or emptied variable needs in the SAME
    merge request. Role variables are `| default(...)`-guarded, so a missed rename
    does not fail: it silently takes the role default.
-6. Prove pipeline parity before merging. The library serves several consumers, so
+7. Prove pipeline parity before merging. The library serves several consumers, so
    a changed input default changes this pipeline too.
 
 ## OS patching and reboots

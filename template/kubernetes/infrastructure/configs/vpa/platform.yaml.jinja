@@ -1,7 +1,7 @@
 ---
-# Right-sizing policies for the platform controllers, updateMode by restart cost.
-# The HPA/VPA split and the per-controller reasons are kubernetes/README.md
-# § Scheduling priority; every maxAllowed.memory tracks the container's limit.
+# Platform controller VPAs, updateMode by restart cost.
+# Every Auto or Initial policy is RequestsOnly with maxAllowed.memory equal to
+# the container's limit, so the limit stays a fixed OOM ceiling.
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
@@ -20,6 +20,7 @@ spec:
         minAllowed: {cpu: 10m, memory: 32Mi}
         maxAllowed: {cpu: 200m, memory: 256Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -36,9 +37,8 @@ spec:
     updateMode: Initial
   resourcePolicy:
     containerPolicies:
-      # The reloader and frr-metrics sidecars are bounded by the release's
-      # postRenderer; cap == each one's limit under RequestsOnly, so the "*"
-      # entry below never raises them past that bound.
+      # A named entry takes precedence over "*", so each sidecar is held to the
+      # limit the release's postRenderer sets.
       - containerName: reloader
         minAllowed: {cpu: 10m, memory: 16Mi}
         maxAllowed: {cpu: 100m, memory: 64Mi}
@@ -52,8 +52,9 @@ spec:
       # speaker and frr, each under a 256Mi limit.
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 300m, memory: 204Mi}
+        maxAllowed: {cpu: 300m, memory: 256Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -74,6 +75,7 @@ spec:
         minAllowed: {memory: 64Mi}
         maxAllowed: {memory: 512Mi}
         controlledResources: [memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -160,6 +162,7 @@ spec:
         minAllowed: {cpu: 10m, memory: 32Mi}
         maxAllowed: {cpu: 200m, memory: 128Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -179,6 +182,7 @@ spec:
         minAllowed: {cpu: 10m, memory: 32Mi}
         maxAllowed: {cpu: 200m, memory: 256Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -196,8 +200,9 @@ spec:
     containerPolicies:
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 128Mi}
+        maxAllowed: {cpu: 200m, memory: 256Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 ---
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -215,8 +220,9 @@ spec:
     containerPolicies:
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 200m, memory: 128Mi}
+        maxAllowed: {cpu: 200m, memory: 320Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 {%- if secrets_backend == 'onepassword' %}
 ---
 apiVersion: autoscaling.k8s.io/v1
@@ -238,6 +244,7 @@ spec:
         minAllowed: {memory: 32Mi}
         maxAllowed: {memory: 256Mi}
         controlledResources: [memory]
+        controlledValues: RequestsOnly
 {%- endif %}
 ---
 apiVersion: autoscaling.k8s.io/v1
@@ -258,6 +265,7 @@ spec:
         minAllowed: {cpu: 10m, memory: 32Mi}
         maxAllowed: {cpu: 200m, memory: 128Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 {%- if vpn_tailscale %}
 ---
 apiVersion: autoscaling.k8s.io/v1
@@ -279,6 +287,7 @@ spec:
         minAllowed: {cpu: 10m, memory: 32Mi}
         maxAllowed: {cpu: 200m, memory: 256Mi}
         controlledResources: [cpu, memory]
+        controlledValues: RequestsOnly
 {%- endif %}
 {%- if gpu == 'nvidia' %}
 ---
@@ -310,8 +319,8 @@ spec:
         controlledResources: [cpu, memory]
 {%- endif %}
 ---
-# k3s AddOns below: recommend-only. The updater must never evict cluster DNS,
-# the PVC-bind path, or the metrics source every other autoscaler reads from.
+# kube-system below: recommend-only. The updater must never evict cluster DNS
+# or the metrics source every other autoscaler reads from.
 # Inspect with `kubectl describe vpa <name> -n kube-system`.
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
@@ -353,6 +362,7 @@ spec:
         maxAllowed: {cpu: 100m, memory: 96Mi}
         controlledResources: [cpu, memory]
 ---
+# maxAllowed.memory equals the limit in controllers/metrics-server/release.yaml.
 apiVersion: autoscaling.k8s.io/v1
 kind: VerticalPodAutoscaler
 metadata:
@@ -369,7 +379,7 @@ spec:
     containerPolicies:
       - containerName: "*"
         minAllowed: {cpu: 25m, memory: 32Mi}
-        maxAllowed: {cpu: 500m, memory: 256Mi}
+        maxAllowed: {cpu: 500m, memory: 192Mi}
         controlledResources: [cpu, memory]
 ---
 apiVersion: autoscaling.k8s.io/v1

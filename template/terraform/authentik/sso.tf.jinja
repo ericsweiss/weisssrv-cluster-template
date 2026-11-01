@@ -29,9 +29,7 @@ locals {
 
   saml_providers = {}
 
-  # Provider identity, pinned rather than inherited (main.tf). The grant list is
-  # the browser flow only: `password` (ROPC) bypasses MFA and `implicit`/`hybrid`
-  # return bearer tokens in the URL fragment.
+  # Browser flow only; see README § Security defaults worth knowing.
   oauth2_grant_types = ["authorization_code", "refresh_token"]
 
   # Assigned to every OAuth2 provider, in the order the API stores them - a
@@ -77,8 +75,8 @@ locals {
     }
   }
 
-  # An application with NO binding is open to every authenticated user. Give
-  # each one at least one binding.
+  # Every application needs at least one binding, or `allow_unbound = true`;
+  # an unbound application fails the plan.
   policy_bindings = {
     grafana = { application = "grafana", group = "grafana-users" }
   }

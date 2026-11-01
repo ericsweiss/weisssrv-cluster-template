@@ -29,9 +29,8 @@ FOREIGN = {
     "docs/EXTENSIBILITY.md",
 }
 
-# Minimum tokens a healthy scan finds; a regex that stopped matching would make
-# the assertion vacuous. The skill ships SKILL.md plus the references/ pages,
-# and both answer fixtures resolve well over 40 paths.
+# Floor below which the scan is assumed broken: a regex that stopped matching
+# would make the assertion vacuous.
 MIN_TOKENS = 30
 
 

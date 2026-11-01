@@ -1,0 +1,141 @@
+---
+# promtool unit tests for pool capacity and device errors: the space
+# thresholds, the pool collector's three staleness arms, and the error sum.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # ZFSPoolSpaceWarning at 85%; 79% stays under the 80% line.
+  - interval: 1m
+    input_series:
+      - series: 'zfs_pool_status_allocated_bytes{instance="pve-01:9101", pool="local-ssd"}'
+        values: '850+0x20'
+      - series: 'zfs_pool_status_size_bytes{instance="pve-01:9101", pool="local-ssd"}'
+        values: '1000+0x20'
+      - series: 'zfs_pool_status_allocated_bytes{instance="pve-02:9101", pool="local-ssd"}'
+        values: '790+0x20'
+      - series: 'zfs_pool_status_size_bytes{instance="pve-02:9101", pool="local-ssd"}'
+        values: '1000+0x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ZFSPoolSpaceWarning
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ZFSPoolSpaceWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'pve-01:9101'
+              pool: local-ssd
+      - eval_time: 12m
+        alertname: ZFSPoolSpaceCritical
+        exp_alerts: []
+
+  # ZFSPoolSpaceCritical at 95%.
+  - interval: 1m
+    input_series:
+      - series: 'zfs_pool_status_allocated_bytes{instance="nas:9101", pool="tank"}'
+        values: '950+0x20'
+      - series: 'zfs_pool_status_size_bytes{instance="nas:9101", pool="tank"}'
+        values: '1000+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ZFSPoolSpaceCritical
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: ZFSPoolSpaceCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: 'nas:9101'
+              pool: tank
+
+  # ZFSPoolCollectorStale, arm 1: the timestamp froze past 15m.
+  - interval: 1m
+    input_series:
+      - series: 'zfs_pool_status_collector_last_success_seconds{instance="nas:9101"}'
+        values: '0+0x40'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: ZFSPoolCollectorStale
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ZFSPoolCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'nas:9101'
+
+  # Arm 2: a hypervisor reports corosync health but no pool collector at all.
+  - interval: 1m
+    input_series:
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{instance="pve-01:9101"}'
+        values: '-120+60x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ZFSPoolCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'pve-01:9101'
+
+  # Both present, the pool scrape 10 minutes old: quiet.
+  - interval: 1m
+    input_series:
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{instance="pve-01:9101"}'
+        values: '-120+60x60'
+      - series: 'zfs_pool_status_collector_last_success_seconds{instance="pve-01:9101"}'
+        values: '-600+60x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ZFSPoolCollectorStale
+        exp_alerts: []
+
+  # Arm 3: a fresh timestamp with success 0 means the pools vanished.
+  - interval: 1m
+    input_series:
+      - series: 'zfs_pool_status_collector_last_success_seconds{instance="nas:9101"}'
+        values: '-600+60x60'
+      - series: 'zfs_pool_status_collector_success{instance="nas:9101"}'
+        values: '1+0x5 0+0x55'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ZFSPoolCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'nas:9101'
+
+  # A host whose collector only ever reported 0 has no pool to lose.
+  - interval: 1m
+    input_series:
+      - series: 'zfs_pool_status_collector_last_success_seconds{instance="192.0.2.23:9101"}'
+        values: '-600+60x60'
+      - series: 'zfs_pool_status_collector_success{instance="192.0.2.23:9101"}'
+        values: '0+0x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ZFSPoolCollectorStale
+        exp_alerts: []
+
+  # ZFSPoolDeviceErrors sums the vdev rows per pool: any error on any row fires,
+  # and a clean pool on the same host does not.
+  - interval: 1m
+    input_series:
+      - series: 'zfs_pool_status_errors_total{instance="nas:9101", pool="tank", vdev="sda", type="cksum"}'
+        values: '0+0x2 3+0x20'
+      - series: 'zfs_pool_status_errors_total{instance="nas:9101", pool="tank", vdev="sdb", type="cksum"}'
+        values: '0+0x22'
+      - series: 'zfs_pool_status_errors_total{instance="nas:9101", pool="archive", vdev="sdc", type="cksum"}'
+        values: '0+0x22'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ZFSPoolDeviceErrors
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ZFSPoolDeviceErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'nas:9101'
+              pool: tank

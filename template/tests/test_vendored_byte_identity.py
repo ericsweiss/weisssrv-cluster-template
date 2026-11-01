@@ -1,14 +1,13 @@
 """Every file vendored from weisssrv-lib must still be byte-identical to it.
 
-Copies and declared forks are listed in scripts/vendored-manifest.yml and checked
-by the library's check-vendored-copies.py engine; contract: docs/ci-pipeline.md.
+The library's check-vendored-copies.py engine checks scripts/vendored-manifest.yml
+at the declared ref, or $WEISSSRV_LIB_REF_OVERRIDE. Contract: docs/ci-pipeline.md.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
-import warnings
 from pathlib import Path
 
 import pytest
@@ -21,6 +20,7 @@ from conftest import (
     _lib_root,
     lib_file,
     pinned_lib_ref,
+    require_ref,
 )
 
 MANIFEST = SCRIPTS / "vendored-manifest.yml"
@@ -30,66 +30,38 @@ MANIFEST = SCRIPTS / "vendored-manifest.yml"
 _SITE_DATA_SUFFIXES = {".yml", ".yaml", ".env", ".conf", ".toml", ".json"}
 
 
-def _ref_available(lib: Path, ref: str) -> bool:
-    return (
-        subprocess.run(
-            ["git", "-C", str(lib), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
-            capture_output=True,
-        ).returncode
-        == 0
-    )
-
-
 def _lib_offer(lib: Path, ref: str) -> set[str]:
-    """The library's offer list at `ref`, or its working tree when the checkout
-    has no such ref. A path absent from the offer is not yet registerable."""
+    """The library's offer list at `ref`. A path absent from the offer is not
+    yet registerable, and an unreadable list fails rather than offering nothing."""
+    wanted = require_ref(lib, ref)
     relpath = "scripts/vendorable-paths.yml"
-    if _ref_available(lib, ref):
-        blob = subprocess.run(
-            ["git", "-C", str(lib), "show", f"{ref}:{relpath}"],
-            capture_output=True,
-            text=True,
-        )
-        raw = blob.stdout if blob.returncode == 0 else ""
-    else:
-        raw = (lib / relpath).read_text() if (lib / relpath).is_file() else ""
-    return set((yaml.safe_load(raw) or {}).get("vendorable") or [])
+    blob = subprocess.run(
+        ["git", "-C", str(lib), "show", f"{wanted}:{relpath}"],
+        capture_output=True,
+        text=True,
+    )
+    assert blob.returncode == 0, f"{wanted}:{relpath} is not in {lib}:\n{blob.stderr}"
+    offered = set((yaml.safe_load(blob.stdout) or {}).get("vendorable") or [])
+    assert offered, f"{wanted}:{relpath} offers nothing, so every twin check is vacuous"
+    return offered
 
 
-def _run_gate(*extra: str) -> subprocess.CompletedProcess:
+def _run_gate(
+    *extra: str, manifest: Path | None = None, repo_root: Path | None = None
+) -> subprocess.CompletedProcess:
     lib = _lib_root()
     argv = [
         sys.executable,
         str(lib / GATE_RELPATH),
         "--manifest",
-        str(MANIFEST),
+        str(manifest or MANIFEST),
         "--repo-root",
-        str(REPO),
+        str(repo_root or REPO),
         "--lib-path",
         str(lib),
         *extra,
     ]
     return subprocess.run(argv, capture_output=True, text=True)
-
-
-def registered_consumer_paths() -> list[str]:
-    """Repo-relative paths registered as byte-identical copies (kind vendored).
-
-    Empty with no library checkout: the never-skip assertion belongs to the gate
-    tests below, not to a caller's collection time.
-    """
-    try:
-        _lib_root()
-    except AssertionError:
-        return []
-    result = _run_gate("--list")
-    if result.returncode != 0:
-        return []
-    return [
-        parts[1]
-        for parts in (line.split("\t") for line in result.stdout.splitlines())
-        if len(parts) >= 3 and parts[0] == "vendored"
-    ]
 
 
 @pytest.fixture(scope="module")
@@ -106,26 +78,16 @@ def registered() -> list[tuple[str, str, str]]:
     return rows
 
 
-@pytest.fixture(scope="session", autouse=True)
-def announce_the_comparison_ref() -> None:
-    """Drift reported against a ref the copies never came from misleads whoever
-    re-vendors, so the fallback is announced rather than assumed. A fixture, not
-    a test: it asserts nothing and would otherwise count as a passing check."""
-    lib = _lib_root()
-    ref = pinned_lib_ref()
-    if not _ref_available(lib, ref):
-        warnings.warn(
-            f"{lib} has no {ref} (fetch its tags, or `task lib:sync`); byte-identity "
-            "is compared against the checkout's working tree",
-            stacklevel=1,
-        )
+def test_lib_checkout_carries_the_pinned_ref() -> None:
+    """Drift against a ref the copies never came from misleads whoever
+    re-vendors, so the declared ref has to resolve in the checkout."""
+    require_ref(_lib_root(), pinned_lib_ref())
 
 
 def test_registered_copies_are_reconciled(registered) -> None:
     """Every vendored copy is identical and every fork reconciled, at the pinned ref."""
-    ref = pinned_lib_ref()
-    at_pin = _ref_available(_lib_root(), ref)
-    result = _run_gate(*(["--ref", ref] if at_pin else []))
+    ref = require_ref(_lib_root(), pinned_lib_ref())
+    result = _run_gate("--ref", ref)
     assert result.returncode != 2, f"the vendored-copy gate could not run:\n{result.stderr}"
     if result.returncode == 0:
         return
@@ -139,7 +101,7 @@ def test_registered_copies_are_reconciled(registered) -> None:
         "ABSORB the library's change, then have its reconciled_sha256 updated in "
         "scripts/vendored-manifest.yml."
     )
-    if at_pin and _run_gate().returncode == 0:
+    if _run_gate().returncode == 0:
         hint = (
             f"These copies ARE current with the library working tree — they match it "
             f"exactly — but the declared lib_ref still pins {ref}, and the pin is what "
@@ -148,6 +110,37 @@ def test_registered_copies_are_reconciled(registered) -> None:
             f"backwards."
         )
     raise AssertionError(f"{result.stdout}{result.stderr}\n{hint}")
+
+
+def test_the_engine_reports_a_mutated_copy(registered, tmp_path) -> None:
+    """Mutation case: the live tree only exercises the clean direction, so the
+    reporting branch is proven against a scratch copy taken from the library."""
+    lib_path, consumer = next(
+        (lib, path) for kind, path, lib in registered if kind == "vendored" and path.endswith(".py")
+    )
+    content = lib_file(lib_path, pinned_lib_ref())
+    manifest = tmp_path / "scripts" / "vendored-manifest.yml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(f"vendored:\n  - lib: {lib_path}\n    consumer: {consumer}\n")
+    copy = tmp_path / consumer
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    at_pin = ["--ref", require_ref(_lib_root(), pinned_lib_ref())]
+
+    copy.write_text(content)
+    clean = _run_gate(*at_pin, manifest=manifest, repo_root=tmp_path)
+    assert clean.returncode == 0, (
+        f"a scratch copy taken from the library is reported as drifted:\n{clean.stdout}{clean.stderr}"
+    )
+
+    copy.write_text(content.replace("\n", "\n# drift\n", 1))
+    drifted = _run_gate(*at_pin, manifest=manifest, repo_root=tmp_path)
+    assert drifted.returncode == 1, (
+        f"one mutated byte in {consumer} was not reported (exit {drifted.returncode}):\n"
+        f"{drifted.stdout}{drifted.stderr}"
+    )
+    assert consumer in drifted.stdout + drifted.stderr, (
+        f"the drift report does not name {consumer}:\n{drifted.stdout}{drifted.stderr}"
+    )
 
 
 def test_every_registered_copy_exists_here(registered) -> None:
@@ -270,9 +263,14 @@ def test_every_shared_molecule_twin_is_registered(registered) -> None:
     """A copy of the collection's molecule-shared/ YAML scaffolding is in the manifest."""
     offered = _lib_offer(_lib_root(), pinned_lib_ref())
     local = REPO / "ansible" / "molecule"
-    if not local.is_dir():
-        return
     covered = {path for _kind, path, _lib in registered}
+    if not local.is_dir():
+        stranded = sorted(path for path in covered if path.startswith("ansible/molecule/"))
+        assert not stranded, f"registered but ansible/molecule/ is absent: {stranded}"
+        return
+    assert any(path.startswith(f"{MOLECULE_SHARED}/") for path in offered), (
+        f"the library offers nothing under {MOLECULE_SHARED}/, so this walk compares nothing"
+    )
     undeclared = sorted(
         str(p.relative_to(REPO))
         for p in local.rglob("*.yml")

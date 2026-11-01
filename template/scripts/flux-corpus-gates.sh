@@ -15,7 +15,9 @@ if [ -z "$CORPUS" ] || [ ! -f "$CORPUS" ]; then
   exit 2
 fi
 
-# Every path below is repository-relative; callers pass an absolute corpus path.
+# Every path below is repository-relative, so the corpus is made absolute before
+# the cd: a relative one would otherwise resolve against the repository root.
+CORPUS="$(cd "$(dirname "$CORPUS")" && pwd)/$(basename "$CORPUS")"
 _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$_SCRIPT_DIR/.." || exit 2
 

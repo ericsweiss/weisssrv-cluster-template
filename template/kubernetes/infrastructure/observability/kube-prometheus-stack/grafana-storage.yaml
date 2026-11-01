@@ -1,7 +1,7 @@
 ---
 # Grafana state on NFS, so Grafana can float to any node. The storage host's
-# Ansible role creates and owns the export directory, so a from-scratch build
-# needs the storage deploy rather than a manual mkdir.
+# Ansible role creates and owns the export directory, so the storage deploy must
+# run before this PV can bind.
 apiVersion: v1
 kind: PersistentVolume
 metadata:

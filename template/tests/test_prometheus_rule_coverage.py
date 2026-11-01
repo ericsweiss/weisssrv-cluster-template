@@ -50,27 +50,14 @@ UNTESTED_BARE = {
 # Windowed, joined, aggregated or absent() shapes. `promtool check rules` only
 # proves these parse: an aggregation that collapses every series, or a window
 # shorter than the scrape gap, reads as a pass. Each of these is owed a test.
-UNTESTED_SHAPES_OWED = {
-    "BlackboxExporterDown",
-    "EndpointDown",
-    "EtcdSnapshotStale",
-    "FluxReconciliationFailure",
-    "LokiRulerEvaluationFailures",
-    "LokiRulerNotificationFailures",
-    "LokiRulerRulesMissing",
-    "OffsiteBackupVerifyStale",
-    "RegistryCacheDown",
-    "SecretsProviderDown",
-    "ZFSPoolDeviceErrors",
-}
+UNTESTED_SHAPES_OWED: set[str] = set()
 
-# Gated on a `${cluster_*}` placeholder. The extractor does not substitute, so
-# that absent() arm matches nothing and fires at every eval_time: a test here
-# would assert the harness, not the alert.
+# A `__name__=~"${cluster_*}"` arm. The extractor does not substitute, and an
+# unsubstituted regex matches no metric name, so that absent() arm fires at every
+# eval_time: a test here would assert the harness, not the alert.
 UNTESTED_PLACEHOLDER_GATED = {
     "ArchiveBackupStale",
     "BackupArtifactStale",
-    "KeyEndpointProbeMissing",
     "OffsiteBackupStale",
     "VzdumpBackupStale",
 }
@@ -244,8 +231,8 @@ def rules_dir_wiring_owed(extractor: str, setters: dict[str, str]) -> bool:
 
 
 def test_app_rule_extraction_is_wired_as_soon_as_the_extractor_supports_it():
-    """The pinned extractor cannot read app PrometheusRule CRs, so RegistryCacheDown
-    is unparsed by promtool. Only this tripwire forces the wiring when the pin moves."""
+    """Without RULES_DIR the app PrometheusRule CRs, RegistryCacheDown's among
+    them, never reach promtool. This tripwire holds every caller to the wiring."""
     assert EXTRACTOR.is_file(), "scripts/extract-prometheus-config.py is missing"
     setters = {
         name: (REPO / name).read_text(encoding="utf-8")
@@ -254,15 +241,11 @@ def test_app_rule_extraction_is_wired_as_soon_as_the_extractor_supports_it():
     }
     assert setters, "none of the Taskfile tree or .gitlab-ci.yml is present"
     assert not rules_dir_wiring_owed(EXTRACTOR.read_text(encoding="utf-8"), setters), (
-        "the vendored extract-prometheus-config.py now accepts --rules-dir, so the "
-        "app PrometheusRule CRs can be linted. Set RULES_DIR: kubernetes/apps in all "
-        "three callers that already set RULE_TESTS_DIR: taskfiles/lint.yml's "
-        "prometheus-config task, .gitlab-ci.yml's prometheus-config-lint variables, "
-        "and tests/validate_render.py. In the same change add "
-        "kubernetes/apps/**/prometheusrule.yaml to the prometheus_config_paths "
-        "changes: anchor, drop 'App CRs are not extracted' from that job's header, "
-        "and drop RegistryCacheDown with its comment group from UNTESTED once "
-        "promtool parses the CR."
+        "the vendored extract-prometheus-config.py accepts --rules-dir but no "
+        "caller sets RULES_DIR, so the app PrometheusRule CRs go unlinted. Set "
+        "RULES_DIR: kubernetes/apps beside RULE_TESTS_DIR in taskfiles/lint.yml's "
+        "prometheus-config task and in .gitlab-ci.yml's prometheus-config-lint "
+        "variables."
     )
 
 

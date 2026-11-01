@@ -28,7 +28,7 @@ file in the module directory. Upgrading the platform is a ref bump plus a plan.
   `init` without it can silently pick up a newer patch.
 - **`required_version` floors on the CI image's Terraform minor.** State written
   by a newer minor is unreadable by an older binary, so local runs and CI stay on
-  one line. The library modules themselves need only 1.5.
+  one line. That floor is stricter than any library module's own.
 - **A pre-1.0 provider is pinned to its patch line.** Minors carry breaking
   schema changes there, so a bump is its own change with the release notes read
   first. The lockfile pins the exact build either way.
@@ -98,5 +98,5 @@ have to plug in:
 - **Secrets** (`secrets_backend`) — not a Terraform concern beyond the `op://`
   references in the Taskfile; the in-cluster half is the `ClusterSecretStore`.
 
-The cluster template's `docs/ARCHITECTURE.md` carries the full seam
-description for each.
+weisssrv-lib's `docs/EXTENSIBILITY.md` carries the full seam description for
+each.

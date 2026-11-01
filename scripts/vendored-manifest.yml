@@ -48,10 +48,16 @@ vendored:
     consumer: template/scripts/check-default-deny-coverage.py
   - lib: scripts/check-deploy-coverage.sh
     consumer: template/scripts/check-deploy-coverage.sh
+  # Imports ci_yaml.py and ci_playbook_invocations.py, registered below.
+  - lib: scripts/check-deploy-preflight.py
+    consumer: template/scripts/check-deploy-preflight.py
   - lib: scripts/check-doc-links.py
     consumer: template/scripts/check-doc-links.py
   - lib: scripts/check-ephemeral-storage-cap.py
     consumer: template/scripts/check-ephemeral-storage-cap.py
+  # Imports gate_common.py and inventory_tree.py, registered below.
+  - lib: scripts/check-guest-endpoint-parity.py
+    consumer: template/scripts/check-guest-endpoint-parity.py
   - lib: scripts/check-helm-repo-parity.py
     consumer: template/scripts/check-helm-repo-parity.py
   - lib: scripts/check-hpa-vpa-invariant.py
@@ -99,8 +105,8 @@ vendored:
     consumer: template/scripts/find-reachable-host.sh
   - lib: scripts/flux-env.sh
     consumer: template/scripts/flux-env.sh
-  # flux-lint.sh runs flux-env.sh, kubeconform-skipped.py and the expected-skip
-  # baseline by path; all three are registered beside it.
+  # flux-lint.sh runs flux-env.sh and kubeconform-skipped.py by path; both are
+  # registered beside it. The expected-skip baseline is the cluster's own.
   - lib: scripts/flux-lint.sh
     consumer: template/scripts/flux-lint.sh
   - lib: scripts/flux-render.sh
@@ -187,13 +193,6 @@ forked:
       Takes --root and --components where the library's takes --repo-root,
       --ci-file, --versions-configmap, --gotk-glob and --runbook.
     reconciled_sha256: 5353b33732feddc81d617138783f5fc65f09b13efc35a2f0dc0b878932e9d51c
-  - lib: scripts/check-guest-endpoint-parity.py
-    consumer: template/scripts/check-guest-endpoint-parity.py
-    reason: >-
-      Walks a fixed manifest tree and inventory directory, where the library's
-      takes --inventory, --manifest-tree and --scoped-group and additionally
-      requires an export to admit a scoped group whole.
-    reconciled_sha256: a7ab41e5de5ec07feb2a240b103b7ab24a96074da95e9e366cce0c03afd941c5
   - lib: scripts/check-secret-rotation-coverage.py
     consumer: template/scripts/check-secret-rotation-coverage.py
     reason: >-

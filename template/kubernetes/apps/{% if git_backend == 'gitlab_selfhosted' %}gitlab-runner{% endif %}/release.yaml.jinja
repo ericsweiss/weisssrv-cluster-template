@@ -14,9 +14,9 @@ metadata:
 spec:
   releaseName: gitlab-runner
   values:
-    # MUST stay at or below what the ResourceQuota admits: above it the runner
-    # submits pods the quota 403s, which GitLab reports as a job failure with no
-    # retry. Derived from the compute_node_count answer, as the quota is.
+    # MUST stay at or below what the ResourceQuota admits: ~5Gi per job pod (4Gi
+    # build, 1Gi per service container) plus the manager. Above it the quota 403s
+    # pods with no retry. Derived from compute_node_count, as the quota is.
     concurrent: {{ sizing.shared_concurrent }}
 
     runners:
@@ -78,13 +78,17 @@ spec:
             memory_limit = "4Gi"
             memory_request = "1Gi"
 
-            # Ceilings equal the defaults, so a per-job KUBERNETES_* override can
-            # only shrink a pod, never grow it past the namespace quota. Without
-            # them the runner ignores such an override outright.
+            # Service containers: the LimitRange defaults, set explicitly.
+            service_memory_limit = "1Gi"
+            service_memory_request = "256Mi"
+
+            # Every ceiling equals its default, so a per-job KUBERNETES_* override
+            # can only shrink a container, never grow it past the per-pod sizes
+            # the concurrent and quota math assumes.
             memory_limit_overwrite_max_allowed = "4Gi"
             memory_request_overwrite_max_allowed = "1Gi"
-            service_memory_limit_overwrite_max_allowed = "4Gi"
-            service_memory_request_overwrite_max_allowed = "1Gi"
+            service_memory_limit_overwrite_max_allowed = "1Gi"
+            service_memory_request_overwrite_max_allowed = "256Mi"
             cpu_request_overwrite_max_allowed = "500m"
 
             # Token-less, RBAC-less job SA — NOT the manager SA, whose Role could

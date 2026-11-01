@@ -156,40 +156,13 @@
   become: true
   serial: 1
   tasks:
-    - name: Check the current version
-      ansible.builtin.command: tailscale version
-      register: current_tailscale_version
-      changed_when: false
-      failed_when: false
+    # The role installs the pinned version with allow_change_held_packages, so a
+    # bump moves through the apt hold and the deb's postinst restarts tailscaled.
+    # `tailscale up` is gated on BackendState, so a joined node needs no auth key.
+    - name: Reconcile Tailscale to the pinned version
+      ansible.builtin.include_role:
+        name: weisssrv.infra.tailscale
       when: tailscale_enabled | default(false) | bool
-
-    - name: Determine whether an upgrade is needed
-      ansible.builtin.set_fact:
-        # Tailscale's apt packages carry no Debian revision suffix, so the first
-        # line of `tailscale version` compares directly to the pin.
-        needs_tailscale_upgrade: >-
-          {{ current_tailscale_version.rc | default(1) != 0
-             or (current_tailscale_version.stdout_lines[0] | default('')) != tailscale_version }}
-      when: tailscale_enabled | default(false) | bool
-
-    - name: Upgrade the Tailscale package
-      ansible.builtin.apt:
-        name: "tailscale={{ tailscale_version }}"
-        state: present
-        update_cache: true
-        allow_downgrade: true
-      when:
-        - tailscale_enabled | default(false) | bool
-        - needs_tailscale_upgrade | default(false)
-
-    - name: Restart tailscaled  # noqa no-handler
-      ansible.builtin.systemd:
-        name: tailscaled
-        state: restarted
-        daemon_reload: true
-      when:
-        - tailscale_enabled | default(false) | bool
-        - needs_tailscale_upgrade | default(false)
 
 - name: Update Ansible collections
   hosts: localhost

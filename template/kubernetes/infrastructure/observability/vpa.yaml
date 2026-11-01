@@ -70,7 +70,7 @@ spec:
       # maxAllowed.memory is each alloy/release.yaml limit; the CPU caps are headroom.
       - containerName: alloy
         minAllowed: {cpu: 25m, memory: 64Mi}
-        maxAllowed: {cpu: 500m, memory: 256Mi}
+        maxAllowed: {cpu: 500m, memory: 640Mi}
         controlledResources: [cpu, memory]
         controlledValues: RequestsOnly
       - containerName: config-reloader
@@ -88,9 +88,7 @@ spec:
   updatePolicy: {updateMode: Auto}
   resourcePolicy:
     containerPolicies:
-      # RequestsOnly: right-size requests but NEVER set limits. Under the default
-      # RequestsAndLimits the VPA re-imposes a CPU limit even after it is removed
-      # from the chart values, which keeps CPUThrottlingHigh firing.
+      # RequestsOnly keeps the release's memory limit fixed and adds no CPU limit.
       - containerName: "*"
         controlledValues: RequestsOnly
         minAllowed: {cpu: 10m, memory: 32Mi}
@@ -160,7 +158,7 @@ spec:
       # the recommendation cannot exceed its ceiling; the CPU caps are headroom.
       - containerName: alertmanager
         minAllowed: {cpu: 25m, memory: 64Mi}
-        maxAllowed: {cpu: 200m, memory: 128Mi}
+        maxAllowed: {cpu: 200m, memory: 192Mi}
         controlledResources: [cpu, memory]
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}

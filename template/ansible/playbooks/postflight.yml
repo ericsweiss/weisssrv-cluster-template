@@ -303,30 +303,34 @@
           health check below would iterate over nothing and pass vacuously.
         quiet: true
 
+    # `-x` reports anything short of healthy, data and checksum errors included,
+    # which a grep for vdev state words misses.
     - name: Check ZFS pool health
-      ansible.builtin.command: "zpool status {{ item }}"
+      ansible.builtin.command: "zpool status -x {{ item }}"
       changed_when: false
       register: zpool_health
-      failed_when: >
+      failed_when: >-
         zpool_health.rc != 0 or
-        'DEGRADED' in zpool_health.stdout or
-        'FAULTED' in zpool_health.stdout or
-        'UNAVAIL' in zpool_health.stdout
+        zpool_health.stdout | trim != "pool '" ~ item ~ "' is healthy"
       loop: "{{ nas_storage_zfs_pools | default([]) | map(attribute='name') | list }}"
       loop_control:
         label: "{{ item }}"
 
+    # A canmount=off dataset reports mounted=no by design and a zvol reports '-',
+    # so only a mountable filesystem has to read 'yes'.
     - name: Verify declared datasets are mounted
-      ansible.builtin.command: "zfs get -H -o value mounted {{ item.name }}"
+      ansible.builtin.command: "zfs list -H -o mounted,canmount {{ item.name }}"
       changed_when: false
       register: dataset_mounted
-      failed_when: dataset_mounted.stdout | trim not in ['yes', '-']
+      failed_when: >-
+        dataset_mounted.rc != 0 or
+        (dataset_mounted.stdout.split() | last != 'off'
+         and dataset_mounted.stdout.split() | first not in ['yes', '-'])
       loop: >-
         {{ nas_storage_zfs_pools | default([]) | map(attribute='datasets', default=[])
            | flatten }}
       loop_control:
         label: "{{ item.name }}"
-      # canmount=off datasets and zvols report '-', which the failed_when allows.
 
     - name: Verify mergerfs mounts
       ansible.builtin.command: findmnt -t fuse.mergerfs -o TARGET,SOURCE
@@ -377,11 +381,25 @@
       failed_when: postflight_service_check is changed
       when: nfs_tls_enabled | default(false)
 
+    - name: Assert the inventory declares at least one NFS export
+      ansible.builtin.assert:
+        that:
+          - nas_storage_exports | default([]) | length > 0
+        fail_msg: >-
+          nas_storage_exports is empty on {{ inventory_hostname }}; the export
+          check below would compare nothing and pass vacuously.
+        quiet: true
+
     - name: Check NFS exports are active
       ansible.builtin.command: showmount -e localhost
       changed_when: false
       register: nfs_exports
-      failed_when: "'/export' not in nfs_exports.stdout"
+      failed_when: >-
+        nfs_exports.rc != 0 or
+        (nas_storage_exports | default([]) | map(attribute='path') | list)
+        | difference(nfs_exports.stdout_lines[1:]
+                     | map('regex_replace', '\\s.*$', '') | list)
+        | length > 0
 
     - name: Verify Samba is running
       ansible.builtin.service:
@@ -410,13 +428,14 @@
       failed_when: mount_check.rc != 0
 
 # Client side of the NFS-over-TLS contract: every node that could mount an
-# export runs the handshake daemon, and any live mount from the NAS is actually
-# TLS (a plaintext one means a client slipped past a require-TLS export line).
+# export runs tlshd, and every live NAS mount, by name or by address, is TLS.
+# A plaintext mount means an export line let it through without TLS.
 - name: Verify NFS-over-TLS on k3s nodes
   hosts: k3s
   become: true
   vars:
     nas_fqdn: "{{ (groups['nas'] | first) ~ '.' ~ internal_domain }}"
+    nas_address: "{{ hostvars[groups['nas'] | first]['ansible_host'] }}"
   check_mode: false
   tasks:
     - name: Verify the tlshd handshake daemon is running
@@ -432,7 +451,7 @@
     # broken probe and must fail rather than empty the assert loop.
     - name: Gather live NFS mounts from the NAS
       ansible.builtin.command:
-        cmd: "grep {{ nas_fqdn }}: /proc/mounts"
+        cmd: "grep -F -e {{ nas_fqdn }}: -e {{ nas_address }}: /proc/mounts"
       changed_when: false
       failed_when: nas_nfs_mounts.rc not in [0, 1]
       register: nas_nfs_mounts

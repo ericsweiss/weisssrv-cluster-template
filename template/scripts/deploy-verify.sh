@@ -3,9 +3,6 @@
 # Needs kubectl, jq and flux on PATH, and reads KUSTOMIZE_VERSION,
 # KUSTOMIZE_SHA256 and PYYAML_VERSION from the job environment.
 
-# The FLUX_VERSION pin stays inline in .gitlab-ci.yml: task lint:flux-version-pin
-# greps it from that file.
-
 # Bind + assert the CI-provided version pins up front: fail loudly if this
 # script is ever run outside the CI job that sets them, and give shellcheck a
 # visible assignment (no SC2154 for env-sourced vars).
@@ -25,6 +22,7 @@ _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # kubectl, jq and flux only. Each arm no-ops when its tool is already present;
 # install output stays on the job log so a failure is diagnosable.
 if ! command -v envsubst > /dev/null 2>&1; then
+  apt-get update -qq > /dev/null
   apt-get install -y -qq gettext-base > /dev/null
 fi
 if ! python3 -c "import yaml" > /dev/null 2>&1; then
@@ -149,11 +147,9 @@ else
     fi
     rm -f "$KS_ERR"
     RENDERED=$(printf '%s\n' "$RAW" | envsubst "$FLUX_ENVSUBST_VARS")
-    # SSA, not plain `apply --dry-run=server`: the latter needs the legacy
-    # last-applied-configuration annotation Flux-owned resources lack.
-    # --force-conflicts wins field-ownership disputes; nothing is persisted.
-
-    # The `if` wrapper keeps a non-zero kubectl exit from aborting under set -e.
+    # SSA, because plain `apply --dry-run=server` needs the last-applied annotation
+    # Flux-owned resources lack. --force-conflicts wins ownership disputes and
+    # nothing persists; the `if` keeps a kubectl failure from tripping set -e.
     if DRYRUN_ERR=$(printf '%s\n' "$RENDERED" | kubectl apply \
       --server-side --dry-run=server --force-conflicts \
       --field-manager=ci-deploy-verify -f - 2>&1); then
@@ -178,12 +174,9 @@ else
   done <<<"$KS_PATHS"
 fi
 
-# Snapshot pre-reconcile state to tell steady-state from bootstrap: with every
-# Kustomization already Ready a non-Ready ExternalSecret is a failure, while
-# during bootstrap ESO may still be starting.
-
-# A classifier that could not run must not relax the rest of the verify, so a
-# failed kubectl is reported and the STRICT arm is taken.
+# Pre-reconcile snapshot: with every Kustomization Ready, a non-Ready
+# ExternalSecret is a failure; during bootstrap ESO may still be starting. A
+# failed classifier takes the STRICT arm rather than relaxing the verify.
 KS_ERR=$(mktemp)
 if PRE_KS_JSON=$(kubectl get kustomizations.kustomize.toolkit.fluxcd.io -A -o json 2>"$KS_ERR"); then
   PRE_KS_NOT_READY=$(printf '%s' "$PRE_KS_JSON" | count_not_ready)
@@ -226,8 +219,47 @@ if ! flux reconcile kustomization flux-system --timeout=3m --with-source; then
   echo "ERROR: Flux root kustomization reconciliation failed or timed out"
   EXIT=1
 fi
-# Allow downstream kustomizations time to reconcile after the root
-sleep 15
+# Every unsuspended child Kustomization of this repo's source attempts the
+# served revision before the readiness reads below. The stragglers are printed,
+# so a timeout names them.
+ks_on_source_revision() {
+  local json behind
+  json=$(kubectl get kustomizations.kustomize.toolkit.fluxcd.io -A -o json) || return 1
+  behind=$(printf '%s' "$json" | jq -r --arg rev "$SOURCE_REV" '.items[]
+      | select(.spec.sourceRef.kind == "GitRepository" and .spec.sourceRef.name == "flux-system"
+          and (.spec.sourceRef.namespace // .metadata.namespace) == "flux-system")
+      | select(.spec.suspend != true)
+      | select(.status.lastAttemptedRevision != $rev)
+      | "\(.metadata.namespace)/\(.metadata.name) at \(.status.lastAttemptedRevision // "none")"') \
+    || return 1
+  [ -z "$behind" ] && return 0
+  printf 'Not yet on %s:\n%s\n' "$SOURCE_REV" "$behind"
+  return 1
+}
+# Without the served revision the readiness reads may judge the previous one.
+# Steady state fails the verify on that; bootstrap only warns and delays. The
+# steady budget matches the Flux-resources wait, since dependsOn chains serialize.
+wait_for_source_revision() {
+  local err budget=120 level=WARNING
+  if [ "$STEADY_STATE" = "true" ]; then budget=300; level=ERROR; fi
+  err=$(mktemp)
+  SOURCE_REV=$(kubectl -n flux-system get gitrepository flux-system \
+    -o jsonpath='{.status.artifact.revision}' 2>"$err" || true)
+  if [ -z "$SOURCE_REV" ]; then
+    echo "$level: could not read the flux-system GitRepository revision; the readiness checks below may read the previous revision"
+    sed 's/^/  /' "$err"
+    rm -f "$err"
+    [ "$level" = "ERROR" ] && return 1
+    sleep 15
+    return 0
+  fi
+  rm -f "$err"
+  wait_for "Kustomizations on the reconciled revision" "$budget" 5 ks_on_source_revision \
+    && return 0
+  echo "$level: the Kustomizations listed above have not attempted $SOURCE_REV"
+  [ "$level" != "ERROR" ]
+}
+wait_for_source_revision || EXIT=1
 
 echo ""
 echo "Flux controllers:"
@@ -322,9 +354,12 @@ fi
 # Name the top-level Kustomizations explicitly: the broad check above catches a
 # stuck stage too, but not with a per-stage failure line. Derived in dependsOn
 # order, never hand-listed, so a new stage cannot be missing from the gate.
-TOP_KUSTOMIZATIONS=$(python3 "$_SCRIPT_DIR/flux-child-kustomizations.py")
+if ! TOP_KUSTOMIZATIONS=$(python3 "$_SCRIPT_DIR/flux-child-kustomizations.py"); then
+  echo "ERROR: could not derive the child Kustomization list from kubernetes/clusters/ (rc above: a dependsOn cycle, or nothing parsed)"
+  exit 1
+fi
 if [ -z "$TOP_KUSTOMIZATIONS" ]; then
-  echo "ERROR: could not derive the child Kustomization list from kubernetes/clusters/"
+  echo "ERROR: the child Kustomization list from kubernetes/clusters/ is empty"
   exit 1
 fi
 echo "Top-level Kustomizations under gate: $(echo "$TOP_KUSTOMIZATIONS" | tr '\n' ' ')"
@@ -464,7 +499,7 @@ if VIP_CONF=$("$_SCRIPT_DIR/cluster-config-value.sh" \
       -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
     READY_NODES=$(kubectl get endpointslices -n traefik \
       -l "kubernetes.io/service-name=$SVC" -o json 2>/dev/null \
-      | jq -r '.items[].endpoints[] | select(.conditions.ready != false) | .nodeName // empty' \
+      | jq -r '.items[] | (.endpoints // [])[] | select(.conditions.ready != false) | .nodeName // empty' \
       2>/dev/null || true)
     ANNOUNCER=""
     while read -r NODE; do

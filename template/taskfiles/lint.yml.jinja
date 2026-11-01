@@ -143,7 +143,8 @@ tasks:
         msg: "ansible-playbook not installed (pip install ansible)"
       - *needs_pyyaml
     cmds:
-      - python3 scripts/deploy-preflight.py
+      # No --require-tag-selections: the deploy jobs select no tags.
+      - python3 scripts/check-deploy-preflight.py
 
   coverage-checks:
     desc: Assert every host a role is declared for is deployed to, and every service task names a unit

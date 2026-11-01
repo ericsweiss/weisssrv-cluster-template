@@ -1,6 +1,7 @@
 """Guards between the gitlab-runner-reaper CronJob and deleting a live CI job
 pod or an in-flight job's registry credential Secret. The program is loaded by
 path from kubernetes/apps/gitlab-runner-reaper/."""
+import json
 import urllib.error
 from datetime import datetime, timedelta, timezone
 
@@ -106,7 +107,7 @@ class FakeApi:
     """Records requests; replays canned list pages and delete outcomes."""
 
     def __init__(self, pages=None, deletes=None):
-        # pages: list of (path_fragment, response) consumed in order per prefix.
+        # pages: {path fragment: [responses]}; the last response repeats.
         self.pages = pages or {}
         self.deletes = deletes or {}
         self.calls = []
@@ -135,10 +136,6 @@ def http_error(code):
 
 def never_over_budget():
     return False
-
-
-def test_module_exists():
-    assert MODULE_PATH.is_file(), f"{MODULE_PATH} missing — the CronJob mounts it"
 
 
 def test_the_label_selector_comes_from_the_cronjob(reaper):
@@ -619,3 +616,77 @@ def test_namespace_start_rotates_between_scheduled_runs(reaper):
         rotated = reaper.rotate_namespaces(namespaces, NOW + timedelta(minutes=15 * i))
         assert sorted(rotated) == sorted(namespaces)
     assert reaper.rotate_namespaces([], NOW) == []
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+class TestKubeApi:
+    """The only place the HTTP method, body and headers reach the wire."""
+
+    def _capture(self, reaper, monkeypatch, body: bytes = b'{"items": []}'):
+        seen = {}
+
+        def fake_urlopen(req, timeout=None, context=None):
+            seen["req"] = req
+            seen["timeout"] = timeout
+            return _FakeResponse(body)
+
+        monkeypatch.setattr(reaper.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(reaper.ssl, "create_default_context", lambda cafile=None: "ctx")
+        return seen
+
+    def test_a_get_carries_the_bearer_token_and_no_body(self, reaper, monkeypatch):
+        seen = self._capture(reaper, monkeypatch)
+        api = reaper.KubeApi("tok", "/dev/null", 5)
+        assert api.request("GET", "/api/v1/pods") == {"items": []}
+        req = seen["req"]
+        assert req.get_method() == "GET"
+        assert req.full_url == reaper.API + "/api/v1/pods"
+        assert req.headers["Authorization"] == "Bearer tok"
+        assert "Content-type" not in req.headers
+        assert req.data is None
+        assert seen["timeout"] == 5
+
+    def test_a_body_is_sent_as_json(self, reaper, monkeypatch):
+        seen = self._capture(reaper, monkeypatch)
+        api = reaper.KubeApi("tok", "/dev/null", 5)
+        api.request("DELETE", "/api/v1/namespaces/ns/pods/p", {"preconditions": {"uid": "u"}})
+        req = seen["req"]
+        assert req.get_method() == "DELETE"
+        assert req.headers["Content-type"] == "application/json"
+        assert json.loads(req.data.decode()) == {"preconditions": {"uid": "u"}}
+
+    def test_an_empty_response_body_is_an_empty_mapping(self, reaper, monkeypatch):
+        self._capture(reaper, monkeypatch, body=b"")
+        api = reaper.KubeApi("tok", "/dev/null", 5)
+        assert api.request("DELETE", "/api/v1/namespaces/ns/pods/p") == {}
+
+    def test_from_service_account_reads_the_mounted_token(self, reaper, monkeypatch, tmp_path):
+        (tmp_path / "token").write_text("mounted-token\n", encoding="utf-8")
+        (tmp_path / "ca.crt").write_text("", encoding="utf-8")
+        seen = self._capture(reaper, monkeypatch)
+        api = reaper.KubeApi.from_service_account(5, sa_dir=str(tmp_path))
+        api.request("GET", "/api/v1/pods")
+        assert seen["req"].headers["Authorization"] == "Bearer mounted-token"
+
+    def test_an_unreachable_apiserver_propagates(self, reaper, monkeypatch):
+        def boom(req, timeout=None, context=None):
+            raise urllib.error.URLError("down")
+
+        monkeypatch.setattr(reaper.urllib.request, "urlopen", boom)
+        monkeypatch.setattr(reaper.ssl, "create_default_context", lambda cafile=None: "ctx")
+        api = reaper.KubeApi("tok", "/dev/null", 5)
+        with pytest.raises(urllib.error.URLError):
+            api.request("GET", "/api/v1/pods")

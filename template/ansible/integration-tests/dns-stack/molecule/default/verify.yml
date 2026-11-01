@@ -1,6 +1,6 @@
 ---
-# DNS Stack Integration Test - Verify
-# Validates unbound + adguard_home + adguard_sync integration
+# DNS stack integration test - verify.
+# unbound, adguard_home and adguard_sync on the two DNS servers.
 
 - name: Verify - DNS Stack Integration
   hosts: all
@@ -20,7 +20,6 @@
           guarded assertions in this scenario skip.
       run_once: true
 
-    # Unbound Verification
     - name: Check Unbound service is running
       ansible.builtin.systemd:
         name: unbound
@@ -71,7 +70,6 @@
         fail_msg: "unbound_forwarders from converge did not render (default forwarders present) — variable ignored/renamed?"
         success_msg: "Custom unbound forwarders rendered (defaults not present)"
 
-    # AdGuard Home Verification
     - name: Check AdGuard Home service is running
       ansible.builtin.systemd:
         name: AdGuardHome
@@ -164,7 +162,6 @@
         success_msg: "AdGuard Sync configuration exists"
       when: "'dns_primary' in group_names"
 
-    # DNS chain test via Unbound (AdGuard's upstream) - verifies Unbound → upstream DNS
     - name: Verify DNS resolution via Unbound
       ansible.builtin.assert:
         that:

@@ -67,6 +67,32 @@ PLATFORM_MIDDLEWARES = (
     "'traefik/hsts-header', 'traefik/security-headers', "
     "'authentik/authentik-auth']"
 )
+INTERNAL_ALLOWLISTS = "['lan-tailscale-only', 'lan-tailscale-strict']"
+INTERNAL_DOMAIN = "'${cluster_internal_domain}'.lowerAscii()"
+INTERNAL_HOST_ENDS = (
+    "['.' + variables.internalDomain + '`', '`' + variables.internalDomain + '`', "
+    "'.' + variables.internalDomain + '\"', '\"' + variables.internalDomain + '\"']"
+)
+# Both VIPs serve the same entrypoints, so an internal-domain route or Ingress
+# must carry its own allowlist middleware or the public VIP serves it.
+INTERNAL_ROUTE_ALLOWLIST = (
+    "!has(object.spec.routes) || object.spec.routes.all(r, !has(r.match) || "
+    "!variables.internalHostEnds.exists(e, r.match.lowerAscii().contains(e)) || "
+    "(has(r.middlewares) && r.middlewares.exists(m, has(m.namespace) && "
+    "m.namespace == 'traefik' && m.name in variables.internalAllowlists)))"
+)
+INTERNAL_INGRESS_ALLOWLIST = (
+    "request.resource.resource != 'ingresses' || !has(object.spec) || "
+    "!has(object.spec.rules) || !object.spec.rules.exists(r, has(r.host) && "
+    "(r.host.lowerAscii() == variables.internalDomain || "
+    "r.host.lowerAscii().endsWith('.' + variables.internalDomain))) || "
+    "(has(object.metadata.annotations) && object.metadata.annotations.exists(k, "
+    "k.startsWith('traefik.ingress.kubernetes.io/') && "
+    "k.lowerAscii() == variables.routerMiddlewares) && "
+    "object.metadata.annotations.all(k, k.lowerAscii() != variables.routerMiddlewares || "
+    "object.metadata.annotations[k].split(',').exists(v, "
+    "v.trim() in variables.internalAllowlistRefs)))"
+)
 REQUIRED_POLICIES = {
     "tenant-traefik-route-refs": {
         "paramKind": None,
@@ -82,12 +108,16 @@ REQUIRED_POLICIES = {
         "variables": [
             ("ns", "object.metadata.namespace"),
             ("platformMiddlewares", PLATFORM_MIDDLEWARES),
+            ("internalDomain", INTERNAL_DOMAIN),
+            ("internalHostEnds", INTERNAL_HOST_ENDS),
+            ("internalAllowlists", INTERNAL_ALLOWLISTS),
         ],
         "validations": [
             (
                 "!has(object.spec.routes) || object.spec.routes.all(r, !has(r.services) ||"
                 " r.services.all(s, !has(s.namespace) || s.namespace == variables.ns))"
             ),
+            INTERNAL_ROUTE_ALLOWLIST,
             (
                 "!has(object.spec.routes) || object.spec.routes.all(r, !has(r.middlewares)"
                 " || r.middlewares.all(m, !has(m.namespace) || m.namespace == variables.ns"
@@ -234,6 +264,12 @@ REQUIRED_POLICIES = {
                 "'traefik-security-headers@kubernetescrd', "
                 "'authentik-authentik-auth@kubernetescrd']"
             )),
+            ("internalDomain", INTERNAL_DOMAIN),
+            ("internalAllowlistRefs", (
+                "['traefik-lan-tailscale-only@kubernetescrd', "
+                "'traefik-lan-tailscale-strict@kubernetescrd']"
+            )),
+            ("routerMiddlewares", "'traefik.ingress.kubernetes.io/router.middlewares'"),
         ],
         "validations": [
             (
@@ -242,6 +278,7 @@ REQUIRED_POLICIES = {
                 "object.metadata.annotations[k].split(',').all(v, !v.contains('@') || "
                 "v.trim() in variables.platformRefs))"
             ),
+            INTERNAL_INGRESS_ALLOWLIST,
         ],
     },
     "tenant-no-externalname-services": {
@@ -594,25 +631,19 @@ def tenant_resources(path: Path, root: Path) -> list[str]:
     return [str(r) for r in doc.get("resources") or []]
 
 
-def allows_cross_namespace(path: Path, root: Path) -> bool | None:
-    """The provider setting, or None when no HelmRelease here declares values —
-    a missing values block leaves the question unanswerable, not answered."""
-    answered = False
+def declares_values(path: Path, root: Path) -> bool:
+    """Whether a HelmRelease here declares spec.values, where the provider
+    setting lives; without one the gate can no longer read the release."""
     try:
         docs = list(yaml.safe_load_all(_read(path, root)))
     except yaml.YAMLError as exc:
         raise Vacuous(f"{path.relative_to(root)}: {exc}") from exc
-    for doc in docs:
-        if not doc or doc.get("kind") != "HelmRelease":
-            continue
-        values = (doc.get("spec") or {}).get("values")
-        if not isinstance(values, dict):
-            continue
-        answered = True
-        providers = values.get("providers") or {}
-        if (providers.get("kubernetesCRD") or {}).get("allowCrossNamespace"):
-            return True
-    return False if answered else None
+    return any(
+        isinstance(doc, dict)
+        and doc.get("kind") == "HelmRelease"
+        and isinstance((doc.get("spec") or {}).get("values"), dict)
+        for doc in docs
+    )
 
 
 def _cel(text: object) -> str:
@@ -806,8 +837,7 @@ def check(root: Path = REPO) -> list[str]:
     if not resources:
         return [f"{TENANTS_KUSTOMIZATION} lists no resources — has the tenant wiring moved?"]
 
-    allows = allows_cross_namespace(release, root)
-    if allows is None:
+    if not declares_values(release, root):
         return [
             f"{TRAEFIK_RELEASE} declares no HelmRelease spec.values — this gate "
             "can no longer read the provider setting"

@@ -10,9 +10,9 @@ metadata:
 spec:
   interval: 30m
   releaseName: traefik
-  # Repo rule: platform HelmReleases revert out-of-band edits. Off where a chart
-  # injects a webhook caBundle (cert-manager, external-secrets, metallb, vpa,
-  # kube-prometheus-stack) — a reconcile would wipe it.
+  # Repo rule: platform HelmReleases revert out-of-band edits. A release whose
+  # chart injects a webhook caBundle leaves drift detection off, since a
+  # reconcile would wipe the bundle.
   driftDetection:
     mode: enabled
   chart:

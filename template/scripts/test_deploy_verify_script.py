@@ -7,6 +7,7 @@ needs a live cluster to run whole. test_deploy_verify_lib.py covers the classifi
 
 from __future__ import annotations
 
+import json
 import shlex
 import shutil
 import subprocess
@@ -115,6 +116,93 @@ class TestKsReady:
         assert "rc=0" in out
 
 
+class TestKsOnSourceRevision:
+    """Each child Kustomization of this repo's source attempts the revision the
+    source serves before the readiness reads; the stragglers are named."""
+
+    PRELUDE = extract("ks_on_source_revision")
+
+    @pytest.fixture(autouse=True)
+    def _jq(self):
+        # Fail rather than skip: without jq every revision check reads as a lag.
+        assert shutil.which("jq"), "jq is required: install it in the job that runs this suite"
+
+    def _run(self, kubectl_body: str, tmp_path: Path) -> str:
+        stub = tmp_path / "kubectl"
+        stub.write_text(f"#!/bin/sh\n{kubectl_body}\n")
+        stub.chmod(0o755)
+        return bash(f'PATH="{tmp_path}:$PATH"\nSOURCE_REV=main@sha1:new\n'
+                    f"{self.PRELUDE}\nks_on_source_revision; echo rc=$?").stdout
+
+    @staticmethod
+    def _ks(rev: str | None, source: str = "flux-system", suspend: bool = False,
+            namespace: str = "flux-system", source_namespace: str | None = None) -> dict:
+        ref = {"kind": "GitRepository", "name": source}
+        if source_namespace is not None:
+            ref["namespace"] = source_namespace
+        item = {"metadata": {"namespace": namespace, "name": "ks"},
+                "spec": {"sourceRef": ref, "suspend": suspend}}
+        if rev is not None:
+            item["status"] = {"lastAttemptedRevision": rev}
+        return item
+
+    @pytest.mark.parametrize(("item", "expected"), [
+        (_ks("main@sha1:new"), "rc=0"),
+        (_ks("main@sha1:old"), "flux-system/ks at main@sha1:old\nrc=1"),
+        (_ks(None), "flux-system/ks at none\nrc=1"),
+        (_ks("tenant@sha1:x", source="tenant"), "rc=0"),
+        (_ks("tenant@sha1:x", namespace="tenant-a"), "rc=0"),
+        (_ks("main@sha1:old", namespace="tenant-a", source_namespace="flux-system"), "rc=1"),
+        (_ks("main@sha1:old", suspend=True), "rc=0"),
+    ], ids=["on-revision", "behind", "never-attempted", "other-source",
+            "tenant-source-named-flux-system", "platform-source-from-tenant", "suspended"])
+    def test_the_verdict(self, item, expected, tmp_path):
+        payload = shlex.quote(json.dumps({"items": [item]}))
+        assert expected in self._run(f"printf '%s' {payload}", tmp_path)
+
+    def test_a_failed_kubectl_read_waits(self, tmp_path):
+        assert "rc=1" in self._run("echo boom >&2; exit 1", tmp_path)
+
+
+class TestWaitForSourceRevision:
+    """Bootstrap only warns when the source revision is unreadable or a child
+    lags; steady state fails the verify on both."""
+
+    PRELUDE = extract("wait_for_source_revision")
+
+    def _run(self, kubectl_body: str, tmp_path: Path, steady: str, wait_rc: int = 0) -> str:
+        stub = tmp_path / "kubectl"
+        stub.write_text(f"#!/bin/sh\n{kubectl_body}\n")
+        stub.chmod(0o755)
+        return bash(f'PATH="{tmp_path}:$PATH"\nSTEADY_STATE={steady}\n'
+                    'sleep() { echo "slept $1"; }\n'
+                    f'wait_for() {{ echo "waited for $1 budget $2"; return {wait_rc}; }}\n'
+                    f"{self.PRELUDE}\nwait_for_source_revision; echo rc=$?").stdout
+
+    @pytest.mark.parametrize(("steady", "expected"), [
+        ("false", ["WARNING: could not read", "forbidden", "slept 15", "rc=0"]),
+        ("true", ["ERROR: could not read", "forbidden", "rc=1"]),
+    ])
+    def test_an_unreadable_source_revision(self, steady, expected, tmp_path):
+        out = self._run('echo "gitrepositories is forbidden" >&2; exit 1', tmp_path, steady)
+        assert all(text in out for text in expected), out
+        assert "waited for" not in out
+
+    @pytest.mark.parametrize(("steady", "wait_rc", "expected"), [
+        ("false", 0, ["budget 120", "rc=0"]),
+        ("false", 1, ["WARNING: the Kustomizations listed above", "rc=0"]),
+        ("true", 1, ["budget 300", "ERROR: the Kustomizations listed above", "rc=1"]),
+    ])
+    def test_a_readable_source_revision_waits_on_the_children(
+            self, steady, wait_rc, expected, tmp_path):
+        out = self._run("printf main@sha1:new", tmp_path, steady, wait_rc)
+        assert all(text in out for text in expected), out
+        assert "slept" not in out
+
+    def test_the_main_flow_fails_the_verify_on_a_lag(self):
+        assert "\nwait_for_source_revision || EXIT=1\n" in SCRIPT.read_text()
+
+
 class TestCheckTopKustomizationsReady:
     """Anything but Ready=True — including a missing object — holds the gate."""
 
@@ -168,6 +256,54 @@ def test_the_gated_stage_list_is_derived_not_hand_written():
     """A hand-listed stage set is the drift flux-child-kustomizations.py exists
     to prevent."""
     assert "flux-child-kustomizations.py" in SCRIPT.read_text()
+
+
+class TestTopKustomizations:
+    """A derivation that fails must stop the verify with a message, under
+    `set -e`, rather than gate on an empty or stale list."""
+
+    BLOCK = block("if ! TOP_KUSTOMIZATIONS=", 'echo "Top-level Kustomizations under gate')
+
+    def _drive(self, tmp_path: Path, helper: str) -> subprocess.CompletedProcess:
+        (tmp_path / "flux-child-kustomizations.py").write_text(helper)
+        return bash(
+            "set -euo pipefail\n"
+            f'_SCRIPT_DIR="{tmp_path}"\n'
+            f"{self.BLOCK}\n"
+            'echo "derived: $TOP_KUSTOMIZATIONS"\n'
+        )
+
+    def test_a_failing_derivation_stops_with_a_message(self, tmp_path):
+        res = self._drive(tmp_path, "import sys\nsys.exit(2)\n")
+        assert res.returncode == 1
+        assert "could not derive the child Kustomization list" in res.stdout
+        assert "derived:" not in res.stdout
+
+    def test_an_empty_derivation_stops_with_a_message(self, tmp_path):
+        res = self._drive(tmp_path, "")
+        assert res.returncode == 1
+        assert "is empty" in res.stdout
+
+    def test_a_derived_list_passes_through(self, tmp_path):
+        res = self._drive(tmp_path, "print('sources')\nprint('apps')\n")
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "derived: sources\napps" in res.stdout
+
+
+def test_an_endpoint_slice_without_endpoints_is_not_a_jq_error():
+    """A slice whose `endpoints` is null must yield no node, not abort the
+    filter and report the VIP as announced by nobody for the wrong reason."""
+    assert shutil.which("jq"), "jq is required: the python-tests job installs it through apt_packages"
+    body = SCRIPT.read_text()
+    (expr,) = [line.split("jq -r '", 1)[1].split("'", 1)[0]
+               for line in body.splitlines() if "jq -r '.items[] | (.endpoints" in line]
+    payload = (
+        '{"items":[{"endpoints":null},'
+        '{"endpoints":[{"conditions":{"ready":true},"nodeName":"n1"}]}]}'
+    )
+    res = subprocess.run(["jq", "-r", expr], input=payload, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.split() == ["n1"]
 
 
 def test_the_version_pins_are_asserted_before_anything_runs():
@@ -350,6 +486,8 @@ class TestIngressVipAssertion:
         result = self._drive(tmp_path, config_rc=1)
         assert "EXIT=1" in result.stdout, result.stdout + result.stderr
         assert "the VIP-announce gate did not run" in result.stdout
+
+
 class TestToolPreflight:
     """Every cluster read is `|| true`, so an absent kubectl must fail up front."""
 

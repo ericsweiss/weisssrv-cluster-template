@@ -30,8 +30,8 @@ needs_corpus = pytest.mark.skipif(
 
 
 def slug(heading: str) -> str:
-    """GitHub's heading slug: inline markup dropped, lowercased, spaces to
-    hyphens, everything else but word characters and hyphens removed."""
+    """A heading's anchor: inline markup dropped, lowercased, each whitespace
+    run to one hyphen, everything else but word characters and hyphens removed."""
     text = _LINK_RE.sub(r"\1", heading)
     text = text.replace("`", "").replace("*", "")
     text = unicodedata.normalize("NFKC", text).lower()

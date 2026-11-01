@@ -5,6 +5,7 @@ path from kubernetes/infrastructure/configs/cloudflare-ddns/, with a fake api.""
 from __future__ import annotations
 
 import pytest
+import yaml
 from conftest import REPO as REPO_ROOT
 from conftest import load_script
 
@@ -21,6 +22,29 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def ddns():
     return load_script(MODULE_PATH)
+
+
+def test_the_program_carries_no_site_data():
+    """Zone and record list come from the environment only. A built-in default
+    would keep working after the CronJob stopped passing one, hiding the break."""
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    config = REPO_ROOT / "kubernetes/infrastructure/sources/cluster-config.yaml"
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))["data"]
+    for key in ("cluster_internal_domain", "cluster_external_domain"):
+        assert data[key] not in source, f"the program hard-codes {key}"
+    for env in ("DDNS_ZONE", "DDNS_RECORDS"):
+        assert f'os.environ.get("{env}", "")' in source, f"{env} carries a built-in default"
+
+
+def test_an_unset_zone_exits_before_any_call(ddns, monkeypatch):
+    monkeypatch.setattr(ddns, "TOKEN", "t")
+    monkeypatch.setattr(ddns, "ZONE", "")
+    monkeypatch.setattr(ddns, "RECORDS", "zone.invalid:true")
+    monkeypatch.setattr(ddns, "public_ip", lambda: pytest.fail("reached public_ip()"))
+    monkeypatch.setattr(ddns, "api", lambda *a, **k: pytest.fail("reached the API"))
+    with pytest.raises(SystemExit) as exit_info:
+        ddns.main()
+    assert "DDNS_ZONE are required" in str(exit_info.value)
 
 
 def _fake_api(replies, seen):
@@ -214,8 +238,8 @@ def test_records_reject_malformed_entry_shapes(ddns, monkeypatch):
 
 
 def test_records_reject_a_non_boolean_proxied_flag(ddns, monkeypatch):
-    """Only `false` ever turned the proxy off, so `:no`, `:0` and a bare trailing
-    colon all silently left the record proxied through Cloudflare."""
+    """Only true/false (any case) are accepted; any other flag is rejected
+    rather than read as proxied."""
     for bad in ("a.zone.invalid:no", "a.zone.invalid:0", "a.zone.invalid:yes",
                 "a.zone.invalid:"):
         assert "non-boolean proxied flag" in _records_exit(ddns, monkeypatch, bad)
@@ -245,7 +269,6 @@ def test_records_accept_the_documented_spellings(ddns, monkeypatch):
         ("bare.zone.invalid", True),
         ("up.zone.invalid", False),
     ]
-
 
 
 # --------------------------------------------------------------------------

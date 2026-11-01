@@ -855,7 +855,7 @@
       "type": "stat",
       "title": "Ruler rules loaded",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Rules loaded by Loki's in-process ruler. They are evaluated inside Loki and pushed straight to Alertmanager, so they never appear in the Prometheus panels above. Raise the green threshold to the rule count this repo ships.",
+      "description": "Rules loaded by Loki's in-process ruler. They are evaluated inside Loki and pushed straight to Alertmanager, so they never appear in the Prometheus panels above. Red means the ruler has no rule loaded.",
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 47 },
       "fieldConfig": {
         "defaults": {

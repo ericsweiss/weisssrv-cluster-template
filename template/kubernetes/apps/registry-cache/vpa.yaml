@@ -12,7 +12,10 @@ spec:
   updatePolicy: {updateMode: Initial}
   resourcePolicy:
     containerPolicies:
+      # RequestsOnly, so the 512Mi limit in deployment.yaml stays the ceiling
+      # and the cap equals it.
       - containerName: "*"
+        controlledValues: RequestsOnly
         minAllowed: {cpu: 25m, memory: 64Mi}
-        maxAllowed: {cpu: 1, memory: 409Mi}
+        maxAllowed: {cpu: 1, memory: 512Mi}
         controlledResources: [cpu, memory]

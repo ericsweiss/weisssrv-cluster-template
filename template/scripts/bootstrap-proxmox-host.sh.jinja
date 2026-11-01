@@ -34,7 +34,9 @@ USAGE
 fi
 
 case "$ADMIN_USER" in
-    root|*[!a-z0-9_-]*|"")
+    # POSIX classes, not a-z ranges: a range follows locale collation and
+    # admits uppercase letters.
+    root|[![:lower:]_]*|*[![:lower:][:digit:]_-]*|"")
         echo "ERROR: '$ADMIN_USER' is not a usable admin username" >&2
         exit 1
         ;;

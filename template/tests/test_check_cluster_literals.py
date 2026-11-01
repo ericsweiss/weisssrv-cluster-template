@@ -36,8 +36,7 @@ SAMPLES = {
 
 
 # Every key cluster-config declares unconditionally. The ConfigMap is the
-# substitution contract, so a key added or dropped there is recorded here too;
-# the upstream template's VERSIONING.md carries the same list.
+# substitution contract, so a key added or dropped there is recorded here too.
 DECLARED_KEYS = frozenset(
     {
         "cluster_name",
@@ -94,7 +93,7 @@ def config_values() -> dict[str, str]:
     return {key: SAMPLES[key] for key in sorted(gate.REQUIRED_KEYS)}
 
 
-def stage(name: str, path: str) -> str:
+def stage(name: str, path: str, source: str = "flux-system") -> str:
     """One Flux Kustomization: the gate derives its scan set from these."""
     return textwrap.dedent(
         f"""\
@@ -102,7 +101,11 @@ def stage(name: str, path: str) -> str:
         kind: Kustomization
         metadata:
           name: {name}
+          namespace: flux-system
         spec:
+          sourceRef:
+            kind: GitRepository
+            name: {source}
           path: ./{path}
           postBuild:
             substituteFrom:
@@ -218,12 +221,13 @@ def test_a_domain_literal_in_a_yml_manifest_is_reported(repo: Path) -> None:
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
-def test_a_stage_declared_in_a_yml_file_is_still_derived(repo: Path) -> None:
-    """The cluster directory is walked under both suffixes too, or the tree a
-    .yml stage names is scanned by nothing."""
+@pytest.mark.parametrize("suffix", [".yaml", ".yml"])
+def test_a_substituted_tree_is_derived_not_hand_listed(repo: Path, suffix: str) -> None:
+    """A new stage brings its tree into the scan without editing the gate, and
+    the cluster directory is walked under both suffixes."""
     write(
         repo,
-        f"{gate.CLUSTER_DIR}/infrastructure-metrics-server.yml",
+        f"{gate.CLUSTER_DIR}/infrastructure-metrics-server{suffix}",
         stage("infrastructure-metrics-server", "kubernetes/infrastructure/metrics-server"),
     )
     write(repo, "kubernetes/infrastructure/metrics-server/release.yaml", """\
@@ -318,6 +322,81 @@ def test_cluster_config_itself_is_not_scanned(repo: Path) -> None:
     assert run(repo) == []
 
 
+def test_a_tenant_kustomization_is_not_credited(repo: Path) -> None:
+    """A tenant path names the tenant's repo, so it never reaches the scan set."""
+    (repo / "kubernetes/db").mkdir(parents=True)
+    write(
+        repo,
+        f"{gate.CLUSTER_DIR}/tenants/tenant.yaml",
+        stage("tenant-db", "kubernetes/db", source="tenant"),
+    )
+    assert "kubernetes/db" not in gate.substituted_trees(repo)
+
+
+def test_a_tenant_stage_naming_flux_system_in_its_own_namespace_is_not_this_repo(
+    repo: Path,
+) -> None:
+    """A sourceRef without a namespace resolves in the Kustomization's namespace."""
+    (repo / "kubernetes/db").mkdir(parents=True)
+    write(
+        repo,
+        f"{gate.CLUSTER_DIR}/tenants/tenant.yaml",
+        stage("tenant-db", "kubernetes/db").replace("namespace: flux-system", "namespace: demo"),
+    )
+    assert "kubernetes/db" not in gate.substituted_trees(repo)
+
+
+def test_a_stage_in_a_cluster_subdirectory_is_derived(repo: Path) -> None:
+    (repo / "kubernetes/infrastructure/configs").mkdir(parents=True)
+    write(
+        repo,
+        f"{gate.CLUSTER_DIR}/stages/configs.yaml",
+        stage("infrastructure-configs", "kubernetes/infrastructure/configs/"),
+    )
+    assert "kubernetes/infrastructure/configs" in gate.substituted_trees(repo)
+
+
+def test_a_dot_led_directory_name_survives_path_normalisation(repo: Path) -> None:
+    """`./.hidden` keeps its leading dot; only the `./` prefix is dropped."""
+    (repo / ".hidden/stage").mkdir(parents=True)
+    write(repo, f"{gate.CLUSTER_DIR}/hidden.yaml", stage("hidden", ".hidden/stage"))
+    assert ".hidden/stage" in gate.substituted_trees(repo)
+
+
+@pytest.mark.parametrize(
+    "substitute_from",
+    ["{kind: ConfigMap, name: cluster-config}", "[cluster-config]"],
+    ids=["mapping", "non-mapping-entry"],
+)
+def test_a_malformed_substitute_from_is_vacuous_not_a_smaller_scan(
+    repo: Path, substitute_from: str
+) -> None:
+    """Skipping the stage would drop its tree from the scan and still pass."""
+    (repo / "kubernetes/odd").mkdir(parents=True)
+    write(repo, f"{gate.CLUSTER_DIR}/odd.yaml", f"""\
+        apiVersion: kustomize.toolkit.fluxcd.io/v1
+        kind: Kustomization
+        metadata:
+          name: odd
+          namespace: flux-system
+        spec:
+          sourceRef: {{kind: GitRepository, name: flux-system}}
+          path: ./kubernetes/odd
+          postBuild:
+            substituteFrom: {substitute_from}
+        """)
+    with pytest.raises(gate.Vacuous, match="odd"):
+        gate.substituted_trees(repo)
+    assert gate.main(["--repo-root", str(repo)]) == 2
+
+
+def test_an_undecodable_generator_source_is_vacuous_not_a_traceback(repo: Path) -> None:
+    (repo / "kubernetes/apps/demo/dash.json").write_bytes(b"\xff\xfe\x00bad")
+    with pytest.raises(gate.Vacuous):
+        run(repo)
+    assert gate.main(["--repo-root", str(repo)]) == 2
+
+
 def test_a_per_node_address_is_not_reported(repo: Path) -> None:
     """Per-guest addresses are inventory data and stay literal."""
     write(repo, "kubernetes/apps/demo/endpointslice.yaml", """\
@@ -383,23 +462,6 @@ def test_a_new_vip_key_with_no_mirror_arm_is_reported(repo: Path) -> None:
         "cluster_extra_vip" in v and "mirrored by no arm" in v
         for v in gate.check_inventory(repo, gate.load_config(repo))
     )
-
-
-def test_a_substituted_tree_is_derived_not_hand_listed(repo: Path) -> None:
-    """A new stage brings its tree into the scan without editing the gate."""
-    write(
-        repo,
-        f"{gate.CLUSTER_DIR}/infrastructure-metrics-server.yaml",
-        stage("infrastructure-metrics-server", "kubernetes/infrastructure/metrics-server"),
-    )
-    write(repo, "kubernetes/infrastructure/metrics-server/release.yaml", """\
-        apiVersion: v1
-        kind: ConfigMap
-        data:
-          host: metrics.example.lan
-        """)
-    assert "kubernetes/infrastructure/metrics-server" in gate.substituted_trees(repo)
-    assert any("metrics-server/release.yaml" in v for v in run(repo))
 
 
 def test_a_nested_stage_path_does_not_double_the_scan(repo: Path) -> None:

@@ -20,7 +20,10 @@ import render_cluster
 GATE = render_cluster.REPO_ROOT / "template" / "scripts" / "check-kustomization-coverage.py"
 # Read off the gate itself, so the fixture cannot drift from the exemption list
 # whose staleness arm it has to satisfy.
-EXEMPT = tuple(load_script(GATE).EXEMPT)
+_GATE = load_script(GATE)
+EXEMPT = tuple(_GATE.EXEMPT)
+# Clear of the gate's floor, so a raised floor cannot fail every case below.
+TREE_SIZE = _GATE.MINIMUM_KUSTOMIZATIONS + 5
 
 _CONFIGMAP = {
     "apiVersion": "v1",
@@ -42,7 +45,7 @@ def _tree(tmp_path: Path) -> Path:
     One directory per kustomization, so each case below mutates app-00 alone.
     """
     root = tmp_path / "kubernetes"
-    for index in range(25):
+    for index in range(TREE_SIZE):
         directory = root / f"app-{index:02d}"
         directory.mkdir(parents=True)
         (directory / "configmap.yaml").write_text(yaml.safe_dump(_CONFIGMAP))
@@ -78,7 +81,7 @@ def test_a_manifest_no_kustomization_names_fails(tmp_path):
 
 
 def test_an_emptied_resource_list_fails(tmp_path):
-    """CRITICAL: the Flux Kustomizations prune, so an emptied list deletes every
+    """The Flux Kustomizations prune, so an emptied list deletes every
     object that file applied rather than shipping less."""
     root = _tree(tmp_path)
     (root / "app-00" / "configmap.yaml").unlink()
@@ -99,7 +102,7 @@ def test_a_kustomization_with_no_content_keys_fails(tmp_path):
 
 
 def test_a_transformer_only_kustomization_fails(tmp_path):
-    """CRITICAL: `kustomize build` emits nothing for a kustomization that only
+    """`kustomize build` emits nothing for a kustomization that only
     transforms, so Flux prunes every object it applied while the gate sees keys."""
     root = _tree(tmp_path)
     app = root / "app-00"

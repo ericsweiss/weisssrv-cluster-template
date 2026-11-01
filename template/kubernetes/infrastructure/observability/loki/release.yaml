@@ -79,6 +79,15 @@ spec:
         ingestion_burst_size_mb: 16
         per_stream_rate_limit: 4MB
         per_stream_rate_limit_burst: 8MB
+        # Stream ceiling, pinned so the cardinality budget sits next to the
+        # labels that spend it. Every stream holds an open chunk for up to
+        # max_chunk_age, so a relabel mistake here takes the log plane down.
+        max_global_streams_per_user: 2000
+      # Out-of-order accept window = max_chunk_age/2; anything older is rejected
+      # as `too_far_behind`. tests/test_loki_out_of_order_window.py holds
+      # alloy_host_journal_max_age inside it.
+      ingester:
+        max_chunk_age: 12h
       compactor:
         retention_enabled: true
         delete_request_store: filesystem

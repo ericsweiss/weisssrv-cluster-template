@@ -4,9 +4,10 @@ exports trust by node address, so tenant pods keep to the restricted volume set.
 
 from __future__ import annotations
 
+import re
+
 import pytest
-import yaml
-from conftest import REPO
+from conftest import REPO, assert_tenant_deny_binding, cel, policy_spec
 
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
 NAME = "tenant-pod-volumes"
@@ -46,29 +47,11 @@ MESSAGE = (
     " persistentVolumeClaim, projected and secret volumes; nfs and other node-level"
     " volume types are platform-owned"
 )
-TENANT_MATCH = {
-    "namespaceSelector": {
-        "matchExpressions": [{"key": "fluxcd.io/tenant", "operator": "Exists"}]
-    }
-}
 WRITES = ["CREATE", "UPDATE"]
 
 
-def _docs() -> list[dict]:
-    return [d for d in yaml.safe_load_all(POLICY.read_text()) if isinstance(d, dict)]
-
-
 def _policy() -> dict:
-    found = [
-        d for d in _docs()
-        if d.get("kind") == "ValidatingAdmissionPolicy" and d["metadata"]["name"] == NAME
-    ]
-    assert len(found) == 1
-    return found[0]["spec"]
-
-
-def _cel(text: str) -> str:
-    return " ".join(text.split())
+    return policy_spec(POLICY, "ValidatingAdmissionPolicy", NAME)
 
 
 def test_the_policy_is_the_shape_the_mirror_evaluates():
@@ -87,23 +70,16 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
              "resources": ["cronjobs"]},
         ]
     }
-    assert [(v["name"], _cel(v["expression"])) for v in spec["variables"]] == [
+    assert [(v["name"], cel(v["expression"])) for v in spec["variables"]] == [
         ("volumes", VARIABLE)
     ]
-    assert [(_cel(v["expression"]), v["message"]) for v in spec["validations"]] == [
+    assert [(cel(v["expression"]), v["message"]) for v in spec["validations"]] == [
         (VALIDATION, MESSAGE)
     ]
 
 
 def test_the_policy_is_deny_bound_on_every_tenant_namespace():
-    bindings = [
-        d["spec"] for d in _docs()
-        if d.get("kind") == "ValidatingAdmissionPolicyBinding"
-        and d["spec"]["policyName"] == NAME
-    ]
-    assert bindings == [
-        {"policyName": NAME, "validationActions": ["Deny"], "matchResources": TENANT_MATCH}
-    ]
+    assert_tenant_deny_binding(POLICY, NAME)
 
 
 def _at(obj: dict, *path: str) -> list[dict]:
@@ -215,8 +191,6 @@ def test_an_absent_step_on_the_path_reads_as_no_volumes(resource, obj):
 def test_every_path_the_variable_reads_is_guarded():
     """Every object.<path> the variable dereferences is has()-checked on each
     of its prefixes, so no branch can throw on any matched kind."""
-    import re
-
     paths = set(re.findall(r"object((?:\.[A-Za-z]+)+)", VARIABLE))
     guarded = set(re.findall(r"has\(object((?:\.[A-Za-z]+)+)\)", VARIABLE))
     for path in paths:

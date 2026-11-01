@@ -17,8 +17,6 @@ module "zone" {
     automatic_https_rewrites = "on"
     tls_1_3                  = "on"
 
-    # http2, polish, mirage and webp are read-only over the API; Auto Minify is not a
-    # settable zone setting.
     http3       = "on"
     zero_rtt    = "off"
     early_hints = "off"

@@ -84,6 +84,28 @@ def test_the_rollout_reader_catches_both_directions():
     assert rollout_problems(services[2:], {"helm_chart_versions_c"}) == []
 
 
+def pin_pattern(ref: str) -> re.Pattern[str]:
+    """A digest pin of `ref`: inline as `image: <ref>:<tag>@sha256:`, or as chart
+    values whose `repository: <ref>` has a digest within the next three lines."""
+    quoted = rf"['\"]?{re.escape(ref)}"
+    inline = rf"image:\s*{quoted}:[^\s@]+@sha256:"
+    chart = (
+        rf"repository:\s*{quoted}['\"]?[ \t]*\n(?:[^\n]*\n){{0,2}}?"
+        r"[ \t]*(?:digest:\s*['\"]?sha256:|tag:\s*['\"]?[^\s@]+@sha256:)"
+    )
+    return re.compile(f"{inline}|{chart}")
+
+
+def test_the_pin_reader_sees_both_spellings():
+    """Mutation case: a chart-values pin counts, an undigested one does not."""
+    pattern = pin_pattern("example.io/app")
+    assert pattern.search("  image: example.io/app:1.2@sha256:ab\n")
+    assert pattern.search('  repository: "example.io/app"\n  tag: "1.2"\n  digest: sha256:ab\n')
+    assert pattern.search("  repository: example.io/app\n  tag: 1.2@sha256:ab\n")
+    assert not pattern.search("  repository: example.io/app\n  tag: 1.2\nother: x\n")
+    assert not pattern.search("  image: example.io/app-extra:1.2@sha256:ab\n")
+
+
 def shared_pin_problems(services, root) -> list[str]:
     """Entries whose `version_file` list is not exactly the manifests pinning the ref."""
     problems: list[str] = []
@@ -94,7 +116,7 @@ def shared_pin_problems(services, root) -> list[str]:
         listed = {version_file} if isinstance(version_file, str) else set(version_file)
         if not all(path.startswith("kubernetes/") for path in listed):
             continue
-        pattern = re.compile(rf"image:\s*{re.escape(ref)}:[^\s@]+@sha256:")
+        pattern = pin_pattern(ref)
         carrying = {
             str(path.relative_to(root))
             for path in (root / "kubernetes").rglob("*.yaml")

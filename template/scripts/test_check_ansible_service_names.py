@@ -49,7 +49,8 @@ def test_a_role_fqcn_fails(tmp_path):
     )
     result = _run(tmp_path)
     assert result.returncode == 1
-    assert "weisssrv.infra.unbound" in result.stdout
+    assert "weisssrv.infra.unbound" in result.stderr
+    assert "weisssrv.infra.unbound" not in result.stdout
 
 
 def test_a_templated_name_is_skipped(tmp_path):
@@ -68,4 +69,49 @@ def test_an_unparseable_file_is_an_error(tmp_path):
     _playbook(tmp_path, "- hosts: all\n  tasks:\n   - bad: [\n")
     result = _run(tmp_path)
     assert result.returncode == 2
-    assert "could not parse" in result.stdout
+    assert "could not parse" in result.stderr
+
+
+def test_a_task_inside_a_block_is_inspected(tmp_path):
+    _playbook(
+        tmp_path,
+        "- hosts: all\n  tasks:\n    - block:\n        - service:\n"
+        "            name: weisssrv.infra.k3s\n",
+    )
+    assert _run(tmp_path).returncode == 1
+
+
+def test_a_list_of_units_is_inspected(tmp_path):
+    _playbook(
+        tmp_path,
+        "- hosts: all\n  tasks:\n    - systemd:\n        name:\n"
+        "          - unbound.service\n          - weisssrv.infra.adguard\n",
+    )
+    assert _run(tmp_path).returncode == 1
+
+
+def test_free_form_args_are_inspected(tmp_path):
+    _playbook(tmp_path, "- hosts: all\n  tasks:\n    - systemd: name=weisssrv.infra.k3s\n")
+    assert _run(tmp_path).returncode == 1
+
+
+def test_inventory_data_named_like_the_module_is_not_a_task(tmp_path):
+    """A `service:` mapping in vars is data, not a module call."""
+    _playbook(
+        tmp_path,
+        "exporter:\n  service:\n    name: weisssrv.infra.node_exporter\n"
+        "  systemd:\n    name: some.dotted.value\n",
+    )
+    result = _run(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_vault_tag_does_not_stop_the_scan(tmp_path):
+    _playbook(tmp_path, "secret: !vault |\n  $ANSIBLE_VAULT;1.1;AES256\n  6162\n")
+    result = _run(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_real_tree_is_clean():
+    result = _run(GATE.parent.parent / "ansible")
+    assert result.returncode == 0, result.stdout + result.stderr

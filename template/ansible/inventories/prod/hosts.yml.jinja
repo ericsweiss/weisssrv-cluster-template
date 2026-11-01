@@ -30,7 +30,7 @@ all:
       children:
         nas:
         compute:
-        # Hardware-trait groups (an e1000e_hosts, a small_ram_hosts) belong here
+        # Hardware-trait groups, one per NIC model or memory class, belong here
         # too, carrying per-trait tuning once. As children their group_vars
         # outrank group_vars/proxmox.yml; siblings only resolve alphabetically.
 
@@ -70,8 +70,8 @@ all:
             - nfs_clients
 {%- endfor %}
 
-    # Recursive resolvers (unbound behind AdGuard Home), one per host so a host
-    # loss never takes them all; dns-01 is the config primary. These addresses ARE
+    # Recursive resolvers (unbound behind AdGuard Home), spread round-robin over
+    # the hosts; dns-01 is the config primary. These addresses ARE
     # the upstream_dns_servers answer - edit the answer, never this list.
     dns:
       hosts:
@@ -207,8 +207,8 @@ all:
               fstype: ext4
               scsi_slot: 1
               sparse: true
-              # Already captured by ZFS replication of ssd/appdata; without this
-              # the nightly vzdump would store 150G of TSDB in the VM image too.
+              # The ssd/appdata snapshots cover it; without this the nightly
+              # vzdump would store 150G of TSDB in the VM image too.
               vzdump_backup: false
             - name: loki-data
               size: 75G
@@ -230,7 +230,7 @@ all:
               vzdump_backup: false
 {%- if tenant_storage %}
             # Root of StorageClass tenant-local: one directory per tenant claim,
-            # replicated with ssd/appdata like the zvols above.
+            # covered by the ssd/appdata snapshots like the zvols above.
             - name: tenant-volumes
               size: 100G
               zvol: {{ tenant_volumes_zvol }}
@@ -314,7 +314,8 @@ all:
         dns:
         mail:
 
-    # Application VMs/LXCs you add later, enrolled in rolling OS patching. Add
-    # each app's own group as a child here.
+    # Application guests Ansible logs into, enrolled in the host roles and rolling
+    # OS patching. Add each app's group as a child; an LXC's group also goes under
+    # lxc_containers. Appliances Ansible cannot log into belong in services.
     app_servers:
       hosts: {}

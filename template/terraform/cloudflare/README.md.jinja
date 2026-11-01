@@ -49,18 +49,15 @@ helper, a `~/.netrc` entry, or an SSH module source).
 Adding a service record by hand here is how the two controllers start fighting:
 external-dns owns a name for as long as its IngressRoute exists.
 
-## Record map keys
+## Record map keys and destroy protection
 
 Each key in the `dns_records` map in `dns.tf` is the record's Terraform state
 address, and the per-record flags decide which resource it becomes.
-`protected = true` routes it to a resource carrying `lifecycle.prevent_destroy`.
 `content_managed_externally = true` stops Terraform diffing `content`, for a
 record whose value another controller owns. Renaming a key or flipping a flag
-plans a destroy-create, so read the next section first.
+plans a destroy-create.
 
-## Destroy protection
-
-`protected = true` on a record means the module routes it to a resource carrying
+`protected = true` routes a record to a resource carrying
 `lifecycle.prevent_destroy`: removing the map entry then fails the plan instead
 of silently deleting the record. Use it for anything whose deletion is an outage
 or a security regression — the apex, any name carrying SSH or a VPN endpoint,
@@ -87,8 +84,12 @@ flag on its own is the blocked step, so there are two paths.
 plan that deletes a resource. When the deletion is the reviewed intent, re-run
 the manual `deploy-terraform` job with the job variable `ALLOW_DNS_DELETE=1`.
 
-Pointing a real sender at this zone is the same kind of two-step: relax `spf`
-and `dmarc` and add DKIM first, then tighten both back once alignment is clean.
+## Mail policy
+
+The zone ships a hard-fail SPF and a `p=reject` DMARC, both protected, for a
+domain that sends no mail. Pointing a real sender at this zone is a two-step:
+relax `spf` and `dmarc` and add DKIM first, then tighten both back once
+alignment is clean.
 An `rua` address outside this zone also needs
 `{{ external_domain }}._report._dmarc` TXT `"v=DMARC1"` published in the RUA
 domain (RFC 7489) before reporters will send; drop `rua` if you do not control
@@ -121,5 +122,5 @@ strict TLS for the whole domain; strict TLS and HSTS are asserted in `main.tf`.
 is in this directory plus two consumers: the cert-manager `ClusterIssuer`'s
 DNS-01 solver and the external-dns HelmRelease. A new backend needs a module
 with the same three inputs (`zone_name`, credentials, a `records` map), an
-issuer solver block, and an external-dns provider block —
-The cluster template's `docs/ARCHITECTURE.md` records the seam.
+issuer solver block, and an external-dns provider block. weisssrv-lib's
+`docs/EXTENSIBILITY.md` records the seam.

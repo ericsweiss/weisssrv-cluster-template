@@ -16,6 +16,9 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parent / "flux-rotate-db-password.sh"
 VALUE_RE = re.compile(r"^[A-Za-z0-9]{40}$")
+# Not the reference cluster's vault, and with a space: the script must take the
+# vault from OP_VAULT and keep it one argument.
+VAULT = "Cluster Ops"
 
 # Every fake appends its basename to `order` and its arguments to `<name>.argv`;
 # the two that are fed on stdin keep it in `<name>.stdin`.
@@ -23,6 +26,7 @@ FAKES = {
     "op": """#!/usr/bin/env bash
 echo op >> "$FAKE_LOG/order"
 printf '%s\\n' "$*" >> "$FAKE_LOG/op.argv"
+printf '%s\\n' "$#" >> "$FAKE_LOG/op.argc"
 case "$1 $2" in
     "item get") printf '%s' "$FAKE_ITEM" ;;
     "item edit") cat > "$FAKE_LOG/op-edit.stdin" ;;
@@ -60,7 +64,13 @@ def _item(title: str, fields: list[str]) -> str:
     return json.dumps({"id": "item-id", "title": title, "category": "PASSWORD", "fields": built})
 
 
-def _run(tmp_path: Path, *args: str, kubectl_rc: int = 0, case: dict | None = None) -> tuple[subprocess.CompletedProcess, Path]:
+def _run(
+    tmp_path: Path,
+    *args: str,
+    kubectl_rc: int = 0,
+    case: dict | None = None,
+    vault: str | None = VAULT,
+) -> tuple[subprocess.CompletedProcess, Path]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir(exist_ok=True)
     for name, body in FAKES.items():
@@ -74,6 +84,9 @@ def _run(tmp_path: Path, *args: str, kubectl_rc: int = 0, case: dict | None = No
     env["FAKE_LOG"] = str(log)
     env["FAKE_KUBECTL_RC"] = str(kubectl_rc)
     env["FAKE_ITEM"] = _item(case["item"], case["fields"]) if case else "{}"
+    env.pop("OP_VAULT", None)
+    if vault is not None:
+        env["OP_VAULT"] = vault
     res = subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True, env=env)
     return res, log
 
@@ -98,9 +111,11 @@ def test_the_item_edit_rides_the_template_and_mirrors_the_primary(tmp_path, app)
     _, log = _run(tmp_path, app, case=case)
     # Both op calls sit in one pipeline, so their start order is not fixed.
     assert set((log / "op.argv").read_text().splitlines()) == {
-        f'item get {case["item"]} --vault Homelab --format json',
-        f'item edit {case["item"]} --vault Homelab',
+        f'item get {case["item"]} --vault {VAULT} --format json',
+        f'item edit {case["item"]} --vault {VAULT}',
     }
+    # item, get|edit, the title, --vault and the vault are one word each.
+    assert sorted((log / "op.argc").read_text().split()) == ["5", "7"]
     values = _edited_values(log)
     for field in case["roles"].values():
         assert VALUE_RE.match(values[field]), field
@@ -126,6 +141,16 @@ def test_the_sql_carries_a_verifier_for_every_role_on_stdin(tmp_path, app):
         assert _scram_matches(values[field], verifier), role
         assert values[field] not in sql
         assert values[field] not in argv
+
+
+@pytest.mark.parametrize("app", sorted(CASES))
+def test_a_missing_vault_stops_before_any_write(tmp_path, app):
+    """Without OP_VAULT the script must fail before it touches 1Password or the
+    database, rather than guess a vault."""
+    res, log = _run(tmp_path, app, case=CASES[app], vault=None)
+    assert res.returncode == 2
+    assert "OP_VAULT" in res.stderr
+    assert not (log / "order").exists()
 
 
 def _scram_matches(password: str, verifier: str) -> bool:

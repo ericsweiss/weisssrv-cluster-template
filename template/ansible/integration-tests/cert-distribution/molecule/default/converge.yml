@@ -9,7 +9,6 @@
   vars_files:
     - ../../../../inventories/prod/group_vars/all.yml
 
-
   pre_tasks:
     # molecule.yml platforms[].groups drive every `group_names` guard below and
     # the later cert_servers / cert_clients plays; an empty group would skip them
@@ -20,7 +19,7 @@
           - groups['cert_servers'] | default([]) | length == 1
           - groups['cert_clients'] | default([]) | length == 2
         fail_msg: >-
-          molecule.yml no longer produces cert_servers and cert_clients, so the
+          molecule.yml does not produce cert_servers and cert_clients, so the
           guarded tasks and the per-group plays in this scenario skip.
       run_once: true
 
@@ -210,10 +209,6 @@
   vars_files:
     - ../../../../inventories/prod/group_vars/all.yml
 
-  vars:
-    # Override defaults for container testing
-    acme_certs_local_cert_dir: /opt/AdGuardHome/certs
-
   tasks:
     - name: Create acme.sh directory
       ansible.builtin.file:
@@ -365,7 +360,6 @@
         acme_certs_enabled: true
         acme_certs_domain: "{{ internal_domain }}"
         acme_certs_ssh_user: "{{ admin_user }}"
-        acme_certs_local_cert_dir: /opt/AdGuardHome/certs
         # The container is not the production cert source address, so the key
         # carries no from="..." restriction: it would reject this SSH push.
         acme_certs_key_from: ""
@@ -373,7 +367,6 @@
         # trusts the CA on the clients, so the chain check would abort converge.
         # Distribution is exercised explicitly further down.
         acme_certs_skip_distribution: true
-
 
 # MUST precede distribution: the receiver's `openssl verify` runs on each
 # client, so the leaf must chain to a CA the client already trusts.
@@ -399,9 +392,6 @@
   vars_files:
     - ../../../../inventories/prod/group_vars/all.yml
 
-  vars:
-    acme_certs_local_cert_dir: /opt/AdGuardHome/certs
-
   tasks:
     # The library role owns the reload script's filename, so it is discovered
     # here rather than spelled out.
@@ -419,11 +409,12 @@
         fail_msg: "acme_certs installed no single /usr/local/sbin/*cert-reload.sh"
         success_msg: "reload script installed"
 
+    # verify.yml asserts the delivered certificate, so a failed push reds there.
     - name: Run certificate distribution script
       ansible.builtin.command: "{{ (reload_script_found.files | first).path }}"
       register: distribution_result
       changed_when: distribution_result.rc == 0
-      failed_when: false  # Don't fail if distribution has issues (we'll check in verify)
+      failed_when: false
 
     - name: Log distribution result
       ansible.builtin.debug:

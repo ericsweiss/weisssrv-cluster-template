@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
-from conftest import REPO, SCRIPTS, _lib_root
+import pytest
+from conftest import REPO, SCRIPTS, _lib_root, load_script, pinned_lib_ref, require_ref
 
 GATE = SCRIPTS / "check-ci-include-job-names.py"
 
@@ -29,16 +31,61 @@ def _run(*extra: str, repo_root: str | None = None) -> subprocess.CompletedProce
     return subprocess.run(argv, capture_output=True, text=True, check=False)
 
 
-def test_every_optional_need_resolves_to_a_job() -> None:
-    """A library rename or a non-default `job_name` input turns an optional need
-    off with no error, so the gate the pipeline waits for stops blocking it."""
-    extra = ["--lib-path", str(_lib_root()), "--require-optional-needs"]
+def _allowances() -> list[str]:
+    extra = []
     for job, reason in EXTRA_JOBS.items():
         extra += ["--extra-job", f"{job}={reason}"]
     for pattern, reason in UNREADABLE_INCLUDES.items():
         extra += ["--allow-unreadable-include", f"{pattern}={reason}"]
-    result = _run(*extra)
+    return extra
+
+
+@pytest.fixture(scope="module")
+def lib_tree(tmp_path_factory) -> Path:
+    """The library's `ci/` tree at the pinned ref, not whatever branch the
+    checkout is on, so a job the pin lacks cannot resolve."""
+    lib = _lib_root()
+    ref = require_ref(lib, pinned_lib_ref())
+    out = tmp_path_factory.mktemp("lib-ci-at-pin")
+    archive = subprocess.run(["git", "-C", str(lib), "archive", ref, "ci"], capture_output=True)
+    assert archive.returncode == 0, f"could not archive ci/ at {ref}: {archive.stderr.decode()}"
+    extract = subprocess.run(
+        ["tar", "-x", "-C", str(out)], input=archive.stdout, capture_output=True
+    )
+    assert extract.returncode == 0, f"could not extract ci/ at {ref}: {extract.stderr.decode()}"
+    return out
+
+
+def test_every_optional_need_resolves_to_a_job(lib_tree) -> None:
+    """A library rename or a non-default `job_name` input turns an optional need
+    off with no error, so the gate the pipeline waits for stops blocking it."""
+    result = _run("--lib-path", str(lib_tree), "--require-optional-needs", *_allowances())
     assert result.returncode == 0, f"{result.stdout}{result.stderr}"
+    assert "optional need(s) resolve" in result.stdout, (
+        f"the gate resolved no optional need at all:\n{result.stdout}{result.stderr}"
+    )
+
+
+def test_an_undeclared_unreadable_include_stops_the_gate(lib_tree) -> None:
+    """Without the allowance the gate stops: a need hidden inside an unreadable
+    include would otherwise pass as resolved."""
+    result = _run("--lib-path", str(lib_tree))
+    assert result.returncode == 2, f"{result.stdout}{result.stderr}"
+    assert "Secret-Detection" in result.stdout + result.stderr
+
+
+def test_the_lint_task_passes_the_same_allowances() -> None:
+    """`task lint` and this suite run the gate with one set of allowances."""
+    tree = load_script("taskfile_tree.py")
+    task = tree.load_tasks(REPO)["lint:ci-policy"]
+    text = " ".join(
+        " ".join(str(step if isinstance(step, str) else step.get("cmd", "")).split())
+        for step in task.get("cmds") or []
+    )
+    for job, reason in EXTRA_JOBS.items():
+        assert f'--extra-job "{job}={reason}"' in text, job
+    for pattern, reason in UNREADABLE_INCLUDES.items():
+        assert f'--allow-unreadable-include "{pattern}={reason}"' in text, pattern
 
 
 def test_a_dangling_optional_need_is_reported(tmp_path) -> None:

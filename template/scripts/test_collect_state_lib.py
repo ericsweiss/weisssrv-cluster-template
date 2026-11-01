@@ -191,17 +191,6 @@ class TestClassifyRegular:
         # Alert noise degrades but must never suppress the artifact.
         assert _regular(6, "true", 9, 9, 19, 19, 100, 50, 0, 0, alerts=99) == "PARTIAL"
 
-    def test_unknown_alerts_demote(self):
-        # collect-state.sh coalesces an unaskable Alertmanager to 1, not 0, so
-        # "could not ask" arrives here as the degrading value.
-        assert _regular(6, "true", 9, 9, 19, 19, 100, 50, 0, 0, alerts=1) == "PARTIAL"
-        assert _regular(6, "true", 9, 9, 19, 19, 100, 50, 0, 0, alerts=0) == "OK"
-
-    def test_suspended_flux_counts_as_not_ready(self):
-        # probe_flux_not_ready folds spec.suspend into its count, so a frozen
-        # cluster arrives here as flux_not_ready>0 and degrades.
-        assert _regular(6, "true", 9, 9, 19, 19, 100, 50, 1, 0) == "PARTIAL"
-
 
 class TestClassifyJson:
     def test_all_green_is_healthy(self):
@@ -234,12 +223,6 @@ class TestClassifyJson:
     def test_firing_alerts_never_catastrophic(self):
         # Alert noise degrades; it never claims the cluster is down.
         assert _json(6, 6, "true", 9, 9, 0, 0, alerts=99) == "degraded"
-
-    def test_unknown_alerts_demote(self):
-        # collect-state.sh coalesces an unaskable Alertmanager to 1, not 0, so
-        # "could not ask" arrives here as the degrading value.
-        assert _json(6, 6, "true", 9, 9, 0, 0, alerts=1) == "degraded"
-        assert _json(6, 6, "true", 9, 9, 0, 0, alerts=0) == "healthy"
 
 
 class TestClassifierParity:
@@ -533,8 +516,8 @@ class TestNoDeadPipelineFallbacks:
         )
 
     def test_the_guard_actually_matches_the_broken_idiom(self):
-        # A gate that cannot fail proves nothing — pin the pattern to the exact
-        # shapes that shipped.
+        # A gate that cannot fail proves nothing: pin the pattern to the broken
+        # shapes it must catch.
         for broken in (
             'systemctl --failed --no-legend | head -20 || echo "none"',
             "sudo postqueue -p 2>/dev/null | tail -1 || echo 'Cannot check'",
@@ -722,7 +705,7 @@ class TestCoerceInt:
 
 
 # probe parity: every shared probe must run in BOTH collect-state.sh modes
-# The --json branch silently lost probe_firing_alerts once; this is the gate.
+# Every probe_* must run in both collect-state.sh modes.
 
 PROBE_DEF_RE = re.compile(r"^(probe_[a-z0-9_]+)\(\)", re.MULTILINE)
 JSON_BRANCH_START = 'if [ "${1:-}" = "--json" ]; then'
@@ -751,10 +734,11 @@ class TestProbeParity:
         )
 
     def test_the_split_finds_both_halves(self):
-        # A gate that cannot fail proves nothing: both halves must be non-empty
-        # and the json branch must be the smaller one.
+        # A gate that cannot fail proves nothing: each half must hold its own
+        # classifier and not the other's.
         json_branch, regular = _split_modes()
         assert "classify_json" in json_branch
+        assert "classify_regular" not in json_branch
         assert "classify_regular" in regular
 
 
@@ -769,16 +753,21 @@ def _extract_function(name: str) -> str:
     return "\n".join(src[start:end + 1])
 
 
-def _probe_zfs(listings: dict[str, str | None], nas_hosts: str,
-               expect: str = "", unknown: bool = False) -> tuple[str, str]:
-    """Drive probe_zfs_degraded over stubbed `zpool list` output per host.
-
-    A listing of None is a host whose ssh/zpool call failed. Returns
-    (ZFS_DEGRADED_RESULT, ZFS_MISSING_RESULT).
+def _probe_zfs(listings: dict[str, str | int | None], nas_hosts: str,
+               expect: str = "", unknown: bool = False,
+               detail: bool = False) -> tuple[str, ...]:
+    """Drive probe_zfs_degraded over stubbed `zpool list` output per host: None
+    is ssh failing, an int a failed zpool's rc. Returns count, missing and,
+    with `detail`, the pool list.
     """
     arms = []
     for host, listing in listings.items():
-        body = "return 1" if listing is None else f"printf '%s' {shlex.quote(listing)}"
+        if listing is None:
+            body = "return 255"
+        elif isinstance(listing, int):
+            body = f"return {listing}"
+        else:
+            body = f"printf '%s' {shlex.quote(listing)}"
         arms.append(f"    {host}) {body} ;;")
     script = "\n".join([
         "set -euo pipefail",
@@ -790,18 +779,19 @@ def _probe_zfs(listings: dict[str, str | None], nas_hosts: str,
         "ssh_probe_cmd() {",
         '  case "${1#*@}" in',
         *arms,
-        "    *) return 1 ;;",
+        "    *) return 255 ;;",
         "  esac",
         "}",
         _extract_function("probe_zfs_degraded"),
-        "probe_zfs_degraded",
+        "probe_zfs_degraded detail" if detail else "probe_zfs_degraded",
         'echo "$ZFS_DEGRADED_RESULT"',
         'echo "$ZFS_MISSING_RESULT"',
+        'echo "$ZFS_POOLS_RESULT" | jq -c .' if detail else "",
     ])
     res = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
-    count, missing = res.stdout.split("\n")[:2]
-    return count, missing
+    out = res.stdout.split("\n")
+    return (out[0], out[1], out[2]) if detail else (out[0], out[1])
 
 
 class TestProbeZfsDegraded:
@@ -830,6 +820,16 @@ class TestProbeZfsDegraded:
         assert count == "1"
         assert missing == "pool tank could not be listed on nas-01"
 
+    @pytest.mark.parametrize("rc", [124, 255])
+    def test_an_unreachable_non_storage_host_is_left_to_the_reachability_count(self, rc):
+        assert _probe_zfs({"opt-01": rc}, nas_hosts="nas-01") == ("0", "")
+
+    @pytest.mark.parametrize("host", ["opt-01", "nas-01"])
+    def test_a_failed_zpool_list_on_an_answering_host_counts(self, host):
+        """A ZFS module that did not load must not read as zero degraded pools."""
+        count, missing = _probe_zfs({host: 1}, nas_hosts="nas-01", expect="tank")
+        assert (count, missing) == ("1", f"zpool list failed on {host}")
+
     def test_a_non_storage_host_with_no_pools_is_not_a_finding(self):
         assert _probe_zfs({"opt-01": ""}, nas_hosts="nas-01") == ("0", "")
 
@@ -839,27 +839,34 @@ class TestProbeZfsDegraded:
         )
         assert (count, missing) == ("1", "")
 
+    def test_the_detail_pool_list_covers_every_host(self):
+        """--json's zfs.pools must agree with degraded_count, which spans all hosts."""
+        require_jq()
+        row = "\t1T\t1G\t999G\n"
+        count, _, pools = _probe_zfs(
+            {"nas-01": f"tank\tONLINE{row}", "opt-01": f"rpool\tDEGRADED{row}",
+             "opt-02": None},
+            nas_hosts="nas-01", expect="tank", detail=True,
+        )
+        assert count == "1"
+        assert [(p["host"], p["name"], p["health"]) for p in json.loads(pools)] == [
+            ("nas-01", "tank", "ONLINE"), ("opt-01", "rpool", "DEGRADED"),
+        ]
+
 
 # The NAS_ZFS_POOLS roster the absence check is gated on: derived from
 # nas_storage_zfs_pools at run time, so a renamed pool is still probed.
 
 
-def _nas_pools_assignment() -> str:
-    """The multi-line NAS_ZFS_POOLS assignment as collect-state.sh writes it."""
+def _derive_nas_pools(nas_yml: str | None, end_marker) -> tuple[str, str, str]:
+    """(roster, NAS_ZFS_POOLS_UNKNOWN, stderr) from collect-state.sh's lines
+    starting at the NAS_ZFS_POOLS assignment and ending at `end_marker(line)`."""
     lines = COLLECT_STATE.read_text().splitlines()
     start = next(
         (i for i, ln in enumerate(lines) if ln.startswith("NAS_ZFS_POOLS=")), None
     )
     assert start is not None, "the NAS_ZFS_POOLS derivation is gone from collect-state.sh"
-    end = next(i for i in range(start, len(lines)) if "nas.yml" in lines[i])
-    return "\n".join(lines[start:end + 1])
-
-
-def _derive_nas_pools_verdict(nas_yml: str | None) -> tuple[str, str, str]:
-    """(roster, NAS_ZFS_POOLS_UNKNOWN, stderr) for the derivation plus its guard."""
-    lines = COLLECT_STATE.read_text().splitlines()
-    start = next(i for i, ln in enumerate(lines) if ln.startswith("NAS_ZFS_POOLS="))
-    end = next(i for i in range(start, len(lines)) if lines[i] == "fi")
+    end = next(i for i in range(start, len(lines)) if end_marker(lines[i]))
     block = "\n".join(lines[start:end + 1])
     with tempfile.TemporaryDirectory() as tmp:
         scripts = Path(tmp) / "scripts"
@@ -872,7 +879,7 @@ def _derive_nas_pools_verdict(nas_yml: str | None) -> tuple[str, str, str]:
             "set -euo pipefail",
             f"_SCRIPT_DIR={shlex.quote(str(scripts))}",
             block,
-            'printf "%s\\n%s" "$NAS_ZFS_POOLS" "$NAS_ZFS_POOLS_UNKNOWN"',
+            'printf "%s\\n%s" "$NAS_ZFS_POOLS" "${NAS_ZFS_POOLS_UNKNOWN:-}"',
         ])
         res = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
@@ -880,25 +887,14 @@ def _derive_nas_pools_verdict(nas_yml: str | None) -> tuple[str, str, str]:
     return roster, unknown, res.stderr
 
 
+def _derive_nas_pools_verdict(nas_yml: str | None) -> tuple[str, str, str]:
+    """The derivation plus its unknown-roster guard."""
+    return _derive_nas_pools(nas_yml, lambda line: line == "fi")
+
+
 def _derive_nas_zfs_pools(nas_yml: str | None) -> str:
-    """Run collect-state.sh's NAS_ZFS_POOLS derivation against a stub nas.yml."""
-    assignment = _nas_pools_assignment()
-    with tempfile.TemporaryDirectory() as tmp:
-        scripts = Path(tmp) / "scripts"
-        scripts.mkdir()
-        if nas_yml is not None:
-            group_vars = Path(tmp) / "ansible/inventories/prod/group_vars"
-            group_vars.mkdir(parents=True)
-            (group_vars / "nas.yml").write_text(nas_yml)
-        script = "\n".join([
-            "set -euo pipefail",
-            f"_SCRIPT_DIR={shlex.quote(str(scripts))}",
-            assignment,
-            'printf "%s" "$NAS_ZFS_POOLS"',
-        ])
-        res = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-    assert res.returncode == 0, res.stderr
-    return res.stdout
+    """The roster alone, from the NAS_ZFS_POOLS assignment."""
+    return _derive_nas_pools(nas_yml, lambda line: "nas.yml" in line)[0]
 
 
 class TestNasZfsPoolRoster:

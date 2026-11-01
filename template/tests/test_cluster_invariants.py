@@ -13,14 +13,16 @@ from conftest import REPO as REPO_ROOT
 from conftest import (
     CONFIGMAP_INVENTORY_MIRROR,
     assert_all_parsed,
+    copier_answers,
+    helm_release,
     k8s_documents,
     load_script,
+    release_values,
 )
 
 K8S_ROOT = REPO_ROOT / "kubernetes"
 SOURCES_DIR = K8S_ROOT / "infrastructure" / "sources"
 CLUSTERS_DIR = K8S_ROOT / "clusters"
-ANSWERS_FILE = REPO_ROOT / ".copier-answers.yml"
 INVENTORY_HOSTS = REPO_ROOT / "ansible" / "inventories" / "prod" / "hosts.yml"
 TASKFILE = REPO_ROOT / "Taskfile.yml"
 TASKFILES_DIR = REPO_ROOT / "taskfiles"
@@ -291,6 +293,55 @@ def test_substitute_gate_skips_the_exempt_stage(tmp_path):
     assert _substitute_problems(tmp_path, tmp_path) == ([], 0)
 
 
+# (inner, outer) Flux Kustomizations whose paths nest by design. The outer
+# stage's kustomization.yaml leaves the inner directory out of its resources,
+# so exactly one Kustomization owns each object.
+NESTED_ALLOWED = {("infrastructure-metrics-server", "infrastructure-controllers")}
+
+
+def _stage_paths(clusters_dir: Path) -> dict[str, str]:
+    """{spec.path without ./ : Kustomization name} under the cluster tree."""
+    paths: dict[str, str] = {}
+    for path, doc in _docs(clusters_dir):
+        if doc.get("kind") != "Kustomization":
+            continue
+        spec_path = (doc.get("spec") or {}).get("path")
+        if spec_path:
+            name = (doc.get("metadata") or {}).get("name", path.name)
+            paths[str(spec_path).rstrip("/").removeprefix("./")] = name
+    return paths
+
+
+def _nested_stages(paths: dict[str, str]) -> set[tuple[str, str, str, str]]:
+    """(inner name, outer name, inner path, outer path) for every nesting pair."""
+    return {
+        (paths[inner], paths[outer], inner, outer)
+        for inner in paths
+        for outer in paths
+        if inner != outer and inner.startswith(outer + "/")
+    }
+
+
+def _unlisted_nesting_problems(paths: dict[str, str], root: Path) -> list[str]:
+    """Nesting pairs that are not allowed, or whose outer stage lists the inner
+    directory and so shares its objects."""
+    problems = []
+    for inner_name, outer_name, inner, outer in sorted(_nested_stages(paths)):
+        if (inner_name, outer_name) not in NESTED_ALLOWED:
+            problems.append(f"{inner_name} ({inner}) nests inside {outer_name} ({outer})")
+            continue
+        kustomization = root / outer / "kustomization.yaml"
+        doc = yaml.safe_load(kustomization.read_text()) if kustomization.is_file() else {}
+        listed = {str(entry).rstrip("/") for entry in (doc or {}).get("resources") or []}
+        child = inner.removeprefix(outer + "/").split("/", 1)[0]
+        if child in listed:
+            problems.append(
+                f"{outer}/kustomization.yaml lists {child}, which {inner_name} "
+                "already reconciles: each stage's prune then targets the other's objects"
+            )
+    return problems
+
+
 @needs_k8s
 def test_no_flux_kustomization_path_nests_inside_another():
     """Two Kustomizations whose spec.path nest each own the inner objects, so
@@ -298,22 +349,33 @@ def test_no_flux_kustomization_path_nests_inside_another():
     as intermittent drift."""
     if not CLUSTERS_DIR.is_dir():
         pytest.skip("no kubernetes/clusters/ tree")
-    paths: dict[str, str] = {}
-    for path, doc in _docs(CLUSTERS_DIR):
-        if doc.get("kind") != "Kustomization":
-            continue
-        spec_path = (doc.get("spec") or {}).get("path")
-        if spec_path:
-            name = (doc.get("metadata") or {}).get("name", path.name)
-            paths[str(spec_path).rstrip("/").removeprefix("./")] = name
+    paths = _stage_paths(CLUSTERS_DIR)
     assert paths, "no Flux Kustomization paths found — this gate is examining nothing"
-    nested = [
-        f"{paths[inner]} ({inner}) nests inside {paths[outer]} ({outer})"
-        for inner in paths
-        for outer in paths
-        if inner != outer and inner.startswith(outer + "/")
-    ]
-    assert not nested, "nested Flux Kustomization paths:\n  " + "\n  ".join(nested)
+    problems = _unlisted_nesting_problems(paths, REPO_ROOT)
+    assert not problems, "nested Flux Kustomization paths:\n  " + "\n  ".join(problems)
+    # An allowance outliving its stage would excuse the next accidental nest.
+    live = {(inner, outer) for inner, outer, _, _ in _nested_stages(paths)}
+    assert NESTED_ALLOWED <= live, f"stale allowances: {sorted(NESTED_ALLOWED - live)}"
+
+
+def test_a_nested_stage_the_outer_also_lists_is_reported(tmp_path):
+    """Mutation case: the allowed pair, with the outer stage listing the inner
+    directory again, and an unallowed nest beside it."""
+    outer = tmp_path / "kubernetes" / "infrastructure" / "controllers"
+    outer.mkdir(parents=True)
+    (outer / "kustomization.yaml").write_text("resources:\n  - metrics-server\n")
+    paths = {
+        "kubernetes/infrastructure/controllers": "infrastructure-controllers",
+        "kubernetes/infrastructure/controllers/metrics-server": "infrastructure-metrics-server",
+        "kubernetes/apps": "apps",
+        "kubernetes/apps/demo": "demo",
+    }
+    problems = _unlisted_nesting_problems(paths, tmp_path)
+    assert any("lists metrics-server" in p for p in problems)
+    assert any(p.startswith("demo (kubernetes/apps/demo)") for p in problems)
+    (outer / "kustomization.yaml").write_text("resources:\n  - vpa\n")
+    del paths["kubernetes/apps/demo"]
+    assert _unlisted_nesting_problems(paths, tmp_path) == []
 
 
 FLUX_KUSTOMIZE_API = "kustomize.toolkit.fluxcd.io/"
@@ -407,10 +469,8 @@ def test_no_site_addresses_are_hard_coded_in_manifests():
     in the ConfigMap may still be spelled out in a NetworkPolicy."""
     if "cluster-config" not in CONFIGMAPS:
         pytest.skip("no cluster-config ConfigMap")
-    if not ANSWERS_FILE.is_file():
-        pytest.skip("no .copier-answers.yml to source the site values from")
     config_file, data = CONFIGMAPS["cluster-config"]
-    answers = yaml.safe_load(ANSWERS_FILE.read_text()) or {}
+    answers = copier_answers()
     site_values = {
         str(value)
         for key, value in answers.items()
@@ -616,7 +676,18 @@ def _store_backends(root: Path) -> set[tuple[str, str, int]]:
     return targets
 
 
-def _egress_reaches(policy: dict, namespace: str, port: int) -> bool:
+def _selects_service(peer: dict, service: str | None) -> bool:
+    """A same-namespace podSelector peer can select `service`'s pods: an empty
+    selector, a matchExpressions one (not comparable here), or a matchLabels
+    value naming the service. The chart's Service is not in the tree to read."""
+    selector = peer.get("podSelector") or {}
+    labels = selector.get("matchLabels") or {}
+    if service is None or not labels or selector.get("matchExpressions"):
+        return True
+    return service in {str(value) for value in labels.values()}
+
+
+def _egress_reaches(policy: dict, namespace: str, port: int, service: str | None = None) -> bool:
     """One egress rule that names `port` AND selects the backend, rather than
     any rule at all: a DNS-only allow must not satisfy this."""
     own = (policy.get("metadata") or {}).get("namespace")
@@ -637,7 +708,7 @@ def _egress_reaches(policy: dict, namespace: str, port: int) -> bool:
                 if named is not None and named != namespace:
                     continue
                 return True
-            if "podSelector" in peer or selector is not None:
+            if selector is not None or ("podSelector" in peer and _selects_service(peer, service)):
                 return True
     return False
 
@@ -652,7 +723,7 @@ def _unreachable_backends(root: Path, controller_ns: str, backends) -> list[str]
     ]
     unreachable = []
     for namespace, service, port in sorted(backends):
-        if not any(_egress_reaches(policy, namespace, port) for policy in policies):
+        if not any(_egress_reaches(policy, namespace, port, service) for policy in policies):
             unreachable.append(f"{controller_ns} -> {namespace}/{service}:{port}")
     return unreachable
 
@@ -681,7 +752,7 @@ def test_the_secret_store_backend_is_reachable_from_external_secrets():
 
 
 def test_a_dns_only_egress_allow_does_not_count_as_reaching_the_backend():
-    """Mutation case: the old shape accepted any egress rule in the namespace."""
+    """Mutation case: an egress rule for another port does not reach the backend."""
     dns_only = {
         "kind": "NetworkPolicy",
         "metadata": {"namespace": CONTROLLER_NAMESPACE},
@@ -707,7 +778,19 @@ def test_a_dns_only_egress_allow_does_not_count_as_reaching_the_backend():
             ]
         },
     }
-    assert _egress_reaches(connect, CONTROLLER_NAMESPACE, 8080)
+    assert _egress_reaches(connect, CONTROLLER_NAMESPACE, 8080, "onepassword-connect")
+    unrelated = {
+        **connect,
+        "spec": {
+            "egress": [
+                {
+                    "to": [{"podSelector": {"matchLabels": {"app": "unrelated"}}}],
+                    "ports": [{"protocol": "TCP", "port": 8080}],
+                }
+            ]
+        },
+    }
+    assert not _egress_reaches(unrelated, CONTROLLER_NAMESPACE, 8080, "onepassword-connect")
 
     def cross(ns_name: str) -> dict:
         return {
@@ -843,37 +926,41 @@ def ha_triad_problems(hosts: dict[str, dict], all_vars: dict) -> list[str]:
     for rule in rules:
         name = rule.get("name", "<unnamed>")
         resources = rule.get("resources") or []
-        match = _HA_RESOURCE_RE.match(str(resources[0])) if resources else None
-        if not match:
-            problems.append(f"{name}: resources[0] is not ct:<id> / vm:<id>")
+        if not resources:
+            problems.append(f"{name}: names no resources")
             continue
-        vmid = match.group(1)
-        if vmid not in by_vmid:
-            problems.append(f"{name}: vmid {vmid} is in no inventory host")
-            continue
-        host_name, host_vars = by_vmid[vmid]
-
         home = _ha_home_node(rule)
         if home is None:
             problems.append(f"{name}: needs exactly one node at priority 2")
             continue
-        if host_vars.get("proxmox_host") != home:
-            problems.append(
-                f"{name}: home is {home} but {host_name}'s proxmox_host is "
-                f"{host_vars.get('proxmox_host')}"
-            )
-
-        for job in jobs:
-            if str(job.get("id", "")).split("-", 1)[0] != vmid:
+        for resource in resources:
+            match = _HA_RESOURCE_RE.match(str(resource))
+            if not match:
+                problems.append(f"{name}: {resource} is not ct:<id> / vm:<id>")
                 continue
-            checked += 1
-            if job.get("source_node") != home:
+            vmid = match.group(1)
+            if vmid not in by_vmid:
+                problems.append(f"{name}: vmid {vmid} is in no inventory host")
+                continue
+            host_name, host_vars = by_vmid[vmid]
+            if host_vars.get("proxmox_host") != home:
                 problems.append(
-                    f"replication {job.get('id')}: source_node "
-                    f"{job.get('source_node')} is not {name}'s home {home}"
+                    f"{name}: home is {home} but {host_name}'s proxmox_host is "
+                    f"{host_vars.get('proxmox_host')}"
                 )
-            if job.get("target_node") == job.get("source_node"):
-                problems.append(f"replication {job.get('id')}: target_node equals source_node")
+            for job in jobs:
+                if str(job.get("id", "")).split("-", 1)[0] != vmid:
+                    continue
+                checked += 1
+                if job.get("source_node") != home:
+                    problems.append(
+                        f"replication {job.get('id')}: source_node "
+                        f"{job.get('source_node')} is not {name}'s home {home}"
+                    )
+                if job.get("target_node") == job.get("source_node"):
+                    problems.append(
+                        f"replication {job.get('id')}: target_node equals source_node"
+                    )
 
     if not checked:
         raise AssertionError("no replication job matched an HA rule — nothing examined")
@@ -920,6 +1007,14 @@ def test_a_moved_ha_home_is_caught():
 def test_a_replication_job_targeting_its_own_source_is_caught():
     job = {**_HA_VARS["proxmox_ha_replication_jobs"][0], "target_node": "pve-01"}
     assert ha_triad_problems(_HA_HOSTS, {**_HA_VARS, "proxmox_ha_replication_jobs": [job]})
+
+
+def test_every_resource_of_a_rule_is_held_to_the_triad():
+    """Mutation case: a second guest in one rule whose host is elsewhere."""
+    hosts = {**_HA_HOSTS, "dns-02": {"vmid": 102, "proxmox_host": "pve-02"}}
+    rule = {**_HA_VARS["proxmox_ha_rules"][0], "resources": ["ct:101", "ct:102"]}
+    problems = ha_triad_problems(hosts, {**_HA_VARS, "proxmox_ha_rules": [rule]})
+    assert any("dns-02" in p for p in problems)
 
 
 def test_a_one_sided_ha_declaration_is_vacuous_not_green():
@@ -1050,86 +1145,115 @@ def test_scannable_files_reaches_more_than_yaml(tmp_path):
 # === The sources stage ================================================
 
 
+def _sources_placeholders(sources_dir: Path) -> tuple[list[str], int]:
+    """(files carrying an unescaped ${...}, number of files read), both suffixes."""
+    paths = sorted({*sources_dir.glob("*.yaml"), *sources_dir.glob("*.yml")})
+    offenders = []
+    for path in paths:
+        body = "\n".join(line for _, line in _code_lines(path))
+        if "${" in body.replace("$${", "__FLUX_ESCAPED__"):
+            offenders.append(path.name)
+    return offenders, len(paths)
+
+
 @needs_k8s
 def test_sources_stage_carries_no_placeholder():
     """`sources` is the one stage with no substituteFrom, so a ${...} there
     ships to the cluster as a literal string."""
     assert SOURCES_DIR.is_dir(), f"{SOURCES_DIR} is missing"
-    for path in sorted(SOURCES_DIR.glob("*.yaml")):
-        body = "\n".join(line for _, line in _code_lines(path))
-        assert "${" not in body.replace("$${", "__FLUX_ESCAPED__"), (
-            f"{path.name}: this stage has no substituteFrom, so the placeholder "
-            "reaches the cluster verbatim"
-        )
-
-
-# Manifests that are deliberately not reconciled: copy-and-edit templates and
-# the break-glass NodePort. Each says so in its own header.
-UNREFERENCED_ALLOWED = {
-    "kubernetes/apps/vm-ingress/certificate.yaml",
-    "kubernetes/apps/vm-ingress/example-route.yaml",
-    "kubernetes/infrastructure/observability/loki/nodeport.yaml",
-}
-
-
-def _kustomization_dirs() -> list[Path]:
-    return sorted(p.parent for p in K8S_ROOT.rglob("kustomization.yaml"))
-
-
-def _referenced_names(doc: dict) -> set[str]:
-    """Every file name the kustomization names, in any field that takes one."""
-    names: set[str] = set()
-
-    def walk(node) -> None:
-        if isinstance(node, str):
-            names.add(node)
-        elif isinstance(node, list):
-            for child in node:
-                walk(child)
-        elif isinstance(node, dict):
-            for key, child in node.items():
-                if key in {"resources", "components", "patchesStrategicMerge", "files", "envs"}:
-                    walk(child)
-                elif key == "path":
-                    walk(child)
-                elif key in {"patches", "configMapGenerator", "secretGenerator"}:
-                    walk(child)
-
-    walk(doc)
-    return names
-
-
-@needs_k8s
-def test_every_kustomization_lists_the_manifests_beside_it():
-    """Kustomize does not auto-discover: an unlisted manifest is read by every
-    gate here and applied by nothing, so the alert or policy it declares is
-    simply absent from the cluster."""
-    directories = _kustomization_dirs()
-    assert directories, "no kustomization.yaml found under kubernetes/"
-    unlisted: list[str] = []
-    for directory in directories:
-        doc = yaml.safe_load((directory / "kustomization.yaml").read_text()) or {}
-        referenced = _referenced_names(doc)
-        for path in sorted(directory.glob("*.yaml")):
-            rel = path.relative_to(REPO_ROOT).as_posix()
-            if path.name == "kustomization.yaml" or rel in UNREFERENCED_ALLOWED:
-                continue
-            if path.name not in referenced:
-                unlisted.append(rel)
-    assert not unlisted, (
-        "manifests no kustomization.yaml references, so kustomize never applies "
-        "them:\n  " + "\n  ".join(unlisted)
+    offenders, read = _sources_placeholders(SOURCES_DIR)
+    assert read, f"no manifest under {SOURCES_DIR} — this gate examined nothing"
+    assert not offenders, (
+        f"{offenders}: this stage has no substituteFrom, so the placeholder "
+        "reaches the cluster verbatim"
     )
 
 
-def test_the_unlisted_manifest_collector_names_what_is_missing(tmp_path):
-    """Mutation case: a directory whose kustomization forgets one file."""
-    doc = yaml.safe_load("resources:\n  - listed.yaml\n")
-    referenced = _referenced_names(doc)
-    (tmp_path / "listed.yaml").write_text("{}\n")
-    (tmp_path / "forgotten.yaml").write_text("{}\n")
-    on_disk = {p.name for p in tmp_path.glob("*.yaml")}
-    assert sorted(on_disk - referenced) == ["forgotten.yaml"]
+def test_a_placeholder_in_a_yml_source_is_reported(tmp_path):
+    """Mutation case: the `.yml` spelling, and a Flux-escaped `$${...}` that passes."""
+    (tmp_path / "repo.yml").write_text("spec:\n  url: https://${cluster_internal_domain}\n")
+    (tmp_path / "escaped.yaml").write_text("data:\n  script: echo $${HOME}\n")
+    assert _sources_placeholders(tmp_path) == (["repo.yml"], 2)
+
+
+# === Kubelet image GC =================================================
+
+K3S_VARS = ANSIBLE_DIR / "inventories" / "prod" / "group_vars" / "k3s.yml"
+IMAGE_GC_ARG = re.compile(r"^image-gc-high-threshold=(\d+)$")
+EXPR_THRESHOLD = re.compile(r">\s*(\d+(?:\.\d+)?)\s*$")
+
+
+def _alert_rules(node):
+    """Every Prometheus rule dict carrying an `alert:` key, at any depth."""
+    if isinstance(node, dict):
+        if "alert" in node and "expr" in node:
+            yield node
+        for value in node.values():
+            yield from _alert_rules(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _alert_rules(value)
+
+
+def image_gc_drift(k3s_vars: dict, release: dict) -> list[str]:
+    """Where the kubelet flag and KubeletImageGCIneffective disagree.
+
+    The alert fires 5 points above the kubelet's high watermark, capped at 79 so
+    it stays under DiskUsageWarning, whose inhibit would otherwise mute it.
+    """
+    flags = [
+        int(match.group(1))
+        for arg in k3s_vars.get("k3s_kubelet_args") or []
+        if (match := IMAGE_GC_ARG.match(str(arg).strip()))
+    ]
+    if len(flags) != 1:
+        return [f"k3s_kubelet_args sets image-gc-high-threshold {len(flags)} times, not once"]
+    flag = flags[0]
+    rules = {rule["alert"]: rule for rule in _alert_rules(release)}
+    gc_rule = rules.get("KubeletImageGCIneffective")
+    disk_rule = rules.get("DiskUsageWarning")
+    if gc_rule is None or disk_rule is None:
+        return [f"{KPS_RELEASE} lacks KubeletImageGCIneffective or DiskUsageWarning"]
+    gc_match = EXPR_THRESHOLD.search(str(gc_rule["expr"]).strip())
+    disk_match = EXPR_THRESHOLD.search(str(disk_rule["expr"]).strip())
+    if not gc_match or not disk_match:
+        return ["an alert expr has no trailing `> <number>` comparison"]
+    alert = float(gc_match.group(1))
+    problems = []
+    if alert != min(flag + 5, 79):
+        problems.append(f"alert threshold {alert:g} is not min({flag} + 5, 79)")
+    if alert >= float(disk_match.group(1)):
+        problems.append(
+            f"alert threshold {alert:g} is not under DiskUsageWarning's "
+            f"{disk_match.group(1)}, so the inhibit mutes it for good"
+        )
+    description = " ".join(str(gc_rule["annotations"].get("description", "")).split())
+    if f"of {flag}%:" not in description:
+        problems.append(f"the alert description does not name the kubelet's {flag}%")
+    return problems
+
+
+def _image_gc_sources() -> tuple[dict, dict]:
+    assert K3S_VARS.is_file(), f"{K3S_VARS} is missing — this guard checked nothing"
+    return yaml.safe_load(K3S_VARS.read_text()) or {}, helm_release(K8S_ROOT / KPS_RELEASE)
+
+
+def test_the_kubelet_image_gc_flag_and_its_alert_agree():
+    """Retuning the kubelet watermark without the alert leaves the alert firing
+    while GC still works, or silent while it cannot keep up."""
+    drift = image_gc_drift(*_image_gc_sources())
+    assert not drift, "image-gc threshold drift:\n  " + "\n  ".join(drift)
+
+
+def test_an_edited_kubelet_flag_is_reported_as_drift():
+    """Mutation case: the kubelet is retuned and the alert is left alone."""
+    k3s_vars, release = _image_gc_sources()
+    k3s_vars["k3s_kubelet_args"] = [
+        "image-gc-high-threshold=55" if str(arg).startswith("image-gc-high-threshold=") else arg
+        for arg in k3s_vars["k3s_kubelet_args"]
+    ]
+    drift = image_gc_drift(k3s_vars, release)
+    assert any("is not min(55 + 5, 79)" in line for line in drift), drift
 
 
 # === Apiserver egress =================================================
@@ -1286,6 +1410,10 @@ NO_CRDS = {
         "the chart ships no CustomResourceDefinition; reboot state lives in node "
         "annotations and a lock ConfigMap"
     ),
+    "infrastructure/controllers/metrics-server/release.yaml": (
+        "the chart ships no CustomResourceDefinition; it serves metrics.k8s.io "
+        "through an APIService and keeps no state"
+    ),
     "infrastructure/controllers/nvidia-device-plugin/release.yaml": (
         "the chart ships no CustomResourceDefinition; the plugin advertises its "
         "devices through the kubelet device plugin API"
@@ -1297,10 +1425,6 @@ NO_CRDS = {
     "infrastructure/controllers/reloader/release.yaml": (
         "the chart ships no CustomResourceDefinition; it watches ConfigMaps and "
         "Secrets and annotates workloads"
-    ),
-    "infrastructure/controllers/tailscale-operator/release.yaml": (
-        "the chart's CRDs ship in its crds/ directory, which a helm uninstall "
-        "never deletes"
     ),
     "infrastructure/controllers/traefik/release.yaml": (
         "the chart's CRDs ship in its crds/ directory, which a helm uninstall "
@@ -1346,6 +1470,8 @@ CRD_KEEPERS.update({
     for rel, shape in {
         "infrastructure/controllers/cnpg/release.yaml": "postRenderer",
         "infrastructure/controllers/cnpg/release-barman-cloud.yaml": "postRenderer",
+        # Its CRDs render from templates/ behind installCRDs, not from crds/.
+        "infrastructure/controllers/tailscale-operator/release.yaml": "postRenderer",
     }.items()
     if (K8S_ROOT / rel).is_file()
 })
@@ -1361,15 +1487,6 @@ ANNOTATION_PREFIX = "external-dns.alpha.kubernetes.io/"
 ANNOTATION_PREFIX_ARG = f"--annotation-prefix={ANNOTATION_PREFIX}"
 EXTERNAL_DNS_ANNOTATION_RE = re.compile(r"^external-dns(\.alpha)?\.kubernetes\.io/")
 KEEP_POLICY = ("helm.sh/resource-policy", "keep")
-
-
-def _helm_release(relpath: str) -> dict:
-    path = K8S_ROOT / relpath
-    assert path.is_file(), f"{relpath} is missing — this guard checked nothing"
-    for doc in yaml.safe_load_all(path.read_text()):
-        if isinstance(doc, dict) and doc.get("kind") == "HelmRelease":
-            return doc
-    raise AssertionError(f"{relpath} holds no HelmRelease")
 
 
 def _values_keep_crds(doc: dict) -> bool:
@@ -1424,7 +1541,7 @@ def _install_strategy(doc: dict) -> str | None:
 @needs_k8s
 @pytest.mark.parametrize("relpath,shape", sorted(CRD_KEEPERS.items()))
 def test_crd_installing_releases_keep_their_crds(relpath, shape):
-    assert _keeps_crds(_helm_release(relpath), shape), (
+    assert _keeps_crds(helm_release(K8S_ROOT / relpath), shape), (
         f"{relpath} no longer sets {KEEP_POLICY[0]}: {KEEP_POLICY[1]} on the CRDs "
         f"its chart owns, at the {shape} path the chart reads — the next uninstall "
         "or chart-version change takes every CR with them"
@@ -1436,7 +1553,7 @@ def test_crd_installing_releases_keep_their_crds(relpath, shape):
 def test_crd_installing_releases_retry_instead_of_uninstalling(relpath):
     """Install remediation remediates by uninstalling, which is the cascade
     above, so every CRD-owning release retries in place instead."""
-    assert _install_strategy(_helm_release(relpath)) == "RetryOnFailure", (
+    assert _install_strategy(helm_release(K8S_ROOT / relpath)) == "RetryOnFailure", (
         f"{relpath} install remediation is back to uninstalling on failure, which "
         "deletes the chart's CRDs and every CR"
     )
@@ -1444,7 +1561,7 @@ def test_crd_installing_releases_retry_instead_of_uninstalling(relpath):
 
 @needs_k8s
 def test_external_dns_pins_the_annotation_prefix():
-    values = (_helm_release(EXTERNAL_DNS_RELEASE).get("spec") or {}).get("values") or {}
+    values = release_values(K8S_ROOT / EXTERNAL_DNS_RELEASE)
     assert ANNOTATION_PREFIX_ARG in (values.get("extraArgs") or []), (
         f"{EXTERNAL_DNS_RELEASE} dropped {ANNOTATION_PREFIX_ARG}: external-dns "
         "stops seeing the annotations the manifests carry and prunes the records "
@@ -1620,7 +1737,7 @@ def _wrong_issuer_origin(env: list[dict]) -> str | None:
 @needs_k8s
 @pytest.mark.parametrize("section", ["server", "worker"])
 def test_authentik_pins_the_external_issuer_origin(section):
-    offender = _wrong_issuer_origin(_env_list(_helm_release(AUTHENTIK_RELEASE), section))
+    offender = _wrong_issuer_origin(_env_list(helm_release(K8S_ROOT / AUTHENTIK_RELEASE), section))
     assert offender is None, (
         f"{AUTHENTIK_RELEASE} {section}.env: {offender} — expected "
         f"{AUTHENTIK_BASE_URL[1]}, the origin every OIDC client is registered "
@@ -1673,7 +1790,7 @@ def _discovery_problems(spec: dict) -> list[str]:
 
 @needs_k8s
 def test_prometheus_discovers_monitoring_objects_in_every_namespace():
-    problems = _discovery_problems(_prometheus_spec(_helm_release(KPS_RELEASE)))
+    problems = _discovery_problems(_prometheus_spec(helm_release(K8S_ROOT / KPS_RELEASE)))
     assert not problems, (
         f"{KPS_RELEASE} prometheusSpec: {'; '.join(problems)} — app-side "
         "ServiceMonitors and PrometheusRules outside the release namespace stop "
@@ -1688,6 +1805,54 @@ def test_a_narrowed_discovery_selector_is_reported():
     pruned = {k: v for k, v in WIDE_DISCOVERY.items() if k != "ruleNamespaceSelector"}
     assert _discovery_problems(pruned)
     assert _discovery_problems({})
+
+
+# The kubelet drop rule names k3s servers by a node-name pattern; the inventory
+# groups are what make a node a server or an agent.
+SERVER_SERIES_DROP_LABELS = ["__name__", "node"]
+
+
+def _server_node_pattern(doc: dict) -> str | None:
+    """The node half of the kubelet drop rule keyed on [__name__, node]."""
+    values = (doc.get("spec") or {}).get("values") or {}
+    monitor = (values.get("kubelet") or {}).get("serviceMonitor") or {}
+    for rule in monitor.get("metricRelabelings") or []:
+        if rule.get("action") == "drop" and rule.get("sourceLabels") == SERVER_SERIES_DROP_LABELS:
+            separator = rule.get("separator", ";")
+            return str(rule.get("regex", "")).rsplit(separator, 1)[-1]
+    return None
+
+
+def _server_pattern_problems(pattern: str | None, servers, agents) -> list[str]:
+    if pattern is None:
+        return ["no kubelet metricRelabelings drop keyed on [__name__, node]"]
+    compiled = re.compile(pattern)
+    problems = [f"server {name} escapes {pattern!r}" for name in servers if not compiled.fullmatch(name)]
+    problems += [f"agent {name} matches {pattern!r}" for name in agents if compiled.fullmatch(name)]
+    return problems
+
+
+@needs_k8s
+@needs_inventory
+def test_the_kubelet_server_drop_matches_exactly_the_server_group():
+    """A renamed server keeps its duplicate registry series; a matched agent
+    loses the only copy of its own."""
+    servers = _group_hosts(K3S_SERVER_GROUP)
+    assert servers, f"no {K3S_SERVER_GROUP} group in the inventory"
+    problems = _server_pattern_problems(
+        _server_node_pattern(helm_release(K8S_ROOT / KPS_RELEASE)),
+        servers,
+        _group_hosts("k3s_agents") or {},
+    )
+    assert not problems, f"{KPS_RELEASE} kubelet drop rule: " + "; ".join(problems)
+
+
+def test_a_server_pattern_out_of_step_with_the_inventory_is_reported():
+    """Mutation case: the comparison, not just the shipped values."""
+    assert _server_pattern_problems("k3s-srv-.*", ["k3s-srv-01"], ["k3s-agt-01"]) == []
+    assert _server_pattern_problems("k3s-srv-.*", ["k3s-server-01"], [])
+    assert _server_pattern_problems("k3s-.*", ["k3s-srv-01"], ["k3s-agt-01"])
+    assert _server_pattern_problems(None, ["k3s-srv-01"], [])
 
 
 def _cluster_issuer_names(root: Path) -> set[str]:

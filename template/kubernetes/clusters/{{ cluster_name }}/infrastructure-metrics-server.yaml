@@ -1,0 +1,29 @@
+---
+# metrics-server in its own stage, not a member of infrastructure-controllers,
+# so its wait cannot freeze configs, observability or apps; nothing dependsOn
+# it. The k3s_disable entry in group_vars/k3s.yml is its other half.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infrastructure-metrics-server
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 10m
+  dependsOn:
+    - name: infrastructure-sources
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/infrastructure/controllers/metrics-server
+  prune: true
+  wait: true
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: cluster-versions
+        optional: false
+      - kind: ConfigMap
+        name: cluster-config
+        optional: false

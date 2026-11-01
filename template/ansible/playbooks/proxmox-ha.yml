@@ -9,8 +9,7 @@
   gather_facts: false
   roles:
     # /etc/pve is clustered, so the role reconciles HA once for the whole
-    # cluster: it probes for a reachable host itself and fails loudly when none
-    # answers. No serial/run_once scaffolding belongs here.
+    # cluster and probes for a reachable host itself.
     - role: weisssrv.infra.proxmox_ha
       tags: [proxmox_ha]
 

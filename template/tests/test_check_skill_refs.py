@@ -9,7 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+from conftest import REPO
+
 SCRIPT = REPO / "scripts" / "check-skill-refs.py"
 
 
@@ -20,16 +21,12 @@ def run(repo_root: Path, skill_dir: Path | None = None) -> subprocess.CompletedP
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
-def make_tree(tmp_path: Path, skill_text: str, extra: tuple = ()) -> Path:
-    """A miniature repo: one real docs file plus whatever the caller names."""
+def make_tree(tmp_path: Path, skill_text: str) -> Path:
+    """A miniature repo: one real docs file and one real script."""
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "RUNBOOKS.md").write_text("# Runbooks\n")
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "check-lib-pins.py").write_text("#\n")
-    for path in extra:
-        target = tmp_path / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("#\n")
     skill = tmp_path / ".claude" / "skills" / "cluster-development"
     (skill / "references").mkdir(parents=True)
     (skill / "SKILL.md").write_text(skill_text)

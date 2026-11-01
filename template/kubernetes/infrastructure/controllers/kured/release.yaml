@@ -1,7 +1,6 @@
 ---
 # Coordinated node reboots: the maintenance playbooks only touch the sentinel
-# file and each node reboots itself under a cluster-wide lock. A playbook that
-# drained nodes would evict its own in-cluster CI executor pod and deadlock.
+# file, and each node drains and reboots itself under a cluster-wide lock.
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:

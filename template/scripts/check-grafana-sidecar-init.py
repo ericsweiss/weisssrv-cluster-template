@@ -23,8 +23,8 @@ REPO = Path(__file__).resolve().parent.parent
 MANIFEST = Path("kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml")
 VERSIONS_CONFIGMAP = Path("kubernetes/infrastructure/sources/versions-configmap.yaml")
 CLUSTER_CONFIG = Path("kubernetes/infrastructure/sources/cluster-config.yaml")
+SOURCES = Path("kubernetes/infrastructure/sources")
 CHART = "kube-prometheus-stack"
-CHART_REPO = "https://prometheus-community.github.io/helm-charts"
 # The chart names every k8s-sidecar container <release>-sc-<kind>, and the init
 # variant <release>-init-sc-<kind>.
 SIDECAR_MARKER = "-sc-"
@@ -33,9 +33,9 @@ SIDECAR_MARKER = "-sc-"
 METHOD_ENV = "METHOD"
 REQUIRED_METHOD = {"initContainers": "LIST", "containers": "WATCH"}
 POSITION = {"initContainers": "init", "containers": "long-running"}
+# A stalled chart repo must fail with a message, not hang until the job timeout.
 RENDER_TIMEOUT_SECONDS = 300
 
-# A stalled chart repo must fail with a message, not hang until the job timeout.
 _VALIDATOR = "validate-helm-values.py"
 
 
@@ -96,6 +96,22 @@ def substitutions(root: Path, validator) -> dict:
     return {**versions, **config}
 
 
+def chart_repo(root: Path, chart_spec: dict) -> str:
+    """The URL of the HelmRepository the release's sourceRef names, as Flux reads it."""
+    ref = chart_spec.get("sourceRef") or {}
+    if ref.get("kind") != "HelmRepository" or not ref.get("name"):
+        raise GateError(f"{MANIFEST} names no HelmRepository sourceRef")
+    for path in sorted((root / SOURCES).glob("*.y*ml")):
+        text = _inspect(f"reading {path.name}", path.read_text, encoding="utf-8")
+        for doc in _inspect(f"parsing {SOURCES / path.name}", _documents, text):
+            meta = doc.get("metadata") or {}
+            if doc.get("kind") == "HelmRepository" and meta.get("name") == ref["name"]:
+                url = (doc.get("spec") or {}).get("url")
+                if url:
+                    return str(url)
+    raise GateError(f"no HelmRepository {ref['name']!r} with a url under {SOURCES}")
+
+
 def render(root: Path, validator) -> list[dict]:
     """The chart as Flux installs it: pinned version, substituted values."""
     manifest = root / MANIFEST
@@ -107,16 +123,18 @@ def render(root: Path, validator) -> list[dict]:
         raise GateError(f"{MANIFEST} references unknown ConfigMap key(s): {missing}")
     spec = _inspect(f"parsing {MANIFEST}", validator.extract_helmrelease_from_text,
                     text, str(manifest)).get("spec", {})
-    version = str(spec.get("chart", {}).get("spec", {}).get("version", ""))
+    chart_spec = spec.get("chart", {}).get("spec", {})
+    version = str(chart_spec.get("version", ""))
     if not version:
         raise GateError(f"could not determine the chart version pinned in {MANIFEST}")
+    repo_url = chart_repo(root, chart_spec)
     with tempfile.NamedTemporaryFile("w", suffix=".yaml") as values_file:
         _inspect(f"serialising the values in {MANIFEST}", yaml.safe_dump,
                  spec.get("values", {}), values_file, sort_keys=False)
         values_file.flush()
         cmd = [
             "helm", "template", CHART, CHART,
-            "--repo", CHART_REPO,
+            "--repo", repo_url,
             "--version", version,
             "--namespace", spec.get("targetNamespace") or "default",
             "-f", values_file.name,

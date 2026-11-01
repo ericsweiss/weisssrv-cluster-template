@@ -11,7 +11,8 @@ from a symptom to the first command.
 | A pod cannot reach a dependency | its namespace's NetworkPolicies. An ingress default-deny is present everywhere, so a new dependency needs a new allow |
 | A pod cannot reach the internet | the egress policy's reserved-CIDR `except:` list, held by `task lint:netpol-parity` |
 | A Service VIP is unreachable from a peer selector | an `ipBlock` peer can never match a Service VIP: kube-proxy rewrites the destination first. Select the pods, not the address |
-| A certificate is not renewing | the Certificate's conditions, then the issuer's. A per-host distribution target needs its pinned key seeded |
+| A certificate is not renewing | the Certificate's conditions, then the issuer's |
+| A certificate push to a host fails on its host key | that target's pinned host key is empty or stale: `task certs:show-host-keys` prints the current keys to pin |
 | A guest lost the network | the bond's slave state and the switch-side port, before suspecting the guest |
 | A host-side change did not apply | re-run the owning playbook with `--limit <host>`; a looped task with a per-item `delegate_to` ends the play silently when a delegate is down |
 | A node is NotReady | `task k3s:status`, then that node's kubelet journal through the log stack |

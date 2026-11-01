@@ -99,10 +99,17 @@ adguard_home_ratelimit_whitelist: >-
   {% raw %}{{ _dns_addressed_hosts | map(attribute='ansible_host')
      | unique | sort | list }}{% endraw %}
 
-# Filtering allowlist entries and PTR records, e.g.
-#   - '@@||example.com^'
-#   - '||<host-ip-in-reverse-octet-order>.in-addr.arpa^$dnsrewrite=NOERROR;PTR;{{ nas_host }}.'
-adguard_home_user_rules: []
+# Filtering rules kept as data, e.g. '@@||example.com^'. One PTR record per
+# addressed host follows from the inventory, like its A record above.
+_dns_filter_rules: []
+adguard_home_user_rules: >-
+  {% raw %}{{ _dns_filter_rules
+     + (_dns_addressed_hosts | map(attribute='ansible_host')
+        | map('regex_replace', '^([0-9]+)[.]([0-9]+)[.]([0-9]+)[.]([0-9]+)$',
+              '||\4.\3.\2.\1.in-addr.arpa^$dnsrewrite=NOERROR')
+        | zip(_dns_addressed_hosts | map(attribute='inventory_hostname')
+              | map('regex_replace', '$', '.' ~ internal_domain ~ '.'))
+        | map('join', ';PTR;') | list) }}{% endraw %}
 
 # --- Certificates -----------------------------------------------------------
 # acme.sh + DNS-01 issues the wildcard on the primary only and pushes it over
@@ -164,19 +171,3 @@ adguard_sync_replica: >-
      | default(groups['dns_primary'][0]) }}.{{ internal_domain }}{% endraw %}
 adguard_sync_admin_user: "{% raw %}{{ adguard_home_admin_user }}{% endraw %}"
 adguard_sync_admin_password: "{% raw %}{{ adguard_home_admin_password }}{% endraw %}"
-adguard_sync_features:
-  dns:
-    accessLists: true
-    serverConfig: true
-    rewrites: true
-  dhcp:
-    serverConfig: true
-    staticLeases: true
-  generalSettings: true
-  queryLogConfig: true
-  statsConfig: true
-  clientSettings: true
-  services: true
-  filters: true
-  theme: true
-  tlsConfig: false

@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Assert every ESO-managed credential has a rotation path written down.
-
-Each `remoteRef.key` and each ExternalSecret must be in the runbook or in DECLARED_MANUAL
-(a ClusterExternalSecret by its externalSecretName). Exit 0 clean, 1 uncovered, 2 vacuous.
-"""
+"""Assert every ESO-managed credential has a rotation path written down: each
+`remoteRef.key` and ExternalSecret is in the runbook's rotation section or in
+DECLARED_MANUAL. Exit 0 clean, 1 uncovered, 2 vacuous."""
 from __future__ import annotations
 
 import argparse
@@ -22,6 +20,9 @@ MANIFEST_TREE = "kubernetes"
 # left out takes its ExternalSecrets with it, silently covered.
 MANIFEST_GLOBS = ("*.yaml", "*.yml")
 DOC = "docs/RUNBOOKS.md"
+# The `## ` section that owns each claim: a name mentioned in an alert table or
+# a storage procedure is not a documented rotation.
+SECTION = "Rotating a secret"
 
 # ExternalSecrets exempted from the runbook requirement, each with a reason.
 # Ships empty: an exemption is an edit to this gate, and a stale one fails it.
@@ -109,6 +110,15 @@ def documents(name: str, text: str) -> bool:
     return re.search(pattern, text) is not None
 
 
+def doc_sections(text: str) -> dict[str, str]:
+    """`## heading` -> that section's body, nested headings included."""
+    return {
+        part.splitlines()[0].strip(): part
+        for part in re.split(r"^## ", text, flags=re.M)[1:]
+        if part.strip()
+    }
+
+
 def check(root: Path) -> list[str]:
     return check_detailed(root)[0]
 
@@ -122,21 +132,24 @@ def check_detailed(root: Path) -> tuple[list[str], int, int]:
             f"no ExternalSecret found under {MANIFEST_TREE}/ — "
             "a gate that checks nothing is not a gate"
         )
-    doc = (root / DOC).read_text(encoding="utf-8")
+    sections = doc_sections((root / DOC).read_text(encoding="utf-8"))
+    if SECTION not in sections:
+        raise Vacuous(f"{DOC} has no `## {SECTION}` section — the gate cannot tell where a rotation is documented")
+    doc = sections[SECTION]
 
     problems = list(reports)
     for key, rel in sorted(keys.items()):
         if not documents(key, doc):
             problems.append(
-                f"{rel}: remoteRef.key {key!r} is named nowhere in {DOC} — "
-                "the vault item has no documented rotation"
+                f"{rel}: remoteRef.key {key!r} is named nowhere in {DOC} § "
+                f"{SECTION} — the vault item has no documented rotation"
             )
     for name, rel in sorted(names.items()):
         if documents(name, doc) or name in DECLARED_MANUAL:
             continue
         problems.append(
             f"{rel}: ExternalSecret {name} is reached by no rotation path — "
-            f"add a row to {DOC} § Rotating a secret, or an entry to "
+            f"add a row to {DOC} § {SECTION}, or an entry to "
             "DECLARED_MANUAL with a reason"
         )
     for name in sorted(DECLARED_MANUAL):

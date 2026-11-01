@@ -247,11 +247,7 @@ def ansible_lint_drift(requirements_text: str, job_version: str) -> list[str]:
 
 
 def test_the_ansible_lint_pin_matches_the_library_input_default() -> None:
-    """`task ansible:lint` and the CI job run one ansible-lint version.
-
-    The include passes no `ansible_lint_version`, so CI takes the library
-    template's default and a drifted local pin applies a different rule set.
-    """
+    """`task ansible:lint` and the CI job run one ansible-lint version."""
     stale = ansible_lint_drift(
         REQUIREMENTS.read_text(encoding="utf-8"), _ansible_lint_job_version()
     )

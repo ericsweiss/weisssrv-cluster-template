@@ -1,39 +1,40 @@
 ---
 # Earliest-reconciling stage: HelmRepository sources, the two substitution
 # ConfigMaps and the PriorityClasses, all of which must exist before
-# controllers/ renders. Ordering rationale: kubernetes/README.md.
+# controllers/ renders. Nothing here may contain a ${...} placeholder.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# HelmRepositories alphabetically, so a new source has an obvious insertion
-# point; the cluster-wide documents follow as a marked block.
+# HelmRepositories alphabetically, gated ones in their place, so a new source
+# has an obvious insertion point; the cluster-wide documents follow.
 resources:
   - authentik.yaml
+{%- if postgres_operator %}
+  - cloudnative-pg.yaml
+{%- endif %}
   - external-dns.yaml
   - external-secrets.yaml
   - fairwinds-stable.yaml
+{%- if git_backend == 'gitlab_selfhosted' %}
+  - gitlab.yaml
+{%- endif %}
   - grafana-community.yaml
   - grafana.yaml
   - jetstack.yaml
   - kured.yaml
   - metallb.yaml
-  - prometheus-community.yaml
-  - stakater.yaml
-  - traefik.yaml
-{%- if git_backend == 'gitlab_selfhosted' %}
-  - gitlab.yaml
-{%- endif %}
+  - metrics-server.yaml
 {%- if gpu == 'nvidia' %}
   - nvidia.yaml
 {%- endif %}
 {%- if secrets_backend == 'onepassword' %}
   - onepassword-connect.yaml
 {%- endif %}
+  - prometheus-community.yaml
+  - stakater.yaml
 {%- if vpn_tailscale %}
   - tailscale.yaml
 {%- endif %}
-{%- if postgres_operator %}
-  - cloudnative-pg.yaml
-{%- endif %}
+  - traefik.yaml
   # Not HelmRepositories: cluster identity, versions and the priority classes.
   - cluster-config.yaml
   - priorityclasses.yaml

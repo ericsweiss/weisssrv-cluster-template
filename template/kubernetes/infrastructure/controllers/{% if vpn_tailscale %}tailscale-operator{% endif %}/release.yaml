@@ -22,12 +22,15 @@ spec:
         namespace: flux-system
       interval: 12h
   install:
-    # The operator-oauth Secret comes from the configs stage, which depends on
-    # this one. Helm --wait would block on pods that are themselves blocked on
-    # that Secret, deadlocking bootstrap.
+    # CRITICAL: disableWait prevents a bootstrap deadlock. The operator-oauth
+    # Secret comes from the configs stage, which depends on controllers, so Helm
+    # --wait would block on pods that need that Secret.
     disableWait: true
-    remediation:
-      retries: 3
+    # Retry in place: the default install remediation is an uninstall, the
+    # cascade the keep policy below guards against.
+    strategy:
+      name: RetryOnFailure
+      retryInterval: 5m
   upgrade:
     remediation:
       retries: 3
@@ -52,3 +55,20 @@ spec:
     apiServerProxyConfig:
       # Ingress/egress proxies only — not the in-process Kubernetes API proxy.
       mode: "false"
+  # CRITICAL: the chart ships the tailscale.com CRDs in templates/ (installCRDs),
+  # so a helm uninstall cascade-deletes every ProxyClass and the proxies built
+  # from them. The keep policy stops that; a strategic merge creates the map.
+  postRenderers:
+    - kustomize:
+        patches:
+          - target:
+              group: apiextensions.k8s.io
+              kind: CustomResourceDefinition
+              name: ".*\\.tailscale\\.com"
+            patch: |
+              apiVersion: apiextensions.k8s.io/v1
+              kind: CustomResourceDefinition
+              metadata:
+                name: placeholder
+                annotations:
+                  helm.sh/resource-policy: keep

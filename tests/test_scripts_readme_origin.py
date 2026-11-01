@@ -34,16 +34,21 @@ def documented_vendored() -> set[str]:
     return md_tables.table_names(README.read_text(encoding="utf-8"), VENDORED_HEADING)
 
 
+def _consumer_paths(doc: dict) -> list[str]:
+    """Every consumer path the manifest names, in either entry form and block."""
+    return [
+        (entry if isinstance(entry, str) else (entry.get("consumer") or entry["lib"]))
+        for block in ("vendored", "forked")
+        for entry in doc.get(block) or []
+    ]
+
+
 def registered_vendored() -> set[str]:
     """Script basenames the manifest registers under template/scripts/."""
     doc = yaml.safe_load(MANIFEST.read_text(encoding="utf-8")) or {}
-    names: set[str] = set()
-    for block in ("vendored", "forked"):
-        for entry in doc.get(block) or []:
-            path = entry if isinstance(entry, str) else (entry.get("consumer") or entry["lib"])
-            if path.startswith("template/scripts/"):
-                names.add(Path(path).name)
-    return names
+    return {
+        Path(path).name for path in _consumer_paths(doc) if path.startswith("template/scripts/")
+    }
 
 
 def mismatches(documented: set[str], registered: set[str]) -> dict[str, str]:
@@ -77,13 +82,7 @@ def test_an_unregistered_script_is_caught():
 
 def _missing_consumers(doc: dict, root: Path) -> list[str]:
     """Manifest entries whose consumer path is not a file under `root`."""
-    missing = []
-    for block in ("vendored", "forked"):
-        for entry in doc.get(block) or []:
-            path = entry if isinstance(entry, str) else (entry.get("consumer") or entry["lib"])
-            if not (root / path).is_file():
-                missing.append(path)
-    return missing
+    return [path for path in _consumer_paths(doc) if not (root / path).is_file()]
 
 
 def test_every_vendored_consumer_path_exists():
@@ -183,16 +182,18 @@ def test_a_row_naming_two_scripts_yields_both():
 SITE_DATA_HEADING = "## Site data"
 
 
-def undeclared_baselines() -> set[str]:
-    """`.txt` files under template/scripts/ the README's Site data table omits.
+def undeclared_baselines(
+    readme: Path = README, scripts: Path = RENDERED_SCRIPTS
+) -> set[str]:
+    """`.txt` files under `scripts` the README's Site data table omits.
 
     validate_render's orphan scan admits site data either by suffix or by a row
     naming it, and `.txt` is outside its suffix allowlist.
     """
     declared = md_tables.table_names(
-        README.read_text(encoding="utf-8"), SITE_DATA_HEADING, (".txt",)
+        readme.read_text(encoding="utf-8"), SITE_DATA_HEADING, (".txt",)
     )
-    shipped = {path.name for path in RENDERED_SCRIPTS.glob("*.txt") if path.is_file()}
+    shipped = {path.name for path in scripts.glob("*.txt") if path.is_file()}
     return shipped - declared
 
 
@@ -201,13 +202,19 @@ def test_every_shipped_baseline_file_is_declared_as_site_data():
     assert undeclared_baselines() == set()
 
 
-def test_an_undeclared_baseline_file_is_caught():
-    """Mutation case: the gate must name a baseline no row declares."""
-    declared = md_tables.table_names(
-        README.read_text(encoding="utf-8"), SITE_DATA_HEADING, (".txt",)
-    )
-    assert {"invented-expected-skipped.txt"} - declared == {"invented-expected-skipped.txt"}
-    assert declared
+def test_an_undeclared_baseline_file_is_caught(tmp_path):
+    """Mutation case: the gate itself names a shipped baseline no row declares,
+    and stays quiet once a row declares it."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "declared-skipped.txt").write_text("")
+    (scripts / "invented-skipped.txt").write_text("")
+    readme = tmp_path / "README.md"
+    rows = "| File | Holds |\n|---|---|\n| `declared-skipped.txt` | a baseline |\n"
+    readme.write_text(f"{SITE_DATA_HEADING}\n\n{rows}")
+    assert undeclared_baselines(readme, scripts) == {"invented-skipped.txt"}
+    readme.write_text(f"{SITE_DATA_HEADING}\n\n{rows}| `invented-skipped.txt` | another |\n")
+    assert undeclared_baselines(readme, scripts) == set()
 
 
 # --------------------------------------------------------------------------
@@ -223,27 +230,23 @@ TEMPLATE_OWNED = {
     "template/scripts/check-collection-pin-trigger.py",
     "template/scripts/check-deploy-host-coverage.py",
     "template/scripts/check-grafana-sidecar-init.py",
-    "template/scripts/check-guest-endpoint-parity.py",
     "template/scripts/check-integration-matrix-coverage.py",
     "template/scripts/check-kustomization-coverage.py",
-    "template/scripts/check-skill-refs.py",
-    "template/scripts/check-tenant-wiring.py.jinja",
     "template/scripts/check-role-default-flips.py",
-    "template/scripts/check-unmanaged-secrets.py.jinja",
+    "template/scripts/check-skill-refs.py",
     "template/scripts/check-tenant-traefik-isolation.py.jinja",
+    "template/scripts/check-tenant-wiring.py.jinja",
+    "template/scripts/check-unmanaged-secrets.py.jinja",
     "template/scripts/check-upstream-rule-mirror.py",
-    "template/scripts/deploy-preflight.py",
     "template/scripts/flux-secret-consumers.py",
     "template/scripts/generate-host-log-staleness.py",
     "template/scripts/taskfile_tree.py",
     "template/scripts/version-registry.py.jinja",
     "template/scripts/{% if use_unifi %}check-unifi-doc-parity.py{% endif %}",
-    "template/scripts/{% if vpn_tailscale %}check-tailnet-dns-parity.py{% endif %}",
     "template/scripts/{% if vpn_tailscale %}check-tailscale-policy.py{% endif %}",
     # The suites that ship into the generated repository and run there.
     "template/scripts/test_check_ansible_service_names.py",
     "template/scripts/test_check_ci_pin_parity.py",
-    "template/scripts/test_flux_rotate_db_password.py",
     "template/scripts/test_check_collection_pin_trigger.py",
     "template/scripts/test_check_deploy_host_coverage.py",
     "template/scripts/test_check_flux_version_pin.py",
@@ -252,6 +255,7 @@ TEMPLATE_OWNED = {
     "template/scripts/test_deploy_verify_lib.py",
     "template/scripts/test_deploy_verify_script.py",
     "template/scripts/test_diagnose_network_issues.py",
+    "template/scripts/test_flux_rotate_db_password.py",
     "template/scripts/test_flux_secret_consumers.py",
     "template/scripts/test_maintenance_lib.py.jinja",
     "template/scripts/test_maintenance_run_with_verify.py",
@@ -260,15 +264,6 @@ TEMPLATE_OWNED = {
 }
 
 SCRIPT_DIRS = ("scripts", "template/scripts")
-
-
-def _consumer_paths(doc: dict) -> set[str]:
-    """Every consumer path the manifest names, in either entry form."""
-    return {
-        (entry if isinstance(entry, str) else (entry.get("consumer") or entry["lib"]))
-        for block in ("vendored", "forked")
-        for entry in doc.get(block) or []
-    }
 
 
 def script_paths(root: Path) -> set[str]:
@@ -286,7 +281,7 @@ def script_paths(root: Path) -> set[str]:
 
 
 def unclassified(doc: dict, found: set[str]) -> list[str]:
-    return sorted(found - _consumer_paths(doc) - TEMPLATE_OWNED)
+    return sorted(found - set(_consumer_paths(doc)) - TEMPLATE_OWNED)
 
 
 def test_every_script_is_classified():

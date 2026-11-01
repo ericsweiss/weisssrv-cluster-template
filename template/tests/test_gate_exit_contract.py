@@ -7,50 +7,55 @@ missing dependency makes the corpus runner report an operator error as a finding
 from __future__ import annotations
 
 import ast
-import re
 from pathlib import Path
 
-import yaml
+from conftest import REPO, SCRIPTS, vendored_consumer_paths
 
-REPO = Path(__file__).resolve().parent.parent
-SCRIPTS = REPO / "scripts"
-MANIFEST = SCRIPTS / "vendored-manifest.yml"
-
-_GUARD = re.compile(r"^except[^:]*\b(?:ImportError|ModuleNotFoundError)\b[^:]*:")
-_STRING_EXIT = re.compile(r"\bsys\.exit\(\s*[\"']")
+_DEPENDENCY_ERRORS = {"ImportError", "ModuleNotFoundError"}
 
 
-def vendored_names() -> set[str]:
-    """Basenames of the library copies. Their guards are fixed upstream."""
-    entries = (yaml.safe_load(MANIFEST.read_text(encoding="utf-8")) or {}).get(
-        "vendored"
-    ) or []
-    names = set()
-    for entry in entries:
-        path = entry if isinstance(entry, str) else (entry or {}).get("consumer", "")
-        names.add(Path(str(path)).name)
-    return names
+def local_gates() -> list[Path]:
+    """Python files under scripts/ that are not library copies, whose guards are
+    fixed upstream."""
+    vendored = set(vendored_consumer_paths(("vendored",)))
+    return [
+        path
+        for path in sorted(SCRIPTS.rglob("*.py"))
+        if path.relative_to(REPO).as_posix() not in vendored
+    ]
+
+
+def _catches_a_missing_dependency(handler: ast.ExceptHandler) -> bool:
+    caught = handler.type
+    names = caught.elts if isinstance(caught, ast.Tuple) else [caught]
+    return any(isinstance(name, ast.Name) and name.id in _DEPENDENCY_ERRORS for name in names)
+
+
+def _is_string_exit(node: ast.AST) -> bool:
+    """`sys.exit("...")`, `exit(f"...")` or `SystemExit("...")`: each exits 1."""
+    if not isinstance(node, ast.Call) or not node.args:
+        return False
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+    first = node.args[0]
+    is_text = isinstance(first, ast.JoinedStr) or (
+        isinstance(first, ast.Constant) and isinstance(first.value, str)
+    )
+    return name in {"exit", "SystemExit"} and is_text
 
 
 def offenders(source: str) -> list[int]:
     """1-indexed lines where a dependency guard exits with a string, so rc 1."""
-    lines = source.splitlines()
-    found: list[int] = []
-    for index, line in enumerate(lines):
-        if not _GUARD.match(line.strip()):
-            continue
-        for offset in range(index + 1, len(lines)):
-            body = lines[offset]
-            if body.strip() and not body.startswith((" ", "\t")):
-                break
-            if _STRING_EXIT.search(body):
-                found.append(offset + 1)
-    return found
+    found: set[int] = set()
+    for handler in ast.walk(ast.parse(source)):
+        if isinstance(handler, ast.ExceptHandler) and _catches_a_missing_dependency(handler):
+            for statement in handler.body:
+                found |= {n.lineno for n in ast.walk(statement) if _is_string_exit(n)}
+    return sorted(found)
 
 
 def test_every_local_gate_exits_2_on_a_missing_dependency():
-    vendored = vendored_names()
-    scripts = [p for p in sorted(SCRIPTS.rglob("*.py")) if p.name not in vendored]
+    scripts = local_gates()
     assert scripts, "no local Python gate under scripts/ — this gate inspected nothing"
     bad = [
         f"{path.relative_to(REPO).as_posix()}:{line}"
@@ -103,8 +108,7 @@ def unguarded_imports(source: str) -> list[int]:
 def test_every_local_gate_guards_its_yaml_import():
     """An unguarded import raises ImportError, which exits 1 through the
     traceback — the same misreporting a string-exit guard causes."""
-    vendored = vendored_names()
-    scripts = [p for p in sorted(SCRIPTS.rglob("*.py")) if p.name not in vendored]
+    scripts = local_gates()
     assert scripts, "no local Python gate under scripts/ — this gate inspected nothing"
     bare = [
         f"{path.relative_to(REPO).as_posix()}:{line}"
@@ -134,6 +138,17 @@ def test_the_unguarded_import_collector_can_fail():
     assert unguarded_imports("import yaml\n") == []
 
 
+def test_an_exit_outside_the_dependency_guard_is_not_reported():
+    """Mutation case: an indented guard ends with its own block, so a string
+    exit later in the function is not read as part of it."""
+    source = (
+        "def main():\n    try:\n        import yaml\n    except ImportError:\n"
+        "        raise SystemExit(2) from None\n"
+        '    sys.exit("usage: gate <file>")\n'
+    )
+    assert offenders(source) == []
+
+
 def test_a_string_exit_guard_is_reported():
     """Mutation case: the collector, not only the shipped state."""
     bad = (
@@ -141,6 +156,11 @@ def test_a_string_exit_guard_is_reported():
         '    sys.exit("PyYAML required")\n'
     )
     assert offenders(bad) == [4]
+    raised = (
+        "try:\n    import yaml\nexcept (OSError, ModuleNotFoundError):\n"
+        '    raise SystemExit(f"{name} required")\n'
+    )
+    assert offenders(raised) == [4]
     good = (
         "try:\n    import yaml\nexcept ImportError:\n"
         '    print("ERROR: PyYAML required", file=sys.stderr)\n'

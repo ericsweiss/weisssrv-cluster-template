@@ -24,13 +24,14 @@ APPLY_CMD = "terraform apply"
 UNGUARDED_APPLY = {"terraform:apply"}
 
 
-def run_without_tty(*args: str) -> subprocess.CompletedProcess:
+def run_without_tty(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["bash", str(GUARD), *args],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, **(env or {})},
     )
 
 
@@ -65,6 +66,15 @@ def test_a_pipeline_cannot_apply():
     result = run_without_tty("terraform:unifi-apply", "live VLANs")
     assert result.returncode == 2, result.stderr
     assert "supervised operator step" in result.stderr
+
+
+def test_an_empty_confirm_word_refuses():
+    """Mutation case: with `:-` instead of `-` a bare Enter would approve."""
+    result = run_without_tty(
+        "terraform:unifi-apply", "live VLANs", env={"SUPERVISED_APPLY_CONFIRM_WORD": ""}
+    )
+    assert result.returncode == 2
+    assert "SUPERVISED_APPLY_CONFIRM_WORD is empty" in result.stderr
 
 
 def test_missing_arguments_are_a_usage_error():

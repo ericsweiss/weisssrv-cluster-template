@@ -1,7 +1,7 @@
 {% raw %}---
-# Alertmanager configuration, rendered by ESO from the secrets backend. A Secret
-# because it embeds credentials; `quote` keeps a rotated password valid YAML.
-# webhook_url, not webhook_url_file — the operator's parser rejects the suffix.
+# Alertmanager configuration, rendered by ESO from the secrets backend: a Secret
+# because it embeds credentials, and `quote` keeps a rotated password valid YAML.
+# Receiver URLs are inline, never *_file: the operator's parser rejects the suffix.
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
@@ -102,7 +102,72 @@ spec:
                 - alertname="ZfsEncryptedMountStuck"
               equal:
                 - instance
-{% endraw %}{% if tenant_storage %}{% raw %}            - source_matchers:
+            # The dump series is per app on one host, so the pair keys on app too.
+            - source_matchers:
+                - alertname="BackupArtifactStaleCritical"
+              target_matchers:
+                - alertname="BackupArtifactStale"
+              equal:
+                - instance
+                - app
+            - source_matchers:
+                - alertname="HostMemAvailableCritical"
+              target_matchers:
+                - alertname="HostMemAvailableLow"
+              equal:
+                - instance
+            # A dark hypervisor fails its scrape too; the critical names the
+            # cause, so the exporter warning for the same host stays quiet.
+            - source_matchers:
+                - alertname="ProxmoxHostDown"
+              target_matchers:
+                - alertname="HostExporterDown"
+              equal:
+                - instance
+            # Thermal pairs. GPU and NIC alerts carry chip_name, since a host can
+            # have two; CPU alerts carry none. Drives pair on chip.
+            - source_matchers:
+                - severity="critical"
+                - component=~"cpu|gpu|network"
+              target_matchers:
+                - severity="warning"
+                - component=~"cpu|gpu|network"
+              equal:
+                - instance
+                - component
+                - chip_name
+            - source_matchers:
+                - alertname="SATADriveTempCritical"
+              target_matchers:
+                - alertname="SATADriveTempWarning"
+              equal:
+                - instance
+                - chip
+            # The 75C step is null-routed, so this pair only tidies the UI.
+            - source_matchers:
+                - alertname="NVMeDriveTempCritical"
+              target_matchers:
+                - alertname="NVMeDriveTempHigh"
+              equal:
+                - instance
+                - chip
+{% endraw %}{% if storage_backend == 'zfs' %}{% raw %}            # Pool names repeat across hosts, so the pair keys on both.
+            - source_matchers:
+                - alertname="ZFSPoolSpaceCritical"
+              target_matchers:
+                - alertname="ZFSPoolSpaceWarning"
+              equal:
+                - instance
+                - pool
+            # One remedy, four alerts: a slab leak eats RAM and keeps swap-clean
+            # from completing. HostMemAvailableCritical is never on this list.
+            - source_matchers:
+                - alertname="HostSlabLeakSuspected"
+              target_matchers:
+                - alertname=~"HostMemAvailableLow|NASSwapNotClearing|SwapCleanFailed|SwapCleanStoppedGuests"
+              equal:
+                - instance
+{% endraw %}{% endif %}{% if tenant_storage %}{% raw %}            - source_matchers:
                 - alertname="TenantVolumesNearlyFull"
               target_matchers:
                 - alertname="TenantVolumesFilling"
@@ -134,7 +199,7 @@ spec:
                 - alertname="InfoInhibitor"
               target_matchers:
                 - severity="info"
-                - alertname!~"NodeOutageStormControl"
+                - alertname!~"NodeOutageStormControl|AlertmanagerNotificationsDropping{% endraw %}{% if storage_backend == 'zfs' %}|SwapCleanStoppedGuests{% endif %}{% raw %}"
               equal:
                 - namespace
             # While a node is down, NodeOutageStormControl suppresses per-pod
@@ -169,6 +234,24 @@ spec:
               - receiver: "null"
                 matchers:
                   - severity="none"
+              # Latches whose remedy is a scheduled window, not an action now:
+              # they hold until the work happens, so they repeat every 3 days.
+              - receiver: chat-default
+                matchers:
+                  - alertname=~"{% endraw %}{% if storage_backend == 'zfs' %}HostSlabLeakSuspected|{% endif %}{% raw %}MaintenanceRebootDeferred|KubeletImageGCIneffective"
+                repeat_interval: 72h
+              # Durability faults whose remedy is a resilver or a hand-run job:
+              # one notice a day while they last, warning and critical alike.
+              - receiver: email-and-chat
+                matchers:
+                  - severity="critical"
+                  - alertname=~"ZFSPoolNotOnline|ZFSPoolDataErrors|CertRenewalFailedProlonged"
+                repeat_interval: 24h
+              - receiver: chat-default
+                matchers:
+                  - severity="warning"
+                  - alertname=~"SMART.*|ZFSPool.*|ArchiveBackup.*|CertRenewal.*|CertDistribution.*"
+                repeat_interval: 24h
               - receiver: email-and-chat
                 matchers:
                   - severity="critical"

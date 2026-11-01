@@ -49,9 +49,9 @@ vars:
   GIT_NAMESPACE: {{ git_namespace }}
   CLUSTER_DIR: kubernetes/clusters/{{ cluster_name }}
   VERSIONS_CM: kubernetes/infrastructure/sources/versions-configmap.yaml
-  # weisssrv-lib checkout at LIB_REF: the source the vendored copies in scripts/,
-  # ansible/molecule/ and the root lint profiles are re-copied from
-  # (scripts/vendored-manifest.yml). Read by lint:invariants only; no deploy path touches it.
+  # weisssrv-lib checkout at LIB_REF, the source of the vendored copies
+  # (scripts/vendored-manifest.yml). `task lib:sync` writes it and the lint
+  # gates that read the library use it; no deploy path touches it.
   LIB_DIR: .weisssrv-lib
   LIB_URL: {{ lib_url }}
   # The pipeline header's declared ref, so a bump is one line in .gitlab-ci.yml
@@ -230,7 +230,6 @@ tasks:
 
   # === Lint =============================================================
   lint:
-    # One lint-stage job stays out: deploy-coverage needs a merge base.
     desc: Run every local gate (no credentials required) — mirrors the CI lint stage except deploy-coverage
     cmds:
       - task: lint:yamllint

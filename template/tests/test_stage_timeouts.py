@@ -7,42 +7,44 @@ stage keeps headroom over the slowest HelmRelease beneath its path.
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
 import pytest
 import yaml
 from conftest import REPO as REPO_ROOT
-from conftest import assert_all_parsed, k8s_documents
+from conftest import assert_all_parsed, k8s_documents, to_seconds
 
 K8S_ROOT = REPO_ROOT / "kubernetes"
 CLUSTERS_DIR = K8S_ROOT / "clusters"
-
-
-def to_seconds(value: str) -> int:
-    """Parse a Flux duration ('15m', '90s', '1h30m') into seconds."""
-    total = 0
-    for amount, unit in re.findall(r"(\d+)([hms])", str(value)):
-        total += int(amount) * {"h": 3600, "m": 60, "s": 1}[unit]
-    assert total > 0, f"unparseable duration {value!r}"
-    return total
 
 
 def _cluster_documents() -> tuple[list[tuple[Path, dict]], list[str]]:
     return k8s_documents(CLUSTERS_DIR)
 
 
-def stage_kustomizations() -> list[tuple[Path, dict]]:
-    """Every waiting Flux stage. Selected on `wait` alone: a stage with no
-    explicit timeout is the case this gate exists for, so it must not drop out
-    of the parametrisation."""
+# The GitRepository this repository's own stages reconcile from. A tenant stage
+# names its own source, and its path lives in the tenant's repository.
+CLUSTER_SOURCE = "flux-system"
+
+# helm-controller's wait on a HelmRelease that declares no timeout of its own.
+FLUX_DEFAULT_RELEASE_TIMEOUT = 300
+
+
+def stage_kustomizations(
+    documents: list[tuple[Path, dict]] | None = None,
+) -> list[tuple[Path, dict]]:
+    """Every waiting stage of this repository. Selected on `wait` alone: a stage
+    with no explicit timeout is the case this gate exists for, so it must not
+    drop out of the parametrisation."""
     found = []
-    for path, doc in _cluster_documents()[0]:
+    for path, doc in _cluster_documents()[0] if documents is None else documents:
         if doc.get("kind") != "Kustomization":
             continue
         if not str(doc.get("apiVersion", "")).startswith("kustomize.toolkit.fluxcd.io/"):
             continue
         spec = doc.get("spec") or {}
+        if (spec.get("sourceRef") or {}).get("name") != CLUSTER_SOURCE:
+            continue
         if spec.get("wait") and spec.get("path"):
             found.append((path, doc))
     return found
@@ -114,20 +116,21 @@ def _component_timeouts(
     return found, unreadable
 
 
-def release_timeouts(stage_path: str, root: Path = REPO_ROOT) -> dict[str, int]:
+def release_timeouts(stage_path: str, root: Path = REPO_ROOT) -> dict[str, float]:
     """Every HelmRelease timeout (spec, install, upgrade) a stage path waits on,
-    whether written in a release or patched in by a Kustomize component."""
-    directory = root / stage_path.lstrip("./")
+    whether written in a release, patched in by a Kustomize component, or the
+    helm-controller default for a release that sets none."""
+    directory = root / stage_path.removeprefix("./")
     assert directory.is_dir(), (
         f"stage path {stage_path} does not exist — the gate examined nothing"
     )
-    timeouts: dict[str, int] = {}
+    timeouts: dict[str, float] = {}
     documents, unreadable = k8s_documents(directory)
     for path, doc in documents:
         if doc.get("kind") == "HelmRelease":
             name = f"{_reported(path, root)}:{doc['metadata']['name']}"
-            for value in _spec_timeouts(doc):
-                timeouts[name] = max(to_seconds(value), timeouts.get(name, 0))
+            values = [to_seconds(value) for value in _spec_timeouts(doc)]
+            timeouts[name] = max(values or [FLUX_DEFAULT_RELEASE_TIMEOUT])
             continue
         patched, failed = _component_timeouts(path, doc, root)
         unreadable += failed
@@ -137,7 +140,17 @@ def release_timeouts(stage_path: str, root: Path = REPO_ROOT) -> dict[str, int]:
     return timeouts
 
 
-def _too_tight(stage: int, releases: dict[str, int]) -> list[str]:
+def _explicit_release_timeouts(stage_path: str, root: Path = REPO_ROOT) -> dict[str, float]:
+    """The timeouts a stage path's releases declare outright, without the default fill."""
+    directory = root / stage_path.removeprefix("./")
+    return {
+        f"{_reported(path, root)}:{doc['metadata']['name']}": max(map(to_seconds, declared))
+        for path, doc in k8s_documents(directory)[0]
+        if doc.get("kind") == "HelmRelease" and (declared := _spec_timeouts(doc))
+    }
+
+
+def _too_tight(stage: float, releases: dict[str, float]) -> list[str]:
     """Releases the stage does not outlast."""
     return [f"{name}'s {release}s" for name, release in releases.items() if stage <= release]
 
@@ -156,8 +169,24 @@ def test_to_seconds_parses_the_flux_spellings():
     assert to_seconds("90s") == 90
     assert to_seconds("15m") == 900
     assert to_seconds("1h30m") == 5400
+    assert to_seconds("500ms") == 0.5
     with pytest.raises(AssertionError):
         to_seconds("soon")
+
+
+def test_a_release_without_a_timeout_takes_the_flux_default(tmp_path):
+    """Mutation case: helm-controller waits its 5m default on a release that
+    sets no timeout, so a stage at or under 5m has no headroom over it."""
+    stage = tmp_path / "kubernetes" / "apps"
+    stage.mkdir(parents=True)
+    (stage / "release.yaml").write_text(
+        "apiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease\n"
+        "metadata:\n  name: plain\nspec:\n  interval: 30m\n"
+    )
+    found = release_timeouts("./kubernetes/apps", root=tmp_path)
+    assert found == {"kubernetes/apps/release.yaml:plain": FLUX_DEFAULT_RELEASE_TIMEOUT}
+    assert _too_tight(300, found)
+    assert _explicit_release_timeouts("./kubernetes/apps", root=tmp_path) == {}
 
 
 def test_a_stage_that_does_not_outlast_a_release_is_reported():
@@ -172,15 +201,17 @@ def test_a_stage_that_does_not_outlast_a_release_is_reported():
 def test_at_least_one_stage_resolved_release_timeouts():
     """A refactor that moved every explicit HelmRelease timeout out of the stage
     paths would leave each parametrised case below comparing nothing."""
-    assert any(release_timeouts(doc["spec"]["path"]) for _path, doc in stage_kustomizations()), (
+    assert any(
+        _explicit_release_timeouts(doc["spec"]["path"]) for _path, doc in stage_kustomizations()
+    ), (
         "no stage path holds a HelmRelease with an explicit timeout — the "
         "comparison in this gate examined nothing"
     )
 
 
 def test_a_component_patched_timeout_is_counted(tmp_path):
-    """Mutation case: two of the apps stage's releases take their timeout from a
-    component outside the stage path, so a walk of that path alone misses them."""
+    """Mutation case: a release can take its timeout from a component outside
+    the stage path, so a walk of that path alone misses it."""
     app = tmp_path / "kubernetes" / "apps" / "runner"
     component = tmp_path / "kubernetes" / "components" / "common"
     app.mkdir(parents=True)
@@ -202,8 +233,30 @@ def test_a_component_patched_timeout_is_counted(tmp_path):
         "          timeout: 15m\n"
     )
     found = release_timeouts("./kubernetes/apps", root=tmp_path)
-    assert found == {"kubernetes/components/common:runner.*": 900}
+    assert found == {
+        "kubernetes/apps/runner/release.yaml:runner": FLUX_DEFAULT_RELEASE_TIMEOUT,
+        "kubernetes/components/common:runner.*": 900,
+    }
     assert _too_tight(900, found) == ["kubernetes/components/common:runner.*'s 900s"]
+
+
+def test_a_tenant_sourced_stage_is_not_a_local_stage():
+    """Mutation case: a tenant Kustomization waits on a path in its own
+    repository, so measuring it against this tree fails on a missing path."""
+    def kustomization(name: str, source: str) -> tuple[Path, dict]:
+        return Path(f"{name}.yaml"), {
+            "apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+            "kind": "Kustomization",
+            "metadata": {"name": name},
+            "spec": {
+                "wait": True,
+                "path": "./kubernetes/flux",
+                "sourceRef": {"kind": "GitRepository", "name": source},
+            },
+        }
+
+    documents = [kustomization("apps", CLUSTER_SOURCE), kustomization("example-app", "example-app")]
+    assert [doc["metadata"]["name"] for _path, doc in stage_kustomizations(documents)] == ["apps"]
 
 
 @pytest.mark.parametrize(

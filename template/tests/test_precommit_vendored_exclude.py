@@ -38,11 +38,12 @@ def excludes() -> dict[str, str]:
 
 
 def uncovered(pattern: str, paths: list[str]) -> list[str]:
-    """Manifest paths the pattern does not exempt."""
+    """Manifest paths the pattern does not exempt. pre-commit applies `exclude`
+    with re.search, so the gate does too."""
     if not pattern:
         return list(paths)
     rx = re.compile(pattern)
-    return [p for p in paths if not rx.match(p)]
+    return [p for p in paths if not rx.search(p)]
 
 
 def test_every_vendored_copy_is_exempt_from_the_whitespace_hooks():
@@ -69,7 +70,7 @@ def test_the_exclude_does_not_exempt_repo_owned_files():
     assert owned, "scripts/ holds nothing but vendored copies"
     for hook, pattern in excludes().items():
         rx = re.compile(pattern)
-        wide = [p for p in owned if rx.match(p)]
+        wide = [p for p in owned if rx.search(p)]
         assert not wide, f"the `{hook}` exclude also exempts repo-owned files: {wide}"
 
 
@@ -78,3 +79,4 @@ def test_a_too_narrow_pattern_is_reported():
     assert uncovered(r"^scripts/shell-lib\.py$", ["scripts/shell-lib.sh"])
     assert not uncovered(r"^scripts/shell-lib\.sh$", ["scripts/shell-lib.sh"])
     assert uncovered("", ["scripts/shell-lib.sh"])
+    assert not uncovered(r"shell-lib\.sh", ["scripts/shell-lib.sh"])

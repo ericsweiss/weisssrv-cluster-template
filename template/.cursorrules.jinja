@@ -1,6 +1,11 @@
 # Cursor rules — {{ cluster_name }}
 
-Cursor's single-file rules format; `.cursor/rules/cluster-development.mdc`
-(`alwaysApply: true`) is the one current Cursor reads. Both defer to
-`.claude/skills/cluster-development/SKILL.md`, the authoritative workflow for
-this cluster. `CLAUDE.md` and `AGENTS.md` point at the same place.
+Read [AGENTS.md](AGENTS.md) first. It is the entry point for every agent and
+names the canonical home of every fact in this repository.
+
+Before any change, read `.claude/skills/cluster-development/SKILL.md` and the
+`references/` file its decision tree names for the change at hand. The skill
+holds the workflow, the invariants and the pre-merge gates.
+
+Nothing is restated here. `.cursor/rules/cluster-development.mdc` carries the
+same pointer for Cursor's rules engine.

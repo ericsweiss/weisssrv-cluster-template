@@ -1,7 +1,7 @@
 ---
 # Local guardrails: run `pre-commit install` once, then these run on every
-# commit. They mirror the secret scan and yamllint the pipeline runs, so
-# problems surface before the push. Revs are pinned; bump them in an MR.
+# commit. They mirror the secret scan, yamllint and the tool-light repo gates
+# the pipeline runs. Revs are pinned; bump them in an MR.
 repos:
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
@@ -30,8 +30,10 @@ repos:
           check-alertmanager-behaviour\.py | check-backup-artifact-apps\.py |
           check-ci-include-job-names\.py |
           check-cluster-invariants\.py | check-comment-length\.py | check-dashboards\.py |
-          check-default-deny-coverage\.py | check-deploy-coverage\.sh | check-doc-links\.py
-          | check-ephemeral-storage-cap\.py | check-helm-repo-parity\.py |
+          check-default-deny-coverage\.py | check-deploy-coverage\.sh |
+          check-deploy-preflight\.py | check-doc-links\.py |
+          check-ephemeral-storage-cap\.py | check-guest-endpoint-parity\.py |
+          check-helm-repo-parity\.py |
           check-hpa-vpa-invariant\.py | check-kubectl-version-pin\.py |
           check-lib-pins\.py |
           check-netpol-except-parity\.py | check-nfs-tls\.py | check-pvc-storageclass\.py |

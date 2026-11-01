@@ -1,7 +1,7 @@
 """Unit tests for scripts/check-ci-pin-parity.sh.
 
-Each test writes a pipeline file carrying the floor pins the gate asserts on and
-checks the exit code: 0 in agreement, 1 on drift or a broken derivation.
+Each test writes a pipeline file carrying the floor pins and checks the exit
+code: 0 in agreement, 1 on drift, 2 on a broken derivation or unreadable file.
 """
 
 from __future__ import annotations
@@ -70,5 +70,14 @@ def test_a_pipeline_the_parser_no_longer_sees_fails(tmp_path):
     result = subprocess.run(
         ["bash", str(GATE), str(ci)], capture_output=True, text=True, check=False
     )
-    assert result.returncode == 1
+    assert result.returncode == 2
     assert "no longer sees it" in result.stdout
+
+
+def test_a_missing_pipeline_file_is_an_inspection_failure(tmp_path):
+    result = subprocess.run(
+        ["bash", str(GATE), str(tmp_path / "absent.yml")],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "cannot read" in result.stderr

@@ -1,7 +1,7 @@
 {% set gc_alert = [k3s_image_gc_high_threshold | int + 5, 79] | min %}---
-# promtool unit tests for KubeletImageGCIneffective. The rule watches the
-# in-cluster DaemonSet's view of each node root filesystem, so a host-exporter
-# target, a node under the watermark and a node where GC works all stay silent.
+# promtool unit tests for the storage alerts: KubeletImageGCIneffective on each
+# node root filesystem, and the SMART health, growth, media-error and collector
+# staleness alerts on the host disks.
 rule_files:
   - rules.yaml
 # The input series are constant, so 5m ticks separate the 2h pending/firing
@@ -20,10 +20,10 @@ tests:
         values: '{{ 110 - k3s_image_gc_high_threshold }}+0x180'
       - series: 'node_filesystem_size_bytes{job="node-exporter", instance="10.42.1.8:9100", mountpoint="/"}'
         values: '100+0x180'
-      # Just over the image-gc watermark: GC is running and keeping up, which is
-      # the node's normal operating band, so this must never page.
+      # At the alert threshold itself, five points over the GC watermark (capped at 79).
+      # The rule's strict `>` keeps it silent at every allowed watermark.
       - series: 'node_filesystem_avail_bytes{job="node-exporter", instance="10.42.1.9:9100", mountpoint="/"}'
-        values: '{{ 101 - gc_alert }}+0x180'
+        values: '{{ 100 - gc_alert }}+0x180'
       - series: 'node_filesystem_size_bytes{job="node-exporter", instance="10.42.1.9:9100", mountpoint="/"}'
         values: '100+0x180'
       # A host exporter at the same fill: not a kubelet image filesystem.
@@ -52,7 +52,7 @@ tests:
       - series: 'smartmon_device_smart_healthy{device="sda", instance="192.0.2.11:9101"}'
         values: '1+0x4 0 1+0x19'
     alert_rule_test:
-      # Before the FAILED sample at 20m, and inside the 15m hold after it.
+      # Before the FAILED sample at 25m, and inside the 15m hold after it.
       - eval_time: 15m
         alertname: SMARTDeviceUnhealthy
         exp_alerts: []

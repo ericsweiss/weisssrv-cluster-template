@@ -49,6 +49,15 @@ CLUSTER_EXTERNAL_SECRET = textwrap.dedent(
 )
 
 
+def runbook(body: str, elsewhere: str = "") -> str:
+    """A RUNBOOKS.md with `body` in the rotation section, `elsewhere` after it."""
+    return (
+        "# Runbooks\n\n## Alerts that link here\n\nnone\n\n"
+        f"## {gate.SECTION}\n\n```bash\n# a shell comment, not a heading\n```\n\n{body}\n### What each ExternalSecret holds\n\nsee above\n\n"
+        f"## Storage\n\n{elsewhere}\n"
+    )
+
+
 def write(root: Path, rel: str, body: str) -> None:
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,7 +68,7 @@ def write(root: Path, rel: str, body: str) -> None:
 def repo(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setattr(gate, "DECLARED_MANUAL", {})
     write(tmp_path, "kubernetes/apps/demo/externalsecret.yaml", EXTERNAL_SECRET)
-    write(tmp_path, gate.DOC, "Demo Item rotates by hand: demo/demo-secrets\n")
+    write(tmp_path, gate.DOC, runbook("Demo Item rotates by hand: demo/demo-secrets\n"))
     return tmp_path
 
 
@@ -69,21 +78,21 @@ def test_a_documented_secret_passes(repo: Path) -> None:
 
 
 def test_an_undocumented_vault_item_fails(repo: Path) -> None:
-    write(repo, gate.DOC, "demo/demo-secrets is refreshed by hand\n")
+    write(repo, gate.DOC, runbook("demo/demo-secrets is refreshed by hand\n"))
     problems = gate.check(repo)
     assert any("Demo Item" in p for p in problems)
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
 def test_a_secret_no_rotation_path_reaches_fails(repo: Path) -> None:
-    write(repo, gate.DOC, "Demo Item lives in the vault\n")
+    write(repo, gate.DOC, runbook("Demo Item lives in the vault\n"))
     problems = gate.check(repo)
     assert any("reached by no rotation path" in p for p in problems)
     assert gate.main(["--repo-root", str(repo)]) == 1
 
 
 def test_a_declared_manual_entry_is_enough(repo: Path, monkeypatch) -> None:
-    write(repo, gate.DOC, "Demo Item lives in the vault\n")
+    write(repo, gate.DOC, runbook("Demo Item lives in the vault\n"))
     monkeypatch.setattr(gate, "DECLARED_MANUAL", {"demo/demo-secrets": "no procedure yet"})
     assert gate.check(repo) == []
 
@@ -95,10 +104,35 @@ def test_a_stale_declared_manual_entry_fails(repo: Path, monkeypatch) -> None:
 
 def test_no_external_secrets_is_vacuous(tmp_path: Path) -> None:
     (tmp_path / "kubernetes").mkdir()
-    write(tmp_path, gate.DOC, "nothing\n")
+    write(tmp_path, gate.DOC, runbook("nothing\n"))
     with pytest.raises(gate.Vacuous):
         gate.check(tmp_path)
     assert gate.main(["--repo-root", str(tmp_path)]) == 2
+
+
+def test_a_name_outside_the_rotation_section_does_not_count(repo: Path) -> None:
+    """Mutation case: both names appear in the doc, but only in another section,
+    so neither has a documented rotation."""
+    write(repo, gate.DOC, runbook("nothing here\n", "Demo Item rotates by hand: demo/demo-secrets\n"))
+    problems = gate.check(repo)
+    assert any("Demo Item" in p for p in problems), problems
+    assert any("reached by no rotation path" in p for p in problems), problems
+    assert gate.main(["--repo-root", str(repo)]) == 1
+
+
+def test_a_subsection_of_the_rotation_section_counts(repo: Path) -> None:
+    body = runbook("see below\n").replace(
+        "see above", "Demo Item rotates by hand: demo/demo-secrets"
+    )
+    write(repo, gate.DOC, body)
+    assert gate.check(repo) == []
+
+
+def test_a_runbook_without_the_rotation_section_is_vacuous(repo: Path) -> None:
+    write(repo, gate.DOC, "# Runbooks\n\nDemo Item rotates by hand: demo/demo-secrets\n")
+    with pytest.raises(gate.Vacuous):
+        gate.check(repo)
+    assert gate.main(["--repo-root", str(repo)]) == 2
 
 
 def test_the_live_tree_is_clean() -> None:
@@ -123,9 +157,9 @@ def test_a_cluster_external_secret_is_covered_too(repo: Path) -> None:
     assert any("DNS Provider Token" in p for p in problems)
     assert gate.main(["--repo-root", str(repo)]) == 1
 
-    write(repo, gate.DOC,
+    write(repo, gate.DOC, runbook(
           "Demo Item rotates by hand: demo/demo-secrets\n"
-          "DNS Provider Token rotates into dns-api-token\n")
+          "DNS Provider Token rotates into dns-api-token\n"))
     assert gate.check(repo) == []
 
 

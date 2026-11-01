@@ -54,11 +54,10 @@
 # CRITICAL: every map key is a STATE ADDRESS. Renaming one plans a destroy that
 # the module's `prevent_destroy` refuses: rename with a `moved {}` block, stop
 # managing an object with `terraform state rm` (README § Renaming and removing).
-# EDIT ME BEFORE THE FIRST APPLY. The `default` network, the DNS servers and the
-# port forwards come from your answers, and the example VLAN /24s dodge your
-# LAN, pod and service ranges. The VLANs, zones, policies and SSIDs below are a
-# WORKED EXAMPLE: README § Before the first apply is the import list of
-# controller objects these entries must adopt rather than duplicate.
+
+# EDIT ME before the first apply: the VLANs, zones, policies and SSIDs are a
+# worked example. README § Before the first apply lists the controller objects
+# to import.
 locals {
   # The resolvers this cluster builds, handed out by every DHCP scope. Changing
   # a resolver's address is one edit here plus the `upstream_dns_servers`
@@ -205,11 +204,9 @@ locals {
     },
   ]
 
-  # CRITICAL: every SSID is WPA-PSK on 2.4 + 5 GHz — 6 GHz fails WLAN creation on
-  # this provider (upstream #406), so enable that band in the UI if you need it.
-  # `cluster_name` is truncated to keep the SSID inside the 32-BYTE 802.11 limit;
-  # over it, the apply fails after the networks and zones are written.
-  # Rename these freely - nothing keys off them.
+  # WPA-PSK on 2.4 + 5 GHz; the provider fails WLAN creation on 6 GHz, so enable
+  # it in the UI. cluster_name is truncated to keep the SSID within the 32-byte
+  # 802.11 limit (26 + `-guest`).
   wlans = {
     iot = {
       ssid       = "{{ cluster_name[:26] }}-iot"

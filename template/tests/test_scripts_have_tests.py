@@ -21,6 +21,10 @@ MANIFEST = SCRIPTS / "vendored-manifest.yml"
 SCRIPT_ROOTS = (SCRIPTS, REPO / "kubernetes", REPO / "terraform")
 SUITE_DIRS = (REPO / "tests", SCRIPTS)
 
+# Trees that hold no script of this repository: bytecode, and the provider and
+# module sources `terraform init` downloads beside each root.
+_VENDOR_PARTS = {"__pycache__", ".terraform"}
+
 _SCRIPT_SUFFIXES = {".py", ".sh"}
 # Site data and fixtures that sit in scripts/ alongside the code. They are
 # covered by the gates that read them, not by a script test, and some carry the
@@ -38,13 +42,13 @@ EXEMPTION_SUITES = {"test_scripts_have_tests.py", "test_script_literals.py"}
 
 
 def _rendered_name(path: Path) -> str:
-    """The basename a render ships: copier strips the `.jinja` suffix."""
-    return path.name.removesuffix(".jinja")
+    """The basename coverage and EXEMPT are keyed on."""
+    return path.name
 
 
 def _rendered_path(path: Path) -> str:
-    """The repo-relative path a render ships, the form an EXEMPT key takes."""
-    return path.relative_to(REPO).with_name(_rendered_name(path)).as_posix()
+    """The repo-relative path, the form an EXEMPT key takes."""
+    return path.relative_to(REPO).as_posix()
 
 
 def _scripts(root: Path = SCRIPTS) -> list[Path]:
@@ -57,10 +61,10 @@ def _scripts(root: Path = SCRIPTS) -> list[Path]:
         p
         for p in root.rglob("*")
         if p.is_file()
-        and "__pycache__" not in p.parts
+        and not _VENDOR_PARTS & set(p.relative_to(root).parts)
         and not p.name.startswith("test_")
-        and Path(_rendered_name(p)).suffix not in _NON_SCRIPT_SUFFIXES
-        and (Path(_rendered_name(p)).suffix in _SCRIPT_SUFFIXES or os.access(p, os.X_OK))
+        and p.suffix not in _NON_SCRIPT_SUFFIXES
+        and (p.suffix in _SCRIPT_SUFFIXES or os.access(p, os.X_OK))
     )
 
 
@@ -230,16 +234,18 @@ def test_every_exemption_key_is_a_repo_relative_path():
 
 def test_a_basename_exemption_does_not_resolve(monkeypatch, upstream_covered):
     """Mutation case: the stale-entry check must reject the old key shape."""
-    script = _all_scripts()[0]
+    scripts = _all_scripts()
+    assert scripts, "the script walk found nothing, so this mutation proves nothing"
+    script = scripts[0]
     monkeypatch.setitem(EXEMPT, _rendered_name(script), "x " * 10)
     with pytest.raises(AssertionError, match="no script resolves to"):
         test_every_exemption_still_names_a_script(upstream_covered)
 
 
 def test_a_path_exemption_resolves(monkeypatch, upstream_covered):
-    script = next(
-        p for p in _all_scripts() if _rendered_name(p) not in upstream_covered
-    )
+    local = [p for p in _all_scripts() if _rendered_name(p) not in upstream_covered]
+    assert local, "no local script found, so this mutation proves nothing"
+    script = local[0]
     monkeypatch.setitem(EXEMPT, _rendered_path(script), "x " * 10)
     test_every_exemption_still_names_a_script(upstream_covered)
 
@@ -256,14 +262,17 @@ def test_the_gate_sees_a_realistic_number_of_scripts():
 
 def test_the_collector_sees_the_shapes_an_extension_filter_missed(tmp_path):
     """The collector is recursive and not extension-keyed: extensionless
-    executables, subdirectory helpers and `.jinja`-named scripts must be seen."""
+    executables and subdirectory helpers must be seen, and a downloaded
+    `.terraform` tree must not."""
     (tmp_path / "gate.py").write_text("#!/usr/bin/env python3\n")
     (tmp_path / "test_gate.py").write_text("")
     (tmp_path / "config.yaml").write_text("---\n")
-    (tmp_path / "values.yaml.jinja").write_text("---\n")
-    (tmp_path / "state.sh.jinja").write_text("")
+    (tmp_path / "state.sh").write_text("")
     (tmp_path / "__pycache__").mkdir()
     (tmp_path / "__pycache__" / "gate.pyc").write_text("")
+    module = tmp_path / "authentik" / ".terraform" / "modules" / "sso" / "scripts"
+    module.mkdir(parents=True)
+    (module / "import.sh").write_text("#!/usr/bin/env bash\n")
     shebang = tmp_path / "reap"
     shebang.write_text("#!/usr/bin/env bash\n")
     shebang.chmod(0o755)

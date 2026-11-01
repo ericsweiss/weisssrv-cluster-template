@@ -1,8 +1,6 @@
 ---
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# Single-namespace dir: the namespace transformer places the shared components'
-# NetworkPolicies here too.
 namespace: cert-manager
 resources:
   - namespace.yaml

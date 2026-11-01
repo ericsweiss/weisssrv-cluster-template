@@ -6,12 +6,11 @@ that same version. A provider ahead of the server carries unserved schema.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import pytest
 import yaml
+from conftest import REPO
 
-REPO = Path(__file__).resolve().parent.parent
 VERSIONS_TF = REPO / "terraform" / "authentik" / "versions.tf"
 LOCK = REPO / "terraform" / "authentik" / ".terraform.lock.hcl"
 ALL_YML = REPO / "ansible" / "inventories" / "prod" / "group_vars" / "all.yml"
@@ -19,11 +18,6 @@ ALL_YML = REPO / "ansible" / "inventories" / "prod" / "group_vars" / "all.yml"
 _PIN = re.compile(r'version\s*=\s*"([0-9]{4}\.[0-9]+\.[0-9]+)"')
 _LOCK_FIELD = re.compile(r'^\s*(version|constraints)\s*=\s*"([^"]+)"', re.MULTILINE)
 _PROVIDER_BLOCK = 'provider "registry.terraform.io/goauthentik/authentik" {'
-
-needs_authentik_terraform = pytest.mark.skipif(
-    not VERSIONS_TF.is_file(), reason="this repository ships no terraform/authentik/"
-)
-
 
 def provider_pin(versions_tf: str) -> str:
     """The exact provider version out of the `required_providers` block."""
@@ -59,9 +53,13 @@ def problems(versions_tf: str, server_version: str, lock: str) -> list:
             f"provider pin {pin} is not minor-locked to authentik_version {server_version}"
         )
     fields = lock_fields(lock)
-    for field in ("version", "constraints"):
-        if fields.get(field) != pin:
-            found.append(f".terraform.lock.hcl {field} is {fields.get(field)!r}, want {pin!r}")
+    if fields.get("version") != pin:
+        found.append(f".terraform.lock.hcl version is {fields.get('version')!r}, want {pin!r}")
+    # `terraform init` records this root's exact pin merged with the library
+    # module's own range, so the pin is one term of the list.
+    constraints = [term.strip() for term in (fields.get("constraints") or "").split(",")]
+    if pin not in constraints:
+        found.append(f".terraform.lock.hcl constraints {constraints} do not carry the pin {pin!r}")
     return found
 
 
@@ -72,7 +70,6 @@ def server_version() -> str:
     return str(version)
 
 
-@needs_authentik_terraform
 def test_provider_pin_server_version_and_lockfile_agree() -> None:
     found = problems(
         VERSIONS_TF.read_text(encoding="utf-8"),
@@ -82,7 +79,6 @@ def test_provider_pin_server_version_and_lockfile_agree() -> None:
     assert found == [], "\n".join(found)
 
 
-@needs_authentik_terraform
 def test_a_mismatched_minor_and_a_stale_lock_both_fail() -> None:
     pin = provider_pin(VERSIONS_TF.read_text(encoding="utf-8"))
     ahead = f"2099.1.{pin.split('.')[-1]}"
@@ -90,6 +86,24 @@ def test_a_mismatched_minor_and_a_stale_lock_both_fail() -> None:
     found = problems(mutated, server_version(), LOCK.read_text(encoding="utf-8"))
     assert any("minor-locked" in p for p in found), found
     assert any("lock.hcl version" in p for p in found), found
+    assert any("do not carry the pin" in p for p in found), found
+
+
+def test_a_merged_constraint_list_carries_the_pin() -> None:
+    """The list `terraform init` records against the library module passes,
+    and a range without the exact pin does not."""
+    pin = provider_pin(VERSIONS_TF.read_text(encoding="utf-8"))
+    block = (
+        f"{_PROVIDER_BLOCK}\n"
+        f'  version     = "{pin}"\n'
+        '  constraints = "{constraints}"\n'
+        "}\n"
+    )
+    merged = block.replace("{constraints}", f">= 2026.5.0, {pin}, < 2027.0.0")
+    assert problems(VERSIONS_TF.read_text(encoding="utf-8"), server_version(), merged) == []
+    ranged = block.replace("{constraints}", ">= 2026.5.0, < 2027.0.0")
+    found = problems(VERSIONS_TF.read_text(encoding="utf-8"), server_version(), ranged)
+    assert any("do not carry the pin" in p for p in found), found
 
 
 def test_the_lock_reader_is_scoped_to_the_authentik_block() -> None:

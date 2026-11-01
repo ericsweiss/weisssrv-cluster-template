@@ -46,7 +46,7 @@ two or more compute nodes. Fewer nodes work, with caveats noted below.
   rules and storage replication are then inert.
 - Virtualization extensions and, if you plan to pass a GPU through, **IOMMU**
   enabled in firmware.
-- A UPS is not required by the template and is strongly recommended by physics.
+- A UPS is strongly recommended. The template does not require one.
 
 ### Storage layout
 
@@ -56,8 +56,8 @@ ZFS. See [ARCHITECTURE.md](ARCHITECTURE.md) § Backend seams for what a
 different one would have to bring.
 
 Create the ZFS pools **by hand, before Ansible runs**. Nothing in the generated
-repository creates or destroys a pool — that is deliberate; Ansible only sets
-properties, creates zvols, and mounts things. The declared datasets are created
+repository creates or destroys a pool. Ansible only sets properties, creates
+zvols, and mounts things. The declared datasets are created
 once, from the same inventory, by `task disaster-recovery:storage-bootstrap`.
 
 The template expects up to four pool roles on the storage node. Pool *names* are
@@ -119,7 +119,7 @@ before you start; the answers marked → become copier answers.
 | Resolver addresses | `upstream_dns_servers` | space-separated, preference order; the DNS containers are **created** at these, not forwarded to |
 | Infrastructure guest addresses | — | DNS, mail relay, application VMs |
 | k3s server VM addresses | — | three, contiguous |
-| k3s agent VM addresses | — | one per compute node, contiguous |
+| k3s agent VM addresses | — | one per Proxmox host, storage node included, contiguous |
 | Kubernetes API VIP | `k3s_api_vip` | floating, assigned by kube-vip |
 | Public ingress VIP | `metallb_public_vip` | the address you port-forward to |
 | Internal ingress VIP | `metallb_internal_vip` | LAN-only services |
@@ -275,7 +275,7 @@ eval "$(op signin)"
 # Create the vault that will hold this cluster's items → onepassword_vault
 op vault create <onepassword_vault>
 
-# Connect server credentials. The server NAME IS LOAD-BEARING: the generated
+# Connect server credentials. The server NAME IS FIXED: the generated
 # `task flux:bootstrap-secrets` looks for `<cluster_name>-connect` and mints its
 # own token against it. Use exactly this form.
 op connect server create <cluster_name>-connect --vaults <onepassword_vault>
@@ -302,7 +302,7 @@ the vault is not.
 
 ### Items to create
 
-**Item titles and field names are load-bearing.** A title is a path segment in
+**Item titles and field names must match exactly.** A title is a path segment in
 an `op://<vault>/<Item Title>/<field>` reference, and it is also the
 `remoteRef.key` an `ExternalSecret` sends to 1Password Connect; a field name is
 the last path segment / `remoteRef.property`. A mismatch is not a warning: `op
@@ -399,16 +399,17 @@ every reconcile, so replacing it later takes effect. The other two are not:
 Generate both with `openssl rand -base64 32` when you create the item.
 
 Four items cannot exist until the thing that issues them exists, so create them
-as the bring-up reaches them: `GitLab Runner` and `GitLab Runner Privileged`
-(registration tokens, from the GitLab project), `Authentik Terraform Token`
-(minted in Authentik after it is running), and `Registry Cache Upstream` (your
-registry account). Until then those workloads stay in `SecretSyncError`, and the
-Deployments among them never get their Secret, so the kube-prometheus-stack
-defaults `KubeDeploymentReplicasMismatch` and `KubePodNotReady` fire for each
-one. `registry-cache` adds its own `RegistryCacheDown` alert, which fires 15
-minutes after bootstrap and keeps firing until the item exists. Silence these,
-or drop `- registry-cache` from `kubernetes/apps/kustomization.yaml`, until you
-have the credentials.
+as the bring-up reaches them. `Authentik Terraform Token` is minted in Authentik
+once it runs, and only the host-side `terraform:*` tasks and CI read it. The
+other three feed ExternalSecrets: `GitLab Runner` and `GitLab Runner Privileged`
+hold registration tokens from the GitLab project, and `Registry Cache Upstream`
+holds your registry account. Until they exist those workloads stay in
+`SecretSyncError`, and the Deployments among them never get their Secret, so
+the kube-prometheus-stack defaults `KubeDeploymentReplicasMismatch` and
+`KubePodNotReady` fire for each one. `registry-cache` adds its own
+`RegistryCacheDown` alert, which fires 15 minutes after bootstrap and keeps
+firing until the item exists. Silence these, or drop `- registry-cache` from
+`kubernetes/apps/kustomization.yaml`, until you have the credentials.
 
 Generate every random value with something like `openssl rand -base64 32` and
 paste it in; do not invent memorable ones. Encrypted-pool passphrases are not in
@@ -430,7 +431,7 @@ can read everything in the vault its Connect server was granted.
 seam; copier will refuse it until it exists. What such a consumer would have to
 build — the library ships GitLab CI YAML, forge-neutral scripts and a
 `--platform github` release path — is mapped in the library's
-[docs/EXTENSIBILITY.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/EXTENSIBILITY.md)
+[docs/EXTENSIBILITY.md](https://github.com/ericsweiss/weisssrv-lib/blob/main/docs/EXTENSIBILITY.md)
 § Forge portability.
 
 You need, before generating:
@@ -711,9 +712,9 @@ python-lint job runs over `scripts/` and `tests/`. `tflint` is
 `curl` is how `task flux:install-cli` fetches the pinned flux release. macOS
 ships it; a minimal Debian image does not.
 
-Not required for `task lint`, but required by the gate you run after touching
-alert rules (`task lint:prometheus-config`): **`promtool`** and **`amtool`**,
-which ship in the Prometheus and Alertmanager release tarballs.
+`task lint` runs `lint:prometheus-config`, which needs **`promtool`** and
+**`amtool`** on PATH. Both ship in the Prometheus and Alertmanager release
+tarballs.
 
 `task collect-state` needs a wall-clock backstop for its SSH probes:
 **`timeout`** on Linux, or **`gtimeout`** from `brew install coreutils` on
@@ -732,7 +733,8 @@ generating (SETUP § 3).
 
 Versions the generated repository expects: Task 3.x, Ansible core 2.18+ (the
 collection's declared floor), Terraform 1.x within the range each generated
-`versions.tf` declares, `op` 2.x, Python 3.11+, copier 9+.
+`versions.tf` declares, `op` 2.x, Python 3.11+, and copier at or above
+`copier.yml`'s `_min_copier_version`.
 
 ---
 

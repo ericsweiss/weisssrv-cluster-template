@@ -21,7 +21,7 @@ sources are unaffected — they fetch over https from `{{ lib_url }}`.
 | Stage | Jobs | Source |
 |---|---|---|
 | `lint` | `yaml-lint`, `ansible-lint`, `shellcheck`, `python-lint`, `terraform-fmt`, `lint-docs-links`, `comment-length`, `flux-lint`, `version-check` (library); `version-coverage`, `version-checksums`, `check-generated-files`, `deploy-coverage`, `netpol-parity`, `kustomization-coverage`, `cluster-literals`, `prometheus-config-lint`, `terraform-tflint`, `check-integration-matrix`, `flux-version-pin`, `kubectl-version-pin`, `check-role-inputs` (this repo) | mixed |
-| `validate` | `terraform-validate` (library); `check-deploy-playbooks`, `terraform-plan`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan`{% if use_unifi %}, `unifi-drift-plan`{% endif %} (this repo) | mixed |
+| `validate` | `terraform-validate`, {% if vpn_tailscale %}`tailscale-drift-plan`, {% endif %}`authentik-drift-plan`{% if use_unifi %}, `unifi-drift-plan`{% endif %} (library); `check-deploy-playbooks`, `terraform-plan` (this repo) | mixed |
 | `test` | `python-tests` (the cluster invariants in `tests/`, the suites beside the scripts in `scripts/`, the library-pin gate and the vendored-copy gate); `integration-tests` (the multi-role molecule stacks, `.gitlab/ci/integration-jobs.yml`) | mixed |
 | `security` | `secret_detection` | library |
 | `ai-review` | `pr-agent-review` | library |
@@ -150,22 +150,26 @@ read one:
 |---|---|
 | `tests/test_authentik_import.py` | `terraform/authentik/import.sh --check` disagrees with `sso.tf`, so a disaster-recovery import names an address that no longer exists |
 | `tests/test_authentik_provider_lockstep.py` | the authentik provider pin, its lock file and `authentik_version` are not the same minor |
-| `tests/test_check_guest_endpoint_parity.py` | a hand-written EndpointSlice names a LAN address that is not a real `ansible_host` |
+| `tests/test_check_deploy_preflight.py` | a deploy job's script stops resolving, its `ansible-playbook` call stops parsing, or it names a playbook that does not exist |
+| `tests/test_check_guest_endpoint_parity.py` | a hand-written EndpointSlice names a LAN address that is not a real `ansible_host`, or the gate stops reading this tree's endpoints, k3s groups or NFS exports |
 | `tests/test_check_secret_rotation_coverage.py` | the secret-rotation gate stops failing on a credential the rotation doc does not cover |
 | `tests/test_check_tenant_wiring.py` | a tenant file is missing its `serviceAccountName`, `prune`, `targetNamespace`, `dependsOn`, namespace labels, RoleBindings, or its `kustomization.yaml` entry |
 {% if use_unifi %}| `tests/test_check_unifi_doc_parity.py` | the UniFi doc-parity gate stops failing when the doc and the Terraform tree disagree |
 {% endif %}| `tests/test_cloudflare_ddns.py` | the DDNS CronJob's program would write, or refuse to write, the wrong public record (skipped whole when `dns_backend` is not `cloudflare`) |
 | `tests/test_cluster_invariants.py` | the inventory, the substitution set or the deploy wiring is internally inconsistent — see below |
-| `tests/test_deploy_preflight.py` | the deploy-preflight gate stops failing on a missing playbook, an unreadable job shape, or a tag that selects nothing |
 | `tests/test_flux_corpus_gates.py` | `scripts/flux-corpus-gates.sh` skips a gate, or stops failing on a finding |
 | `tests/test_generate_host_log_staleness.py` | the host-log-staleness generator stops failing when its rules drift from the inventory |
+| `tests/test_gitlab_runner_overrides.py` | a shared-runner `*_overwrite_max_allowed` ceiling differs from its explicit default, so a job variable could grow a pod past the size the quota assumes |
 | `tests/test_gitlab_runner_reaper.py` | the reaper's guards would delete a live CI job pod, or an in-flight job's registry credential Secret |
-| `tests/test_grafana_dashboards.py` | a dashboard's JSON is unparseable or malformed, which `flux-lint` cannot see inside the ConfigMap that carries it |
+| `tests/test_grafana_dashboards.py` | a dashboard's JSON is unparseable or malformed, which `flux-lint` cannot see inside the ConfigMap that carries it, or a ruler rule-count panel turns green at a count other than the `LokiRulerRulesMissing` threshold |
 | `tests/test_helm_values_releases.py` | `scripts/helm-values-releases.yaml` misses a HelmRelease, or names a chart the sources do not declare, so its values block is validated against nothing |
 | `tests/test_inventory_defaults.py` | an inventory variable restates the role default it already gets |
 | `tests/test_lib_pins.py` | a library pin stops deriving from the declared `lib_ref` input — an `include: ref:`, the collection `version:`, a Terraform `?ref=` the site list names, or the Taskfile's `LIB_REF` |
 | `tests/test_local_gate_floors.py` | a local `task lint` gate that mirrors a CI include drops its linted-nothing floor, so it passes on a target list that matches nothing |
+| `tests/test_loki_out_of_order_window.py` | a host journal replay outruns Loki's out-of-order window, so the lines a restarted collector replays are rejected as `too_far_behind` |
 | `tests/test_namespace_psa.py` | a Namespace this repo declares carries no Pod Security Admission labels, which admits at `privileged` |
+| `tests/test_platform_releases.py` | a platform HelmRelease value would fail only once the cluster runs it: the Connect pod mounts a ServiceAccount token, the Grafana probe is not HTTP, metrics-server runs beside the k3s AddOn or dies with one node, or the controllers stage declares a chart-defined CR |
+| `tests/test_playbook_behaviour.py` | a playbook expression stops doing its job: postflight passes an unhealthy pool, an unmounted dataset or a missing export, autostart writes onboot on an HA-managed guest or runs the wrong guest CLI, or the cert re-seed skips a target it can reach |
 | `tests/test_playbook_extra_var_bools.py` | a `when:` reads an `-e` extra var without ending its filter chain in `\| bool`, which ansible-core refuses because the value arrives as a string |
 | `tests/test_prometheus_rule_coverage.py` | an alert rule has no promtool unit test and no declared exemption, or an exemption names an alert that is gone or now tested |
 | `tests/test_repo_hygiene.py` | a file the ignore rules exclude is tracked anyway |
@@ -174,8 +178,9 @@ read one:
 {% if secrets_backend == 'onepassword' %}| `tests/test_secret_store_reachability.py` | the ESO namespace denies egress with no allow that actually selects the secrets backend, so every ExternalSecret would stop syncing |
 {% endif %}| `tests/test_stage_timeouts.py` | a Flux stage's timeout is shorter than the slowest HelmRelease beneath its path |
 | `tests/test_supervised_apply_guard.py` | `scripts/supervised-apply-guard.sh` admits an unsupervised apply, or a supervised apply task stops running it first |
+| `tests/test_tenant_flux_policy.py` | `tenant-flux-impersonation` admits a tenant Kustomization or HelmRelease with no `serviceAccountName`, or with a source in another namespace |
 | `tests/test_vendored_byte_identity.py` | a file copied from the library differs from it at the pinned ref, or a declared fork has stopped differing, or the library changed under a fork that never absorbed it. The one suite that needs a library checkout, see below |
-| `tests/test_vpa_caps_vs_helm_limits.py` | a VPA `maxAllowed.memory` sits above the memory limit its chart declares, which `check-hpa-vpa-invariant.py` cannot see for a chart-rendered workload |
+| `tests/test_vpa_caps_vs_helm_limits.py` | a VPA `maxAllowed.memory` sits above the memory limit its chart declares, which `check-hpa-vpa-invariant.py` cannot see for a chart-rendered workload, or a Flux controller VPA is not `RequestsOnly` with its cap at the 1Gi gotk limit |
 | `scripts/test_check_flux_version_pin.py` | the Flux-version-pin gate stops failing on a bootstrap manifest that disagrees with the pinned version |
 | `scripts/test_check_integration_matrix_coverage.py` | the matrix-coverage gate stops failing on an integration stack no CI matrix entry runs |
 | `scripts/test_collect_state_lib.py` | the state collector would leak a secret into `CLUSTER_STATUS.txt`, or misclassifies a health check |
@@ -372,14 +377,16 @@ behind reds the pipeline instead of producing unreliable readiness output.
 
 ### check-deploy-playbooks
 
-`scripts/deploy-preflight.py` walks every job extending `.deploy-base` or
-`.maintenance-base`, checks that each `ansible-playbook` call names a playbook
-that exists, and runs `--list-tasks` for each `--tags` selection to prove it
-reaches at least one task. A tag that matches nothing makes a deploy job a green
-no-op, which nothing else in the pipeline can see, because the play still exits
-0. It also fails when it cannot parse a job's invocation, so a rewritten job
-cannot quietly drop out of coverage. `task lint:deploy-preflight` runs the same
-script.
+`scripts/check-deploy-preflight.py`, vendored from the library, walks every job
+extending `.deploy-base` or `.maintenance-base`. It checks that each
+`ansible-playbook` call names a playbook that exists, and runs `--list-tasks`
+for each `--tags` selection under the job's own `--limit` and `--skip-tags` to
+prove it reaches at least one task. A tag that matches nothing makes a deploy
+job a green no-op, which nothing else in the pipeline can see, because the play
+still exits 0. It also fails when it cannot parse a job's invocation, so a
+rewritten job cannot quietly drop out of coverage. The deploy jobs run whole
+playbooks, so the run passes no `--require-tag-selections`.
+`task lint:deploy-preflight` runs the same script.
 
 ### Drift plans
 
@@ -391,6 +398,18 @@ red. The drift plans read live credentials, so they run on `main` and on a
 schedule, never on a merge request.{% if use_unifi %} `unifi-drift-plan` also
 needs a LAN-reachable runner: the console is not published, so a runner
 elsewhere fails at the first data read.{% endif %}
+
+The {% if vpn_tailscale %}tailnet ACL and the {% endif %}SSO objects are applied by
+hand (`task terraform:*-apply` refuses `-auto-approve`), so the drift jobs are
+what notices an admin-console edit. A broken detector exits 1: a plan error,
+expired credentials, an unreachable endpoint or a state lock. They carry no
+merge-request rule, which would put vault secrets into a job running an
+unmerged branch's own code.
+
+A drift exit 2 leaves the pipeline **passed with warnings**, and GitLab sends no
+mail for a warned pipeline. Nothing tells you about drift unless you watch the
+scheduled pipeline yourself in **Settings → CI/CD → Schedules** (§ Version
+bumps) or wire a pipeline-event webhook.
 
 ### The verify stage
 
@@ -454,7 +473,7 @@ so the setting means something.
 | `OP_SERVICE_ACCOUNT_TOKEN` | every deploy job | **Yes** | Masked, and the rule gate for the whole deploy stage — see below |
 | `VERSION_BUMP_BOT_TOKEN` | `version-bump-bot` | **Yes** | Masked PAT, `api` + `write_repository` — a job token can neither push nor open an MR |
 | `OPENAI__KEY` | `pr-agent-review` | No | Masked. The reviewer runs ON merge requests, so a protected variable would disable it. Scope the key to a spend limit instead. |
-| `GITLAB__PERSONAL_ACCESS_TOKEN` | `pr-agent-review` | No | Masked, `api` scope — the account the review comments post as. Same reason as above; give it the least privilege that can comment. |
+| `GITLAB__PERSONAL_ACCESS_TOKEN` | `pr-agent-review` | No | Masked. Same reason as above. Use a project access token for this project only, with the Developer role the review label needs and `api` scope, never a personal token: an unprotected variable is readable by any merge request. |
 | `GH_API_TOKEN` | `version-bump-bot` | **Yes** | Optional, masked, read-only with no scopes — raises the GitHub API rate limit the version checker runs into (`GITHUB_TOKEN` is accepted as a fallback alias) |
 
 `version-bump-bot` runs only from a schedule or a web run on `main`, so its PAT
@@ -464,8 +483,8 @@ Every deploy rule is gated on `$OP_SERVICE_ACCOUNT_TOKEN`, so an unset token
 creates no deploy jobs. `validation-gate` carries no token clause and fails on
 every main pipeline without it, so a fork or a freshly generated repo reds main
 until the variable is set rather than reporting a green pipeline that deployed
-nothing. Protecting it also removes `terraform-plan` from merge requests — the
-trade-off is under "Deploy jobs".
+nothing. Protecting it also removes `terraform-plan` from merge requests, a
+trade-off § Deploys describes.
 
 ### {{ onepassword_vault }} vault items
 
@@ -519,6 +538,13 @@ DNS, so an operator triggers them after reading the diff.
 They are `interruptible: false` (a new pipeline must never cancel a running
 deploy) and retry twice on `runner_system_failure` only — an evicted runner pod
 is environmental and the playbooks are idempotent.
+
+`deploy-terraform` applies the plan `terraform-plan` saved earlier in the same
+pipeline, not a fresh one, so what ships is what the merge request's Terraform
+widget showed. `terraform-plan` is the only job that reads the secret store on a
+merge-request ref; marking `OP_SERVICE_ACCOUNT_TOKEN` protected removes the plan
+from merge requests, and a pipeline with no token produces no plan at all —
+that is a skip, not a clean plan.
 
 ### Cancellation policy
 
@@ -576,28 +602,7 @@ The drift plans and `pr-agent-review` are deliberately not listed: they allow
 failure, and an allow-failure job counts as successful for a `needs:`, so
 listing them would gate nothing.
 
-`deploy-terraform` applies the plan `terraform-plan` saved earlier in the same
-pipeline, not a fresh one, so what ships is what the merge request's Terraform
-widget showed. `terraform-plan` is the only job that reads the secret store on a
-merge-request ref; marking `OP_SERVICE_ACCOUNT_TOKEN` protected removes the plan
-from merge requests, and a pipeline with no token produces no plan at all —
-that is a skip, not a clean plan.
-
-### Drift plans
-
-The {% if vpn_tailscale %}tailnet ACL and the {% endif %}SSO objects are applied by
-hand (`task terraform:*-apply` refuses `-auto-approve`), so nothing would
-otherwise notice an admin-console edit. The drift jobs re-plan read-only on a
-schedule and post-merge, and exit 2 on a non-empty diff. Each scopes that with
-`allow_failure: exit_codes: [2]`, so drift warns while a broken detector — a
-plan error, expired credentials, an unreachable endpoint, a state lock — exits 1
-and fails red. They carry no merge-request rule: that would materialise vault
-secrets into a job running an unmerged branch's own code.
-
-A drift exit 2 leaves the pipeline **passed with warnings**, and GitLab sends no
-mail for a warned pipeline. Nothing tells you about drift unless you watch the
-scheduled pipeline yourself in **Settings → CI/CD → Schedules** (§ Version
-bumps) or wire a pipeline-event webhook.
+### The default branch name
 
 The branch name is written **literally** as `main`: GitLab does not expand
 variables inside a quoted `rules:if`, so `$CI_DEFAULT_BRANCH` would be compared

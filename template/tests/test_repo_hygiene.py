@@ -55,12 +55,12 @@ def _ignore_tree(tmp_path: Path, files: dict[str, str]) -> Path:
     return tmp_path
 
 
-def unignored_probes(tree: Path) -> list[str]:
+def unignored_probes(tree: Path, probes: tuple[str, ...] = PROBES) -> list[str]:
     """Probes no .gitignore in `tree` covers. core.excludesFile is neutralised so
     a machine-wide ignore rule cannot stand in for a missing shipped one."""
     return [
         probe
-        for probe in PROBES
+        for probe in probes
         if subprocess.run(
             ["git", "-C", str(tree), "-c", "core.excludesFile=/dev/null",
              "check-ignore", "-q", probe],
@@ -70,6 +70,25 @@ def unignored_probes(tree: Path) -> list[str]:
 
 
 SHIPPED_IGNORES = (".gitignore", "terraform/.gitignore")
+
+# Caches and coverage output a local test or lint run drops in the tree.
+TOOL_ARTIFACT_PROBES = (
+    ".coverage",
+    ".coverage.abc123",
+    "coverage.xml",
+    "htmlcov/index.html",
+    ".ruff_cache/CACHEDIR.TAG",
+    ".pytest_cache/CACHEDIR.TAG",
+)
+
+
+def _shipped_ignores() -> dict[str, str]:
+    shipped = {}
+    for relpath in SHIPPED_IGNORES:
+        source = REPO / relpath
+        assert source.is_file(), f"{relpath} is gone, so its ignore rules no longer apply"
+        shipped[relpath] = source.read_text()
+    return shipped
 
 
 def test_no_yamllint_config_at_the_repo_root():
@@ -130,16 +149,19 @@ def test_plan_offenders_catches_every_spelling():
 def test_both_gitignores_cover_the_bare_plan_name(tmp_path):
     """Replays the shipped ignore files in a scratch work tree: a render is not a
     git repo, so checking REPO directly would skip where the rules are authored."""
-    shipped = {}
-    for relpath in SHIPPED_IGNORES:
-        source = REPO / relpath
-        assert source.is_file(), f"{relpath} is gone, so plan files are no longer ignored"
-        shipped[relpath] = source.read_text()
-    missed = unignored_probes(_ignore_tree(tmp_path, shipped))
+    missed = unignored_probes(_ignore_tree(tmp_path, _shipped_ignores()))
     assert not missed, (
         f"no shipped .gitignore covers {missed}. `terraform plan -out=tfplan` then "
         "writes an unignored file holding every resolved credential."
     )
+
+
+def test_local_tool_artifacts_are_ignored(tmp_path):
+    """A local test run's caches and coverage output, left untracked, hide a
+    real change in `git status` during a pre-MR check."""
+    tree = _ignore_tree(tmp_path, _shipped_ignores())
+    missed = unignored_probes(tree, TOOL_ARTIFACT_PROBES)
+    assert not missed, f"no shipped .gitignore covers {missed}"
 
 
 def test_a_dropped_bare_plan_rule_is_reported(tmp_path):
@@ -208,12 +230,8 @@ def test_no_kubernetes_manifest_uses_the_yml_suffix():
     the cluster while every gate that walks the source tree skips it."""
     offenders = yml_manifests(KUBERNETES)
     assert not offenders, (
-        f"kubernetes manifests ending .yml: {offenders} — the manifest gates read "
-        ".yaml only (conftest.k8s_documents, test_namespace_psa.py, "
-        "test_stage_timeouts.py, test_runbook_coverage.py, "
-        "scripts/check-guest-endpoint-parity.py, "
-        "scripts/check-secret-rotation-coverage.py). Rename the file, or widen "
-        "conftest.k8s_documents and those two scripts together."
+        f"kubernetes manifests ending .yml: {offenders} — rename the file to "
+        ".yaml, the one suffix every manifest in this tree uses"
     )
 
 

@@ -104,8 +104,8 @@ def test_an_emptied_kustomization_is_reported(tree: Path) -> None:
 
 
 def test_a_transformer_only_kustomization_is_reported(tree: Path) -> None:
-    """CRITICAL: a kustomization that only transforms builds empty, so Flux
-    prunes every object it applied even though the file carries keys."""
+    """A kustomization that only transforms builds empty, so Flux prunes every
+    object it applied even though the file carries keys."""
     write(tree.parent, "kubernetes/apps/demo/patch.yaml", "kind: Deployment\n")
     write(
         tree.parent,
@@ -178,3 +178,97 @@ def test_a_remote_base_is_not_a_missing_file(tree: Path) -> None:
     )
     assert gate.check(tree) == []
     assert gate.main([str(tree)]) == 0
+
+
+def test_a_name_with_no_file_behind_it_is_reported(tree: Path) -> None:
+    """Mutation case: a typo'd resource fails `kustomize build` for the stage."""
+    write(
+        tree.parent,
+        "kubernetes/apps/demo/kustomization.yaml",
+        "resources:\n  - release.yaml\n  - relase.yaml\n",
+    )
+    problems = gate.check(tree)
+    assert any("kustomization.yaml -> relase.yaml" in p for p in problems), problems
+    assert gate.main([str(tree)]) == 1
+
+
+def test_a_listed_manifest_with_no_object_is_reported(tree: Path) -> None:
+    """Mutation case: a listed file emptied to comments renders nothing."""
+    write(tree.parent, "kubernetes/apps/demo/release.yaml", "# moved elsewhere\n")
+    problems = gate.check(tree)
+    assert any("carries no object" in p for p in problems), problems
+    assert gate.main([str(tree)]) == 1
+
+
+def test_a_kustomization_yml_is_walked(tree: Path) -> None:
+    """kustomize reads either spelling, so a `.yml` one still has its siblings
+    checked."""
+    (tree / "apps/demo/kustomization.yaml").rename(tree / "apps/demo/kustomization.yml")
+    assert gate.check(tree) == []
+    write(tree.parent, "kubernetes/apps/demo/networkpolicy.yaml", "kind: NetworkPolicy\n")
+    assert gate.check(tree) == [
+        "kubernetes/apps/demo/networkpolicy.yaml: on disk, named by no kustomization, "
+        "so Flux never applies it"
+    ]
+
+
+def test_an_unlisted_json_sibling_is_reported(tree: Path) -> None:
+    """Mutation case: a dashboard JSON no configMapGenerator names never ships."""
+    write(tree.parent, "kubernetes/apps/demo/dashboard.json", "{}\n")
+    assert any("dashboard.json" in p for p in gate.check(tree))
+    write(
+        tree.parent,
+        "kubernetes/apps/demo/kustomization.yaml",
+        "resources:\n  - release.yaml\nconfigMapGenerator:\n  - name: dash\n"
+        "    files:\n      - dashboard.json\n",
+    )
+    assert gate.check(tree) == []
+
+
+def test_files_flux_bootstrap_writes_are_not_missing_yet(tree: Path) -> None:
+    """Before `flux bootstrap` runs, flux-system/ names files it will write."""
+    write(
+        tree.parent,
+        "kubernetes/clusters/demo/flux-system/kustomization.yaml",
+        "resources:\n  - gotk-components.yaml\n  - gotk-sync.yaml\n",
+    )
+    assert gate.missing_references(tree) == []
+    write(
+        tree.parent,
+        "kubernetes/clusters/demo/flux-system/kustomization.yaml",
+        "resources:\n  - gotk-components.yaml\n  - extra.yaml\n",
+    )
+    assert gate.missing_references(tree) == [
+        "kubernetes/clusters/demo/flux-system/kustomization.yaml -> extra.yaml"
+    ]
+
+
+def test_a_bootstrapped_flux_system_missing_one_file_is_reported(tree: Path) -> None:
+    """Mutation case: once bootstrap has written one file, the other is missing."""
+    write(
+        tree.parent,
+        "kubernetes/clusters/demo/flux-system/kustomization.yaml",
+        "resources:\n  - gotk-components.yaml\n  - gotk-sync.yaml\n",
+    )
+    write(tree.parent, "kubernetes/clusters/demo/flux-system/gotk-sync.yaml", "kind: Kustomization\n")
+    assert gate.missing_references(tree) == [
+        "kubernetes/clusters/demo/flux-system/kustomization.yaml -> gotk-components.yaml"
+    ]
+
+
+def test_a_bootstrap_name_outside_flux_system_is_missing(tree: Path) -> None:
+    """Mutation case: the bootstrap exemption holds in flux-system/ only."""
+    write(
+        tree.parent,
+        "kubernetes/apps/demo/kustomization.yaml",
+        "resources:\n  - release.yaml\n  - gotk-sync.yaml\n",
+    )
+    assert gate.missing_references(tree) == [
+        "kubernetes/apps/demo/kustomization.yaml -> gotk-sync.yaml"
+    ]
+
+
+def test_a_listed_manifest_that_does_not_parse_exits_2(tree: Path) -> None:
+    """A listed file the gate cannot read is an inspection failure, not a finding."""
+    write(tree.parent, "kubernetes/apps/demo/release.yaml", "kind: [unclosed\n")
+    assert gate.main([str(tree)]) == 2

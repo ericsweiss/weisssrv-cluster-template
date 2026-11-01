@@ -46,7 +46,8 @@ COVERED = """# Runbooks
 | `example-app-oidc` | `example-app/app-secrets` |
 """
 
-# Every name is a strict prefix of the one the runbook actually carries.
+# The runbook names extend the real ones, so a substring match would wrongly
+# cover them.
 LONGER_NAMES = """# Runbooks
 
 ## Rotating a secret

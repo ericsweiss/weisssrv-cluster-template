@@ -47,10 +47,12 @@ a tag before opening the merge request.
 
 ## Guest playbooks and the cert-distribution key
 
-`weisssrv.infra.base` rewrites each guest's `authorized_keys`, which drops the
-`acme_certs` distribution key pinned there. The loss only shows at the next
-renewal, so `base.yml` and `mail.yml` each end with a play on `dns_primary` that
-re-seeds the targets through the role's `seed-target` tasks. A new playbook that
+A re-provisioned guest comes back without the `acme_certs` distribution key
+pinned in its `authorized_keys`, and the loss only shows at the next renewal.
+So `base.yml` and `mail.yml` each run a play on `dns_primary` after their role
+plays. It includes `playbooks/tasks/_reseed-cert-target.yml` once per target.
+That file takes the pubkey from the job's env, or from the key file on the cert
+authority. With neither, it names the target and skips it. A new playbook that
 applies `base` to a cert target needs the same play.
 
 `acme_certs_distribution_targets` is derived in `group_vars/dns.yml` from
@@ -59,8 +61,6 @@ Print the pins with `task certs:show-host-keys` and paste them in, or the target
 stops receiving the wildcard. `docs/RUNBOOKS.md` § Certificates has the rest.
 
 ## Code conventions
-
-`CLAUDE.md` and `AGENTS.md` point here rather than restating these.
 
 - **Fully-qualified names.** `ansible.builtin.apt`, not `apt`;
   `weisssrv.infra.base`, not `base`. `ansible-lint` enforces it under

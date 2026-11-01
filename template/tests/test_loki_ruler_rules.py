@@ -20,6 +20,10 @@ _STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"|`[^`]*`')
 _SELECTOR_RE = re.compile(r"\{[^{}]*\}")
 _MATCHER_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\s*(?:=~|!~|!=|=)\s*["`]')
 _LINE_FILTER_RE = re.compile(r'\|~\s*"((?:[^"\\]|\\.)*)"')
+# The escapes Go's strconv.Unquote accepts; LogQL's parser rejects any other.
+_GO_ESCAPE = re.compile(
+    r'\\(?:[abfnrtv\\"]|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[0-3][0-7]{2})'
+)
 # Everything that may precede the leaf stream selector: aggregations, range
 # functions and their arguments.
 _HEAD_RE = re.compile(r"^[\w\s(,.]*$")
@@ -74,6 +78,16 @@ def escape_problem(masked: str) -> str | None:
     return None
 
 
+def go_unquote(body: str) -> str:
+    """The body of a Go double-quoted string, unquoted the way strconv.Unquote
+    does. An escape outside Go's set raises ValueError, as LogQL's parser fails."""
+    rest = _GO_ESCAPE.sub("", body)
+    at = rest.find("\\")
+    if at != -1:
+        raise ValueError(f"unknown escape {rest[at:at + 2]!r}")
+    return codecs.decode(body, "unicode_escape")
+
+
 def line_filter_problem(expr: str) -> str | None:
     """`|~` takes a Go double-quoted string, so `\\b` must be written `\\\\b`.
 
@@ -81,9 +95,9 @@ def line_filter_problem(expr: str) -> str | None:
     """
     for raw in _LINE_FILTER_RE.findall(expr):
         try:
-            pattern = codecs.decode(raw, "unicode_escape")
-        except (UnicodeDecodeError, ValueError) as exc:
-            return f"line filter {raw!r} will not unquote: {exc}"
+            pattern = go_unquote(raw)
+        except ValueError as exc:
+            return f"line filter {raw!r} fails LogQL unquoting: {exc}"
         try:
             re.compile(pattern)
         except re.error as exc:
@@ -179,6 +193,7 @@ def test_every_logql_expression_is_structurally_sound(files):
     )
 
 
+@needs_corpus
 def test_the_shipped_expressions_exercise_the_checker(files):
     """A checker that found no selector in any real rule would pass everything."""
     exprs = [rule.get("expr", "") for rules in files.values() for rule in rules]
@@ -208,3 +223,17 @@ def test_a_single_backslash_line_filter_is_reported():
     nothing and the alert never fires."""
     problems = expr_problems(r'sum(count_over_time({job="j"} |~ "\bSTOP" [1h]))')
     assert problems and "control character" in problems[0]
+
+
+def test_an_escape_go_rejects_is_reported():
+    """`\\d` unquotes in Python but not in Go, so the ruler rejects the group."""
+    problems = expr_problems('{job="j"} |~ "\\d+ dropped"')
+    assert problems and "fails LogQL unquoting" in problems[0]
+    assert expr_problems('{job="j"} |~ "\\\\d+ dropped"') == []
+
+
+def test_go_unquote_matches_strconv():
+    assert go_unquote(r"\\d+ \x41\u00e9\101\t\"") == "\\d+ A\u00e9A\t\""
+    for bad in (r"\d", r"\s", r"\.", r"\'", r"\x4", r"\8", r"\400", "\\"):
+        with pytest.raises(ValueError):
+            go_unquote(bad)

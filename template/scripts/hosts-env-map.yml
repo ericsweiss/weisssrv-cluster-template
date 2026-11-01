@@ -1,11 +1,11 @@
 ---
 # Export map for generate-hosts-env.py: inventory group -> shell variable in
 # scripts/hosts.env. Regenerate with `task hosts:sync`; CI fails when stale.
-# A group must list hosts directly; a children-only group resolves to nothing.
+# A group resolves to its own hosts plus every child group's.
 output: scripts/hosts.env
 exports:
-  # Hostnames, not addresses: the Proxmox nodes are reached through SSH config
-  # (and through the tailnet when off-LAN), so their names must resolve.
+  # Hostnames, not addresses: the Proxmox nodes are reached through SSH config,
+  # so their names must resolve.
   - key: NAS_HOSTS
     group: nas
     value: names

@@ -304,27 +304,12 @@ Gaps against the reference cluster this repository deliberately does not close.
 Each is a live decision, not a backlog entry — if you reopen one, change this
 list in the same MR.
 
-- **Deploy-job `rules:` are written out per job.** The reference cluster factors
-  the shared preamble into a hidden `.skip-schedule-web` fragment; the generated
-  pipeline repeats it. Repetition is what makes each job's trigger set readable
-  where the job is, and a `!reference` that silently changes every deploy's
-  trigger set is the more expensive mistake in a repository an operator forks
-  and edits.
-- **The template's `task lint` is a subset of the reference cluster's.** The
-  gates it omits — Prometheus/Alertmanager config lint, the cluster-literal
-  check, the flux/kubectl/busybox pin checks, the CI-policy and tailnet-policy
-  checks — each need a tool or a policy file a freshly generated cluster does
-  not have yet. They are adopted per cluster, not shipped empty.
 - **Not every library script is vendored.** `template/scripts/` carries what a
   generated cluster's tasks and CI jobs actually invoke; the library's
   role-development and matrix-generation tooling stays out. `scripts/README.md`
   in the render is the human inventory, and the render's own
   `scripts/vendored-manifest.yml` is the machine-checked one — the copies that
   do ship are gated in the generated repository, by it, not from here.
-- **Agent guidance ships; agent settings do not.** A generated cluster gets
-  `AGENTS.md`, `CLAUDE.md`, the `.claude/` skill and the `.cursor/` rule — all
-  prose — but no `.claude/settings.json`. Permissions and hooks are per operator
-  and per machine, and a shipped one is a permission grant nobody reviewed.
 - **The `{{ {}['unimplemented'] | mandatory('...') }}` else-branches are
   unreachable.** Every backend selector is an enum whose `choices` list only the
   implemented values, and `test_unimplemented_backend_choices_fail_at_copy_time`

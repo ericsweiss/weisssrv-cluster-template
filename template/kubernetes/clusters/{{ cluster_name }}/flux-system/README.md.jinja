@@ -18,7 +18,7 @@ invocation by hand — the Taskfile is the one place it is maintained.
 
 `--path` must stay `./kubernetes/clusters/{{ cluster_name }}` — it is the
 directory this file lives in, and the cluster root `kustomization.yaml` there
-lists the five infrastructure stages plus `apps` and `tenants`.
+lists the infrastructure stages plus `apps` and `tenants`.
 
 After bootstrap, commit the two generated files. Do not hand-edit them:
 customisation goes in `kustomization.yaml` (patches), which is why the PSA and

@@ -10,9 +10,9 @@
 .paths-integration:
   changes:
     - ansible/integration-tests/**/*
-    # Every integration converge include_tasks's
+    # Every integration converge includes
     # ansible/molecule/tasks/container-warmup.yml, and _shared/prepare.yml
-    # re-imports ansible/molecule/prepare-common.yml.
+    # imports ansible/molecule/prepare-common.yml.
     - ansible/molecule/**/*
     # The roles under test ship in weisssrv.infra: the pin is the suite's real
     # input, alongside the prod all.yml the converges vars_files.
@@ -79,14 +79,15 @@
     # the test image, the rest hit the in-cluster cache.
     REGISTRY_CACHE: "{{ registry_cache }}"
   before_script:
-    # Wait for the DinD sidecar — with a pre-built CI image the script starts
-    # before DinD is ready (no apt-get delay to absorb its startup).
+    # Wait for the DinD sidecar: a pre-built CI image starts the script before
+    # DinD is ready. A sidecar still down after 30s fails the job here.
     - |
       for i in $(seq 1 30); do
         docker info >/dev/null 2>&1 && break
         echo "Waiting for DinD... ($i)"
         sleep 1
       done
+      docker info >/dev/null 2>&1 || { echo "DinD not ready after 30s" >&2; exit 1; }
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     # Pre-pull the test image into this job's DinD so the scenarios
     # (pre_build_image: true) start without pulling. Cache first, time-bounded,
@@ -98,9 +99,6 @@
       else
         docker pull "$MOLECULE_TEST_IMAGE"
       fi
-    # weisssrv.infra is installed by molecule's own `dependency` step (each
-    # scenario points it at ansible/requirements.yml), so the pin has one
-    # installer.
     - mkdir -p "$CI_PROJECT_DIR/junit"
   artifacts:
     when: always

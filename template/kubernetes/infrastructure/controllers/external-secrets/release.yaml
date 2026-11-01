@@ -53,6 +53,8 @@ spec:
         labelSelector:
           matchLabels:
             app.kubernetes.io/name: external-secrets
+    # Memory limits for all three components are hand-set over the working-set
+    # peak and matched by the paired RequestsOnly VPAs' maxAllowed.
     webhook:
       replicaCount: 2
       priorityClassName: platform
@@ -61,7 +63,7 @@ spec:
           cpu: 25m
           memory: 64Mi
         limits:
-          memory: 128Mi
+          memory: 256Mi
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
@@ -79,7 +81,7 @@ spec:
           cpu: 25m
           memory: 64Mi
         limits:
-          memory: 128Mi
+          memory: 320Mi
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname

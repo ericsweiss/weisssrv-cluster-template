@@ -14,8 +14,8 @@ spec:
     - Egress
 ---
 # Manager: long-polls GitLab and talks to the kube-API to spawn job pods. The
-# apiserver rule targets the server node range and the ingress VIP is allowed
-# both as ipBlock and as namespace, because kube-proxy DNATs before policy.
+# apiserver rule targets the server node range. The ingress VIP is DNATed to
+# the Traefik pods before policy, so the peer is their namespace.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -47,8 +47,6 @@ spec:
         - protocol: TCP
           port: 6443
     - to:
-        - ipBlock:
-            cidr: ${cluster_metallb_internal_vip}/32
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: traefik
@@ -105,8 +103,6 @@ spec:
         - protocol: TCP
           port: 6443
     - to:
-        - ipBlock:
-            cidr: ${cluster_metallb_internal_vip}/32
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: traefik

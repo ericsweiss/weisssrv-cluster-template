@@ -5,12 +5,10 @@
 extends: relaxed
 
 rules:
-  # `relaxed` keeps line-length at warning level and disables the comment
-  # rules. Here line-length is off outright, because inline documentation
-  # comments run long, and document-start comes back as a warning.
+  # Inline documentation comments run long.
   line-length: disable
-  # Files under template/ are Jinja sources: a rendered document may legitimately
-  # start with a control block, so the `---` requirement is advisory here.
+  # Files under template/ are Jinja sources: a rendered document may start with
+  # a control block, so the `---` requirement is advisory here.
   document-start:
     present: true
     level: warning

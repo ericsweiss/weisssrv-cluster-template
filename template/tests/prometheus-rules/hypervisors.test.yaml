@@ -1,0 +1,232 @@
+---
+# promtool unit tests for platform.hypervisors. The corosync collector's
+# sentinel is what marks a Proxmox host, so each scoped case carries it on the
+# hypervisor and leaves it off the guest that must stay quiet.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # ProxmoxHostDown: a hypervisor stops answering; a guest that does the same
+  # is HostExporterDown's alone.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '1+0x9 0+0x20'
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+60x9'
+      - series: 'up{job="node-exporter-host", instance="192.0.2.23:9101"}'
+        values: '1+0x9 0+0x20'
+    alert_rule_test:
+      # Inside the 5m hold.
+      - eval_time: 13m
+        alertname: ProxmoxHostDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ProxmoxHostDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node-exporter-host
+              instance: 'pve-01:9101'
+
+  # A hypervisor that answers is quiet.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '1+0x30'
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ProxmoxHostDown
+        exp_alerts: []
+
+  # CorosyncWedged: pinned near 100% fires; the 1-2% baseline and a 2m
+  # membership-change spike do not.
+  - interval: 1m
+    input_series:
+      - series: 'proxmox_corosync_cpu_percent{instance="pve-01:9101"}'
+        values: '95+0x20'
+      - series: 'proxmox_corosync_cpu_percent{instance="pve-02:9101"}'
+        values: '2+0x20'
+      - series: 'proxmox_corosync_cpu_percent{instance="pve-03:9101"}'
+        values: '2+0x5 100+0x2 2+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: CorosyncWedged
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CorosyncWedged
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: 'pve-01:9101'
+
+  # PmxcfsStale: a 5-minute-old mtime is healthy; a frozen one fires.
+  - interval: 1m
+    input_series:
+      - series: 'proxmox_pmxcfs_manager_status_mtime_seconds{instance="pve-01:9101"}'
+        values: '-300+60x60'
+      - series: 'proxmox_pmxcfs_manager_status_mtime_seconds{instance="pve-02:9101"}'
+        values: '100+0x60'
+    alert_rule_test:
+      # Stale from 12m; inside the 5m hold.
+      - eval_time: 14m
+        alertname: PmxcfsStale
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: PmxcfsStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: 'pve-02:9101'
+
+  # A deleted manager_status reads mtime 0 and still fires, because the file
+  # existed within 7d.
+  - interval: 1m
+    input_series:
+      - series: 'proxmox_pmxcfs_manager_status_mtime_seconds{instance="pve-01:9101"}'
+        values: '0+60x10 0+0x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: PmxcfsStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: 'pve-01:9101'
+
+  # A cluster that never ran HA has no manager_status: mtime 0 throughout.
+  - interval: 1m
+    input_series:
+      - series: 'proxmox_pmxcfs_manager_status_mtime_seconds{instance="pve-01:9101"}'
+        values: '0+0x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: PmxcfsStale
+        exp_alerts: []
+
+  # CorosyncHealthCollectorStale: a 2-minute lag is healthy; a frozen sentinel
+  # crosses the 300s floor.
+  - interval: 1m
+    input_series:
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{instance="pve-01:9101"}'
+        values: '-120+60x60'
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{instance="pve-02:9101"}'
+        values: '0+0x60'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: CorosyncHealthCollectorStale
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: CorosyncHealthCollectorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'pve-02:9101'
+
+  # ProxmoxHostIOPressure: half the time stalled on a hypervisor fires; the
+  # same load on a guest is out of scope.
+  - interval: 1m
+    input_series:
+      - series: 'node_pressure_io_waiting_seconds_total{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+30x40'
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+60x40'
+      - series: 'node_pressure_io_waiting_seconds_total{job="node-exporter-host", instance="192.0.2.23:9101"}'
+        values: '0+30x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ProxmoxHostIOPressure
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ProxmoxHostIOPressure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'pve-01:9101'
+
+  # A six-minute nightly burst stays inside the 15m hold.
+  - interval: 1m
+    input_series:
+      - series: 'node_pressure_io_waiting_seconds_total{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+0x10 0+30x6 180+0x40'
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+60x56'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ProxmoxHostIOPressure
+        exp_alerts: []
+
+  # ProxmoxHostMemoryPressure: the same shape against the 0.10 threshold.
+  - interval: 1m
+    input_series:
+      - series: 'node_pressure_memory_waiting_seconds_total{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '0+30x40'
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '0+60x40'
+      - series: 'node_pressure_memory_waiting_seconds_total{job="node-exporter-host", instance="192.0.2.31:9101"}'
+        values: '0+30x40'
+      - series: 'node_pressure_memory_waiting_seconds_total{job="node-exporter-host", instance="pve-03:9101"}'
+        values: '0+3x40'
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="pve-03:9101"}'
+        values: '0+60x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ProxmoxHostMemoryPressure
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ProxmoxHostMemoryPressure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'pve-02:9101'
+
+  # NFSServerDown, arm 1: nfsd running with zero threads.
+  - interval: 1m
+    input_series:
+      - series: 'node_nfsd_server_threads{job="node-exporter-host", instance="nas:9101"}'
+        values: '8+0x4 0+0x20'
+      - series: 'node_nfsd_server_threads{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '8+0x24'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: NFSServerDown
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: NFSServerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node-exporter-host
+              instance: 'nas:9101'
+
+  # Arm 2: a host that served NFS stops reporting nfsd at all.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="nas:9101"}'
+        values: '1+0x40'
+      - series: 'node_nfsd_server_threads{job="node-exporter-host", instance="nas:9101"}'
+        values: '8+0x9'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: NFSServerDown
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: NFSServerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node-exporter-host
+              instance: 'nas:9101'
+
+  # A host that never ran nfsd is quiet.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '1+0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: NFSServerDown
+        exp_alerts: []

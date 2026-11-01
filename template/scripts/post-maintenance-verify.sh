@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# CRITICAL: cluster health check for the maintenance tasks and jobs; exits 1 on
-# any critical failure. Two rules hold throughout, and breaking either makes
-# this gate lie. Test a CAPTURED value, never `! ... | grep -q`: under pipefail
-# grep -q's early pipe close SIGPIPEs the upstream and inverts the verdict.
-# Look pods up with jsonpath, never `kubectl get -o wide`: the RESTARTS
-# column's "5 (3m ago)" suffix shifts every field after it.
-# Needs kubectl plus maintenance-lib.sh.
+# Cluster health check for the maintenance tasks and jobs; exits 1 on any
+# critical failure. Needs kubectl plus maintenance-lib.sh.
+
+# Test a captured value, never `! ... | grep -q` (shell-lib.sh owns that
+# pipefail rule). Look pods up with jsonpath: `-o wide`'s RESTARTS suffix
+# "5 (3m ago)" shifts every field after it.
 
 set -euo pipefail
 
@@ -190,8 +189,11 @@ for dep in traefik:traefik coredns:kube-system cert-manager:cert-manager metallb
       if DEP2=$(kubectl get deployment "$name" -n "$ns" -o jsonpath='{.status.availableReplicas} {.spec.replicas}' 2>/dev/null) \
          && deployment_replicas_ok "${DEP2%% *}" "${DEP2##* }"; then
         echo "  $name ($ns): ${DEP2%% *}/${DEP2##* } available (recovered after grace)"
+      elif [ -n "${DEP2:-}" ]; then
+        echo "  ERROR: $name ($ns): ${DEP2%% *}/${DEP2##* } available after the grace period"
+        ERRORS=$((ERRORS + 1))
       else
-        echo "  ERROR: $name ($ns): ${AVAIL:-0}/${DESIRED:-?} available"
+        echo "  ERROR: $name ($ns): ${AVAIL:-0}/${DESIRED:-?} available (re-read after the grace period failed)"
         ERRORS=$((ERRORS + 1))
       fi
     else
@@ -245,12 +247,8 @@ while IFS= read -r jk; do
   if [ -z "$JOB_NODES" ]; then
     # No pod left to attribute a node to, so this WARNs while kured is active.
     job_warn="${job_warn} $jk(pods gone; kured active)"
-  # Capture-and-test, NOT `! ... | grep -q`: under pipefail grep -q's early pipe
-  # close SIGPIPEs the upstream, so `!` would wrongly excuse a real failure.
   # The list is empty iff every job pod is unscheduled or on a rebooting node.
   elif [ -z "$(printf '%s\n' "$JOB_NODES" | grep -v '^$' | grep -vxFf <(printf '%s\n' "$KURED_NOW"))" ]; then
-    # Every pod unscheduled or on a rebooting node; one failure on a healthy
-    # node would have fallen through to the ERROR below.
     job_warn="${job_warn} $jk(all pods unscheduled or on a kured-rebooting node)"
   else
     echo "ERROR: failed Job $jk (a pod failed on a healthy node, not a kured transient)"

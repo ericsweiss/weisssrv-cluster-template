@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tenant admission policies refuse only later writes: run at rollout and before
 # each onboarding to list the tenant objects they would refuse that predate them.
-# Exit 0 clean, 1 findings, 2 kubectl or jq failed. Was audit-tenant-services.sh.
+# Exit 0 clean, 1 findings, 2 kubectl or jq failed.
 
 # Labels are tenant-writable, so they are never the proof: every EndpointSlice
 # and Endpoints address must be a live Pod in the same namespace that the
@@ -17,6 +17,9 @@ PLATFORM_MIDDLEWARES='["traefik/lan-tailscale-only", "traefik/lan-tailscale-stri
 PLATFORM_REFS='["traefik-lan-tailscale-only@kubernetescrd", "traefik-lan-tailscale-strict@kubernetescrd", "traefik-hsts-header@kubernetescrd", "traefik-security-headers@kubernetescrd", "authentik-authentik-auth@kubernetescrd"]'
 PLATFORM_FORWARD_AUTH='["http://authentik-server.authentik.svc.cluster.local/outpost.goauthentik.io/auth/traefik"]'
 PLATFORM_ISSUERS='["letsencrypt-prod", "letsencrypt-staging"]'
+INTERNAL_ALLOWLISTS='["lan-tailscale-only", "lan-tailscale-strict"]'
+INTERNAL_ALLOWLIST_REFS='["traefik-lan-tailscale-only@kubernetescrd", "traefik-lan-tailscale-strict@kubernetescrd"]'
+CLUSTER_CONFIG=cluster-config
 OWN_SERVICE_HEAD='^https?://[a-z]([-a-z0-9]*[a-z0-9])?[.]'
 OWN_SERVICE_TAIL='[.]svc([.]cluster[.]local)?(:[0-9]{1,5})?(/.*)?$'
 CERT_MANAGER_SA=system:serviceaccount:cert-manager:cert-manager
@@ -77,7 +80,12 @@ def tailscale($o): (.metadata.annotations // {}) | keys[] | select(startswith("t
             | .[0] as $w | .[1] | select(own and (.name | at | not) | not)
             | "\($o): TLS \($w) \(.namespace // $ns)/\(.name) outside its namespace"),
         (if (.spec.parentRefs // []) | length > 0
-         then "\($o): parentRefs attach to parent routes, which is platform-owned" else empty end)'
+         then "\($o): parentRefs attach to parent routes, which is platform-owned" else empty end),
+        ((.spec.routes // [])[] | (.match // "") as $m
+            | select(any($c.ends[]; . as $e | $m | ascii_downcase | contains($e))
+                and (any((.middlewares // [])[]; .namespace == "traefik"
+                    and (.name as $x | any($c.internal[]; . == $x))) | not))
+            | "\($o): match \($m) is on the internal domain without traefik/lan-tailscale-only or -strict")'
     INGRESS_CHECKS=$UNGRANTED'
         (if .spec.defaultBackend != null then "\($o): default backend answers every hostname" else empty end),
         ((.spec.rules // [])[] | if (.host // "") == "" then "\($o): rule without a host"
@@ -95,6 +103,15 @@ def tailscale($o): (.metadata.annotations // {}) | keys[] | select(startswith("t
             | "\($o): ingressClassName \(.) is not traefik"),
         ((.metadata.annotations // {})["kubernetes.io/ingress.class"] // "traefik" | select(. != "traefik")
             | "\($o): annotation kubernetes.io/ingress.class \(.) is not traefik"),
+        (select(any((.spec.rules // [])[]; (.host // "" | ascii_downcase) as $h
+                | $h == $c.domain or ($h | endswith("." + $c.domain))))
+            | (.metadata.annotations // {}) | to_entries
+            | select((any(.[]; (.key | startswith("traefik.ingress.kubernetes.io/"))
+                    and (.key | ascii_downcase) == "traefik.ingress.kubernetes.io/router.middlewares")
+                and all(.[] | select(.key | ascii_downcase == "traefik.ingress.kubernetes.io/router.middlewares");
+                    any(.value | split(",")[] | trimmed; . as $v | any($c.ingressInternal[]; . == $v))))
+                | not)
+            | "\($o): an internal-domain host without traefik-lan-tailscale-only or -strict in router.middlewares"),
         tailscale($o), refs($o)'
     CERTIFICATE_CHECKS='.spec as $s
         | (if $g.problem != null then "\($o): \($g.problem)" else
@@ -126,6 +143,12 @@ def tailscale($o): (.metadata.annotations // {}) | keys[] | select(startswith("t
     TCP_UDP_CHECKS='"\($o): tenants may not route TCP or UDP"'
     DEFAULT_TLS_CHECKS='select($n == "default") | "\($o): the default \($kind) is platform-owned"'
     SERVICE_CHECKS='tailscale($o), refs($o)'
+    # tenant-flux-impersonation: a ServiceAccount, and every source in the namespace.
+    FLUX_CHECKS='(if (.spec.serviceAccountName // "") == ""
+            then "\($o): no spec.serviceAccountName, so the controller applies it as itself" else empty end),
+        ((if $kind == "Kustomization" then [.spec.sourceRef] else [.spec.chart.spec.sourceRef, .spec.chartRef] end)[]
+            | select(. != null and (own | not))
+            | "\($o): source \(.kind)/\(.name) in namespace \(.namespace)")'
     VOLUME_CHECKS='(if $kind == "Pod" then .spec.volumes
             elif $kind == "CronJob" then .spec.jobTemplate.spec.template.spec.volumes
             else .spec.template.spec.volumes end) // []
@@ -159,15 +182,24 @@ if [ -z "$namespaces" ]; then
     exit 0
 fi
 
+grants=$(kget -n "$FLUX_NAMESPACE" get configmaps)
+# The internal domain tenant-traefik-route-refs reads after Flux substitution.
+domain=$(jq -r --arg name "$CLUSTER_CONFIG" \
+    'first(.items[] | select(.metadata.name == $name) | .data.cluster_internal_domain // empty) // empty' \
+    <<<"$grants") || die "unreadable ConfigMaps in $FLUX_NAMESPACE"
+[ -n "$domain" ] || die "no cluster_internal_domain in $FLUX_NAMESPACE/$CLUSTER_CONFIG"
+
 # shellcheck disable=SC2016 # a jq program, expanded by jq
 constants=$(jq -nc --argjson m "$PLATFORM_MIDDLEWARES" --argjson r "$PLATFORM_REFS" \
     --argjson f "$PLATFORM_FORWARD_AUTH" --argjson i "$PLATFORM_ISSUERS" \
     --arg h "$OWN_SERVICE_HEAD" --arg t "$OWN_SERVICE_TAIL" --arg sa "$CERT_MANAGER_SA" \
-    --argjson v "$RESTRICTED_VOLUME_KEYS" \
+    --argjson v "$RESTRICTED_VOLUME_KEYS" --argjson n "$INTERNAL_ALLOWLISTS" \
+    --argjson x "$INTERNAL_ALLOWLIST_REFS" \
+    --arg d "$(tr '[:upper:]' '[:lower:]' <<<"$domain")" \
     '{middlewares: $m, refs: $r, forwardAuth: $f, issuers: $i, head: $h, tail: $t, sa: $sa,
-      volumes: $v}') ||
+      volumes: $v, internal: $n, ingressInternal: $x, domain: $d,
+      ends: [".\($d)`", "`\($d)`", ".\($d)\"", "\"\($d)\""]}') ||
     die "unreadable allowlists"
-grants=$(kget -n "$FLUX_NAMESPACE" get configmaps)
 
 findings=()
 count=0
@@ -194,6 +226,8 @@ for ns in $namespaces; do
     replicasets=$(kget -n "$ns" get replicasets.apps)
     jobs=$(kget -n "$ns" get jobs.batch)
     cronjobs=$(kget -n "$ns" get cronjobs.batch)
+    kustomizations=$(kget -n "$ns" get kustomizations.kustomize.toolkit.fluxcd.io)
+    helmreleases=$(kget -n "$ns" get helmreleases.helm.toolkit.fluxcd.io)
 
     # The grant: hosts, maxPriority as the isolation gate takes it (ASCII digits
     # to 2^31-1; \A..\z, as $ matches before a final newline), and any problem.
@@ -276,6 +310,8 @@ for ns in $namespaces; do
         audit ReplicaSet "$replicasets" "$VOLUME_CHECKS"
         audit Job "$jobs" "$VOLUME_CHECKS"
         audit CronJob "$cronjobs" "$VOLUME_CHECKS"
+        audit Kustomization "$kustomizations" "$FLUX_CHECKS"
+        audit HelmRelease "$helmreleases" "$FLUX_CHECKS"
         # tenant-pvc-storageclasses: tenant-local, or "" for a platform-written static volume.
         jq -r --arg ns "$ns" '.items[] | (if (.spec | has("storageClassName")) then .spec.storageClassName else null end) as $s
             | if $s == "" and ((.spec.volumeName // "") | startswith($ns + "-") | not)
@@ -298,7 +334,7 @@ done
 if [ "${#findings[@]}" -gt 0 ]; then
     printf '%s\n' "${findings[@]}"
     echo "audit-tenant-admission: ${#findings[@]} finding(s) the tenant policies refuse on the next write." >&2
-    echo "    Fix each as the tenants README describes: grant, routes, Services, endpoints, certificates, volumes, claims." >&2
+    echo "    Fix each as the tenants README describes: grant, routes, Services, endpoints, certificates, volumes, claims, Flux objects." >&2
     exit 1
 fi
 echo "audit-tenant-admission: OK ($count tenant namespace(s))"

@@ -64,6 +64,7 @@ def declared_lib_ref(path: Path) -> str | None:
     entry = ((header.get("spec") or {}).get("inputs") or {}).get("lib_ref") or {}
     return entry.get("default")
 
+
 # `.tmp` carries this pipeline's two weisssrv-lib clones, so copying it would
 # duplicate hundreds of megabytes into every render.
 _IGNORED = shutil.ignore_patterns(

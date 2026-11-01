@@ -173,3 +173,29 @@ def test_a_non_utf8_pipeline_reports_that_it_inspected_nothing(tmp_path):
     res = _run(root)
     assert res.returncode == 2
     assert "unreadable" in res.stderr
+
+
+def test_a_non_utf8_gotk_components_reports_that_it_inspected_nothing(tmp_path):
+    """An undecodable manifest is not a missing header: the gate never read it."""
+    root = _tree(tmp_path, gotk="2.9.0")
+    gotk = root / "kubernetes/clusters/example/flux-system/gotk-components.yaml"
+    gotk.write_bytes(b"# Flux Version: v\xff\xfe\n")
+    res = _run(root)
+    assert res.returncode == 2
+    assert "unreadable" in res.stderr
+
+
+def test_a_missing_components_header_says_so(tmp_path):
+    root = _tree(tmp_path, gotk="2.9.0")
+    gotk = root / "kubernetes/clusters/example/flux-system/gotk-components.yaml"
+    gotk.write_text("# Flux Version: v2.9.0\n")
+    res = _run(root)
+    assert res.returncode == 1
+    assert "has no '# Components:' header" in res.stdout
+
+
+def test_this_repository_passes_on_the_real_tree():
+    """The subject `task lint:flux-version-pin` hands it: this repository's own
+    pipeline, versions ConfigMap and, once bootstrapped, gotk-components."""
+    res = _run(Path(__file__).resolve().parent.parent)
+    assert res.returncode == 0, res.stdout + res.stderr

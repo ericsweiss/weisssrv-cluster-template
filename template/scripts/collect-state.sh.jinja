@@ -90,9 +90,9 @@ probe_pve_reachable() {
     echo "$up $total"
 }
 
-# ZFS pool health aggregated across all reachable Proxmox hosts. Sets
-# ZFS_DEGRADED_RESULT (non-ONLINE pools, plus pools a NAS host should list and does
-# not), ZFS_MISSING_RESULT (those pools, named) and ZFS_POOLS_RESULT under "detail".
+# ZFS pool health across all reachable Proxmox hosts. Sets ZFS_DEGRADED_RESULT
+# (non-ONLINE pools, a NAS host's missing ones, failed listings), ZFS_MISSING_RESULT
+# (those, named) and, under "detail", ZFS_POOLS_RESULT: every host's pools, tagged.
 probe_zfs_degraded() {
     local want_detail="${1:-}"
     local cols="name,health"
@@ -100,19 +100,32 @@ probe_zfs_degraded() {
     ZFS_DEGRADED_RESULT=0
     ZFS_POOLS_RESULT="[]"
     ZFS_MISSING_RESULT=""
-    local host pools listed host_degraded seen want absent
+    local host pools listed rc host_degraded seen want absent
     local -a expect_pools=()
     for host in ${PVE_HOSTS[@]+"${PVE_HOSTS[@]}"}; do
         listed=false
-        pools=""
+        rc=0
         # shellcheck disable=SC2029 # $cols is a trusted constant; expanding it
         # client-side is intended (the remote gets the same literal column list).
-        if pools=$(ssh_probe_cmd "${SSH_USER}@${host}" "zpool list -H -o ${cols} 2>/dev/null" 2>/dev/null); then
-            listed=true
+        pools=$(ssh_probe_cmd "${SSH_USER}@${host}" "zpool list -H -o ${cols} 2>/dev/null" 2>/dev/null) || rc=$?
+        # ssh fails with 255 and the backstop with 124, which the PVE reachability
+        # count covers. Any other non-zero is zpool failing on a host that answered.
+        case "$rc" in
+            0) listed=true ;;
+            124|255) pools="" ;;
+            *)
+                ZFS_DEGRADED_RESULT=$((ZFS_DEGRADED_RESULT + 1))
+                ZFS_MISSING_RESULT="${ZFS_MISSING_RESULT}${ZFS_MISSING_RESULT:+, }zpool list failed on $host"
+                continue
+                ;;
+        esac
+        if [ "$listed" = true ]; then
             host_degraded=$(echo "$pools" | awk -F'\t' 'NF>=2 && $2 != "ONLINE" {c++} END{print c+0}')
             ZFS_DEGRADED_RESULT=$((ZFS_DEGRADED_RESULT + host_degraded))
-            if [ "$want_detail" = "detail" ] && [ "$ZFS_POOLS_RESULT" = "[]" ]; then
-                ZFS_POOLS_RESULT=$(echo "$pools" | jq -R -s '[split("\n")[] | select(length>0) | split("\t") | {name:.[0], health:.[1], size:.[2], alloc:.[3], free:.[4]}]' 2>/dev/null || echo "[]")
+            if [ "$want_detail" = "detail" ]; then
+                ZFS_POOLS_RESULT=$(echo "$pools" | jq -R -s --arg host "$host" --argjson acc "$ZFS_POOLS_RESULT" \
+                    '$acc + [split("\n")[] | select(length>0) | split("\t") | {host:$host, name:.[0], health:.[1], size:.[2], alloc:.[3], free:.[4]}]' \
+                    2>/dev/null || echo "$ZFS_POOLS_RESULT")
             fi
         fi
         # A pool that failed to import has no `zpool list` row at all, so on the
@@ -144,7 +157,7 @@ probe_zfs_degraded() {
 
 # Flux readiness — Kustomizations and HelmReleases that are NOT reconciling:
 # Ready!=True OR suspended (a suspended object keeps a stale Ready=True forever).
-# Echoes the count, or "unknown" when the query could not run; a false 0 would lie.
+# Echoes the count, or "unknown" when the query could not run, never a false 0.
 probe_flux_not_ready() {
     local out=unknown json
     if json=$(kubectl "$@" get kustomizations.kustomize.toolkit.fluxcd.io,helmreleases.helm.toolkit.fluxcd.io -A -o json 2>/dev/null); then
@@ -618,21 +631,19 @@ if [ -d "$PVE_DUMP_DIR" ]; then
     cat /var/lib/node_exporter/vzdump_backup.prom 2>/dev/null | cs_emit "  No vzdump metrics"
     echo "pve-cluster backup metrics:"
     cat /var/lib/node_exporter/pve_cluster_backup.prom 2>/dev/null | cs_emit "  No pve-cluster backup metrics"
-    # restic to the offsite bucket is the last line of defence: report its
-    # timers and metrics, not just the schedule the generic timer list shows.
+    # The restic-offsite timers and metrics, beyond the schedule the generic
+    # timer list shows.
     echo "restic-offsite timers:"
     systemctl list-timers 'restic-offsite*' --all --no-pager 2>/dev/null | cs_capped 5 "  No restic-offsite timers"
     echo "restic-offsite metrics:"
     cat /var/lib/node_exporter/restic_offsite.prom 2>/dev/null | cs_emit "  No restic-offsite metrics"
     echo "restic-offsite verify metrics:"
     cat /var/lib/node_exporter/restic_offsite_verify.prom 2>/dev/null | cs_emit "  No restic-offsite verify metrics"
-    # A restore that has never been PROVEN is not a backup. These are the only
-    # series that say a drill ran and what it compared.
+    # Restore-drill series: the last drill run and what it compared.
     echo "restore-drill metrics:"
     cat /var/lib/node_exporter/backup_restore_drill.prom 2>/dev/null | cs_emit "  No restore-drill metrics"
-    # Recovery depth: retention states the INTENT, this states the truth. It
-    # reaches the offsite bucket, so a slow or failed list degrades to a marker
-    # rather than hanging the run.
+    # Recovery points actually held offsite, read from the bucket; a slow or
+    # failed list degrades to a marker rather than hanging the run.
     echo "restic recovery points (oldest/newest of the offsite repo):"
     snaps=$(sudo timeout 90 restic-offsitectl snapshots 2>&1); rc=$?
     if [ "$rc" -eq 124 ]; then
@@ -811,7 +822,8 @@ EOF
     [ "$rc" -eq 0 ] || echo "Failed (rc=$rc)"
 
     # Cluster-wide data (collected once from the first server node)
-    # Exit codes: 0 = collected, 2 = not a server (try next), other = SSH/remote failure
+    # Exit codes: 0 = collected, 2 = not a server (try next), 3 = API unresponsive
+    # (try next), other = SSH/remote failure.
     local cluster_rc
     if [ "$K3S_CLUSTER_COLLECTED" = "false" ]; then
         set +e
@@ -1114,9 +1126,9 @@ if kubectl --request-timeout=5s get nodes >/dev/null 2>&1; then
     K3S_API_OK=true
 fi
 
-# Health probes mirroring the --json branch's signals. Each falls back to "0"
-# so an operator-side issue never promotes a run, and the defaults below keep
-# set -u quiet if a probe is skipped.
+# Health probes mirroring the --json branch's signals. The flux and alert probes
+# report "unknown" on failure, which the verdict coerces to failing; the
+# Warning-event count stays advisory. See probe_zfs_degraded for unreachable hosts.
 FLUX_NOT_READY_REG=0
 ZFS_DEGRADED_REG=0
 ZFS_MISSING_REG=""
@@ -1151,9 +1163,8 @@ ZFS_MISSING_REG=$ZFS_MISSING_RESULT
 # Recent warning events — see probe_warning_events.
 WARNING_EVENTS_REG=$(probe_warning_events --request-timeout=5s)
 
-# See probe_firing_alerts. Unlike the advisory Warning-event count this DOES
-# gate OK: an artifact headed "Status: OK" while TargetDown is firing is the
-# exact lie this collector exists to prevent.
+# See probe_firing_alerts. Firing alerts gate OK, unlike the advisory
+# Warning-event count.
 ALERTS_FIRING_REG=$(probe_firing_alerts --request-timeout=5s)
 
 {
@@ -1301,8 +1312,7 @@ while IFS= read -r file; do
     rm -f -- "$file"
     COUNT=$((COUNT + 1))
 done < <(
-    # One `ls -td` (an xargs split would sort each batch independently and keep
-    # 5 per batch); `|| true` absorbs the no-match exit under set -e.
+    # `|| true` absorbs the no-match exit under set -e.
     # shellcheck disable=SC2012 # ls -t for mtime sort; names are timestamped
     ls -td -- "$STATE_DIR"/cluster-state-*.txt 2>/dev/null \
         | tail -n +6 \

@@ -9,8 +9,8 @@ terraform {
   required_providers {
     cloudflare = {
       source = "cloudflare/cloudflare"
-      # Patch line pinned (../README.md). v5 renames every resource the module
-      # uses: moving to it is a module rewrite plus a state mv per record.
+      # Patch line pinned, so a provider bump is its own reviewed change. v5
+      # renames every resource the module uses: moving to it is a module rewrite.
       version = "~> 4.52.0"
     }
   }

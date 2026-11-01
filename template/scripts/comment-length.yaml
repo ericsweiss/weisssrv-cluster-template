@@ -24,6 +24,7 @@ exclude:
   - scripts/check-dashboards.py
   - scripts/check-default-deny-coverage.py
   - scripts/check-deploy-coverage.sh
+  - scripts/check-deploy-preflight.py
   - scripts/check-doc-links.py
   - scripts/check-ephemeral-storage-cap.py
   - scripts/check-flux-version-pin.py

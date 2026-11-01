@@ -30,10 +30,9 @@ CRD_CATALOG = (
 )
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
-# apiVersion/Kind pairs kubeconform may validate against NO schema. Empty: the
-# catalog covers every kind the template ships, so a skip is either a failed
-# catalog fetch or a new CRD arriving unvalidated.
-EXPECTED_SKIPPED = frozenset()
+# The render's own list of apiVersion/Kind pairs kubeconform may validate
+# against no schema, which flux-lint passes to the same tracker.
+EXPECTED_SKIPPED_RELPATH = "scripts/kubeconform-expected-skipped.txt"
 
 
 class Failure(Exception):
@@ -41,10 +40,8 @@ class Failure(Exception):
 
 
 def _lib_verdict(verified: str, unverified: str, ref_verified: bool) -> str:
-    """CRITICAL: a gate that read the library checkout says something about the
-    PINNED ref only when that ref resolved. Every lib-reading gate prints
-    through this, so none reports a bare `ok` against a checkout at another ref.
-    """
+    """A lib-reading gate's verdict. It speaks for the pinned ref only when that
+    ref resolved, so no gate reports a bare `ok` against another checkout."""
     return "  " + (verified if ref_verified else unverified)
 
 
@@ -75,20 +72,31 @@ def _yaml_paths(root: Path, *, recursive: bool = True) -> list[Path]:
 YAMLLINT_CONFIG = "lint/yamllint-relaxed.yml"
 
 
+def _include_inputs(render: Path, file: str) -> dict:
+    """One library include's inputs in the generated pipeline."""
+    ci = render_cluster.load_ci(render / ".gitlab-ci.yml")
+    for inc in ci.get("include", []):
+        if isinstance(inc, dict) and inc.get("file") == file:
+            return inc.get("inputs") or {}
+    raise Failure(f"the generated pipeline has no {file} include")
+
+
 def check_yamllint(render: Path, **_kw) -> None:
+    """The targets and config the render's yaml-lint include passes, so this
+    lints exactly what the generated pipeline lints."""
     _need("yamllint")
-    dirs = ("ansible", "kubernetes", "terraform", "scripts", "taskfiles", "lint")
-    targets = [d for d in dirs if (render / d).is_dir()]
-    targets += [f for f in (".gitlab-ci.yml", "Taskfile.yml") if (render / f).is_file()]
+    inputs = _include_inputs(render, "/ci/lint/yaml-lint.yml")
+    targets = str(inputs.get("targets") or "").split()
     if not targets:
-        raise Failure("nothing to lint — the render has no ansible/, kubernetes/ or terraform/")
-    # The render's own config, so this matches its CI job and `task lint`.
-    # Falling back to `-d relaxed` would lint a different profile than the
-    # generated pipeline does and report different findings.
-    if not (render / YAMLLINT_CONFIG).is_file():
+        raise Failure("the yaml-lint include passes no targets — the gate would lint nothing")
+    missing = [t for t in targets if not (render / t).exists()]
+    if missing:
+        raise Failure(f"the yaml-lint include names targets the render lacks: {missing}")
+    config = str(inputs.get("config") or "")
+    if config != f"-c {YAMLLINT_CONFIG}" or not (render / YAMLLINT_CONFIG).is_file():
         raise Failure(
-            f"the render ships no {YAMLLINT_CONFIG} — its yaml-lint job and `task lint` "
-            "both pass that path, so the gate would check a profile the cluster never uses"
+            f"the yaml-lint include passes {config!r}; this gate expects `-c "
+            f"{YAMLLINT_CONFIG}`, the profile `task lint` uses, shipped in the render"
         )
     result = _run(["yamllint", "-c", YAMLLINT_CONFIG, *targets], cwd=render)
     if result.returncode:
@@ -182,7 +190,12 @@ def tf_state_backend_problems(render: Path) -> list[str]:
         return ["no terraform task declares TF_HTTP_ADDRESS — the render has no managed state"]
 
     problems = []
-    roots = {path.name for path in (render / "terraform").glob("*") if path.is_dir()}
+    # Dot-directories are tool state, such as a `terraform init` .terraform/.
+    roots = {
+        path.name
+        for path in (render / "terraform").glob("*")
+        if path.is_dir() and not path.name.startswith(".")
+    }
     if set(envs) != roots:
         problems.append(
             f"terraform roots {sorted(roots)} but state-backed tasks for {sorted(envs)} — "
@@ -190,7 +203,9 @@ def tf_state_backend_problems(render: Path) -> list[str]:
         )
     for key in _TF_SHARED_HTTP_KEYS:
         values = {root: env.get(key) for root, env in envs.items()}
-        if len(set(values.values())) != 1:
+        if not all(values.values()):
+            problems.append(f"{key} is missing from a root's state backend: {values}")
+        elif len(set(values.values())) != 1:
             problems.append(f"{key} is not identical across the roots: {values}")
     for root, env in envs.items():
         for key, suffix in (
@@ -302,11 +317,7 @@ def check_terraform_validate(
 def _flux_lint_inputs(render: Path) -> dict:
     """The flux-lint include's inputs, so this and CI can never disagree about
     which render helper and which ConfigMaps are in play."""
-    ci = render_cluster.load_ci(render / ".gitlab-ci.yml")
-    for inc in ci.get("include", []):
-        if isinstance(inc, dict) and inc.get("file") == "/ci/validate/flux-lint.yml":
-            return inc.get("inputs") or {}
-    raise Failure("the generated pipeline has no flux-lint include")
+    return _include_inputs(render, "/ci/validate/flux-lint.yml")
 
 
 def _configmap_paths(render: Path) -> list[str]:
@@ -359,18 +370,30 @@ def _kubeconform(render: Path, k8s_version: str, manifests: str, *extra: str):
 
 def _skipped_kinds(render: Path, k8s_version: str, manifests: list[str]) -> list[str]:
     """Kinds kubeconform validated against NO schema, via the render's own
-    tracker. kubeconform's own return code never shows them, so an unexpected
-    pair is the caller's failure."""
+    tracker and baseline. kubeconform's own return code never shows them, so
+    the tracker's verdict against the baseline is the failure."""
     tracker = render / "scripts" / "kubeconform-skipped.py"
-    if not tracker.is_file():
-        raise Failure(
-            "the render ships no scripts/kubeconform-skipped.py, so the kinds "
-            "kubeconform validated against no schema went unreported"
-        )
+    baseline = render / EXPECTED_SKIPPED_RELPATH
+    for path in (tracker, baseline):
+        if not path.is_file():
+            raise Failure(
+                f"the render ships no {path.relative_to(render)}, so the kinds "
+                "kubeconform validated against no schema went unchecked"
+            )
+    # -verbose lists the valid resources too; without it an all-valid corpus
+    # reports none and the tracker reads that as an empty render.
     audit = _kubeconform(
-        render, k8s_version, "\n---\n".join(manifests), "-output", "json"
+        render, k8s_version, "\n---\n".join(manifests), "-verbose", "-output", "json"
     )
-    report = _run([sys.executable, str(tracker)], input=audit.stdout, cwd=render)
+    if audit.returncode and not audit.stdout.strip():
+        raise Failure(f"the kubeconform schema audit produced no report:\n{audit.stderr}")
+    report = _run([sys.executable, str(tracker), str(baseline)], input=audit.stdout, cwd=render)
+    if report.returncode:
+        raise Failure(
+            f"kubeconform-skipped.py exited {report.returncode} — a kind with no schema "
+            "is UNVALIDATED, or the audit read nothing. A failed catalog fetch looks "
+            f"the same as a new CRD:\n{report.stdout}{report.stderr}"
+        )
     # The tracker lists each skipped kind as "  - <group>/<Kind>"; everything
     # else it prints is prose.
     return [line.strip(" -") for line in report.stdout.splitlines() if line.startswith("  - ")]
@@ -418,6 +441,39 @@ def _tenant_example_problems(render: Path, k8s_version: str, values: dict[str, s
     return problems
 
 
+def _kustomization_builds(
+    cluster_dirs: list[Path], render: Path, values: dict[str, str]
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """(path, substituted build) for every Flux Kustomization the cluster
+    directories name, plus why any could not be built. An unknown placeholder
+    is a failure: substituted as empty it would hand the gates a blank value."""
+    builds: list[tuple[str, str]] = []
+    failures: list[str] = []
+    for cluster_dir in cluster_dirs:
+        for ks_file in sorted(cluster_dir.glob("*.yaml")):
+            if ks_file.stem == "kustomization":
+                continue
+            doc = yaml.safe_load(ks_file.read_text()) or {}
+            src = str((doc.get("spec") or {}).get("path", "")).removeprefix("./")
+            if not src:
+                continue
+            build = _run(["kustomize", "build", src], cwd=render)
+            if build.returncode:
+                failures.append(f"kustomize build {src}:\n{build.stderr}")
+                continue
+            if not build.stdout.strip():
+                failures.append(f"{src}: kustomize build produced no resources")
+                continue
+            unknown = sorted({m for m in PLACEHOLDER.findall(build.stdout) if m not in values})
+            if unknown:
+                failures.append(
+                    f"{src}: placeholders with no ConfigMap key (they render EMPTY): {unknown}"
+                )
+                continue
+            builds.append((src, PLACEHOLDER.sub(lambda m: values[m.group(1)], build.stdout)))
+    return builds, failures
+
+
 def check_flux(render: Path, **_kw) -> None:
     _need("kustomize")
     _need("kubeconform")
@@ -438,49 +494,20 @@ def check_flux(render: Path, **_kw) -> None:
     if not cluster_dirs:
         raise Failure("no kubernetes/clusters/<name>/ in the render")
 
-    failures: list[str] = []
+    builds, failures = _kustomization_builds(cluster_dirs, render, values)
     validated: list[str] = []
-    built = 0
-    for cluster_dir in cluster_dirs:
-        for ks_file in sorted(cluster_dir.glob("*.yaml")):
-            if ks_file.stem == "kustomization":
-                continue
-            doc = yaml.safe_load(ks_file.read_text()) or {}
-            src = (doc.get("spec") or {}).get("path", "")
-            if not src:
-                continue
-            src = src.lstrip("./")
-            build = _run(["kustomize", "build", src], cwd=render)
-            if build.returncode:
-                failures.append(f"kustomize build {src}:\n{build.stderr}")
-                continue
-            if not build.stdout.strip():
-                failures.append(f"{src}: kustomize build produced no resources")
-                continue
-            unknown = sorted({m for m in PLACEHOLDER.findall(build.stdout) if m not in values})
-            if unknown:
-                failures.append(
-                    f"{src}: placeholders with no ConfigMap key (they render EMPTY): {unknown}"
-                )
-                continue
-            rendered = PLACEHOLDER.sub(lambda m: values[m.group(1)], build.stdout)
-            conform = _kubeconform(render, k8s_version, rendered, "-strict", "-summary")
-            if conform.returncode:
-                failures.append(f"kubeconform {src}:\n{conform.stdout}{conform.stderr}")
-            validated.append(rendered)
-            built += 1
+    for src, rendered in builds:
+        conform = _kubeconform(render, k8s_version, rendered, "-strict", "-summary")
+        if conform.returncode:
+            failures.append(f"kubeconform {src}:\n{conform.stdout}{conform.stderr}")
+        validated.append(rendered)
+    built = len(builds)
     failures += _tenant_example_problems(render, k8s_version, values)
     if failures:
         raise Failure("\n".join(failures))
     if not validated:
         raise Failure("no Kustomization rendered — kubeconform validated nothing")
     skipped = _skipped_kinds(render, k8s_version, validated)
-    if unexpected := sorted(set(skipped) - EXPECTED_SKIPPED):
-        raise Failure(
-            "kubeconform had no schema for " + ", ".join(unexpected) + " — those "
-            "resources are UNVALIDATED. A failed catalog fetch looks the same as a "
-            "new CRD here; add the pair to EXPECTED_SKIPPED once the gap is deliberate."
-        )
     print(
         f"  flux ok ({built} Kustomizations + the tenant wiring example, k8s "
         f"{k8s_version}, {len(values)} substitutions"
@@ -553,23 +580,17 @@ def check_cluster_gates(render: Path, **_kw) -> None:
     configmaps = _configmap_paths(render)
     values = _substitutions(render, configmaps)
 
-    corpus: list[str] = []
-    for cluster_dir in sorted((render / "kubernetes" / "clusters").glob("*")):
-        for ks_file in sorted(cluster_dir.glob("*.yaml")):
-            if ks_file.stem == "kustomization":
-                continue
-            src = ((yaml.safe_load(ks_file.read_text()) or {}).get("spec") or {}).get("path", "")
-            if not src:
-                continue
-            build = _run(["kustomize", "build", src.lstrip("./")], cwd=render)
-            if build.returncode:
-                raise Failure(f"kustomize build {src}:\n{build.stderr}")
-            corpus.append(PLACEHOLDER.sub(lambda m: values.get(m.group(1), ""), build.stdout))
+    cluster_dirs = sorted((render / "kubernetes" / "clusters").glob("*"))
+    builds, build_failures = _kustomization_builds(cluster_dirs, render, values)
+    if build_failures:
+        raise Failure("\n".join(build_failures))
+    corpus = [rendered for _src, rendered in builds]
     if not corpus:
         raise Failure("no Kustomization rendered — the gates would examine nothing")
     stream = "\n---\n".join(corpus)
 
-    failures = []
+    ran: list[str] = []
+    failures: list[str] = []
     wrapper = render / "scripts" / _CORPUS_GATE_WRAPPER
     if not wrapper.is_file():
         failures.append(f"{_CORPUS_GATE_WRAPPER} is wired into CI but not shipped")
@@ -582,6 +603,7 @@ def check_cluster_gates(render: Path, **_kw) -> None:
             result = _run(["bash", f"scripts/{_CORPUS_GATE_WRAPPER}", str(corpus_file)], cwd=render)
         finally:
             corpus_file.unlink(missing_ok=True)
+        ran.append(_CORPUS_GATE_WRAPPER)
         if result.returncode:
             failures.append(f"{_CORPUS_GATE_WRAPPER}:\n{result.stdout}{result.stderr}")
 
@@ -595,20 +617,23 @@ def check_cluster_gates(render: Path, **_kw) -> None:
         ],
         cwd=render,
     )
+    ran.append("check-netpol-except-parity.py")
     if netpol.returncode:
         failures.append(f"check-netpol-except-parity.py:\n{netpol.stdout}{netpol.stderr}")
 
     dashboards = _run([sys.executable, "scripts/check-dashboards.py"], cwd=render)
+    ran.append("check-dashboards.py")
     if dashboards.returncode:
         failures.append(f"check-dashboards.py:\n{dashboards.stdout}{dashboards.stderr}")
 
     prometheus = _prometheus_config(render)
+    ran += ["lint-prometheus-config.sh", "check-alertmanager-behaviour.py"]
     if prometheus:
         failures.append(prometheus)
 
     if failures:
         raise Failure("\n".join(failures))
-    print(f"  cluster gates ok ({_CORPUS_GATE_WRAPPER} + 4 over {len(corpus)} builds)")
+    print(f"  cluster gates ok ({', '.join(ran)} over {len(corpus)} builds)")
 
 
 def check_flux_lint(render: Path, **_kw) -> None:
@@ -747,9 +772,8 @@ def check_vendored(
 
 
 def _vendored_row(self_checks: bool, ref_verified: bool) -> str:
-    """CRITICAL: byte-identity is a claim about the PINNED ref. The engine falls
-    back to the library working tree when that ref does not resolve, so the
-    unverified spelling REPLACES the claim rather than qualifying it."""
+    """The vendored row. Byte-identity is a claim about the pinned ref, so an
+    unverified ref replaces the claim rather than qualifying it."""
     if not self_checks:
         return _lib_verdict(
             "vendored ok (render scripts only)",
@@ -824,78 +848,90 @@ def _check_registered_copies(lib_path: Path) -> list[str]:
             f"{MANIFEST_RELPATH} would be compared against whatever the library "
             "checkout happens to hold, not the ref the copies were taken at"
         ]
+    problems, _registered = _vendored_copy_problems(
+        checker,
+        manifest,
+        render_cluster.REPO_ROOT,
+        lib_path,
+        str(ref),
+        f"vendored copies ({MANIFEST_RELPATH})",
+        "scripts/vendored-manifest.yml",
+    )
+    return problems
+
+
+def _vendored_copy_problems(
+    checker: Path,
+    manifest: Path,
+    repo_root: Path,
+    lib_path: Path,
+    ref: str,
+    label: str,
+    fix: str,
+) -> tuple[list[str], set[str]]:
+    """The library engine's verdict on one tree's manifest at `ref`, and the
+    basenames it registers. The engine validates only what the manifest names,
+    so a library twin in scripts/ that it leaves out is reported too."""
     argv = [
         sys.executable,
         str(checker),
         "--manifest",
         str(manifest),
         "--repo-root",
-        str(render_cluster.REPO_ROOT),
+        str(repo_root),
         "--lib-path",
         str(lib_path),
     ]
     problems = []
-    result = _run(argv + ["--ref", str(ref)])
+    result = _run(argv + ["--ref", ref])
     if result.returncode:
-        # The engine falls back to the working tree when the ref does not
-        # resolve, so a failure here is drift against whichever tree it names.
-        # Copies matching that tree under an older pin need a bump, not a re-vendor.
+        # Copies that match the working tree under an older pin need a bump.
         hint = ""
         if _run(argv).returncode == 0:
             hint = (
-                "\nThese copies match the library's working tree exactly, but this "
-                f"repository pins {ref}. That is the expected state while a library tag "
-                "is being cut; resolve it by bumping copier.yml's lib_ref default (and "
-                "this repository's own includes) once the tag exists — never by "
+                f"\nThese copies match the library's working tree exactly, but the pin "
+                f"is {ref}. That is the expected state while a library tag is being cut; "
+                "resolve it by bumping copier.yml's lib_ref default (and this "
+                "repository's own includes) once the tag exists — never by "
                 "re-vendoring backwards."
             )
-        problems.append(
-            f"vendored copies ({MANIFEST_RELPATH}):\n{result.stdout}{result.stderr}{hint}"
-        )
-    problems += _unregistered_twins(argv, lib_path, str(ref))
-    return problems
+        problems.append(f"{label}:\n{result.stdout}{result.stderr}{hint}")
 
-
-def _unregistered_twins(argv: list[str], lib_path: Path, ref: str) -> list[str]:
-    """This repository's scripts/ may hold no library twin the manifest omits.
-
-    The engine validates what the manifest names and cannot see what it leaves
-    out, so an unregistered copy is held to nothing.
-    """
     listed = _run(argv + ["--list"])
     if listed.returncode:
-        return [f"{MANIFEST_RELPATH} does not parse:\n{listed.stdout}{listed.stderr}"]
+        problems.append(f"{label} does not parse:\n{listed.stdout}{listed.stderr}")
+        return problems, set()
     registered = {
         Path(parts[1]).name
         for parts in (line.split("\t") for line in listed.stdout.splitlines())
         if len(parts) >= 3
     }
     if not registered:
-        return [
-            f"{MANIFEST_RELPATH} registers no copy — the comparison above examined "
-            "nothing, so every library twin in this repository is ungated"
-        ]
-    own = render_cluster.REPO_ROOT / "scripts"
-    if not own.is_dir():
-        return []
+        problems.append(
+            f"{label} registers no copy — every library twin in that tree is ungated"
+        )
+        return problems, registered
+    scripts = repo_root / "scripts"
+    if not scripts.is_dir():
+        return problems, registered
     lib_names = _offered_script_names(lib_path, ref)
     if not lib_names:
-        return [f"the library offers no scripts at {ref} — this arm examined nothing"]
+        problems.append(f"the library offers no scripts at {ref} — this arm examined nothing")
     unregistered = sorted(
         path.name
-        for path in own.iterdir()
+        for path in scripts.iterdir()
         if path.is_file()
         and path.name in lib_names
         and path.name not in registered
         and path.suffix not in _SITE_DATA_SUFFIXES
     )
-    if not unregistered:
-        return []
-    return [
-        f"this repository's scripts/ carries library twins {MANIFEST_RELPATH} does not "
-        f"name: {', '.join(unregistered)} — nothing holds them to the library. Add them "
-        "to scripts/vendored-manifest.yml."
-    ]
+    if unregistered:
+        problems.append(
+            f"{label}: scripts/ carries library twins the manifest does not name: "
+            f"{', '.join(unregistered)} — nothing holds them to the library. Add them "
+            f"to {fix}."
+        )
+    return problems, registered
 
 
 RENDER_GATE_RELPATH = "tests/test_vendored_byte_identity.py"
@@ -935,68 +971,15 @@ def check_rendered_vendored(
             "its pin from there, so it would have nothing to compare at"
         )
 
-    problems: list[str] = []
-    argv = [
-        sys.executable,
-        str(checker),
-        "--manifest",
-        str(manifest),
-        "--repo-root",
-        str(render),
-        "--lib-path",
-        str(lib_path),
-    ]
-    result = _run(argv + ["--ref", str(ref)])
-    if result.returncode:
-        # The engine falls back to the working tree when the ref does not
-        # resolve, so a failure here is drift against whichever tree it names.
-        # Copies matching that tree under an older pin need a bump, not a re-vendor.
-        hint = ""
-        if _run(argv).returncode == 0:
-            hint = (
-                f"\nThese copies match the library's working tree exactly, but the render "
-                f"pins {ref}. That is the expected state while a library tag is being cut; "
-                f"resolve it by bumping copier.yml's lib_ref default (and this "
-                f"repository's own includes) once the tag exists — never by re-vendoring "
-                f"backwards."
-            )
-        problems.append(f"the render's {MANIFEST_RELPATH}:\n{result.stdout}{result.stderr}{hint}")
-
-    listed = _run(argv + ["--list"])
-    if listed.returncode:
-        problems.append(f"the render's {MANIFEST_RELPATH} does not parse:\n{listed.stderr}")
-        registered: set[str] = set()
-    else:
-        registered = {
-            Path(parts[1]).name
-            for parts in (line.split("\t") for line in listed.stdout.splitlines())
-            if len(parts) >= 3
-        }
-
-    lib_names = _offered_script_names(lib_path, str(ref))
-    if not lib_names:
-        problems.append(f"the library offers no scripts at {ref} — this arm examined nothing")
-    unregistered = sorted(
-        path.name
-        for path in sorted((render / "scripts").iterdir())
-        if path.is_file()
-        and path.name in lib_names
-        and path.name not in registered
-        and path.suffix not in _SITE_DATA_SUFFIXES
+    problems, registered = _vendored_copy_problems(
+        checker,
+        manifest,
+        render,
+        lib_path,
+        str(ref),
+        f"the render's {MANIFEST_RELPATH}",
+        "template/scripts/vendored-manifest.yml",
     )
-    if unregistered:
-        problems.append(
-            f"the render's scripts/ carries library twins that its {MANIFEST_RELPATH} does "
-            f"not name: {', '.join(unregistered)} — they ship to every generated cluster "
-            "ungated. Add them to template/scripts/vendored-manifest.yml."
-        )
-
-    if not registered:
-        problems.append(
-            f"the render's {MANIFEST_RELPATH} registers no copy — every library file it "
-            "ships would go ungated in the generated repository"
-        )
-
     if problems:
         raise Failure("\n".join(problems))
     print(
@@ -1054,9 +1037,8 @@ def _checkout_dirty(lib_path: Path) -> list[str]:
 
 
 def lib_checkout_problems(lib_path: Path, expected: str) -> list[str]:
-    """CRITICAL: --lib-path may be any tree. Without this, the vendored, role
-    and include gates compare the render against an unrelated library and report
-    green. A git failure is reported as unverified, never as a match."""
+    """--lib-path may be any tree, so the checkout must sit on the pinned tag
+    with no local edits. A git failure is reported as unverified, never a match."""
     try:
         tags = _checkout_tags(lib_path)
         if expected not in tags:
@@ -1656,8 +1638,8 @@ RENDERED_AREAS = {
     "task gates, which read it as YAML rather than running it",
     "tests": "no check here: the generated repository's own suite runs in its pipeline",
     "docs": "no check here: prose, held by the render suite's doc and link gates",
-    ".gitlab": "ci-policy, include-contract, through the pipeline that includes "
-    "these job files",
+    ".gitlab": "yamllint, through the yaml-lint include's targets; ci-policy and "
+    "include-contract read .gitlab-ci.yml only, not the local job files it includes",
     ".claude": "no check here: agent instructions, held by the render suite's doc gates",
     ".cursor": "no check here: agent instructions, held by the render suite's doc gates",
     ".ansible": "no check here: empty collection and role install targets",
@@ -1763,8 +1745,7 @@ def main() -> int:
         if failed:
             print("\nFAILED:\n" + "\n\n".join(failed), file=sys.stderr)
             return 1
-        # An unrequested lib skip is red: a third of the registry reporting
-        # success is how ungated vendored drift reaches a generated cluster.
+        # A lib check skipped without --skip is a failure, not a pass.
         if skipped_for_lib:
             print(
                 "\nFAILED: " + ", ".join(skipped_for_lib) + " need --lib-path and did "

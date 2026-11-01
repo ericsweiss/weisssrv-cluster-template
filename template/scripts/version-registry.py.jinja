@@ -4,8 +4,8 @@ Read by `task maintenance:check-versions`; coverage enforced by `task lint:versi
 Field reference and categories: weisssrv-lib docs/SCRIPTS.md.
 """
 
-# Charts reconciled by Flux: nothing to deploy, the push is the deploy.
-_FLUX = "git push (Flux reconciles)"
+# Charts reconciled by Flux: nothing to deploy, the merge is the deploy.
+_FLUX = "merge the MR (Flux reconciles on merge)"
 
 
 def _chart(name, key, repo, chart, **extra):
@@ -134,8 +134,8 @@ CONFIG = {
             "MetalLB", "metallb", "https://metallb.github.io/metallb", "metallb",
             held=True,
             notes=(
-                "held at 0.15.x: 0.16.x floods the apiserver on this topology. "
-                "Confirm upstream has shipped a fix before unholding."
+                "held at 0.15.x: 0.16.x carries an apiserver-flood regression "
+                "(metallb#3063). Confirm upstream has shipped the fix before unholding."
             ),
         ),
         _chart("Traefik", "traefik", "https://traefik.github.io/charts", "traefik"),
@@ -144,9 +144,6 @@ CONFIG = {
             "kube_prometheus_stack",
             "https://prometheus-community.github.io/helm-charts",
             "kube-prometheus-stack",
-            # A pin a human must rewrite with this one takes
-            # coupled_vars=["prometheus_operator_crds"], which makes --update-all
-            # print PAIRED-EDIT-REQUIRED instead of relying on the note below.
             notes="bump prometheus_operator_crds in lockstep — the CRDs must match the operator",
         ),
         _chart(
@@ -169,6 +166,7 @@ CONFIG = {
             "https://prometheus-community.github.io/helm-charts",
             "prometheus-blackbox-exporter",
         ),
+{%- if secrets_backend == 'onepassword' %}
         _chart(
             "1Password Connect",
             "onepassword_connect",
@@ -176,9 +174,17 @@ CONFIG = {
             "connect",
             notes="Chart is named `connect`; it serves every ExternalSecret in the cluster.",
         ),
+{%- endif %}
         _chart("VPA", "vpa", "https://charts.fairwinds.com/stable", "vpa"),
         _chart("kured", "kured", "https://kubereboot.github.io/charts", "kured"),
         _chart("Reloader", "reloader", "https://stakater.github.io/stakater-charts", "reloader"),
+        _chart(
+            "metrics-server",
+            "metrics_server",
+            "https://kubernetes-sigs.github.io/metrics-server",
+            "metrics-server",
+            source_url="https://github.com/kubernetes-sigs/metrics-server/releases",
+        ),
 {%- if postgres_operator %}
         _chart(
             "CloudNativePG operator",

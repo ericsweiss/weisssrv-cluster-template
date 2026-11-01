@@ -41,6 +41,7 @@ GATE_HEADERS = (
     "Checking HPA/VPA invariant",
     "Checking NetworkPolicy LAN fence over real CIDRs",
     "Checking scrape/NetworkPolicy invariant",
+    "Checking scrape port admission over real namespaces",
     "Checking ingress default-deny coverage",
     "Checking ClusterSecretStore scoping",
     "Checking PVC storageClassName",
@@ -102,6 +103,21 @@ def test_a_tenant_only_resource_reaches_the_corpus(corpus: Path) -> None:
     assert "tenant-crd-editor" in corpus.read_text(), (
         "the tenants tree never reached the corpus the gates read, so a tenant's "
         "own SecretStore or NetworkPolicy is ungated"
+    )
+
+
+def test_a_relative_corpus_path_is_read_from_the_caller_s_directory(corpus: Path) -> None:
+    """The wrapper changes to the repository root, so a relative corpus path
+    must be resolved first or the gates read a file that is not there."""
+    result = subprocess.run(
+        ["bash", str(GATES), corpus.name],
+        cwd=corpus.parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert "no storageClassName" in result.stdout + result.stderr, (
+        f"{result.stdout}{result.stderr}"
     )
 
 

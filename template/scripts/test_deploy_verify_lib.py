@@ -44,9 +44,6 @@ def _items(*objs) -> str:
     return json.dumps({"items": list(objs)})
 
 
-# count_not_ready
-
-
 class TestCountNotReady:
     def test_all_ready_zero(self):
         out = _run("count_not_ready", _items(_ready("True"), _ready("True"))).stdout.strip()
@@ -80,9 +77,6 @@ class TestCountNotReady:
         assert _run("count_not_ready", "").stdout.strip() == ""
 
 
-# not_ready_ns_names
-
-
 class TestNotReadyNsNames:
     def _obj(self, ns, name, status):
         o = _ready(status)
@@ -102,9 +96,6 @@ class TestNotReadyNsNames:
         assert out == ""
 
 
-# steady_state
-
-
 class TestSteadyState:
     def test_zero_is_steady(self):
         assert _run("steady_state 0").stdout.strip() == "true"
@@ -121,9 +112,6 @@ class TestSteadyState:
 
     def test_missing_arg_is_bootstrap(self):
         assert _run("steady_state").stdout.strip() == "false"
-
-
-# nodes_not_ready_count
 
 
 class TestNodesNotReadyCount:
@@ -145,9 +133,6 @@ class TestNodesNotReadyCount:
         assert _run("nodes_not_ready_count", "").stdout.strip() == "0"
 
 
-# pods_not_running_or_completed
-
-
 class TestPodsNotRunningOrCompleted:
     # Columns mirror `kubectl get pods -n <ns> --no-headers`: NAME READY STATUS ...
     def test_running_and_completed_excluded(self):
@@ -160,9 +145,6 @@ class TestPodsNotRunningOrCompleted:
         assert "bad" in out
         assert "pend" in out
         assert "ok" not in out
-
-
-# pods_non_transient
 
 
 class TestPodsNonTransient:
@@ -196,9 +178,6 @@ class TestPodsNonTransient:
         assert "prog" not in out
 
 
-# pods_running_unready
-
-
 class TestPodsRunningUnready:
     def test_ready_running_excluded(self):
         rows = "a 1/1 Running 0 5m\nb 2/2 Running 0 5m\n"
@@ -215,9 +194,6 @@ class TestPodsRunningUnready:
         # check's job (pods_not_running_or_completed).
         rows = "a 0/1 Pending 0 5m\n"
         assert _run("pods_running_unready", rows).stdout.strip() == ""
-
-
-# helmreleases_not_ready_names
 
 
 class TestHelmreleasesNotReadyNames:
@@ -237,9 +213,6 @@ class TestHelmreleasesNotReadyNames:
     def test_all_ready_empty(self):
         out = _run("helmreleases_not_ready_names", _items(self._hr("ok", "True"))).stdout.strip()
         assert out == ""
-
-
-# helmreleases_hard_failed
 
 
 class TestHelmreleasesHardFailed:
