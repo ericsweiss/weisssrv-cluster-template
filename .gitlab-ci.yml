@@ -120,10 +120,10 @@ include:
     inputs:
       tags: []
       image: python:3.14
-      # jq: the nested `pytest tests scripts` inside the render collects
-      # scripts/test_collect_state_lib.py and test_deploy_verify_lib.py, which
-      # drive the shipped jq filters and fail rather than skip without it.
-      apt_packages: "jq"
+      # No apt: this repo's jobs run on the shared non-root runner, so jq (the
+      # render's collect-state tests drive its filters) comes from the fetcher
+      # in setup_command.
+      apt_packages: ""
       test_dir: "tests"
       # ansible-core: the nested render suite evaluates playbook expressions
       # through Ansible's templar and fails without it under CI. Job variables,

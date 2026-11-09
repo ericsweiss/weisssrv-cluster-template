@@ -165,13 +165,13 @@ maintenance_ci_runner_namespaces:
 # `task flux:sync-versions` and commit the regenerated ConfigMap.
 
 # Host-side pins consumed by weisssrv.infra roles (no role default — required).
-adguard_home_version: "0.107.79"
-adguard_sync_version: "0.9.5"
-alloy_host_version: "1.21.2-1"    # apt package version, not the chart version
+adguard_home_version: "0.107.80"
+adguard_sync_version: "0.9.6"
+alloy_host_version: "1.21.3-1"    # apt package version, not the chart version
 {%- if vpn_tailscale %}
 # apt package pin, read from a tasks-only maintenance play where the role
 # default is out of scope. Not helm_chart_versions.tailscale_operator.
-tailscale_version: "1.104.4"
+tailscale_version: "1.104.5"
 {%- endif %}
 
 # Debian cloud image every VM is built from, a DATED directory rather than
@@ -181,7 +181,7 @@ proxmox_vm_cloud_image_name: "debian-13-generic-amd64-20260914-2601.qcow2"
 # yamllint disable-line rule:line-length
 proxmox_vm_cloud_image_checksum: "sha512:a733e7d49442a03e70d03e4eb5aaf3967f3efc69ef70952f9bb10fc1ee2c4876eb95956b5ad2d31350e5fada768feb651352535fb8cd1233f61998a5a7d2e93c"
 
-k3s_version: "v1.37.1+k3s1"
+k3s_version: "v1.37.2+k3s1"
 # sha256 of install.sh at that tag: it verifies the k3s binary, not itself.
 # Recompute on every k3s_version bump - docs/RUNBOOKS.md.
 k3s_install_script_checksum: "sha256:ed01f89fd977bf20ac1516bbebf8370bf3ddbaa55dac8aba610956a4c78cc00b"
@@ -212,7 +212,7 @@ helm_chart_versions:
   prometheus_operator_crds: "33.0.1"
   kube_prometheus_stack: "93.1.0"
   loki: "21.0.0"
-  alloy: "1.14.3"
+  alloy: "1.15.0"
   prometheus_blackbox_exporter: "11.21.1"
 {%- if secrets_backend == 'onepassword' %}
   onepassword_connect: "2.4.3"

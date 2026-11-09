@@ -7,9 +7,9 @@
 # Run `task flux:sync-versions` to regenerate. CI fails if out of sync.
 apiVersion: v1
 data:
-  adguard_home_version: 0.107.79
-  adguard_sync_version: 0.9.5
-  alloy_host_version: 1.21.2-1
+  adguard_home_version: 0.107.80
+  adguard_sync_version: 0.9.6
+  alloy_host_version: 1.21.3-1
   authentik_version: 2026.8.5
   busybox_version: '1.38'
 {%- if vpn_tailscale %}
@@ -19,7 +19,7 @@ data:
 {%- if git_backend == 'gitlab_selfhosted' %}
   gitlab_runner_helm_version: 0.94.3
 {%- endif %}
-  helm_chart_versions_alloy: 1.14.3
+  helm_chart_versions_alloy: 1.15.0
   helm_chart_versions_cert_manager: v1.21.3
 {%- if postgres_operator %}
   helm_chart_versions_cloudnative_pg: 0.29.1
@@ -48,7 +48,7 @@ data:
 {%- endif %}
   helm_chart_versions_traefik: 42.3.1
   helm_chart_versions_vpa: 5.2.0
-  k3s_version: v1.37.1+k3s1
+  k3s_version: v1.37.2+k3s1
 {%- if tenant_storage %}
   local_path_provisioner_version: v0.0.37
 {%- endif %}
@@ -60,7 +60,7 @@ data:
   postgresql_version: 18.6-trixie
   registry_cache_version: 3.1.2
 {%- if vpn_tailscale %}
-  tailscale_version: 1.104.4
+  tailscale_version: 1.104.5
 {%- endif %}
 kind: ConfigMap
 metadata:
