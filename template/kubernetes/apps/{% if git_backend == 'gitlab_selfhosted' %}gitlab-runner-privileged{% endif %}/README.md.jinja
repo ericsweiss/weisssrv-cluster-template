@@ -25,9 +25,13 @@ a manifest — so verify it by hand after every registration.
 GET /api/v4/runners/<id>   ->  "runner_type": "project_type"
 ```
 
-If you want tenant repositories to build images, register a *second* privileged
-runner scoped to the tenant group, with its own namespace, quota and egress
-policy, and a distinct tag (`tenant-build`). Do not widen this one.
+The registration is a locked project runner with the tag `{{ ci_runner_tag }}`,
+"Run untagged jobs" off and "Lock to current projects" on. Enable it on another
+project only when that project needs root + DinD, such as a tenant image build:
+that project's **Settings > CI/CD > Runners > Enable for this project**, never a
+group or the instance. Every developer who can push to an enabled project runs
+root on this runner, so enable it only for a project trusted as much as this
+one.
 
 ## Isolation from the shared runner
 
@@ -49,12 +53,12 @@ policy, and a distinct tag (`tenant-build`). Do not widen this one.
   tag (`ci_runner_tag`) deliberately does **not** move them — that is why the
   tag beside them is generated while these stay literal.
 
-`protected: false` is deliberate and, unlike the shared runner's, is a real
-residual risk: it lets this privileged runner execute MR pipelines from
-unprotected feature branches. It is accepted because every job in this repo's
+Running jobs from unprotected branches is deliberate and, unlike on the shared
+runner, a real residual risk: it lets this privileged runner execute MR
+pipelines from unprotected feature branches. It is accepted because every job in this repo's
 pipeline is tagged for this runner and MR CI would otherwise never run. **The
-project-lock above is what keeps that risk bounded to committers on this one
-repository.**
+project lock above is what keeps that risk bounded to committers on the
+projects it is enabled for.**
 
 ## Sizing
 
@@ -96,7 +100,7 @@ race the cgroup setup and die at prepare.
 | Value | Where |
 |---|---|
 | Runner token | secrets item **GitLab Runner Privileged** → `runner-token` |
-| Tag | `{{ ci_runner_tag }}` — generated from the `ci_runner_tag` answer on BOTH sides (this runner's `tags:` and every job's `tags:` in `.gitlab-ci.yml`), so they cannot drift. With `runUntagged: false`. |
+| Tag | `{{ ci_runner_tag }}` — set on the runner registration in GitLab, with untagged jobs off; every job's `tags:` in `.gitlab-ci.yml` is generated from the same `ci_runner_tag` answer. A mismatch does not error: tagged jobs sit pending until timeout. |
 | Job image | `runners.config` TOML, digest-pinned |
 | Concurrency | `concurrent` + `resourcequota.yaml` (together) |
 

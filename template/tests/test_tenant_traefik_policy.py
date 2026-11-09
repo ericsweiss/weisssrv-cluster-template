@@ -9,7 +9,7 @@ import re
 
 import pytest
 import yaml
-from conftest import REPO
+from conftest import REPO, policy_spec
 
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
 AUTHENTIK = REPO / "kubernetes" / "apps" / "authentik" / "middleware.yaml"
@@ -27,19 +27,12 @@ FAILOVER_MESSAGE = "tenant failover services are not supported; use weighted ser
 OUTPOST = "http://authentik-server.authentik.svc.cluster.local/outpost.goauthentik.io/auth/traefik"
 
 
-def _object_refs() -> dict:
-    docs = [d for d in yaml.safe_load_all(POLICY.read_text()) if isinstance(d, dict)]
-    found = [
-        d for d in docs
-        if d.get("kind") == "ValidatingAdmissionPolicy"
-        and d["metadata"]["name"] == "tenant-traefik-object-refs"
-    ]
-    assert len(found) == 1
-    return found[0]["spec"]
+def _policy(name: str) -> dict:
+    return policy_spec(POLICY, "ValidatingAdmissionPolicy", name)
 
 
 def _variables() -> dict[str, str]:
-    return {v["name"]: v["expression"] for v in _object_refs().get("variables") or []}
+    return {v["name"]: v["expression"] for v in _policy("tenant-traefik-object-refs").get("variables") or []}
 
 
 def allowed(spec: dict, ns: str) -> bool:
@@ -59,7 +52,7 @@ def allowed(spec: dict, ns: str) -> bool:
 
 
 def test_the_validation_is_the_shape_the_mirror_evaluates():
-    found = [v for v in _object_refs()["validations"] if v["message"] == MESSAGE]
+    found = [v for v in _policy("tenant-traefik-object-refs")["validations"] if v["message"] == MESSAGE]
     assert len(found) == 1
     assert found[0]["expression"] == EXPRESSION
 
@@ -117,7 +110,7 @@ REDIS_EXPRESSION = "!has(object.spec.rateLimit) || !has(object.spec.rateLimit.re
 
 
 def test_the_redis_refusal_is_the_shape_the_mirror_evaluates():
-    found = [v for v in _object_refs()["validations"] if v["message"] == REDIS_MESSAGE]
+    found = [v for v in _policy("tenant-traefik-object-refs")["validations"] if v["message"] == REDIS_MESSAGE]
     assert len(found) == 1
     assert " ".join(found[0]["expression"].split()) == REDIS_EXPRESSION
 
@@ -153,7 +146,7 @@ def failover_allowed(spec: dict) -> bool:
 
 
 def test_the_failover_refusal_is_the_shape_the_mirror_evaluates():
-    found = [v for v in _object_refs()["validations"] if v["message"] == FAILOVER_MESSAGE]
+    found = [v for v in _policy("tenant-traefik-object-refs")["validations"] if v["message"] == FAILOVER_MESSAGE]
     assert len(found) == 1
     assert " ".join(found[0]["expression"].split()) == FAILOVER_EXPRESSION
 
@@ -226,14 +219,6 @@ ROUTE_SERVICE_MIDDLEWARES_MESSAGE = (
     " allowlist, never a name@provider one"
 )
 PLATFORM_MW = "traefik/security-headers"
-
-
-def _policy(name: str) -> dict:
-    docs = [d for d in yaml.safe_load_all(POLICY.read_text()) if isinstance(d, dict)]
-    found = [d for d in docs if d.get("kind") == "ValidatingAdmissionPolicy"
-             and d["metadata"]["name"] == name]
-    assert len(found) == 1
-    return found[0]["spec"]
 
 
 def _pinned(policy: str, message: str) -> str:
@@ -388,8 +373,8 @@ def test_a_tenant_route_without_parent_refs_is_admitted():
     assert parent_refs_allowed({"routes": [], "parentRefs": []})
 
 
-# Skipped: an UPDATE to a terminating object that leaves spec and annotations
-# unchanged; the annotations clause keeps the name@provider check out of reach.
+# The match condition skips an UPDATE to a terminating object that leaves spec
+# and annotations unchanged, so removing a finalizer is never refused.
 FINALIZING_EXPRESSION = (
     "request.operation != 'UPDATE' || !has(object.metadata.deletionTimestamp) || "
     "object.spec != oldObject.spec || (has(object.metadata.annotations) ? "
@@ -404,3 +389,166 @@ def test_the_ingress_refs_policy_lets_a_terminating_object_shed_its_finalizer():
     assert [(c["name"], " ".join(c["expression"].split())) for c in spec["matchConditions"]] == [
         ("enforce-unless-finalizing-unchanged", FINALIZING_EXPRESSION)
     ]
+
+
+INTERNAL_MESSAGE = (
+    "a tenant route on the internal domain must list traefik/lan-tailscale-only or"
+    " traefik/lan-tailscale-strict"
+)
+INTERNAL_EXPRESSION = (
+    "!has(object.spec.routes) || object.spec.routes.all(r, !has(r.match) || "
+    "!variables.internalHostEnds.exists(e, r.match.lowerAscii().contains(e)) || "
+    "(has(r.middlewares) && r.middlewares.exists(m, has(m.namespace) && "
+    "m.namespace == 'traefik' && m.name in variables.internalAllowlists)))"
+)
+INTERNAL_HOST_ENDS = (
+    "['.' + variables.internalDomain + '`', '`' + variables.internalDomain + '`', "
+    "'.' + variables.internalDomain + '\"', '\"' + variables.internalDomain + '\"']"
+)
+
+
+def _route_refs_variables() -> dict[str, str]:
+    return {v["name"]: " ".join(v["expression"].split())
+            for v in _policy("tenant-traefik-route-refs")["variables"]}
+
+
+def internal_route_allowed(spec: dict, domain: str) -> bool:
+    """The validation above, evaluated on the shipped variables."""
+    variables = _route_refs_variables()
+    assert variables["internalDomain"] == "'${cluster_internal_domain}'.lowerAscii()"
+    domain = domain.lower()
+    assert variables["internalHostEnds"] == INTERNAL_HOST_ENDS
+    ends = [f".{domain}`", f"`{domain}`", f'.{domain}"', f'"{domain}"']
+    allowlists = ast.literal_eval(variables["internalAllowlists"])
+    return all(
+        "match" not in r or not any(e in r["match"].lower() for e in ends)
+        or any(m.get("namespace") == "traefik" and m["name"] in allowlists
+               for m in r.get("middlewares") or [])
+        for r in spec.get("routes") or []
+    )
+
+
+def test_the_internal_route_rule_is_the_shape_the_mirror_evaluates():
+    assert _pinned("tenant-traefik-route-refs", INTERNAL_MESSAGE) == INTERNAL_EXPRESSION
+
+
+@pytest.mark.parametrize(
+    ("route", "admitted"),
+    [
+        ({"match": "Host(`a.home.test`)", "middlewares": [
+            {"name": "lan-tailscale-only", "namespace": "traefik"}]}, True),
+        ({"match": "Host(`a.home.test`)", "middlewares": [
+            {"name": "lan-tailscale-strict", "namespace": "traefik"}]}, True),
+        ({"match": "Host(`A.HOME.TEST`)", "middlewares": [
+            {"name": "hsts-header", "namespace": "traefik"}]}, False),
+        ({"match": "Host(`a.home.test`)"}, False),
+        ({"match": "Host(`a.home.test`)", "middlewares": [
+            {"name": "lan-tailscale-only"}]}, False),
+        ({"match": "Host(`a.public.test`)"}, True),
+        ({"match": "Host(`a.myhome.test`)"}, True),
+        ({"match": "Host(`a.public.test`) && PathPrefix(`/home.test`)"}, True),
+        ({"match": "Host(`home.test`)"}, False),
+        ({"match": 'Host("a.home.test")'}, False),
+        ({"kind": "Rule"}, True),
+    ],
+    ids=["only", "strict", "upper-case-without", "no-middlewares", "own-namespace-copy",
+         "public-host", "domain-containing-the-internal-one", "domain-in-a-path",
+         "apex", "double-quoted", "udp-shape"],
+)
+def test_an_internal_route_needs_a_platform_allowlist(route, admitted):
+    assert internal_route_allowed({"routes": [route]}, "home.test") is admitted
+    assert internal_route_allowed({"routes": [route]}, "Home.Test") is admitted
+
+
+INGRESS_INTERNAL_MESSAGE = (
+    "a tenant Ingress on the internal domain must list traefik-lan-tailscale-only@kubernetescrd"
+    " or traefik-lan-tailscale-strict@kubernetescrd in router.middlewares"
+)
+INGRESS_INTERNAL_EXPRESSION = (
+    "request.resource.resource != 'ingresses' || !has(object.spec) || "
+    "!has(object.spec.rules) || !object.spec.rules.exists(r, has(r.host) && "
+    "(r.host.lowerAscii() == variables.internalDomain || "
+    "r.host.lowerAscii().endsWith('.' + variables.internalDomain))) || "
+    "(has(object.metadata.annotations) && object.metadata.annotations.exists(k, "
+    "k.startsWith('traefik.ingress.kubernetes.io/') && "
+    "k.lowerAscii() == variables.routerMiddlewares) && "
+    "object.metadata.annotations.all(k, k.lowerAscii() != variables.routerMiddlewares || "
+    "object.metadata.annotations[k].split(',').exists(v, "
+    "v.trim() in variables.internalAllowlistRefs)))"
+)
+ROUTER_MIDDLEWARES = "traefik.ingress.kubernetes.io/router.middlewares"
+
+
+def internal_ingress_allowed(ingress: dict, domain: str) -> bool:
+    """The Ingress validation above, evaluated on the shipped variables."""
+    variables = {v["name"]: " ".join(v["expression"].split())
+                 for v in _policy("tenant-traefik-ingress-refs")["variables"]}
+    assert variables["internalDomain"] == "'${cluster_internal_domain}'.lowerAscii()"
+    domain = domain.lower()
+    assert variables["routerMiddlewares"] == f"'{ROUTER_MIDDLEWARES}'"
+    refs = ast.literal_eval(variables["internalAllowlistRefs"])
+    hosts = [r["host"].lower() for r in (ingress.get("spec") or {}).get("rules") or []
+             if "host" in r]
+    if not any(h == domain or h.endswith("." + domain) for h in hosts):
+        return True
+    keys = {k: v for k, v in (ingress["metadata"].get("annotations") or {}).items()
+            if k.lower() == ROUTER_MIDDLEWARES}
+    return any(k.startswith("traefik.ingress.kubernetes.io/") for k in keys) and all(
+        any(v.strip() in refs for v in value.split(",")) for value in keys.values()
+    )
+
+
+def test_the_internal_ingress_rule_is_the_shape_the_mirror_evaluates():
+    assert _pinned("tenant-traefik-ingress-refs", INGRESS_INTERNAL_MESSAGE) == (
+        INGRESS_INTERNAL_EXPRESSION
+    )
+
+
+def test_the_ingress_allowlist_refs_name_the_route_allowlists():
+    """The provider spelling of the same two traefik middlewares."""
+    variables = {v["name"]: " ".join(v["expression"].split())
+                 for v in _policy("tenant-traefik-ingress-refs")["variables"]}
+    refs = ast.literal_eval(variables["internalAllowlistRefs"])
+    names = ast.literal_eval(_route_refs_variables()["internalAllowlists"])
+    assert refs == [f"traefik-{n}@kubernetescrd" for n in names]
+
+
+def _ingress(host: str, annotations: dict | None = None) -> dict:
+    return {"metadata": {"annotations": annotations or {}},
+            "spec": {"rules": [{"host": host}]}}
+
+
+@pytest.mark.parametrize(
+    ("ingress", "admitted"),
+    [
+        (_ingress("a.home.test", {ROUTER_MIDDLEWARES:
+                                  "traefik-hsts-header@kubernetescrd, "
+                                  "traefik-lan-tailscale-only@kubernetescrd"}), True),
+        (_ingress("A.Home.Test", {ROUTER_MIDDLEWARES:
+                                  "traefik-lan-tailscale-strict@kubernetescrd"}), True),
+        (_ingress("a.home.test"), False),
+        (_ingress("home.test"), False),
+        (_ingress("a.home.test", {ROUTER_MIDDLEWARES: "traefik-hsts-header@kubernetescrd"}),
+         False),
+        (_ingress("a.home.test", {ROUTER_MIDDLEWARES: "demo-lan-tailscale-only@kubernetescrd"}),
+         False),
+        (_ingress("a.home.test", {
+            ROUTER_MIDDLEWARES: "traefik-lan-tailscale-only@kubernetescrd",
+            "traefik.ingress.kubernetes.io/Router.Middlewares": "demo-auth@kubernetescrd"}),
+         False),
+        (_ingress("a.home.test", {
+            "TRAEFIK.INGRESS.KUBERNETES.IO/router.middlewares":
+                "traefik-lan-tailscale-only@kubernetescrd"}),
+         False),
+        (_ingress("a.myhome.test"), True),
+        (_ingress("a.public.test"), True),
+        ({"metadata": {}, "spec": {}}, True),
+    ],
+    ids=["only", "strict-mixed-case-host", "no-annotation", "apex", "other-middleware",
+         "own-namespace-copy", "case-variant-key-without", "upper-case-prefix-only",
+         "domain-containing-the-internal-one",
+         "public-host", "no-rules"],
+)
+def test_an_internal_ingress_needs_a_platform_allowlist(ingress, admitted):
+    assert internal_ingress_allowed(ingress, "home.test") is admitted
+    assert internal_ingress_allowed(ingress, "HOME.TEST") is admitted

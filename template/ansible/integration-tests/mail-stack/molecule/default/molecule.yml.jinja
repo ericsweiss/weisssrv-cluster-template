@@ -52,9 +52,9 @@ provisioner:
         # 587 (25 is chrooted and cannot read /etc/sasldb2) and mynetworks stays
         # loopback-only, so a relayed message proves a real SASL handshake.
         smtp_relay_config:
-          # Encrypt to the mock Gmail smarthost without verifying its cert; the
-          # mock credentials leave the message deferred at the relay, which is
-          # what the verify play's relay-queue assertion keys on.
+          # Encrypt to the smarthost without verifying its cert. The mock
+          # credentials leave the message deferred at the relay, which the
+          # verify play's relay-queue assertion keys on.
           smtp_tls_security_level: "encrypt"
 
 {% raw %}

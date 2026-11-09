@@ -10,6 +10,17 @@
       ansible.builtin.systemd:
         name: "{{ 'k3s' if k3s_role == 'server' else 'k3s-agent' }}"
       check_mode: true
+      register: k3s_service_state
+
+    - name: Assert the k3s service is active before the upgrade
+      ansible.builtin.assert:
+        that:
+          - k3s_service_state.status.ActiveState | default('') == 'active'
+        fail_msg: >-
+          {{ inventory_hostname }}: the k3s service is
+          {{ k3s_service_state.status.ActiveState | default('unknown') }}, not active.
+          Fix it before a rolling upgrade.
+        quiet: true
 
     - name: Display the current cluster state
       ansible.builtin.command: k3s kubectl get nodes -o wide

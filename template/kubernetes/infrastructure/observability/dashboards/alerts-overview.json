@@ -44,7 +44,8 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Critical firing",
+      "title": "Critical firing (Prometheus)",
+      "description": "Prometheus ALERTS only. Loki ruler alerts go straight to Alertmanager; the Alertmanager active stat counts them.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
       "fieldConfig": {
@@ -83,7 +84,8 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "Warning firing",
+      "title": "Warning firing (Prometheus)",
+      "description": "Prometheus ALERTS only. Loki ruler alerts go straight to Alertmanager; the Alertmanager active stat counts them.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
       "fieldConfig": {
@@ -121,7 +123,8 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "Info firing",
+      "title": "Info firing (Prometheus)",
+      "description": "Prometheus ALERTS only. Loki ruler alerts go straight to Alertmanager; the Alertmanager active stat counts them.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
       "fieldConfig": {
@@ -158,7 +161,8 @@
     {
       "id": 4,
       "type": "stat",
-      "title": "Pending",
+      "title": "Pending (Prometheus)",
+      "description": "Prometheus ALERTS only. Loki ruler alerts go straight to Alertmanager; the Alertmanager active stat counts them.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
       "fieldConfig": {
@@ -278,13 +282,13 @@
       "id": 10,
       "type": "table",
       "title": "Firing alerts",
-      "description": "Every alert currently in firing state. Sorted by severity then start time.",
+      "description": "Every Prometheus alert in firing state, sorted by severity then start time. Loki ruler alerts reach Alertmanager directly and are not listed; the Alertmanager active stat counts them.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 12, "w": 24, "x": 0, "y": 6 },
       "options": {
         "showHeader": true,
         "footer": { "show": false, "reducer": ["sum"], "fields": "" },
-        "sortBy": [{ "displayName": "Severity", "desc": true }, { "displayName": "Started", "desc": false }]
+        "sortBy": [{ "displayName": "Severity", "desc": false }, { "displayName": "Started", "desc": false }]
       },
       "fieldConfig": {
         "defaults": {
@@ -300,10 +304,10 @@
               {
                 "id": "mappings",
                 "value": [
-                  { "type": "value", "options": { "critical": { "color": "red", "index": 0, "text": "critical" } } },
-                  { "type": "value", "options": { "warning": { "color": "yellow", "index": 1, "text": "warning" } } },
-                  { "type": "value", "options": { "info": { "color": "blue", "index": 2, "text": "info" } } },
-                  { "type": "value", "options": { "none": { "color": "gray", "index": 3, "text": "none" } } }
+                  { "type": "value", "options": { "1 critical": { "color": "red", "index": 0, "text": "critical" } } },
+                  { "type": "value", "options": { "2 warning": { "color": "yellow", "index": 1, "text": "warning" } } },
+                  { "type": "value", "options": { "3 info": { "color": "blue", "index": 2, "text": "info" } } },
+                  { "type": "value", "options": { "4 none": { "color": "gray", "index": 3, "text": "none" } } }
                 ]
               },
               { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "basic" } },
@@ -334,7 +338,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "(ALERTS_FOR_STATE and ignoring(alertstate) (ALERTS{alertstate=\"firing\"} == 1)) * 1000",
+          "expr": "label_replace(label_replace(label_replace(label_replace((ALERTS_FOR_STATE and ignoring(alertstate) (ALERTS{alertstate=\"firing\"} == 1)) * 1000, \"severity\", \"1 critical\", \"severity\", \"critical\"), \"severity\", \"2 warning\", \"severity\", \"warning\"), \"severity\", \"3 info\", \"severity\", \"info\"), \"severity\", \"4 none\", \"severity\", \"none\")",
           "instant": true,
           "refId": "A",
           "format": "table"
@@ -843,6 +847,40 @@
       ]
     },
     {
+      "id": 36,
+      "type": "stat",
+      "title": "Alertmanager active",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Unsilenced, uninhibited alerts in Alertmanager from every source: Loki ruler alerts, Watchdog and InfoInhibitor included. A count above the Prometheus firing stats points at a Loki ruler alert.",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 42 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "blue", "value": null }]
+          },
+          "unit": "short",
+          "noValue": "0"
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max(alertmanager_alerts{state=\"active\"}) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 40,
       "type": "row",
       "title": "Loki ruler (log-based alerts)",
@@ -855,7 +893,7 @@
       "type": "stat",
       "title": "Ruler rules loaded",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Rules loaded by Loki's in-process ruler. They are evaluated inside Loki and pushed straight to Alertmanager, so they never appear in the Prometheus panels above. Raise the green threshold to the rule count this repo ships.",
+      "description": "Rules loaded by Loki's in-process ruler. They are evaluated inside Loki and pushed straight to Alertmanager, so they never appear in the Prometheus panels above. Red means the ruler has no rule loaded.",
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 47 },
       "fieldConfig": {
         "defaults": {

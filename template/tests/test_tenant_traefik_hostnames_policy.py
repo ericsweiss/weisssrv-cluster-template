@@ -7,8 +7,7 @@ from __future__ import annotations
 import re
 
 import pytest
-import yaml
-from conftest import REPO
+from conftest import REPO, assert_tenant_deny_binding, cel, policy_bindings, policy_spec
 
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
 NAME = "tenant-traefik-hostnames"
@@ -16,9 +15,10 @@ WRITES = ["CREATE", "UPDATE"]
 # The leading matcher, and every Host matcher, in a tenant route rule.
 LEADING_HOST = "^Host[(]`[^`]+`[)]( && .*)?$"
 ANY_HOST = "Host[(]`[^`]*`[)]"
-# The Traefik Ingress annotations that name the domains a router's certificate covers.
+# Traefik decodes Ingress annotation keys case-insensitively, so the policy
+# lowercases a key before matching it against TLS_DOMAINS or ROUTING.
+# TLS_DOMAINS names the domains a router's certificate covers.
 TLS_DOMAINS = "traefik.ingress.kubernetes.io/router.tls.domains."
-# Traefik decodes annotation fields case-insensitively, so the policy lowercases keys.
 # The Ingress annotations that would reshape the routing rule Traefik builds from
 # spec.rules, or raise its priority over a platform route.
 ROUTING = [
@@ -137,21 +137,8 @@ VALIDATIONS = [
 GRANT = {"hosts": "demo.apps.test\n  demo.home.test \n\n"}
 
 
-def _docs(kind: str, name: str) -> list[dict]:
-    return [
-        d for d in yaml.safe_load_all(POLICY.read_text())
-        if isinstance(d, dict) and d.get("kind") == kind and d["metadata"]["name"] == name
-    ]
-
-
-def _cel(text: str) -> str:
-    return " ".join(text.split())
-
-
 def test_the_hostname_policy_is_the_shape_the_mirror_evaluates():
-    found = _docs("ValidatingAdmissionPolicy", NAME)
-    assert len(found) == 1
-    spec = found[0]["spec"]
+    spec = policy_spec(POLICY, "ValidatingAdmissionPolicy", NAME)
     assert spec["failurePolicy"] == "Fail"
     assert spec["paramKind"] == {"apiVersion": "v1", "kind": "ConfigMap"}
     assert spec["matchConstraints"] == {
@@ -163,21 +150,17 @@ def test_the_hostname_policy_is_the_shape_the_mirror_evaluates():
         ]
     }
     assert [
-        {"name": v["name"], "expression": _cel(v["expression"])} for v in spec["variables"]
+        {"name": v["name"], "expression": cel(v["expression"])} for v in spec["variables"]
     ] == VARIABLES
     assert [
-        {"expression": _cel(v["expression"]), "message": v["message"]}
+        {"expression": cel(v["expression"]), "message": v["message"]}
         for v in spec["validations"]
     ] == VALIDATIONS
 
 
 def test_the_hostname_policy_has_no_shared_binding():
     """Each tenant's binding names its own grant, so none ships here."""
-    assert not [
-        d for d in yaml.safe_load_all(POLICY.read_text())
-        if isinstance(d, dict) and d.get("kind") == "ValidatingAdmissionPolicyBinding"
-        and d["spec"]["policyName"] == NAME
-    ]
+    assert not policy_bindings(POLICY, NAME)
 
 
 def hosts(grant: dict) -> list[str]:
@@ -442,9 +425,7 @@ def test_a_traefik_or_default_class_ingress_is_admitted(spec, annotations):
 
 
 def test_tenant_tcp_and_udp_routes_are_refused_outright():
-    found = _docs("ValidatingAdmissionPolicy", "tenant-no-tcp-udp-routes")
-    assert len(found) == 1
-    spec = found[0]["spec"]
+    spec = policy_spec(POLICY, "ValidatingAdmissionPolicy", "tenant-no-tcp-udp-routes")
     assert spec["failurePolicy"] == "Fail"
     assert spec["matchConstraints"] == {
         "resourceRules": [
@@ -458,15 +439,4 @@ def test_tenant_tcp_and_udp_routes_are_refused_outright():
             "message": "tenants serve HTTP only; ask the platform for a TCP route",
         }
     ]
-    bindings = _docs("ValidatingAdmissionPolicyBinding", "tenant-no-tcp-udp-routes")
-    assert [b["spec"] for b in bindings] == [
-        {
-            "policyName": "tenant-no-tcp-udp-routes",
-            "validationActions": ["Deny"],
-            "matchResources": {
-                "namespaceSelector": {
-                    "matchExpressions": [{"key": "fluxcd.io/tenant", "operator": "Exists"}]
-                }
-            },
-        }
-    ]
+    assert_tenant_deny_binding(POLICY, "tenant-no-tcp-udp-routes")

@@ -57,9 +57,7 @@ tests:
         alertname: EncryptedSwapPlaintextFallback
         exp_alerts: []
 
-  # Healthy: the mapper IS the swap device, so neither arm may fire. An
-  # operator who puts plaintext swap back by hand clears the restore alert
-  # through SwapTotal, which is why that arm reads the node gauge too.
+  # Healthy: the mapper IS the swap device, so neither arm may fire.
   - interval: 5m
     input_series:
       - series: 'encrypted_swap_mapper_active{instance="pve-01:9101", job="node-exporter-host"}'
@@ -74,4 +72,22 @@ tests:
         exp_alerts: []
       - eval_time: 35m
         alertname: EncryptedSwapRestoreFailed
+        exp_alerts: []
+
+  # Plaintext swap restored by hand after finalize wrote any_swap_active=0: the
+  # live SwapTotal clears the restore alert, and the fallback arm stays quiet.
+  - interval: 5m
+    input_series:
+      - series: 'encrypted_swap_mapper_active{instance="pve-01:9101", job="node-exporter-host"}'
+        values: '0+0x24'
+      - series: 'encrypted_swap_any_swap_active{instance="pve-01:9101", job="node-exporter-host"}'
+        values: '0+0x24'
+      - series: 'node_memory_SwapTotal_bytes{instance="pve-01:9101", job="node-exporter-host"}'
+        values: '34359738368+0x24'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: EncryptedSwapRestoreFailed
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: EncryptedSwapPlaintextFallback
         exp_alerts: []

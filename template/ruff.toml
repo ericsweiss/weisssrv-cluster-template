@@ -1,9 +1,9 @@
-# Forked from weisssrv-lib `lint/ruff.toml`: same rule selection, cluster-scoped
-# header. The `python-lint` CI job uses ruff's own config discovery, so this file
-# at the repository root is what makes the job agree with a local `ruff check`.
+# The shared ruff profile. A repo keeps it at the root, where ruff
+# discovers it, or passes its path with `--config`. py39 is the lowest Python
+# any family repo supports.
 target-version = "py39"
 
 [lint]
-# Correctness-first selection; formatting-only rules are deliberately out.
-# Rationale: weisssrv-lib lint/ruff.toml.
+# Correctness rules only: the family runs no formatter, so the E1-E3/E5 layout
+# rules stay out.
 select = ["E4", "E7", "E9", "F", "W", "B"]

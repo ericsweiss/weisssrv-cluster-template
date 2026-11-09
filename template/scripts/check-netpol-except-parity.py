@@ -81,10 +81,6 @@ FENCE_NETS = [ipaddress.ip_network(c) for c in LAN_FENCE] + [
     ipaddress.ip_network("fe80::/10"),
 ]
 
-# Egress rules that deliberately have no peers, i.e. allow egress everywhere,
-# keyed "<namespace>/<name>" with the reason. Site data: populated from --config.
-UNRESTRICTED_EGRESS_OK: dict[str, str] = {}
-
 
 class ConfigError(ValueError):
     """A malformed --config file — an operator error (exit 2), not a violation."""
@@ -99,9 +95,8 @@ class Policy:
     def __init__(self, canonical=None, fence_nets=None, unrestricted_ok=None) -> None:
         self.canonical = dict(CANONICAL if canonical is None else canonical)
         self.fence_nets = list(FENCE_NETS if fence_nets is None else fence_nets)
-        self.unrestricted_ok = dict(
-            UNRESTRICTED_EGRESS_OK if unrestricted_ok is None else unrestricted_ok
-        )
+        # Peer-less egress rules keyed "<namespace>/<name>" with the reason.
+        self.unrestricted_ok = dict(unrestricted_ok or {})
 
 
 def load_config(path) -> Policy:
@@ -137,15 +132,6 @@ def _policy_key(doc) -> str:
     namespace reads as `default`, the spelling every sibling gate uses."""
     meta = doc.get("metadata") or {}
     return f"{doc_namespace(doc)}/{meta.get('name', '<unnamed>')}"
-
-
-def has_egress(spec) -> bool:
-    """Whether the policy actually restricts egress.
-
-    Mirrors the API's own derivation: an omitted policyTypes is inferred from
-    the rules present, and an explicit empty list restricts nothing.
-    """
-    return "Egress" in policy_types(spec)
 
 
 def _nets(cidrs, rendered=False):
@@ -200,7 +186,7 @@ def iter_egress_rules(doc):
     if not isinstance(doc, dict) or doc.get("kind") != "NetworkPolicy":
         return
     spec = doc.get("spec") or {}
-    if not has_egress(spec):
+    if "Egress" not in policy_types(spec):
         return
     key = _policy_key(doc)
     rules = spec.get("egress")

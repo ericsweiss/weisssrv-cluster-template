@@ -118,8 +118,7 @@ ref each pipeline's `spec:` header declares, and refuses to compare at all when
 that ref and `copier.yml`'s `lib_ref` default disagree. It also runs the
 library's vendored-copy engine (`scripts/check-vendored-copies.py`) against
 [`scripts/vendored-manifest.yml`](../scripts/vendored-manifest.yml), which
-names the copies no directory walk reaches: the canonical
-`tests/test_check_lib_pins.py` suite, the secret-detection ruleset under
+names the copies no directory walk reaches: the secret-detection ruleset under
 `.gitlab/`, and the lint profiles this repository deliberately forks. The
 manifest is consumer-owned. The library publishes only an offer list
 (`scripts/vendorable-paths.yml`) bounding what a manifest may name, so moving a
@@ -136,15 +135,10 @@ generated after its release.
 
 ## Running the tests locally
 
+[README § Local gates](../README.md#local-gates) lists the gates to run before a
+merge request. To render once and validate the kept tree:
+
 ```bash
-python3 -m pytest tests -q                      # structure + copier schema
-python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
-  --self-checks                                 # every check above, plus this repo's own
-python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
-  --answers tests/answers-unlike.yml            # the contrast fixture
-python3 tests/validate_render.py --lib-path ~/src/weisssrv-lib \
-  --answers tests/answers-unlike.yml \
-  --data vpn_tailscale=true --data gpu=none --data use_unifi=false   # mixed modules
 python3 tests/render_cluster.py --out /tmp/x    # just render, and keep it
 python3 tests/validate_render.py --render-dir /tmp/x --lib-path ~/src/weisssrv-lib
 ```
@@ -194,6 +188,11 @@ and a cancelled one leaves that tag uncut behind a green pipeline.
 requests the largest limits in the pipeline and is the first job refused at
 pod-creation time when several pipelines overlap, which arrives as a system
 failure rather than a test failure.
+
+Library CI templates default to `tags: []`. This repository's jobs stay
+tag-less, so they land on the shared runner. The generated pipeline passes the
+`ci_runner_tag` answer to every include that defines a job, because its deploy
+and DinD jobs need the privileged runner.
 
 ## The two answer fixtures
 
@@ -304,27 +303,12 @@ Gaps against the reference cluster this repository deliberately does not close.
 Each is a live decision, not a backlog entry — if you reopen one, change this
 list in the same MR.
 
-- **Deploy-job `rules:` are written out per job.** The reference cluster factors
-  the shared preamble into a hidden `.skip-schedule-web` fragment; the generated
-  pipeline repeats it. Repetition is what makes each job's trigger set readable
-  where the job is, and a `!reference` that silently changes every deploy's
-  trigger set is the more expensive mistake in a repository an operator forks
-  and edits.
-- **The template's `task lint` is a subset of the reference cluster's.** The
-  gates it omits — Prometheus/Alertmanager config lint, the cluster-literal
-  check, the flux/kubectl/busybox pin checks, the CI-policy and tailnet-policy
-  checks — each need a tool or a policy file a freshly generated cluster does
-  not have yet. They are adopted per cluster, not shipped empty.
 - **Not every library script is vendored.** `template/scripts/` carries what a
   generated cluster's tasks and CI jobs actually invoke; the library's
   role-development and matrix-generation tooling stays out. `scripts/README.md`
   in the render is the human inventory, and the render's own
   `scripts/vendored-manifest.yml` is the machine-checked one — the copies that
   do ship are gated in the generated repository, by it, not from here.
-- **Agent guidance ships; agent settings do not.** A generated cluster gets
-  `AGENTS.md`, `CLAUDE.md`, the `.claude/` skill and the `.cursor/` rule — all
-  prose — but no `.claude/settings.json`. Permissions and hooks are per operator
-  and per machine, and a shipped one is a permission grant nobody reviewed.
 - **The `{{ {}['unimplemented'] | mandatory('...') }}` else-branches are
   unreachable.** Every backend selector is an enum whose `choices` list only the
   implemented values, and `test_unimplemented_backend_choices_fail_at_copy_time`

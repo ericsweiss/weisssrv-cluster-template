@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Optional
 
 try:
     import yaml
@@ -108,20 +108,24 @@ def parse_ci(text: str, loader: type = CILoader) -> dict:
 
 
 def load_ci(path, loader: type = CILoader) -> dict:
+    """The jobs document of the pipeline file at `path`, as parse_ci reads it."""
     return parse_ci(Path(path).read_text(encoding="utf-8"), loader=loader)
+
+
+# GitLab's reserved top-level keywords: a mapping under one of them is not a job.
+RESERVED_KEYS = frozenset({
+    "default", "include", "stages", "variables", "workflow", "image",
+    "services", "before_script", "after_script", "cache", "spec",
+})
 
 
 def jobs(doc: dict) -> dict:
     """The real jobs: mapping values whose key is not a `.hidden` template and
     not one of GitLab's reserved top-level keys."""
-    reserved = {
-        "default", "include", "stages", "variables", "workflow", "image",
-        "services", "before_script", "after_script", "cache", "spec",
-    }
     return {
         name: body
         for name, body in doc.items()
-        if isinstance(body, dict) and not name.startswith(".") and name not in reserved
+        if isinstance(body, dict) and not name.startswith(".") and name not in RESERVED_KEYS
     }
 
 
@@ -129,7 +133,7 @@ _MISSING = object()
 
 
 def script_lines(job: dict, doc: dict, key: str = "script",
-                 unresolved: List[list] = None) -> List[str]:
+                 unresolved: Optional[List[list]] = None) -> List[str]:
     """A job's `key` block flattened to strings, `!reference` nodes expanded.
 
     A reference into an included file contributes nothing; pass `unresolved` to

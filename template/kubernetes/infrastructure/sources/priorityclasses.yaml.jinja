@@ -20,8 +20,8 @@ description: >-
 
 ---
 # Every unclassed pod sits at 0 and outranks a CI job pod. preemptionPolicy
-# Never means CI queues instead of evicting. Gated with the runner modules that
-# set it — an ungated copy would be a class nothing names.
+# Never means CI queues instead of evicting. Gated with the runner modules, the
+# only workloads that name it.
 apiVersion: scheduling.k8s.io/v1
 kind: PriorityClass
 metadata:

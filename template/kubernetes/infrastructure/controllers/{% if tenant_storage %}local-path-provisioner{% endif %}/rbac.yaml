@@ -1,7 +1,7 @@
 ---
-# Upstream's RBAC except pods and pods/log, narrowed to this namespace where the
-# helper pods run; claims, PVs and nodes stay cluster-wide. See the tenants
-# README, Persistent storage.
+# Upstream's RBAC with pods, pods/log and configmaps narrowed to this namespace,
+# where the helper pods and local-path-config live; claims, PVs and nodes stay
+# cluster-wide. See the tenants README, Persistent storage.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -18,6 +18,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -25,7 +28,7 @@ metadata:
   name: local-path-provisioner-role
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "persistentvolumeclaims", "configmaps"]
+    resources: ["nodes", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]

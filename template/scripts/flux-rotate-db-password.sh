@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Rotate an in-cluster Postgres role password: 1Password first, then the role,
-# then the ExternalSecret refresh and pod restarts. Usage: <authentik>.
+# then the ExternalSecret refresh and pod restarts. Usage: <authentik>,
+# with OP_VAULT naming the 1Password vault that holds the item.
 set -euo pipefail
 
 app=${1:-}
@@ -18,6 +19,11 @@ case "$app" in
         exit 2
         ;;
 esac
+vault=${OP_VAULT:-}
+if [ -z "$vault" ]; then
+    echo "ERROR: OP_VAULT is not set; run through 'task flux:rotate-db-password'" >&2
+    exit 2
+fi
 
 # The role gets a SCRAM-SHA-256 verifier, not the password, so a statement log
 # never holds the cleartext. The generated values are ASCII, so no SASLprep.
@@ -50,7 +56,7 @@ edits+=("password=$first")
 # command line would show the new passwords in the process list.
 echo "rotate-db-password: $item -> 1Password"
 {
-    op item get "$item" --vault Homelab --format json
+    op item get "$item" --vault "$vault" --format json
     printf '%s\n' "${edits[@]}" |
         jq -R -s 'split("\n") | map(select(length > 0) | capture("^(?<k>[^=]+)=(?<v>.*)$") | {(.k): .v}) | add'
 } | jq -s '
@@ -58,13 +64,13 @@ echo "rotate-db-password: $item -> 1Password"
     | [$e | keys[] | . as $k | select(([$f[] | select(.id == $k or .label == $k)] | length) != 1)] as $bad
     | if ($bad | length) > 0 then error("missing or ambiguous 1Password fields: " + ($bad | join(", ")))
       else .fields |= map(($e[.id] // $e[.label]) as $v | if $v == null then . else .value = $v end) end' |
-    op item edit "$item" --vault Homelab >/dev/null
+    op item edit "$item" --vault "$vault" >/dev/null
 
 sql=""
 for a in "${alters[@]}"; do sql+="$a;"; done
 echo "rotate-db-password: ALTER USER in the database"
-# The SQL is a -f script on stdin, which is what --single-transaction wraps: an
-# exec argument lands in the API audit log, a half-rotated pair has no restore.
+# The SQL rides stdin as a -f script, so --single-transaction changes every role
+# or none, and no exec argument carries it into the API audit log.
 # shellcheck disable=SC2086  # $pod is a deliberate word list of kubectl args
 if ! kubectl exec -i $pod -- sh -c "$psql_auth -v ON_ERROR_STOP=1 --single-transaction -f -" <<<"$sql" >/dev/null; then
     echo "ERROR: the database rotation did not complete cleanly; its commit state" \

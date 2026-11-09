@@ -1,18 +1,16 @@
 ---
 {%- from "partials/molecule.jinja" import systemd_platform, galaxy_dependency,
     molecule_env, test_sequence with context %}
-# nas_storage scenario: NFS export + Samba share rendering, Samba service and
-# client access. NFS/CIFS client mounts are not possible in Docker — server-side
-# render only. Scenario conventions: ansible/TESTING.md.
+# nas_storage: NFS export and Samba share rendering, the Samba service and
+# client access. Docker cannot mount NFS or CIFS, so the server side is the
+# boundary. Scenario conventions: ansible/TESTING.md.
 
 driver:
   name: docker
 
 platforms:
-  # NAS Server - runs nas_storage role
   - name: nas-server
-    # Shared systemd-container shape; only name/groups/capabilities differ per
-    # platform (SYS_ADMIN is the NAS server's alone).
+    # Shared systemd-container shape; SYS_ADMIN is the NAS server's alone.
     <<: &systemd_platform
 {{- systemd_platform('storage-stack-net') }}
     capabilities:
@@ -21,8 +19,7 @@ platforms:
       - storage
       - nas_servers
 
-  # SMB Client - tests Samba connectivity (listing shares)
-  # NFS client removed: mounting NFS shares doesn't work in Docker containers
+  # Lists and reads the Samba shares; Docker cannot mount an NFS client.
   - name: smb-client-01
     <<: *systemd_platform
     groups:
@@ -33,9 +30,8 @@ platforms:
 provisioner:
   name: ansible
 {{- molecule_env() }}
-    # Samba user password: the nas_storage role's nas_storage_samba_password
-    # default reads this env var and sets the `nas` smbpasswd (anonymous access
-    # is hardened off, so verify authenticates with it).
+    # nas_storage_samba_password defaults to this env var and sets the `nas`
+    # smbpasswd. Anonymous access is off, so verify authenticates with it.
     SAMBA_NAS_PASSWORD: molecule-test-samba-pw
   config_options:
     defaults:
@@ -49,18 +45,18 @@ provisioner:
   inventory:
     group_vars:
       nas_servers:
-        # Base role configuration (applied by converge). SSH hardening is
-        # exercised by the base role's own molecule scenario; skip it here to
-        # keep this integration test focused on the NFS/Samba storage path.
+        # base runs as a nas_storage dependency. Its own scenario covers SSH
+        # hardening, so this stack skips it.
         base_skip_ssh_config: true
         base_skip_dns_config: true  # DNS resolver needs real network
 
-        # NAS storage configuration - skip operations that don't work in containers
-        nas_storage_skip_zfs_operations: true  # ZFS requires kernel modules (also bypasses the bind-source mountpoint guard)
-        nas_storage_skip_nfs_reload: true      # exportfs -ra fails without NFS kernel support
-        nas_storage_skip_smartd_service: true  # No block devices in container
+        # ZFS needs kernel modules; this also bypasses the bind-source guard.
+        nas_storage_skip_zfs_operations: true
+        # exportfs -ra fails without NFS kernel support.
+        nas_storage_skip_nfs_reload: true
+        # No block devices in a container.
+        nas_storage_skip_smartd_service: true
 
-        # NFS exports configuration (templates will be generated)
         nas_storage_exports:
           # 1777: the SMB write test proves the share layer is writable; the
           # fixture dirs stay sticky-world-writable so no unix user plumbing
@@ -88,7 +84,6 @@ provisioner:
               - spec: "172.16.0.0/12"
                 options: "rw,sync,no_subtree_check,all_squash,anonuid=1000,anongid=2000,fsid=11"
 
-        # Samba shares configuration (Samba DOES work in containers)
         nas_storage_samba_shares:
           - name: media
             path: /tank/media
@@ -112,16 +107,8 @@ provisioner:
           - /tank/media
           - /tank/share
 
-        # SMART monitoring (no real devices in container; the smartd_*_disks
-        # lists the role consumes default to empty)
+        # The smartd disk lists default to empty, so no device is needed.
         nas_storage_smartd_enabled: true
-
-      smb_clients:
-        # Samba client configuration
-        smb_server: nas-server
-        smb_test_shares:
-          - media
-          - share
 
 verifier:
   name: ansible

@@ -46,8 +46,10 @@ it to one version is the caller's job.
    the SAME secret-store item the application reads. Without an entry, authentik
    generates a secret that only exists in Terraform state and the app can never
    learn it.
-3. Add the `applications` entry, a group, and a `policy_bindings` entry. **An
-   application with no binding is open to every authenticated user.**
+3. Add the `applications` entry, a group, and a `policy_bindings` entry. An
+   application that no binding names fails the plan, so it never becomes
+   reachable by every authenticated user. A tile that really is open to
+   everyone declares `allow_unbound = true`.
 
 ## Renaming and removing
 
@@ -75,10 +77,6 @@ instead, which `prevent_destroy` does not block.
 Keep the `moved {}` block after the apply. It is the permanent record of the old
 state address, and removing one is a change of its own with its own plan and
 apply.
-
-An application that no `policy_bindings` entry names fails the plan rather than
-quietly becoming reachable by every authenticated user; a tile that really is
-open to everyone declares `allow_unbound = true`.
 
 ## Adoption and recovery
 
@@ -129,9 +127,16 @@ run instead of importing a subset, and fewer pairs than `imports.tf` has blocks
 fails it too.
 
 Keep `imports.tf` complete. After every apply that creates objects, read the ids
-back out (`terraform output application_ids policy_binding_ids group_ids`) and
-add a block for each one. A list written once at adoption time is not a recovery
-path.
+back out of state and add a block for each one:
+
+```bash
+task terraform:authentik-state -- pull | jq '.outputs | map_values(.value)'
+```
+
+The outputs carry every id an import block takes: `application_ids`,
+`oauth2_provider_ids`, `proxy_provider_ids`, `saml_provider_ids`,
+`custom_scope_mapping_ids`, `group_ids` and `policy_binding_ids`. A list
+written once at adoption time is not a recovery path.
 
 ## Custom scope mappings
 
@@ -178,5 +183,5 @@ server-side on every token issue and is readable by any authentik admin.
 `kubernetes/apps/authentik` plus this module is the whole SSO backend. A
 replacement has to provide: an OIDC issuer the apps can point at, a forward-auth
 middleware Traefik can call for apps without OIDC, and a group model the
-bindings can express. The cluster template's `docs/ARCHITECTURE.md` records
-the seam.
+bindings can express. weisssrv-lib's `docs/EXTENSIBILITY.md` records the
+seam.

@@ -15,7 +15,9 @@ if [ -z "$CORPUS" ] || [ ! -f "$CORPUS" ]; then
   exit 2
 fi
 
-# Every path below is repository-relative; callers pass an absolute corpus path.
+# Every path below is repository-relative, so the corpus is made absolute before
+# the cd: a relative one would otherwise resolve against the repository root.
+CORPUS="$(cd "$(dirname "$CORPUS")" && pwd)/$(basename "$CORPUS")"
 _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$_SCRIPT_DIR/.." || exit 2
 
@@ -133,6 +135,21 @@ echo "=== Checking NFS PersistentVolume TLS ==="
 NFS_CERT_DOMAIN=$(scripts/cluster-config-value.sh cluster_internal_domain || true)
 python3 scripts/check-nfs-tls.py --allow-empty --cert-domain "$NFS_CERT_DOMAIN" \
   < "$CORPUS" || record $? check-nfs-tls.py
+# Both VIPs serve the same entrypoints, so only a source allowlist keeps an
+# internal hostname off the public VIP.
+echo "=== Checking internal-domain route allowlists ==="
+python3 scripts/check-internal-route-allowlist.py \
+  --cluster-config kubernetes/infrastructure/sources/cluster-config.yaml \
+  --required-middleware traefik/lan-tailscale-only \
+  --required-middleware traefik/lan-tailscale-strict \
+  < "$CORPUS" || record $? check-internal-route-allowlist.py
+# A tree gate: a custom resource needs its CRD from a stage its own stage waits
+# on, or a fresh cluster's first reconcile fails with `no matches for kind`.
+echo "=== Checking CRD stage order ==="
+for root in "${CLUSTERS[@]}"; do
+  python3 scripts/check-crd-stage-order.py --cluster-dir "${root%/}" \
+    || record $? "check-crd-stage-order.py ${root%/}"
+done
 # Source files, not the corpus: the app list is Ansible site data.
 echo "=== Checking backup-artifact apps against their alert arms ==="
 python3 scripts/check-backup-artifact-apps.py \

@@ -49,9 +49,9 @@ vars:
   GIT_NAMESPACE: {{ git_namespace }}
   CLUSTER_DIR: kubernetes/clusters/{{ cluster_name }}
   VERSIONS_CM: kubernetes/infrastructure/sources/versions-configmap.yaml
-  # weisssrv-lib checkout at LIB_REF: the source the vendored copies in scripts/,
-  # ansible/molecule/ and the root lint profiles are re-copied from
-  # (scripts/vendored-manifest.yml). Read by lint:invariants only; no deploy path touches it.
+  # weisssrv-lib checkout at LIB_REF, the source of the vendored copies
+  # (scripts/vendored-manifest.yml). `task lib:sync` writes it and the lint
+  # gates that read the library use it; no deploy path touches it.
   LIB_DIR: .weisssrv-lib
   LIB_URL: {{ lib_url }}
   # The pipeline header's declared ref, so a bump is one line in .gitlab-ci.yml
@@ -98,11 +98,6 @@ tasks:
     desc: Show available tasks
     cmds:
       - task --list
-
-  kubernetes:lint:
-    desc: "Validate all Flux-managed Kubernetes manifests (alias for flux:lint)"
-    cmds:
-      - task: flux:lint
 
   # === Library checkout =================================================
   lib:sync:
@@ -171,8 +166,7 @@ tasks:
       SMTP_UPSTREAM_PASSWORD: {% endraw %}{{ secret_ref('SMTP Smarthost', 'password') }}{% raw %}
       LOKI_PUSH_USER: {% endraw %}{{ secret_ref('Loki Push Auth', 'username') }}{% raw %}
       LOKI_PUSH_PASSWORD: {% endraw %}{{ secret_ref('Loki Push Auth', 'password') }}{% raw %}
-      # base rewrites the relay's authorized_keys, so mail.yml re-seeds the
-      # cert-distribution key from the primary resolver afterwards.
+      # mail.yml re-seeds the cert-distribution key, which a re-provisioned relay loses.
       ACME_SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'public key') }}{% raw %}
     preconditions: *op_preconditions
     cmds:
@@ -230,7 +224,6 @@ tasks:
 
   # === Lint =============================================================
   lint:
-    # One lint-stage job stays out: deploy-coverage needs a merge base.
     desc: Run every local gate (no credentials required) — mirrors the CI lint stage except deploy-coverage
     cmds:
       - task: lint:yamllint
@@ -249,6 +242,8 @@ tasks:
       - task: lint:repo-sync
       - task: lint:netpol-parity
       - task: lint:kustomization-coverage
+      - task: lint:skill-refs
+      - task: lint:image-gc-threshold
       - task: lint:dashboards
       - task: lint:helm-repo-parity
       - task: lint:cluster-literals

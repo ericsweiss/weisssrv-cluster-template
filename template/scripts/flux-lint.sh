@@ -10,13 +10,12 @@ FL_MODE="substitute"
 FL_CLUSTER_DIR=""
 FL_KUSTOMIZE_PATH=""
 FL_VERSIONS_CM=""
-FL_RENDER_SCRIPT="scripts/flux-render.sh"
+FL_RENDER_SCRIPT="scripts/flux-env.sh"
 FL_SKIPPED_SCRIPT="scripts/kubeconform-skipped.py"
 FL_EXPECTED_SKIPPED=""
 FL_CHILD_KUSTOMIZATIONS=""
 FL_RENDER_ALL=""
 FL_K8S_VERSION=""
-FL_CATALOG=""
 FL_CATALOG_REF=""
 FL_ALLOWED_SKIPS="0"
 FL_REQUIRE_CLUSTER_ROOT="true"
@@ -29,7 +28,7 @@ Usage: flux-lint.sh [--mode substitute|simple] [options]
 Substitute mode (a cluster repo; needs flux, kustomize, kubeconform, envsubst):
   --cluster-dir DIR            dir of Flux Kustomizations to iterate (required)
   --versions-configmap FILE    ConfigMap of substitution keys (required)
-  --render-script FILE         flux-render.sh / flux-env.sh (default scripts/flux-render.sh)
+  --render-script FILE         ConfigMap exporter (default scripts/flux-env.sh)
   --skipped-script FILE        kubeconform-skipped.py (default scripts/kubeconform-skipped.py)
   --expected-skipped FILE      baseline of apiVersion/Kind pairs with no schema
   --child-kustomizations FILE  flux-child-kustomizations.py, for dependsOn order
@@ -37,14 +36,14 @@ Substitute mode (a cluster repo; needs flux, kustomize, kubeconform, envsubst):
   --require-cluster-root BOOL  build the cluster root (default true)
   --check-flux-version BOOL    hold the flux CLI equal to the ConfigMap (default true)
 
-Simple mode (a tenant repo; needs kustomize, kubeconform):
+Simple mode (a tenant repo; needs kustomize, kubeconform). Every ${NAME} must
+name a cluster_* key, the namespace cluster-config owns:
   --kustomize-path PATH        the ONE directory to build (required)
   --allowed-skips N            resources kubeconform may validate against no schema
 
 Both modes:
   --k8s-version VER            kubeconform target; substitute mode derives it otherwise
-  --crd-catalog URL            kubeconform -schema-location template
-  --crd-catalog-ref REF        datreeio/CRDs-catalog ref the default template uses
+  --crd-catalog-ref REF        datreeio/CRDs-catalog ref (required)
 USAGE
 }
 
@@ -70,7 +69,6 @@ while [ "$#" -gt 0 ]; do
         --child-kustomizations) FL_CHILD_KUSTOMIZATIONS="${2:-}"; shift 2 ;;
         --render-all) FL_RENDER_ALL="${2:-}"; shift 2 ;;
         --k8s-version) FL_K8S_VERSION="${2:-}"; shift 2 ;;
-        --crd-catalog) FL_CATALOG="${2:-}"; shift 2 ;;
         --crd-catalog-ref) FL_CATALOG_REF="${2:-}"; shift 2 ;;
         --allowed-skips) FL_ALLOWED_SKIPS="${2:-}"; shift 2 ;;
         --require-cluster-root) need_value "$1" "${2:-}"; FL_REQUIRE_CLUSTER_ROOT="$2"; shift 2 ;;
@@ -81,17 +79,32 @@ while [ "$#" -gt 0 ]; do
 done
 
 # The catalog is pinned to a ref so a catalog rewrite cannot change what the
-# gate accepts. A caller may pass the whole template instead, to self-host.
-if [ -z "$FL_CATALOG" ]; then
-    [ -n "$FL_CATALOG_REF" ] || die "--crd-catalog or --crd-catalog-ref is required"
-    FL_CATALOG="https://raw.githubusercontent.com/datreeio/CRDs-catalog/${FL_CATALOG_REF}/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
-fi
-FL_CATALOG_LABEL="${FL_CATALOG_REF:-$FL_CATALOG}"
+# gate accepts.
+[ -n "$FL_CATALOG_REF" ] || die "--crd-catalog-ref is required"
+FL_CATALOG="https://raw.githubusercontent.com/datreeio/CRDs-catalog/${FL_CATALOG_REF}/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
+
+# `$${` is Flux's escape for a literal `${`, masked out of every scan.
+mask_flux_escapes() {
+    sed 's/\$\$[{]/__FLUX_ESCAPED__/g'
+}
+
+# Fails, naming the lines, on a `${` Flux's envsubst mishandles: `${1}` is eaten
+# silently in-cluster, and `${ x}` or a `${` still open at the line end fails the
+# parse, since Flux refuses a reference across a line and kustomize folds at spaces.
+check_malformed_refs() {
+    local where="$1" scan="$2" malformed
+    malformed=$({ printf '%s\n' "$scan" | grep -nE '\$\{[^A-Za-z_]'
+        printf '%s\n' "$scan" | grep -nE '\$\{[^}]*$'; } | sort -t: -k1,1n -u || true)
+    [ -z "$malformed" ] && return 0
+    echo "ERROR: $where renders a \${ sequence Flux's envsubst mishandles (escape as \$\${ or assemble at runtime):"
+    printf '%s\n' "$malformed" | head -5 | sed 's/^/  /'
+    return 1
+}
 
 run_simple_mode() {
     [ -n "$FL_KUSTOMIZE_PATH" ] || die "--kustomize-path is required in simple mode"
     local k8s_ver="${FL_K8S_VERSION:-1.36.0}"
-    local rendered summary skipped
+    local rendered summary skipped scan foreign
     rendered=$(mktemp)
     # shellcheck disable=SC2064  # expand the path now, not at trap time
     trap "rm -f '$rendered'" EXIT
@@ -106,7 +119,25 @@ run_simple_mode() {
         return 1
     fi
 
-    echo "=== kubeconform (k8s $k8s_ver) ==="
+    # The tenant Kustomization substitutes from cluster-config under
+    # StrictPostBuildSubstitutions, so one `${...}` it cannot resolve fails the
+    # whole tenant reconcile. A bash modifier (`${conf%/*}`) reads as `conf`.
+    scan=$(mask_flux_escapes < "$rendered")
+    check_malformed_refs "$FL_KUSTOMIZE_PATH" "$scan" || return 1
+    foreign=$(printf '%s\n' "$scan" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' \
+        | sed 's/^\$[{]//' | grep -v '^cluster_' | sort -u || true)
+    if [ -n "$foreign" ]; then
+        echo "ERROR: $FL_KUSTOMIZE_PATH references substitution keys outside cluster-config's cluster_* set:"
+        printf '%s\n' "$foreign" | sed 's/^/  - /'
+        echo "  Escape a literal as \$\${...}; a tenant substitutes from cluster-config alone."
+        return 1
+    fi
+
+    if [ -n "$FL_K8S_VERSION" ]; then
+        echo "=== kubeconform (k8s $k8s_ver) ==="
+    else
+        echo "=== kubeconform (k8s $k8s_ver, the script default: pass --k8s-version to match the cluster) ==="
+    fi
     # -ignore-missing-schemas lets platform CRDs validate against the datreeio
     # catalog; 2>&1 because per-resource failures go to stderr; stdin because
     # kubeconform parses a file by its extension and reads a bare name as none.
@@ -129,7 +160,7 @@ run_simple_mode() {
     skipped=$(printf '%s\n' "$summary" | sed -n 's/.*Skipped: \([0-9][0-9]*\).*/\1/p')
     if [ -z "$skipped" ] || [ "$skipped" -gt "$FL_ALLOWED_SKIPS" ]; then
         echo "ERROR: kubeconform validated ${skipped:-?} resource(s) against no schema (allowed_skips=$FL_ALLOWED_SKIPS)"
-        echo "The catalog at $FL_CATALOG_LABEL moved or was unreachable, or the kind has no published schema."
+        echo "The catalog at $FL_CATALOG_REF moved or was unreachable, or the kind has no published schema."
         echo "Add a -schema-location for it, or raise allowed_skips."
         return 1
     fi
@@ -225,10 +256,9 @@ check_flux_cli() {
 check_cluster_root() {
     local gotk_components="$FL_CLUSTER_DIR/flux-system/gotk-components.yaml"
     local gotk_sync="$FL_CLUSTER_DIR/flux-system/gotk-sync.yaml"
-    # CRITICAL: check the shape of the tree first, independent of bootstrap
-    # state. The -L tests below inspect only each path's final component, so
-    # containment is asserted on the resolved path too. Otherwise an
-    # intermediate symlink hands kustomize a tree outside the repo.
+    # Containment is asserted on the resolved path first: the -L tests below
+    # see only each path's final component, so an intermediate symlink would
+    # hand kustomize a tree outside the repo.
     local repo_root cluster_real contained=0
     repo_root=$(pwd -P)
     cluster_real=$(readlink -f "$FL_CLUSTER_DIR" 2>/dev/null || echo "")
@@ -274,8 +304,9 @@ check_cluster_root() {
 # One stage: build, scan the pre-substitution text, substitute, validate.
 # Appends the rendered documents to the corpus every aggregate check reads.
 lint_stage() {
-    local label="$1" srcpath="$2" raw malformed missing empty ref varname
-    local strict_err rendered repo_root src_real
+    local label="$1" srcpath="$2" raw missing empty ref varname
+    local strict_err rendered repo_root src_real name flux_bin
+    local -a cm_env=()
     echo "=== Building + validating $label (path $srcpath) ==="
     # Flux reconciles paths relative to the repository root, so a stage that
     # resolves outside it (absolute, `..`, a symlink out) is not this cluster.
@@ -295,23 +326,19 @@ lint_stage() {
         printf '%s\n' "$raw"
         return 1
     fi
-    # printf, never echo: a leading `-n` reads as an option and dashboard JSON
-    # carries literal \n that echo expands. `$${` is Flux's escape, masked out
-    # of every scan below.
+    # printf, never echo: echo's treatment of a leading `-` and of backslash
+    # escapes differs between shells, and dashboard JSON carries literal \n.
     local scan
-    scan=$(printf '%s\n' "$raw" | sed 's/\$\$[{]/__FLUX_ESCAPED__/g')
-    malformed=$(printf '%s\n' "$scan" | grep -nE '\$\{[^A-Za-z_]' || true)
-    if [ -n "$malformed" ]; then
-        echo "ERROR: $srcpath renders a \${ sequence Flux's envsubst mishandles (escape as \$\${ or assemble at runtime):"
-        printf '%s\n' "$malformed" | head -5 | sed 's/^/  /'
-        return 1
-    fi
+    scan=$(printf '%s\n' "$raw" | mask_flux_escapes)
+    check_malformed_refs "$srcpath" "$scan" || return 1
     missing=""
     empty=""
+    # Membership is the ConfigMap allowlist, never the process environment:
+    # kustomize-controller substitutes from the ConfigMaps alone.
     for ref in $(printf '%s\n' "$scan" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' | sort -u); do
         varname=${ref#\$\{}
         varname=${varname%\}}
-        if [ -z "${!varname+x}" ]; then
+        if [[ " $FLUX_ENVSUBST_VARS " != *" \${$varname} "* ]]; then
             missing="$missing $varname"
         elif [ -z "${!varname}" ]; then
             empty="$empty $varname"
@@ -336,8 +363,17 @@ lint_stage() {
     # CRITICAL: GNU envsubst below reads only `${NAME}`, while Flux's Go
     # envsubst also reads bash modifiers (`${conf%/*}`) as variables. Its
     # own --strict is the authority, or the post-build fails in-cluster and
-    # that Kustomization stops reconciling.
-    if ! strict_err=$(printf '%s\n' "$raw" | flux envsubst --strict 2>&1 >/dev/null); then
+    # that Kustomization stops reconciling. It runs by absolute path under
+    # `env -i` with the ConfigMap keys alone, so a caller's PATH, HOME or CI_*
+    # cannot resolve a name.
+    flux_bin=$(command -v flux) || { echo "ERROR: the flux CLI is not on PATH"; return 1; }
+    for name in $FLUX_ENVSUBST_VARS; do
+        name=${name#\$\{}
+        name=${name%\}}
+        cm_env+=("$name=${!name}")
+    done
+    if ! strict_err=$(printf '%s\n' "$raw" \
+            | env -i "${cm_env[@]}" "$flux_bin" envsubst --strict 2>&1 >/dev/null); then
         echo "ERROR: $srcpath fails Flux's strict substitution: $strict_err"
         return 1
     fi
@@ -390,6 +426,10 @@ run_substitute_mode() {
     vars=$(bash "$FL_RENDER_SCRIPT" export-versions "$FL_VERSIONS_CM") \
         || { echo "ERROR: failed to extract version keys from $FL_VERSIONS_CM"; return 1; }
     eval "$vars"
+    if [ -z "${FLUX_ENVSUBST_VARS:-}" ]; then
+        echo "ERROR: $FL_RENDER_SCRIPT exported no FLUX_ENVSUBST_VARS allowlist for $FL_VERSIONS_CM"
+        return 1
+    fi
 
     local failed=0
     [ "$FL_CHECK_FLUX_VERSION" != "true" ] || check_flux_cli || failed=1

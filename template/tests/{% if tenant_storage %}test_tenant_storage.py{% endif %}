@@ -280,16 +280,17 @@ def _rules(kind: str) -> dict[str, set[str]]:
 
 
 def test_the_provisioner_reads_pods_and_their_logs_only_in_its_own_namespace():
-    """Helper pods run only in local-path-storage, so pod and log access is a
-    namespaced Role, a deliberate narrowing of upstream's cluster-wide grant."""
+    """Helper pods and local-path-config live only in local-path-storage, so pod,
+    log and ConfigMap access is a namespaced Role, a deliberate narrowing of
+    upstream's cluster-wide grant."""
     assert _rules("Role") == {
         "pods": {"get", "list", "watch", "create", "patch", "update", "delete"},
         "pods/log": {"get"},
+        "configmaps": {"get", "list", "watch"},
     }
     assert _rules("ClusterRole") == {
         "nodes": {"get", "list", "watch"},
         "persistentvolumeclaims": {"get", "list", "watch"},
-        "configmaps": {"get", "list", "watch"},
         "persistentvolumes": {"get", "list", "watch", "create", "patch", "update", "delete"},
         "events": {"create", "patch"},
         "storageclasses": {"get", "list", "watch"},

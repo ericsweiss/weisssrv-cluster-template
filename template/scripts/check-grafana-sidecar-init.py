@@ -23,8 +23,8 @@ REPO = Path(__file__).resolve().parent.parent
 MANIFEST = Path("kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml")
 VERSIONS_CONFIGMAP = Path("kubernetes/infrastructure/sources/versions-configmap.yaml")
 CLUSTER_CONFIG = Path("kubernetes/infrastructure/sources/cluster-config.yaml")
+SOURCES = Path("kubernetes/infrastructure/sources")
 CHART = "kube-prometheus-stack"
-CHART_REPO = "https://prometheus-community.github.io/helm-charts"
 # The chart names every k8s-sidecar container <release>-sc-<kind>, and the init
 # variant <release>-init-sc-<kind>.
 SIDECAR_MARKER = "-sc-"
@@ -33,10 +33,9 @@ SIDECAR_MARKER = "-sc-"
 METHOD_ENV = "METHOD"
 REQUIRED_METHOD = {"initContainers": "LIST", "containers": "WATCH"}
 POSITION = {"initContainers": "init", "containers": "long-running"}
+# A stalled chart repo must fail with a message, not hang until the job timeout.
 RENDER_TIMEOUT_SECONDS = 300
 
-# A stalled chart repo must fail with a message, not hang until the job timeout.
-_VALIDATOR = "validate-helm-values.py"
 
 
 class GateError(RuntimeError):
@@ -64,59 +63,66 @@ def _inspect(step: str, call, *args, **kwargs):
         raise GateError(f"{step}: {_one_line(exc)}") from exc
 
 
-def _yaml_file(path: Path) -> dict:
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-
-
 def _documents(text: str) -> list[dict]:
     return [d for d in yaml.safe_load_all(text) if isinstance(d, dict)]
 
 
-def _validator():
-    """Reuse the sibling gate's substitution and HelmRelease extraction."""
-    src = Path(__file__).resolve().parent / _VALIDATOR
+def _sibling(module_name: str, filename: str):
+    """A vendored helper from this script's own directory."""
+    src = Path(__file__).resolve().parent / filename
     if not src.is_file():
-        raise GateError(f"{_VALIDATOR} must sit next to this script")
-    spec = importlib.util.spec_from_file_location("validate_helm_values", str(src))
+        raise GateError(f"{filename} must sit next to this script")
+    spec = importlib.util.spec_from_file_location(module_name, str(src))
     module = importlib.util.module_from_spec(spec)
-    _inspect(f"loading {_VALIDATOR}", spec.loader.exec_module, module)
+    _inspect(f"loading {filename}", spec.loader.exec_module, module)
     return module
 
 
-def substitutions(root: Path, validator) -> dict:
+def substitutions(root: Path, validator, common) -> dict:
     """Both Flux substitution ConfigMaps, which the manifest's ${vars} resolve from."""
     versions = _inspect(f"reading {VERSIONS_CONFIGMAP}", validator.load_versions,
                         str(root), str(root / VERSIONS_CONFIGMAP))
-    config_path = root / CLUSTER_CONFIG
-    if not config_path.is_file():
-        raise GateError(f"cluster identity ConfigMap not found: {CLUSTER_CONFIG}")
-    config = _inspect(f"parsing {CLUSTER_CONFIG}", _yaml_file, config_path).get("data") or {}
-    if not config:
-        raise GateError(f"no cluster identity keys in {CLUSTER_CONFIG}")
-    return {**versions, **config}
+    return {**versions, **common.load_cluster_config(root, str(CLUSTER_CONFIG))}
 
 
-def render(root: Path, validator) -> list[dict]:
+def chart_repo(root: Path, chart_spec: dict, validator) -> str:
+    """The URL of the HelmRepository the release's sourceRef names, as Flux reads it."""
+    ref = chart_spec.get("sourceRef") or {}
+    if ref.get("kind") != "HelmRepository" or not ref.get("name"):
+        raise GateError(f"{MANIFEST} names no HelmRepository sourceRef")
+    unreadable: list = []
+    repos = validator.helm_repositories(str(root / SOURCES), unreadable)
+    if unreadable:
+        path, exc = unreadable[0]
+        raise GateError(f"parsing {path}: {_one_line(exc)}")
+    if ref["name"] not in repos:
+        raise GateError(f"no HelmRepository {ref['name']!r} with a url under {SOURCES}")
+    return repos[ref["name"]]
+
+
+def render(root: Path, validator, common) -> list[dict]:
     """The chart as Flux installs it: pinned version, substituted values."""
     manifest = root / MANIFEST
     if not manifest.is_file():
         raise GateError(f"HelmRelease not found: {MANIFEST}")
     source = _inspect(f"reading {MANIFEST}", manifest.read_text, encoding="utf-8")
-    text, missing = validator.substitute(source, substitutions(root, validator))
+    text, missing = validator.substitute(source, substitutions(root, validator, common))
     if missing:
         raise GateError(f"{MANIFEST} references unknown ConfigMap key(s): {missing}")
     spec = _inspect(f"parsing {MANIFEST}", validator.extract_helmrelease_from_text,
                     text, str(manifest)).get("spec", {})
-    version = str(spec.get("chart", {}).get("spec", {}).get("version", ""))
+    chart_spec = spec.get("chart", {}).get("spec", {})
+    version = str(chart_spec.get("version", ""))
     if not version:
         raise GateError(f"could not determine the chart version pinned in {MANIFEST}")
+    repo_url = chart_repo(root, chart_spec, validator)
     with tempfile.NamedTemporaryFile("w", suffix=".yaml") as values_file:
         _inspect(f"serialising the values in {MANIFEST}", yaml.safe_dump,
                  spec.get("values", {}), values_file, sort_keys=False)
         values_file.flush()
         cmd = [
             "helm", "template", CHART, CHART,
-            "--repo", CHART_REPO,
+            "--repo", repo_url,
             "--version", version,
             "--namespace", spec.get("targetNamespace") or "default",
             "-f", values_file.name,
@@ -152,7 +158,9 @@ def sidecars(docs: list[dict]) -> list[tuple[str, str, str, str | None]]:
 
 
 def check(root: Path = REPO) -> list[str]:
-    containers = sidecars(render(root, _validator()))
+    validator = _sibling("validate_helm_values", "validate-helm-values.py")
+    common = _sibling("gate_common", "gate_common.py")
+    containers = sidecars(render(root, validator, common))
     # A gate that inspects nothing is not a gate: the values enable a sidecar in
     # both positions, so a render missing either means the knob or the chart moved.
     for field in REQUIRED_METHOD:

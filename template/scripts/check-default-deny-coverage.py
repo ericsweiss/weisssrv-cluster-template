@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Assert every namespace that owns a workload carries an ingress default-deny.
 
-Reads the rendered corpus on stdin, exemptions via --exempt NS=REASON and an
-egress default-deny per --require-egress NS. Exit codes: docs/SCRIPTS.md.
+Reads the rendered corpus on stdin and exemptions via --exempt NS=REASON.
+Exit codes: docs/SCRIPTS.md.
 """
 from __future__ import annotations
 
@@ -52,16 +52,16 @@ EXEMPT_NAMESPACES = {
 }
 
 
-def _allows_all(spec: dict, direction: str, peer_key: str) -> bool:
-    """True when a rule in one direction admits everything.
+def _allows_all(spec: dict) -> bool:
+    """True when an ingress rule admits everything.
 
     An entry with neither peers nor `ports`, or a port-less entry whose peer
     selects everything. A rule naming ports still narrows the surface.
     """
-    for rule in spec.get(direction) or []:
+    for rule in spec.get("ingress") or []:
         if not isinstance(rule, dict) or rule.get("ports"):
             continue
-        peers = rule.get(peer_key)
+        peers = rule.get("from")
         if not peers:
             return True
         if isinstance(peers, list) and any(peer_selects_everything(p) for p in peers):
@@ -69,14 +69,12 @@ def _allows_all(spec: dict, direction: str, peer_key: str) -> bool:
     return False
 
 
-def analyze(docs: list[dict]) -> tuple[dict[str, set[str]], set[str], set[str]]:
-    """-> (namespace -> the workloads in scope, ingress-fenced, egress-fenced)."""
+def analyze(docs: list[dict]) -> tuple[dict[str, set[str]], set[str]]:
+    """-> (namespace -> the workloads in scope, ingress-fenced namespaces)."""
     workloads: dict[str, set[str]] = {}
     fenced: set[str] = set()
-    egress_fenced: set[str] = set()
     # Additive: one wide-open allow re-opens the namespace, so subtract at the end.
     wide_open: set[str] = set()
-    egress_wide_open: set[str] = set()
 
     for doc in docs:
         kind = doc.get("kind")
@@ -96,18 +94,11 @@ def analyze(docs: list[dict]) -> tuple[dict[str, set[str]], set[str], set[str]]:
             # not all-pods: it can neither fence nor defeat a fence.
             and isinstance(spec.get("podSelector"), dict)
             and selects_all_pods(spec.get("podSelector"))
+            and "Ingress" in policy_types(spec)
         ):
-            declared = policy_types(spec)
-            if "Ingress" in declared:
-                target = wide_open if _allows_all(spec, "ingress", "from") else fenced
-                target.add(ns)
-            if "Egress" in declared:
-                target = (
-                    egress_wide_open if _allows_all(spec, "egress", "to") else egress_fenced
-                )
-                target.add(ns)
+            (wide_open if _allows_all(spec) else fenced).add(ns)
 
-    return workloads, fenced - wide_open, egress_fenced - egress_wide_open
+    return workloads, fenced - wide_open
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -122,14 +113,6 @@ def main(argv: list[str] | None = None) -> int:
         metavar="NS=REASON",
         help="additional exempt namespace, with its reason (repeatable)",
     )
-    parser.add_argument(
-        "--require-egress",
-        action="append",
-        default=[],
-        metavar="NS",
-        help="namespace that must also carry an egress default-deny (repeatable). "
-             "Opt-in: the ingress mandate is cluster-wide, egress is per namespace",
-    )
     args = parser.parse_args(argv)
 
     try:
@@ -141,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
 
     docs = load_corpus()
 
-    workloads, fenced, egress_fenced = analyze(docs)
+    workloads, fenced = analyze(docs)
 
     if not workloads:
         print(
@@ -165,17 +148,6 @@ def main(argv: list[str] | None = None) -> int:
             f"the exemption where this gate is invoked (--exempt {ns}=REASON)."
         )
 
-    for ns in sorted(set(args.require_egress)):
-        if ns in egress_fenced:
-            continue
-        violations.append(
-            f"  {ns}: --require-egress names it, but no namespace-wide NetworkPolicy "
-            f"denies egress by default — a policy whose podSelector is empty must "
-            f"list Egress in policyTypes, and an egress rule with neither `to` nor "
-            f"`ports` re-opens it. Add the egress default-deny to the namespace's "
-            f"kustomization, or drop --require-egress {ns}."
-        )
-
     if violations:
         print(
             "Default-deny mandate violated — namespaces open to every pod "
@@ -188,13 +160,11 @@ def main(argv: list[str] | None = None) -> int:
     unused = sorted(ns for ns in exempt if ns not in workloads)
     if unused:
         print(f"(exemptions declared but not exercised by this corpus: {', '.join(unused)})")
-    egress = len(set(args.require_egress))
     print(
         f"Ingress default-deny OK ({len(workloads)} workload namespaces, "
         f"{len([n for n in workloads if n in fenced])} fenced, "
-        f"{len([n for n in workloads if n in exempt])} exempt"
-        + (f", {egress} egress-fenced" if egress else "")
-        + f") in {len(docs)} document(s)"
+        f"{len([n for n in workloads if n in exempt])} exempt) "
+        f"in {len(docs)} document(s)"
     )
     return 0
 

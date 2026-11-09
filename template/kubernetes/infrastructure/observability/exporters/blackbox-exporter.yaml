@@ -56,7 +56,7 @@ spec:
           timeout: 10s
           http:
             valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
-            valid_status_codes: [200, 301, 302, 401, 403]
+            valid_status_codes: [200, 301, 302, 303, 307, 308, 401, 403]
             follow_redirects: false
             preferred_ip_protocol: ip4
             tls_config:
@@ -113,8 +113,8 @@ spec:
           url: ${cluster_lan_gateway}
           module: icmp_ping
         # Outside-in WAN witness, not a monitored endpoint: it tells a cluster
-        # fault from an ISP outage. Suppress on
-        # `max(probe_success{instance="1.1.1.1"}) == 0`; EndpointDown excludes it.
+        # fault from an ISP outage. EndpointDown excludes it, and
+        # KeyEndpointProbeMissing fires when the target is renamed away.
         - name: internet-witness
           url: 1.1.1.1
           module: icmp_ping

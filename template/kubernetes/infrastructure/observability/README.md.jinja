@@ -16,12 +16,13 @@ ship them.
 
 Nothing in this directory contains a domain, an IP, or a hostname. Every
 site-specific value arrives at reconcile time from the `cluster-config`
-ConfigMap via `postBuild.substituteFrom` (chart/image versions come from the
-sibling `cluster-versions` ConfigMap the same way). Adding a hostname literal
-here is a regression — put it in `cluster-config` instead. The gate that proves
-it reads the dashboard JSON as well as the manifests, so a
-`probe_success{instance="https://git.example.com"}` literal in a new app
-dashboard reds it.
+ConfigMap via `postBuild.substituteFrom`. Chart and image versions come from the
+sibling `cluster-versions` ConfigMap the same way. A new site value goes into
+`cluster-config`, never in here as a literal.
+
+`task lint:cluster-literals` enforces this. It reads the dashboard JSON as well
+as the manifests, so a `probe_success{instance="https://git.example.com"}`
+literal in a new app dashboard fails it.
 
 ### `cluster-config` keys this directory consumes
 
@@ -268,7 +269,8 @@ account, and `persistence.enabled: true` means the database outlives the pod,
 so there is never a second first start. The vault's `admin-password` must
 therefore be its final value before this stage first reconciles; changing it
 later does nothing to the account on its own. Resetting or rotating it:
-`docs/RUNBOOKS.md` § Locked out of Grafana.
+`docs/RUNBOOKS.md` § Suspending, rolling back, and breaking glass, under
+"Locked out of Grafana".
 
 Closing the basic-auth path is also why both Grafana sidecars run with
 `skipReload: true` — their default behaviour is to POST Grafana's
@@ -300,7 +302,7 @@ release upgrade rolls back on every reconcile.
 The node-outage inhibition suppresses per-pod and per-workload warnings
 **cluster-wide** — the target alertnames carry no node label, so no `equal:` is
 possible. Criticals, `EndpointDown` and `TargetDown` are never inhibited, and
-the source is the bounded `NodeOutageStormControl` rule, which stops firing 7d
+the source is the bounded, null-routed `NodeOutageStormControl` rule, which stops firing 7d
 after the node was last Ready. The `Watchdog` route is a dead man's switch: it
 must stay ahead of the `severity=none` null route, and the external heartbeat is
 the only signal that survives a total observability-plane outage, loss of DNS

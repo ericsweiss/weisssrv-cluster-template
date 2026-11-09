@@ -1,0 +1,199 @@
+---
+# promtool unit tests for platform.temperature. hwmon temps join their chip
+# names on (instance, chip); every case carries the corosync sentinel on the
+# hypervisor and leaves it off the LXC that reads the same sensor.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # SATA: 56C on the hypervisor crosses the 55C critical after its 5m hold; the
+  # LXC reading the same sensor and a 45C drive stay quiet.
+  - interval: 1m
+    input_series:
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="nas:9101"}'
+        values: '0+60x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="nas:9101", chip="target0:0:0_0:0:0:0", sensor="temp1"}'
+        values: '56+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="nas:9101", chip="target0:0:0_0:0:0:0", chip_name="drivetemp"}'
+        values: '1+0x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="nas:9101", chip="target1:0:0_1:0:0:0", sensor="temp1"}'
+        values: '45+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="nas:9101", chip="target1:0:0_1:0:0:0", chip_name="drivetemp"}'
+        values: '1+0x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="192.0.2.23:9101", chip="target0:0:0_0:0:0:0", sensor="temp1"}'
+        values: '56+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="192.0.2.23:9101", chip="target0:0:0_0:0:0:0", chip_name="drivetemp"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SATADriveTempCritical
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: SATADriveTempCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: storage
+              instance: 'nas:9101'
+              chip: 'target0:0:0_0:0:0:0'
+
+  # NVMe ladder: 77C sits in the null-routed band, 81C throttles.
+  - interval: 1m
+    input_series:
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+60x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="pve-01:9101", chip="nvme_nvme0", sensor="temp1"}'
+        values: '77+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="pve-01:9101", chip="nvme_nvme0", chip_name="nvme"}'
+        values: '1+0x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="pve-01:9101", chip="nvme_nvme1", sensor="temp1"}'
+        values: '81+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="pve-01:9101", chip="nvme_nvme1", chip_name="nvme"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NVMeDriveTempHigh
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: NVMeDriveTempHigh
+        exp_alerts:
+          - exp_labels:
+              severity: none
+              component: storage
+              instance: 'pve-01:9101'
+              chip: nvme_nvme0
+          - exp_labels:
+              severity: none
+              component: storage
+              instance: 'pve-01:9101'
+              chip: nvme_nvme1
+      - eval_time: 1m
+        alertname: NVMeDriveTempCritical
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: NVMeDriveTempCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: storage
+              instance: 'pve-01:9101'
+              chip: nvme_nvme1
+
+  # CPU on both vendors: an Intel package at 92C warns, an AMD one at 96C goes
+  # critical, and 85C stays under both.
+  - interval: 1m
+    input_series:
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+60x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="pve-01:9101", chip="platform_coretemp_0", sensor="temp1"}'
+        values: '92+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="pve-01:9101", chip="platform_coretemp_0", chip_name="coretemp"}'
+        values: '1+0x30'
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '0+60x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="pve-02:9101", chip="pci0000:00_0000:00:18_3", sensor="temp1"}'
+        values: '96+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="pve-02:9101", chip="pci0000:00_0000:00:18_3", chip_name="k10temp"}'
+        values: '1+0x30'
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="pve-03:9101"}'
+        values: '0+60x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="pve-03:9101", chip="platform_coretemp_0", sensor="temp1"}'
+        values: '85+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="pve-03:9101", chip="platform_coretemp_0", chip_name="coretemp"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: CPUTempWarning
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CPUTempWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: cpu
+              instance: 'pve-01:9101'
+          - exp_labels:
+              severity: warning
+              component: cpu
+              instance: 'pve-02:9101'
+      - eval_time: 3m
+        alertname: CPUTempCritical
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: CPUTempCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: cpu
+              instance: 'pve-02:9101'
+
+  # Host GPU: 88C warns after 5m, 96C goes critical after 1m.
+  - interval: 1m
+    input_series:
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+60x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="pve-01:9101", chip="pci0000:00_0000:03:00_0", sensor="temp1"}'
+        values: '88+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="pve-01:9101", chip="pci0000:00_0000:03:00_0", chip_name="xe"}'
+        values: '1+0x30'
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '0+60x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="pve-02:9101", chip="pci0000:00_0000:01:00_0", sensor="temp1"}'
+        values: '96+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="pve-02:9101", chip="pci0000:00_0000:01:00_0", chip_name="amdgpu"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HostGpuTempWarning
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: HostGpuTempWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: gpu
+              instance: 'pve-01:9101'
+              chip_name: xe
+          - exp_labels:
+              severity: warning
+              component: gpu
+              instance: 'pve-02:9101'
+              chip_name: amdgpu
+      # Inside the 1m hold.
+      - eval_time: 0m
+        alertname: HostGpuTempCritical
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: HostGpuTempCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              component: gpu
+              instance: 'pve-02:9101'
+              chip_name: amdgpu
+
+  # NIC: 91C for 10m warns; a guest reading the same chip does not.
+  - interval: 1m
+    input_series:
+      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="nas:9101"}'
+        values: '0+60x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="nas:9101", chip="pci0000:00_0000:05:00_0", sensor="temp1"}'
+        values: '91+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="nas:9101", chip="pci0000:00_0000:05:00_0", chip_name="nic_aqc113"}'
+        values: '1+0x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="192.0.2.23:9101", chip="pci0000:00_0000:05:00_0", sensor="temp1"}'
+        values: '91+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="192.0.2.23:9101", chip="pci0000:00_0000:05:00_0", chip_name="nic_aqc113"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NICTempWarning
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: NICTempWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: network
+              instance: 'nas:9101'
+              chip_name: nic_aqc113

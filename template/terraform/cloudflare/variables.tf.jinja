@@ -8,8 +8,6 @@ variable "cloudflare_api_token" {
 }
 
 variable "cloudflare_account_id" {
-  # Stored in the same item's `username` field, which is non-obvious enough that
-  # a wrong value would otherwise surface as a confusing zone-not-found error.
   description = "Cloudflare account ID (1Password item 'Cloudflare Terraform Token', field 'username')"
   type        = string
 
@@ -37,9 +35,7 @@ variable "contact_email" {
 }
 
 variable "apex_seed_ip" {
-  # Seeds the apex A record at creation only. The DDNS job owns the live value
-  # from then on (the record carries content_managed_externally = true), so this
-  # is documentation, not configuration.
+  # Published on first create only; the DDNS job owns the value afterwards.
   description = "Placeholder public IP written when the apex record is first created"
   type        = string
   default     = "192.0.2.1"

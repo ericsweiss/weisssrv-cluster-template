@@ -1,0 +1,7 @@
+---
+# Manifests no kustomization.yaml lists on purpose, read by check-kustomization.py
+# --exempt. Each is applied by hand, and the file's own header says when.
+kubernetes/apps/vm-ingress/example-route.yaml: copy-me example, not a route
+kubernetes/apps/vm-ingress/certificate.yaml: listed alongside your own route
+kubernetes/infrastructure/observability/loki/nodeport.yaml: >-
+  on-demand only: always on it is an unauthenticated Loki path

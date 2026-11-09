@@ -95,6 +95,9 @@ spec:
               kind: Deployment
               metadata:
                 name: onepassword-connect
+                # The chart renders an explicit metadata.namespace, so the patch
+                # must carry it too: a namespace-less patch matches nothing.
+                namespace: external-secrets
               spec:
                 template:
                   spec:

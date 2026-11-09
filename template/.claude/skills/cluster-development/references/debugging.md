@@ -11,13 +11,20 @@ from a symptom to the first command.
 | A pod cannot reach a dependency | its namespace's NetworkPolicies. An ingress default-deny is present everywhere, so a new dependency needs a new allow |
 | A pod cannot reach the internet | the egress policy's reserved-CIDR `except:` list, held by `task lint:netpol-parity` |
 | A Service VIP is unreachable from a peer selector | an `ipBlock` peer can never match a Service VIP: kube-proxy rewrites the destination first. Select the pods, not the address |
-| A certificate is not renewing | the Certificate's conditions, then the issuer's. A per-host distribution target needs its pinned key seeded |
+| A certificate is not renewing | the Certificate's conditions, then the issuer's |
+| A certificate push to a host fails on its host key | that target's pinned host key is empty or stale: an entry with an empty `host_key` is dropped from the targets. `task certs:show-host-keys` prints the current keys to pin |
 | A guest lost the network | the bond's slave state and the switch-side port, before suspecting the guest |
-| A host-side change did not apply | re-run the owning playbook with `--limit <host>`; a looped task with a per-item `delegate_to` ends the play silently when a delegate is down |
+| A host-side change did not apply | re-run the owning playbook with `--limit <host>`; a looped task with a per-item `delegate_to` ends the play with rc 0 when a delegate is down |
+| A playbook matched no hosts | run it from `ansible/`, or pass `-i ansible/inventories/prod/hosts.yml`: the inventory is set by `ansible/ansible.cfg` |
+| A role ignored an inventory value | the name is misspelled or was renamed upstream: every role variable is read through `default()`, so an unread name takes the role default |
 | A node is NotReady | `task k3s:status`, then that node's kubelet journal through the log stack |
 | Logs stopped arriving from a host | the host log-shipping role ran, and the ingress route it pushes through is up |
+| An alert is firing | `references/alert-triage.md` |
 | An alert fired with no runbook | the rule's `runbook_url` must anchor a real heading; `task lint:prometheus-config` is the gate |
 | A credential stopped working | re-run the task that injects it, or `task flux:rotate-secret -- <ns>/<name>` for an in-cluster one |
+| An ExternalSecret is not syncing | `kubectl -n <ns> get externalsecret` for its `Ready` condition; `task flux:refresh-secret -- <ns>/<name>` re-syncs without a restart |
+| A pod reports a stale NFS file handle | delete the pod so it remounts; an established mount does not survive a server restart |
+| A pod's restart counter needs clearing | `kubectl delete pod`, not `kubectl rollout restart`, which Flux reverts on the next reconcile |
 
 ## Reading logs and metrics
 

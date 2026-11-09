@@ -21,9 +21,8 @@ providers, groups, policy bindings — are site data and belong in
 `AUTHENTIK_WEB__BASE_URL` pins the canonical origin to `auth.<external_domain>`,
 so every OIDC issuer and absolute link authentik builds names the external host
 on both routes. The internal route still serves the UI, but its absolute links
-point at the external name, so make `auth.<external_domain>` resolve from the
-LAN (a split-horizon rewrite, or hairpin NAT) before running the initial-setup
-flow.
+point at the external name. `group_vars/dns.yml` answers
+`auth.<external_domain>` with the internal VIP on the LAN.
 
 ## The two ForwardAuth middlewares
 
@@ -50,7 +49,9 @@ expects authentik-injected basic credentials (a proxy provider with
 | Dump landing zone | NFS export `/backups-apps/authentik` on `${cluster_nas_host}` |
 
 The pg_dump CronJob runs at 02:30 in `cluster_timezone` and keeps the newest
-seven dumps (`RETENTION`). Stagger it against your other dump jobs.
+seven dumps (`RETENTION`). Stagger it against your other dump jobs. The export
+sits on a dataset the offsite tier reads. Deploy the storage host's Ansible
+role before this module, or the first run has nothing to mount.
 
 Restore one:
 
@@ -74,8 +75,7 @@ so do it as soon as the ingress answers:
 
 1. **Bootstrap the built-in admin** at
    `https://auth.<external>/if/flow/initial-setup/`. That flow is available
-   only while no admin exists. `group_vars/dns.yml` answers that name with the
-   internal VIP on the LAN, so run it from a machine using the new resolvers.
+   only while no admin exists. Run it from a machine using the new resolvers.
 2. **Mint an API token** for `akadmin` (Directory > Tokens) and store it as the
    `Authentik Terraform Token` vault item.
 3. **Apply the objects from code.** `terraform/authentik/sso.tf` ships the
@@ -104,7 +104,12 @@ Remove `- authentik` from `kubernetes/apps/kustomization.yaml`. Then also:
    becomes unreachable. Its built-in `admin` account stays — its password is the
    `Grafana SSO` item's `admin-password` field — so that is the way back in;
 2. remove `authentik-auth` from every IngressRoute middleware chain that lists
-   it, or those routes 500 on every request.
+   it, or those routes 500 on every request;
+3. remove `terraform/authentik` and the `authentik-drift-plan` CI job, which
+   otherwise plan against an identity provider that no longer exists;
+4. drop `authentik/authentik-auth` and the outpost URL from
+   `infrastructure/configs/tenant-traefik-policy.yaml`, which admits them in
+   tenant IngressRoutes.
 
 Swapping to another IdP (Keycloak, Zitadel, Dex) means replacing this directory
 and the middleware **name** referenced from those chains — the shape (ForwardAuth

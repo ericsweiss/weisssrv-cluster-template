@@ -35,10 +35,11 @@ repository afterwards.
 | Adding DCGM GPU telemetry | — | — |
 | Rotating a secret | — | — |
 | Adding or changing a DNS record | — | — |
-| Mail relay | — | — |
+| Mail relay | `#mail-relay` | the Postfix alerts |
 | Certificates | `#certificates` | the certificate-expiry alerts |
 | Suspending, rolling back, and breaking glass | — | — |
 | Storage | `#storage` | the ZFS pool alerts |
+| Host and hypervisor alerts | — | its subsections, one per alert family |
 | Backups and restore | `#backups-and-restore` | the backup-failed / stale alerts |
 | kube-system fencing | — | — |
 | When Flux is unhappy | — | — |
@@ -46,9 +47,8 @@ repository afterwards.
 | Updating the template | — | — |
 | Where the platform is documented | — | — |
 
-The anchored rows above are the top-level sections alerts link to. Subsection
-anchors are load-bearing too — `#kubelet-image-store-on-a-node-root-filesystem`
-and `#loki-push-emergency-fallback` are both linked from alert rules — and
+The anchored rows above are the top-level sections alerts link to. Alert rules
+link to subsections too, and
 `tests/test_render.py::test_runbook_urls_resolve` is the contract of record:
 rename a heading and that gate fails, so rename it and the annotations in the
 same commit.

@@ -30,9 +30,7 @@ spec:
       retries: 3
       remediateLastFailure: true
   values:
-    # crds.enabled MUST stay true. With it false, a chart version change renders
-    # the CRD templates as deletions and takes every IPAddressPool +
-    # L2Advertisement with them — i.e. every LoadBalancer IP goes <pending>.
+    # The chart owns the metallb.io CRDs; see the CRITICAL note at postRenderers.
     crds:
       enabled: true
     prometheus:
@@ -76,9 +74,10 @@ spec:
           memory: 64Mi
         limits:
           memory: 256Mi
-  # The chart owns the metallb.io CRDs, so a helm uninstall cascade-deletes
-  # every IPAddressPool and L2Advertisement. The keep policy stops that; a
-  # strategic merge creates metadata.annotations.
+  # CRITICAL: the chart must own the metallb.io CRDs. With crds.enabled false a
+  # version switch renders them as deletions, and a helm uninstall cascade-deletes
+  # them; either takes every IPAddressPool and VIP. The keep policy stops the
+  # uninstall cascade; a strategic merge creates metadata.annotations.
   postRenderers:
     - kustomize:
         patches:

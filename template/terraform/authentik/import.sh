@@ -87,7 +87,17 @@ if [ "${CHECK_ONLY}" = 1 ]; then
   exit 0
 fi
 
-STATE="$(terraform state list 2>/dev/null || true)"
+# A backend failure stops the run here. "No state file was found" exits 1 too,
+# and is the empty state adoption and disaster recovery start from.
+STATE_ERR="$(mktemp)"
+trap 'rm -f "${STATE_ERR}"' EXIT
+if ! STATE="$(terraform state list 2>"${STATE_ERR}")"; then
+  if ! grep -q 'No state file was found' "${STATE_ERR}"; then
+    cat "${STATE_ERR}" >&2
+    exit 1
+  fi
+  STATE=""
+fi
 imported=0
 skipped=0
 while IFS='|' read -r addr id; do

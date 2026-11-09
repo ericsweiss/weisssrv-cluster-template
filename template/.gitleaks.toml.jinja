@@ -17,16 +17,15 @@ regexes = [
 {%- endif %}
   # Documentation placeholders like [your-cloudflare-api-token].
   '''^\[your-[a-z0-9-]+\]''',
-  # Documentation placeholders written as <angle-bracket> tokens — a literal
-  # <…> is never real credential material.
-  '''<[a-z][a-z0-9_-]*>''',
+  # Documentation placeholders written as <angle-bracket> tokens. Anchored to
+  # the whole token, so a real secret containing <word> is still reported.
+  '''^<[a-z][a-z0-9_-]*>$''',
   # Test/fixture tokens — anchored at start of token so a real secret prefixed
   # with "prodtestkey_…" or similar can't be silenced.
   '''^(test|fake|dummy|example)[-_]?(password|token|key|secret)[A-Za-z0-9_-]*''',
 {%- if secrets_backend == 'onepassword' %}
   # Published supply-chain pins the CI templates verify downloaded key material
-  # against. Exact values, so rotating a pinned key forces a review here rather
-  # than silently covering the new material.
+  # against. Exact values, so rotating a pinned key forces a review here.
   '''^3FEF9748469ADBE15DA7CA80AC2D62742012EA22$''',
   '''^0e88171d9f8b7630763f70cbf69f2a01b4ba8ea1d8e79487f59c162db255eb84$''',
 {%- endif %}
@@ -51,8 +50,4 @@ description = "{{ cluster_name }} synthetic test fixtures"
 regexes = [
   # cert-distribution molecule — mock acme.sh private keys.
   '''MIIEvgIBADANBgkqhkiGTestPrivateKey''',
-  # scripts/test_collect_state_lib.py — redaction-suite inputs, patterns not credentials.
-  '''^glpat-abc123def456$''',
-  '''^glrt-AbC_123-xyz$''',
-  '''7the8keymaterial''',
 ]

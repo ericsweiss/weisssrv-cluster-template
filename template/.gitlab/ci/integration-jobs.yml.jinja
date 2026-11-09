@@ -10,9 +10,9 @@
 .paths-integration:
   changes:
     - ansible/integration-tests/**/*
-    # Every integration converge include_tasks's
+    # Every integration converge includes
     # ansible/molecule/tasks/container-warmup.yml, and _shared/prepare.yml
-    # re-imports ansible/molecule/prepare-common.yml.
+    # imports ansible/molecule/prepare-common.yml.
     - ansible/molecule/**/*
     # The roles under test ship in weisssrv.infra: the pin is the suite's real
     # input, alongside the prod all.yml the converges vars_files.
@@ -50,7 +50,7 @@
     # Digest-pinned (multi-arch index), matching the library's molecule jobs.
     # --insecure-registry: the in-cluster pull-through cache is plaintext HTTP
     # and network-fenced, and every fresh DinD daemon needs the flag.
-    - name: docker:27.5.1-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce
+    - name: docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
       # Required: a digest-bearing image name must still answer at the `docker`
       # host DOCKER_HOST points at.
       alias: docker
@@ -79,14 +79,15 @@
     # the test image, the rest hit the in-cluster cache.
     REGISTRY_CACHE: "{{ registry_cache }}"
   before_script:
-    # Wait for the DinD sidecar — with a pre-built CI image the script starts
-    # before DinD is ready (no apt-get delay to absorb its startup).
+    # Wait for the DinD sidecar: a pre-built CI image starts the script before
+    # DinD is ready. A sidecar still down after 30s fails the job here.
     - |
       for i in $(seq 1 30); do
         docker info >/dev/null 2>&1 && break
         echo "Waiting for DinD... ($i)"
         sleep 1
       done
+      docker info >/dev/null 2>&1 || { echo "DinD not ready after 30s" >&2; exit 1; }
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     # Pre-pull the test image into this job's DinD so the scenarios
     # (pre_build_image: true) start without pulling. Cache first, time-bounded,
@@ -98,12 +99,13 @@
       else
         docker pull "$MOLECULE_TEST_IMAGE"
       fi
-    # weisssrv.infra is installed by molecule's own `dependency` step (each
-    # scenario points it at ansible/requirements.yml), so the pin has one
-    # installer.
     - mkdir -p "$CI_PROJECT_DIR/junit"
   artifacts:
     when: always
+    # The junit report glob does not match a subdirectory, so the attempts
+    # molecule-retry.sh stashes survive only as an artifact path.
+    paths:
+      - junit/failed-attempt-*/
     reports:
       junit: junit/*.xml
   # Above MOL_MAX x worst-case attempt, not at it: with no headroom a retry

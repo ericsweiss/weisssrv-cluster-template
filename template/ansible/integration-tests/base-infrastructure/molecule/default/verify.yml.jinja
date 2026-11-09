@@ -66,7 +66,6 @@
         state: present
       check_mode: true
       register: base_pkgs
-      failed_when: base_pkgs is changed
 
     - name: Assert base packages installed
       ansible.builtin.assert:
@@ -155,6 +154,19 @@
           - "'/bin/zsh' in zsh_test.stdout"
         fail_msg: "Zsh not functional"
         success_msg: "Zsh functional"
+
+    - name: Read the Oh My Zsh theme from .zshrc
+      ansible.builtin.command: grep -E '^ZSH_THEME="[^"]+"' /home/{{ admin_user }}/.zshrc
+      register: theme_test
+      changed_when: false
+      failed_when: false
+
+    - name: Assert an Oh My Zsh theme is set
+      ansible.builtin.assert:
+        that:
+          - theme_test.rc == 0
+        fail_msg: ".zshrc sets no ZSH_THEME"
+        success_msg: "Oh My Zsh theme: {{ theme_test.stdout }}"
 {%- endraw %}
 {%- if vpn_tailscale %}
 {%- raw %}

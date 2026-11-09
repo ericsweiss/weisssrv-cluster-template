@@ -33,9 +33,9 @@ data:
   cluster_pod_cidr: "{{ k3s_pod_cidr }}"
   cluster_service_cidr: "{{ k3s_service_cidr }}"
 
-  # `cluster_api_vip` is what the manifests read; `cluster_k3s_api_vip` is the
-  # reserved longer spelling, kept so a manifest written with the k3s_ segment
-  # resolves rather than substituting to an empty string.
+  # `cluster_api_vip` is what the manifests read. `cluster_k3s_api_vip` holds the
+  # same address for the host tooling: taskfiles/k3s.yml and the invariants gate
+  # read it by that name.
   cluster_api_vip: "{{ k3s_api_vip }}"
   cluster_k3s_api_vip: "{{ k3s_api_vip }}"
   # Pod egress to the apiserver must allow the SERVER NODE IPs, not the VIP:
@@ -147,6 +147,7 @@ data:
 {%- if dns_backend == 'cloudflare' %}
 
   # WAN A records the cloudflare-ddns CronJob owns, as `label[:proxied]` pairs;
-  # `@` is the apex and proxied defaults to true.
-  cluster_ddns_records: "{{ external_domain }}:true"
+  # `@` is the apex. The value carries its own quotes: kustomize unquotes the
+  # placeholder before Flux substitutes, and a bare `@` cannot start a scalar.
+  cluster_ddns_records: '"@:true"'
 {%- endif %}

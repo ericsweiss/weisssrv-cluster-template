@@ -18,9 +18,6 @@ x-preconditions:
       msg: "ansible-playbook not installed. pip install ansible, then: task ansible:install-collections"
     - sh: command -v op
       msg: "1Password CLI not installed: https://developer.1password.com/docs/cli/get-started/"
-    # `op account list`, not `op whoami`: with the desktop-app integration
-    # whoami reports "not signed in" in the non-interactive shell Task uses
-    # here.
     - sh: op account list 2>/dev/null
       msg: "1Password CLI not authenticated. Run: eval $(op signin)"
 
@@ -62,7 +59,7 @@ tasks:
     env: &base_env
       ROOT_EMAIL_ALIAS: {% endraw %}{{ secret_ref('Email Config', 'root_alias') }}{% raw %}
       SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('SSH Key', 'public key') }}{% raw %}
-      # base rewrites authorized_keys, so base.yml re-seeds the cert key after it.
+      # base.yml re-seeds the cert-distribution key, which a re-provisioned guest loses.
       ACME_SSH_PUBLIC_KEY: {% endraw %}{{ secret_ref('Cert Distribution Key', 'public key') }}{% raw %}
     preconditions: *op_preconditions
     cmds:

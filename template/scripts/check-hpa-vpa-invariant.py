@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Assert no workload has both an HPA and a CPU-controlling VPA.
 
-Reads the rendered corpus on stdin with consumer data from --policy-config;
-exits 0 clean, 1 on a violation, 2 on an error. Contract: docs/SCRIPTS.md.
+Reads the rendered corpus on stdin and --policy-config; exits 0 clean, 1 on a
+violation, 2 on an error. Contract: weisssrv-lib docs/SCRIPTS.md.
 """
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ try:
         doc_key,
         doc_namespace,
         load_corpus,
+        selector_matches,
     )
 except ImportError:
     print(
@@ -40,8 +41,7 @@ PDB_KIND = "PodDisruptionBudget"
 
 class Policy:
     """Consumer data from --policy-config. A value, not module state, so a
-    second load replaces rather than accumulates. A plain class, not a
-    dataclass: importlib path-loading cannot resolve the annotations.
+    second load replaces rather than accumulates.
     """
 
     def __init__(
@@ -146,8 +146,8 @@ def _allowlist(doc: dict, path, key: str, kind: str | None = None) -> set[str]:
     for target, reason in raw.items():
         if not str(reason or "").strip():
             raise ValueError(f"{path}: {key}[{target}] has no reason")
-        # CRITICAL: a key becomes a set member verbatim, so a mis-shaped one
-        # exempts nothing and the exemption silently does not apply.
+        # A key becomes a set member verbatim, so a mis-shaped one would
+        # exempt nothing and the exemption would silently not apply.
         segments = str(target).split("/")
         if len(segments) != 3 or not all(s.strip() for s in segments):
             raise ValueError(
@@ -206,7 +206,12 @@ def load_policy(path) -> Policy:
     if not isinstance(doc, dict):
         raise ValueError(f"{path}: top-level must be a mapping")
     policy = Policy()
-    for entry in doc.get("chart_native_hpa_targets") or []:
+    targets = doc.get("chart_native_hpa_targets") or []
+    if not isinstance(targets, list):
+        raise ValueError(f"{path}: chart_native_hpa_targets must be a list of mappings")
+    for entry in targets:
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: chart-native target {entry!r} is not a mapping")
         missing = [k for k in ("namespace", "kind", "name") if not entry.get(k)]
         if missing:
             raise ValueError(f"{path}: chart-native target {entry!r} is missing {missing}")
@@ -374,6 +379,96 @@ def vpa_cap_unjudged(
     return _vpa_cap_scan(docs, allowlist, declared_limits)[1]
 
 
+def _workload_resources(docs: list[dict]) -> dict[tuple[str, str, str], dict[str, dict]]:
+    """(namespace, kind, name) -> {container name: its resources mapping}."""
+    out: dict[tuple[str, str, str], dict[str, dict]] = {}
+    for d in docs:
+        kind = d.get("kind")
+        if kind not in POD_SPEC_KINDS and kind != "CronJob":
+            continue
+        name = (d.get("metadata") or {}).get("name")
+        if not name:
+            continue
+        containers: dict[str, dict] = {}
+        for c in _containers_of(d):
+            resources = c.get("resources")
+            containers[str(c.get("name") or "?")] = resources if isinstance(resources, dict) else {}
+        out[(doc_namespace(d), kind, str(name))] = containers
+    return out
+
+
+def _format_quantity(value: float, resource: str) -> str:
+    """A computed quantity in the unit a manifest would spell it in."""
+    if resource == "cpu":
+        return f"{int(value * 1000)}m"
+    return f"{int(value // 2**20)}Mi" if value >= 2**20 else f"{int(value // 2**10)}Ki"
+
+
+def _covered(by_container: dict, cname: object, explicit: set) -> dict:
+    """The entries of `by_container` a policy for `cname` governs."""
+    if cname in (None, "*"):
+        return {k: v for k, v in by_container.items() if k not in explicit}
+    return {k: v for k, v in by_container.items() if k == cname}
+
+
+def _controlled_caps(policy: dict) -> list[tuple[str, object, float]]:
+    """(resource, raw cap, parsed cap) for each positive maxAllowed the policy controls."""
+    controlled = policy.get("controlledResources")
+    resources = (
+        {"cpu", "memory"} if controlled is None else {str(r).lower() for r in controlled}
+    )
+    out = []
+    for resource in ("memory", "cpu"):
+        cap_raw = (policy.get("maxAllowed") or {}).get(resource)
+        cap = parse_quantity(cap_raw)
+        if resource in resources and cap is not None and cap > 0:
+            out.append((resource, cap_raw, cap))
+    return out
+
+
+def _ratio_cap_violations(
+    vpakey: str,
+    target: tuple[str, str, str],
+    policy: dict,
+    containers: dict[str, dict],
+) -> list[str]:
+    """Caps a limit-controlling policy lets the admission controller scale past a limit.
+
+    The controller keeps each container's request:limit ratio, so a capped request
+    of `cap` carries a limit of cap x limit / request.
+    """
+    out: list[str] = []
+    for resource, cap_raw, cap in _controlled_caps(policy):
+        for container, spec in sorted(containers.items()):
+            requests, limits = spec.get("requests"), spec.get("limits")
+            if not isinstance(requests, dict) or not isinstance(limits, dict):
+                continue
+            request_raw, limit_raw = requests.get(resource), limits.get(resource)
+            request, limit = parse_quantity(request_raw), parse_quantity(limit_raw)
+            if request is None or limit is None or request <= 0 or limit <= 0:
+                continue
+            # A 1:1 or inverted pair, and a memory cap at or above the limit,
+            # are each reported by their own arm.
+            if request >= limit * (1 - 1e-9):
+                continue
+            if resource == "memory" and cap >= limit * (1 - 1e-9):
+                continue
+            effective = cap * limit / request
+            if effective <= limit * (1 + 1e-9):
+                continue
+            out.append(
+                f"  {vpakey}: maxAllowed.{resource} {cap_raw} lets the admission "
+                f"controller raise the {limit_raw} {resource} limit of container "
+                f"{container!r} in {'/'.join(target)} to "
+                f"{_format_quantity(effective, resource)} — it keeps the "
+                f"{request_raw}:{limit_raw} request:limit ratio, so the effective limit "
+                f"is cap x limit / request. Cap at most 0.8 x limit x (request / limit) "
+                f"= {_format_quantity(0.8 * request, resource)}, or set controlledValues: "
+                f"RequestsOnly with a hand-set limit"
+            )
+    return out
+
+
 def _vpa_cap_scan(
     docs: list[dict],
     allowlist: set[str] | None = None,
@@ -383,6 +478,7 @@ def _vpa_cap_scan(
     allowed = allowlist or set()
     declared = declared_limits or {}
     workloads = _workload_memory_limits(docs)
+    rendered = _workload_resources(docs)
     unjudged: list[str] = []
     out: list[str] = []
     for d in docs:
@@ -396,58 +492,67 @@ def _vpa_cap_scan(
         ref = spec.get("targetRef") or {}
         if not ref.get("name"):
             continue
+        # An Off VPA applies no recommendation, so no cap of it can ever bind.
+        if str((spec.get("updatePolicy") or {}).get("updateMode", "Auto")).lower() == "off":
+            continue
         target = _target_key(ns, ref)
         tns, tkind, tname = target
         # A declared limit fills a gap; a rendered one is the truth and wins.
         limits = {**declared.get("%s/%s/%s" % target, {}), **(workloads.get(target) or {})}
-        vpa_off = str((spec.get("updatePolicy") or {}).get("updateMode", "Auto")).lower() == "off"
-        policies = (spec.get("resourcePolicy") or {}).get("containerPolicies", []) or []
-        if not limits:
-            if any(
-                parse_quantity((p.get("maxAllowed") or {}).get("memory")) is not None
-                for p in policies
-            ):
-                unjudged.append(
-                    f"  {vpakey}: maxAllowed.memory is set, but the corpus renders no "
-                    f"memory limit for {tns}/{tkind}/{tname}, so the cap was not "
-                    f"compared against anything"
-                )
-            continue
-        # An exact-named containerPolicy overrides "*" for that container, so
-        # the wildcard's cap must not be judged against explicitly-covered ones.
-        explicit = {p.get("containerName") for p in policies
-                    if p.get("containerName") not in (None, "*")}
+        raw = [
+            p for p in (spec.get("resourcePolicy") or {}).get("containerPolicies", []) or []
+            if isinstance(p, dict)
+        ]
+        policies = [p for p in raw if str(p.get("mode") or "").lower() != "off"]
+        if not limits and any(
+            parse_quantity((p.get("maxAllowed") or {}).get("memory")) is not None
+            for p in policies
+        ):
+            unjudged.append(
+                f"  {vpakey}: maxAllowed.memory is set, but the corpus renders no "
+                f"memory limit for {tns}/{tkind}/{tname}, so the cap was not "
+                f"compared against anything"
+            )
+        # An exact-named containerPolicy overrides "*" for that container, Off
+        # included, so the wildcard is never judged against a named one.
+        explicit = {p.get("containerName") for p in raw} - {None, "*"}
+
         for p in policies:
-            cap_raw = (p.get("maxAllowed") or {}).get("memory")
-            cap = parse_quantity(cap_raw)
-            if cap is None:
-                continue
-            off = vpa_off or str(p.get("mode") or "").lower() == "off"
+            cname = p.get("containerName")
             # Unset controlledValues defaults to RequestsAndLimits, i.e. the
             # policy moves the limit too.
             controls_limits = (
                 str(p.get("controlledValues") or "RequestsAndLimits").lower() != "requestsonly"
             )
-            cname = p.get("containerName")
-            targets = (
-                {k: v for k, v in limits.items() if k not in explicit}
-                if cname in (None, "*")
-                else {k: v for k, v in limits.items() if k == cname}
-            )
-            for container, limit_raw in sorted(targets.items()):
+            if controls_limits and target in rendered:
+                out += _ratio_cap_violations(
+                    vpakey, target, p, _covered(rendered[target], cname, explicit)
+                )
+            elif controls_limits:
+                # A memory cap with no limit at all is already named above.
+                unjudged += [
+                    f"  {vpakey}: maxAllowed.{resource} controls limits but the corpus "
+                    f"renders no request:limit pair for {tns}/{tkind}/{tname}, so the "
+                    f"ratio rule was not applied"
+                    for resource, _, _ in _controlled_caps(p)
+                    if resource != "memory" or limits
+                ]
+            cap_raw = (p.get("maxAllowed") or {}).get("memory")
+            cap = parse_quantity(cap_raw)
+            if cap is None:
+                continue
+            for container, limit_raw in sorted(_covered(limits, cname, explicit).items()):
                 limit = parse_quantity(limit_raw)
                 if limit is None or limit <= 0:
                     continue
-                # An Off policy applies no recommendation, so the kubelet never
-                # sees the cap and neither arm can fire.
-                if not off and cap > limit * (1 + 1e-9):
+                if cap > limit * (1 + 1e-9):
                     out.append(
                         f"  {vpakey}: maxAllowed.memory {cap_raw} is above the {limit_raw} "
                         f"limit of container {container!r} in {tns}/{tkind}/{tname} — a "
                         f"recommendation the kubelet would reject; lower the cap or raise "
                         f"the limit in the same commit"
                     )
-                elif controls_limits and not off and abs(cap - limit) <= limit * 1e-9:
+                elif controls_limits and abs(cap - limit) <= limit * 1e-9:
                     out.append(
                         f"  {vpakey}: maxAllowed.memory {cap_raw} equals the limit of "
                         f"container {container!r} in {tns}/{tkind}/{tname} while the policy "
@@ -589,17 +694,6 @@ def _blocks_last_eviction(pdb_spec: dict, replicas: int) -> bool:
     return False
 
 
-def _selector_matches(selector: object, labels: dict) -> bool:
-    """Whether a PDB's label selector matches a pod label set. matchExpressions
-    are not modelled, so a selector using them matches nothing here."""
-    if not isinstance(selector, dict) or selector.get("matchExpressions"):
-        return False
-    match_labels = selector.get("matchLabels")
-    if not isinstance(match_labels, dict) or not match_labels:
-        return False
-    return match_labels.items() <= labels.items()
-
-
 def pdb_floor_violations(docs: list[dict]) -> list[str]:
     """Flag an HPA whose floor is one replica beside a PDB that blocks its eviction.
 
@@ -631,7 +725,7 @@ def pdb_floor_violations(docs: list[dict]) -> list[str]:
         if key not in labels_of:
             continue
         for pdb_name, pdb_spec in budgets.get(key[0], []):
-            if not _selector_matches(pdb_spec.get("selector"), labels_of[key]):
+            if not selector_matches(pdb_spec.get("selector"), labels_of[key]):
                 continue
             if not _blocks_last_eviction(pdb_spec, floor):
                 continue
@@ -712,13 +806,20 @@ def dangling_target_violations(docs: list[dict], exempt: set[str]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="HPA/VPA + CPU-limit policy gate.")
-    parser.add_argument("--require-chart-native-vpas", action="store_true")
+    parser.add_argument(
+        "--require-chart-native-vpas", action="store_true",
+        help="full-corpus mode: also assert the chart-native HPA targets, the "
+             "no-CPU-limit policy, the VPA cap rule and the memory ratio rule",
+    )
     parser.add_argument(
         "--require-rendered-targets", action="store_true",
         help="fail an HPA/VPA whose workload target the corpus does not render "
              "(leave off where charts render the targets)",
     )
-    parser.add_argument("--policy-config", help="YAML/JSON policy data (see module docstring)")
+    parser.add_argument(
+        "--policy-config",
+        help="YAML/JSON policy data; keys in weisssrv-lib docs/SCRIPTS.md",
+    )
     parser.add_argument(
         "--allow-unjudged-vpa-caps", action="store_true",
         help="report, rather than fail on, memory caps whose target the corpus "
@@ -759,8 +860,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             key = _target_key(ns, ref)
             # updateMode "Off" is recommend-only: it never mutates pods, so it
-            # cannot fight an HPA (this is how coredns pairs a min==max HPA pin
-            # with a right-sizing VPA). Only mutating modes can conflict.
+            # cannot fight an HPA. Only mutating modes can conflict.
             mode = (spec.get("updatePolicy") or {}).get("updateMode", "Auto")
             if str(mode).lower() == "off":
                 continue
@@ -791,9 +891,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.require_chart_native_vpas:
         for key, source in sorted(policy.chart_native_hpa_targets.items()):
             ns, tkind, tname = key
-            # `not vpas.get(key)` (vs `key not in vpas`) also catches a mutating
-            # VPA whose every containerPolicy is mode:Off — it registers with an
-            # empty controlled set but right-sizes nothing, so it must not count.
+            # A mutating VPA whose every containerPolicy is mode:Off registers
+            # with an empty controlled set and right-sizes nothing, so it fails too.
             if not vpas.get(key):
                 violations.append(
                     f"  {ns}/{tkind}/{tname}: chart-native HPA ({source}) has no "
@@ -851,7 +950,9 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "VPA cap policy violated — maxAllowed.memory must stay under the container's "
             "memory limit, and may equal it only where the policy does not control limits "
-            "(controlledValues: RequestsOnly). Offenders:",
+            "(controlledValues: RequestsOnly). Where it does, a container whose request is "
+            "below its limit needs cap x limit / request within that limit: cap at most "
+            "0.8 x limit x (request / limit). Offenders:",
             file=sys.stderr,
         )
         print("\n".join(cap_violations), file=sys.stderr)
@@ -863,9 +964,10 @@ def main(argv: list[str] | None = None) -> int:
         failed = True
     if cap_unjudged:
         print(
-            "VPA memory caps NOT JUDGED — the corpus renders no memory limit for their "
-            "target, so a cap above the real limit would pass review. Pin the limit in "
-            "the policy file's vpa_cap_declared_limits, or acknowledge these with "
+            "VPA caps NOT JUDGED. A memory cap with no rendered limit: pin the limit in "
+            "the policy file's vpa_cap_declared_limits. A cap that controls limits on a "
+            "target the corpus does not render: render the workload or set "
+            "controlledValues: RequestsOnly. Or acknowledge these with "
             "--allow-unjudged-vpa-caps. Targets:",
             file=sys.stderr,
         )

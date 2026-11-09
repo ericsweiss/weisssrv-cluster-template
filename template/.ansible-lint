@@ -2,8 +2,8 @@
 # ansible-lint configuration. https://ansible.readthedocs.io/projects/lint/configuring/
 
 # Must stay at the repo root: ansible-lint discovers this file by walking UP
-# from its working directory, so both callers find it - the CI job (cwd = repo
-# root) and `task ansible:lint` (cwd = `ansible/`).
+# from its working directory, and both callers, CI and `task ansible:lint`, run
+# from here over `ansible/`.
 
 # The profile also selects WHICH rules run: without one, opt-in rules such as
 # run-once[task] fire on every deliberate `run_once:`.

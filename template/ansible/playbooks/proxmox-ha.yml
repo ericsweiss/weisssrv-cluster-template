@@ -9,8 +9,7 @@
   gather_facts: false
   roles:
     # /etc/pve is clustered, so the role reconciles HA once for the whole
-    # cluster: it probes for a reachable host itself and fails loudly when none
-    # answers. No serial/run_once scaffolding belongs here.
+    # cluster and probes for a reachable host itself.
     - role: weisssrv.infra.proxmox_ha
       tags: [proxmox_ha]
 
@@ -23,10 +22,53 @@
   gather_facts: false
   ignore_unreachable: true
 
+  vars:
+    replication_enabled: "{{ proxmox_ha_replication_jobs | default([]) | length > 0 }}"
+    replication_missed: >-
+      {{ ansible_play_hosts_all | map('extract', hostvars)
+         | selectattr('replication_probe.unreachable', 'defined')
+         | map(attribute='inventory_hostname') | list }}
+    replication_missed_expected: >-
+      {{ replication_missed | intersect(deploy_expected_absent_hosts | default([])) }}
+    replication_missed_unexpected: >-
+      {{ replication_missed | difference(deploy_expected_absent_hosts | default([])) }}
+
   tasks:
     - name: Include replication management
       ansible.builtin.include_role:
         name: weisssrv.infra.proxmox_ha
         tasks_from: replication
-      when: proxmox_ha_replication_jobs | default([]) | length > 0
+      when: replication_enabled
       tags: [proxmox_ha, proxmox_ha_replication]
+  post_tasks:
+    # ignore_unreachable keeps a down node in the play and exits 0, so the
+    # probe's registered result is the only record of an unreconciled node.
+    - name: Report the nodes the replication play could not reach
+      when: replication_enabled
+      tags: [always]
+      block:
+        - name: Probe the connection the replication play needed
+          ansible.builtin.ping:
+          register: replication_probe
+        - name: Report declared-absent nodes the replication play could not reach
+          ansible.builtin.debug:
+            msg: >-
+              Storage replication NOT reconciled on nodes declared absent in
+              deploy_expected_absent_hosts: {{ replication_missed_expected | join(', ') }}.
+              Re-run `task proxmox:ha` once they are back.
+          when: replication_missed_expected | length > 0
+          run_once: true
+          delegate_to: localhost
+          become: false
+        - name: Fail because the replication play could not reach a node
+          ansible.builtin.fail:
+            msg: >-
+              UNREACHABLE, so storage replication was NOT reconciled on:
+              {{ replication_missed_unexpected | join(', ') }}.
+              A failover to such a node finds no replica. Fix the node and re-run
+              `task proxmox:ha -- --tags proxmox_ha_replication`,
+              or list it in deploy_expected_absent_hosts if it is knowingly out.
+          when: replication_missed_unexpected | length > 0
+          run_once: true
+          delegate_to: localhost
+          become: false

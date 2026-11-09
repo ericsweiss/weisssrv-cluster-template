@@ -106,6 +106,9 @@ external_domain:
     {% elif external_domain == internal_domain %}
     external_domain must differ from internal_domain. Use a subdomain for the
     internal zone (lan.example.com) if you only own one domain.
+    {% elif external_domain.endswith('.' ~ internal_domain) %}
+    external_domain must not sit inside internal_domain: tenant admission holds
+    every host under internal_domain to the LAN-only middleware.
     {% endif %}
 
 # --------------------------------------------------------------------------
@@ -411,31 +414,36 @@ upstream_dns_servers:
   type: str
   help: >-
     Addresses of this cluster's resolvers, space-separated, in preference
-    order. The starter inventory builds one AdGuard+unbound container at each
-    address, points every host's resolv.conf at the list, and forwards
-    non-cluster names from in-cluster DNS to it — so these are the addresses
-    the containers are CREATED at, not pre-existing servers to forward to.
-    Two (one per host) is the smallest resilient answer.
+    order. The starter inventory CREATES one AdGuard+unbound container at each
+    address. These are not existing servers to forward to. Two is the smallest
+    resilient answer.
 
-    A cluster that runs its own recursive resolver elsewhere removes three
-    things: ansible/playbooks/dns.yml, the unbound-exporter entry in
+    A cluster with its own resolver elsewhere removes three things:
+    ansible/playbooks/dns.yml, the unbound-exporter entry in
     kubernetes/infrastructure/observability/exporters/kustomization.yaml, and
     cluster_unbound_exporter_addresses in cluster-config. Left in place, those
-    scrape targets stay permanently down and feed TargetDown.
+    targets stay down and feed TargetDown.
 
-    These are the ONLY guest addresses you choose here. Every other one in the
-    starter inventory is composed from a fixed scheme (.11+ hosts, .23 relay,
-    .31+ k3s servers, .41+ agents), and a resolver's Proxmox vmid is DERIVED
-    from its address (100 + last octet) — so an answer landing in one of those
-    bands produces two guests on one address under one vmid. The validator
-    below rejects exactly that; hosts.yml's header lists the whole scheme.
+    A resolver's Proxmox vmid is 100 + its last octet. The other guest
+    addresses come from reserved bands (.11+ hosts, .23 relay, .31+ k3s
+    servers, .41+ agents), and the validator rejects an answer inside one.
+    hosts.yml's header lists the whole scheme.
   default: "{{ lan_prefix }}.21 {{ lan_prefix }}.22"
   validator: >-
     {% set _addrs = upstream_dns_servers.split() %}
     {% set _vips = vip_labels %}
-    {% set ns = namespace(taken=[]) %}
+    {% set ns = namespace(taken=[], outside=[], edge=[]) %}
     {% for a in _addrs %}
     {% set _o = a.split('.')[-1] | int %}
+    {% if a | regex_search('^' ~ ipv4_octets_re ~ '$') %}
+    {% set _a = a.split('.') | map('int') | list %}
+    {% set _v = _a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3] %}
+    {% if _v < lan_address_range[0] or _v > lan_address_range[1] %}
+    {% set ns.outside = ns.outside + [a] %}
+    {% elif _v == lan_address_range[0] or _v == lan_address_range[1] %}
+    {% set ns.edge = ns.edge + [a] %}
+    {% endif %}
+    {% endif %}
     {% if a in _vips %}
     {% set ns.taken = ns.taken + [a ~ ' is ' ~ _vips[a]] %}
     {% elif a.startswith(lan_prefix ~ '.') %}
@@ -452,6 +460,13 @@ upstream_dns_servers:
     {% elif _addrs | unique | list | length != _addrs | length %}
     upstream_dns_servers lists the same address twice — one container is built
     per address, so a repeat is one resolver, not two.
+    {% elif ns.outside %}
+    upstream_dns_servers must sit inside lan_cidr ({{ lan_cidr }}), and
+    {{ ns.outside | join(', ') }} does not. Each address becomes a resolver
+    guest on the flat LAN, not an existing server to forward to.
+    {% elif ns.edge %}
+    upstream_dns_servers names {{ ns.edge | join(', ') }}, the network or
+    broadcast address of lan_cidr ({{ lan_cidr }}), which no guest can take.
     {% elif ns.taken %}
     upstream_dns_servers collides with the addresses the starter inventory
     composes: {{ ns.taken | join('; ') }}. A resolver's vmid is 100 + its last
@@ -546,8 +561,7 @@ git_host:
   help: >-
     Hostname of the git server, without scheme or path — the Flux GitRepository
     URL, the CI include refs and the container registry host are built from it.
-  # No default: git_backend has one implemented value, so a per-backend default
-  # would have one arm. Give it back when the GitHub arm ships.
+  # No default: the forge hostname is site data.
   placeholder: "git.example.com"
   validator: >-
     {% if not (git_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$')) %}
@@ -562,11 +576,10 @@ git_namespace:
     repository name. THE REPOSITORY MUST BE NAMED cluster_name: every path the
     template composes — the Flux bootstrap target, the GitLab-managed Terraform
     state project, the README's repository row and the runbook_url prefix on
-    every alert — is `git_namespace/cluster_name`. There is deliberately no
-    separate repository-name answer; a second name only ever produced renders
-    that disagreed with themselves (`flux bootstrap` CREATES the repository it
-    is pointed at, so the mismatch surfaces as a second, empty repo rather than
-    an error). Subgroups are allowed.
+    every alert — is `git_namespace/cluster_name`. `flux bootstrap` creates the
+    repository it is pointed at, so a mismatched name surfaces as a second,
+    empty repository.
+    Subgroups are allowed.
   placeholder: "homelab"
   validator: >-
     {% if not (git_namespace | regex_search('^[a-zA-Z0-9][a-zA-Z0-9._-]*(/[a-zA-Z0-9][a-zA-Z0-9._-]*)*$')) %}
@@ -832,7 +845,7 @@ node_exporter_job_regex:
     ships as an alternation member; missing: {{ _absent | join(', ') }}.
     The rules referencing them would match no series, and a rule that matches
     nothing never fires. Add labels, do not replace them:
-    "node-exporter|node-exporter-host|{{ node_exporter_job_regex.split('|') | first }}".
+    "{{ (_shipped + (_members | reject('in', _shipped) | reject('equalto', '') | list)) | join('|') }}".
     {% endif %}
 
 k3s_image_gc_high_threshold:
@@ -996,14 +1009,14 @@ lib_ref:
     Never answer a tag OLDER than the default below: the generated playbooks are
     written against the role contracts of the release the template pins, and an
     older pin takes the role defaults silently rather than failing.
-  default: "v0.23.0"
+  default: "v0.25.2"
   validator: >-
     {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
     lib_ref must be a release TAG of the form vX.Y.Z (e.g. v1.2.3). A branch is
     never a valid pin: the generated repo's scripts/check-lib-pins.py enforces
     the same shape on the declared `lib_ref` input every `include:` entry reads,
     so a branch answered here fails the very first pipeline.
-    {% elif (lib_ref[1:].split('.') | map('int') | list) < [0, 23, 0] %}
+    {% elif (lib_ref[1:].split('.') | map('int') | list) < [0, 25, 2] %}
     lib_ref must be the release this template pins or newer. The generated
     playbooks are written against that release's role contracts: an older pin
     takes the role defaults silently rather than failing.
@@ -1084,7 +1097,7 @@ license_year:
   type: str
   help: Copyright year named in LICENSE.
   when: "{{ license == 'mit' }}"
-  placeholder: "2026"
+  default: "{{ '%Y' | strftime }}"
   validator: >-
     {% if license == 'mit' and not (license_year | regex_search('^[0-9]{4}$')) %}
     license_year must be a four-digit year.

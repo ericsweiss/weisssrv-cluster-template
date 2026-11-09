@@ -7,14 +7,13 @@ skew, 2 on an operator error. Contract: docs/SCRIPTS.md.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
 import re
 
 REPO = Path(__file__).resolve().parent.parent
-CI_YAML = REPO / (os.environ.get("CI_FILE") or ".gitlab-ci.yml")
+CI_YAML = REPO / ".gitlab-ci.yml"
 VERSIONS_CM = REPO / "kubernetes/infrastructure/sources/versions-configmap.yaml"
 
 _KUBECTL_RE = re.compile(r"dl\.k8s\.io/release/v(\d+)\.(\d+)\.\d+/bin")
@@ -69,8 +68,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         description=__doc__,
         epilog=(
             "The defaults assume the conventional layout; pass both paths when "
-            "the consumer's layout differs. $CI_FILE (repo-relative or absolute) "
-            "retargets the first default. The check itself is forge-neutral: it "
+            "the consumer's layout differs. The check itself is forge-neutral: it "
             "regexes either a dl.k8s.io download pin or a kubectl_version: "
             "include input out of whatever text it is given."
         ),

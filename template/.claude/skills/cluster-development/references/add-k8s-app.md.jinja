@@ -48,7 +48,9 @@ condensed checklist and the traps. Copy the closest existing directory under
     and the external record from the external-dns annotation, unless the name
     needs a nested subdomain or a DNS-only record — then one entry in
     `terraform/cloudflare/dns.tf`.
-11. **Docs**: a `kubernetes/apps/<app>/README.md` covering what lives in that
+11. **Database and backups**: any app holding state it cannot rebuild needs a
+    restorable artefact. § Database and backups below.
+12. **Docs**: a `kubernetes/apps/<app>/README.md` covering what lives in that
     folder, plus a row in the repository `README.md` § Applications.
 
 ## A receiver reached from outside the cluster
@@ -69,7 +71,8 @@ sitting behind Traefik, needs four more things than an IngressRoute:
 - A **guest** firewall allow on the nodes that may announce the address, not a
   datacenter rule: a frame destined for the VIP is forwarded to the announcing
   node's guest, so the guest firewall filters it and a datacenter rule is inert.
-  `add-vm-app.md` § Firewall is the same trap from the guest side.
+  The Firewall step of `add-vm-app.md` § Checklist is the same trap from the
+  guest side.
 
 ## Alert rules
 
@@ -84,6 +87,25 @@ Either way:
   heading that says what to do.
 - A promtool unit test ships in `tests/prometheus-rules/`, proven with
   `task lint:prometheus-config`.
+
+## Database and backups
+
+A database in the app's own namespace ships a nightly pg-dump CronJob;
+`kubernetes/apps/authentik/pg-dump.yaml` is the worked example. The dump lands
+on a static NFS PV that mounts the app's own `/export/backups-apps/<app>` export
+by hostname.
+
+- Host side, in `ansible/inventories/prod/group_vars/nas.yml`: the app's
+  `/export/backups-apps/<app>` export, and an entry in
+  `nas_storage_backup_artifact_apps` whose `pattern` matches the dump file name.
+- Alert side: a matching `absent(...{app="<app>"})` arm in `BackupArtifactStale`
+  in `kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml`.
+  `scripts/check-backup-artifact-apps.py` fails when the app list and the arms
+  disagree.
+- Network side: the CronJob's egress to the database and the database's
+  ingress from the CronJob.
+- The VPA for a database is `Off`.
+- The restore path goes in the app's `README.md`.
 
 ## Storage
 

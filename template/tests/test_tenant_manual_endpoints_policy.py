@@ -1,12 +1,13 @@
 """Only the control plane may write tenant Endpoints or EndpointSlices: hand-written
-ones point Traefik at another namespace's pods. No CEL engine ships here, so
-`allowed()` mirrors the validation; the first test pins its shape."""
+ones point Traefik at another namespace's pods. `allowed()` reads the usernames
+out of the shipped validation, and the first test pins its shape."""
 
 from __future__ import annotations
 
+import re
+
 import pytest
-import yaml
-from conftest import REPO
+from conftest import REPO, assert_tenant_deny_binding, policy_spec
 
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
 NAME = "tenant-no-manual-endpoints"
@@ -22,29 +23,36 @@ EXPRESSION = (
     + "]"
 )
 MESSAGE = "tenant Endpoints and EndpointSlices are managed by the control plane only"
-TENANT_MATCH = {
-    "namespaceSelector": {
-        "matchExpressions": [{"key": "fluxcd.io/tenant", "operator": "Exists"}]
-    }
-}
 
 
-def _docs(kind: str) -> list[dict]:
-    return [
-        d for d in yaml.safe_load_all(POLICY.read_text())
-        if isinstance(d, dict) and d.get("kind") == kind
-        and d["metadata"]["name"] == NAME
-    ]
+# A disjunction of `username == '<name>'` and `username in ['<name>', ...]`.
+_USERNAME = r"request\.userInfo\.username"
+_NAMES = r"'[^']+'(?:, '[^']+')*"
+_CLAUSE = rf"{_USERNAME} (?:== '[^']+'|in \[{_NAMES}\])"
+_ADMIT_ONLY = re.compile(rf"{_CLAUSE}(?: \|\| {_CLAUSE})*")
+
+
+def admitted(expression: str) -> set[str]:
+    """The exact usernames an admit-list expression lets through."""
+    text = " ".join(expression.split())
+    assert _ADMIT_ONLY.fullmatch(text), f"not an exact-username admit list: {text}"
+    return set(re.findall(r"'([^']+)'", text))
 
 
 def allowed(username: str) -> bool:
-    return username == "system:kube-controller-manager" or username in CONTROLLERS
+    """The shipped validation, evaluated on one request username."""
+    [validation] = policy_spec(POLICY, "ValidatingAdmissionPolicy", NAME)["validations"]
+    return username in admitted(validation["expression"])
+
+
+def test_a_widened_expression_is_not_read_as_an_admit_list():
+    """Mutation case: a prefix match would admit `<controller>-evil`."""
+    with pytest.raises(AssertionError, match="not an exact-username admit list"):
+        admitted("request.userInfo.username.startsWith('system:kube-controller-manager')")
 
 
 def test_the_policy_is_the_shape_the_mirror_evaluates():
-    found = _docs("ValidatingAdmissionPolicy")
-    assert len(found) == 1
-    spec = found[0]["spec"]
+    spec = policy_spec(POLICY, "ValidatingAdmissionPolicy", NAME)
     assert spec["failurePolicy"] == "Fail"
     assert spec["matchConstraints"]["resourceRules"] == [
         {
@@ -65,12 +73,7 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
 
 
 def test_the_binding_denies_on_every_tenant_namespace():
-    found = _docs("ValidatingAdmissionPolicyBinding")
-    assert len(found) == 1
-    spec = found[0]["spec"]
-    assert spec["policyName"] == NAME
-    assert spec["validationActions"] == ["Deny"]
-    assert spec["matchResources"] == TENANT_MATCH
+    assert_tenant_deny_binding(POLICY, NAME)
 
 
 # k3s runs kube-controller-manager with use-service-account-credentials, so

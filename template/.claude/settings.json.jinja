@@ -1,9 +1,6 @@
-{#- CRITICAL: AGENT PERMISSIONS for the generated cluster. Two traps are encoded
-    here and must survive any edit: `kubectl apply --dry-run` is spelled out as
-    the two read-only values, because a bare `--dry-run=*` also matches
-    `--dry-run=none` (kubectl's default — a live apply); and every destructive
-    ZFS and rm form is denied in its `ssh <host> ...` wrapper as well as bare,
-    because the storage host is reached over ssh, where a bare deny never matches. -#}
+{#- `kubectl apply --dry-run` allows only its read-only values: `=*` also matches
+    `=none`. Destructive ZFS forms are denied bare and over ssh. `:**` keeps the
+    remote-delete ask from parsing as the trailing `:*` prefix form. -#}
 {
   "permissions": {
     "allow": [
@@ -15,7 +12,8 @@
       "Bash(git branch -a:*)",
       "Bash(git branch -v:*)",
       "Bash(git fetch:*)",
-      "Bash(git remote:*)",
+      "Bash(git remote -v:*)",
+      "Bash(git remote get-url:*)",
       "Bash(git describe:*)",
       "Bash(git rev-parse:*)",
       "Bash(git check-ignore:*)",
@@ -23,11 +21,13 @@
       "Bash(git blame:*)",
       "Bash(git config --get:*)",
       "Bash(git config --list:*)",
+      "Bash(git commit:*)",
       "Bash(kubectl get:*)",
       "Bash(kubectl describe:*)",
       "Bash(kubectl logs:*)",
       "Bash(kubectl top:*)",
-      "Bash(kubectl config:*)",
+      "Bash(kubectl config get-contexts:*)",
+      "Bash(kubectl config current-context:*)",
       "Bash(kubectl api-resources:*)",
       "Bash(kubectl version:*)",
       "Bash(kubectl cluster-info:*)",
@@ -42,12 +42,10 @@
       "Bash(flux tree:*)",
       "Bash(flux build:*)",
       "Bash(helm search:*)",
-      "Bash(helm repo:*)",
+      "Bash(helm repo list:*)",
       "Bash(helm show:*)",
       "Bash(helm template:*)",
       "Bash(helm list:*)",
-      "Bash(helm get values:*)",
-      "Bash(helm get manifest:*)",
       "Bash(helm history:*)",
       "Bash(kustomize build:*)",
       "Bash(kustomize version:*)",
@@ -56,10 +54,9 @@
       "Bash(ansible-inventory:*)",
       "Bash(terraform validate:*)",
       "Bash(terraform plan:*)",
-      "Bash(terraform fmt:*)",
+      "Bash(terraform fmt -check:*)",
       "Bash(task --list:*)",
       "Bash(task lint:*)",
-      "Bash(yq:*)",
       "Bash(yamllint:*)",
       "Bash(jq:*)",
       "Bash(shellcheck:*)",
@@ -70,10 +67,8 @@
       "Bash(wc:*)",
       "Bash(grep:*)",
       "Bash(rg:*)",
-      "Bash(find:*)",
       "Bash(sed -n:*)",
       "Bash(cut:*)",
-      "Bash(sort:*)",
       "Bash(uniq:*)",
       "Bash(diff:*)",
       "Bash(which:*)",
@@ -100,14 +95,13 @@
       "WebFetch(domain:prometheus.io)"
     ],
     "deny": [
-      "Bash(git push origin main:*)",
+      "Bash(git push origin main)",
+      "Bash(git push * main)",
       "Bash(git push * main:*)",
-      "Bash(git push origin HEAD:*)",
-      "Bash(git push -u origin main:*)",
-      "Bash(git push --set-upstream origin main:*)",
-      "Bash(git push --force:*)",
-      "Bash(git push -f:*)",
-      "Bash(git push --force-with-lease:*)",
+      "Bash(git push *:main:*)",
+      "Bash(git push *:refs/heads/main:*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
       "Bash(git reset --hard:*)",
       "Bash(git clean -fdx:*)",
       "Bash(sudo rm:*)",
@@ -123,6 +117,9 @@
       "Bash(zpool create:*)",
       "Bash(zpool destroy:*)",
       "Bash(zfs destroy:*)",
+      "Bash(sed -n -i:*)",
+      "Bash(sed -ni:*)",
+      "Bash(sed -n * -i:*)",
       "Bash(ssh * sudo rm:*)",
       "Bash(ssh * sudo dd:*)",
       "Bash(ssh * zpool create:*)",
@@ -133,7 +130,15 @@
       "Bash(ssh * sudo zfs destroy:*)"
     ],
     "ask": [
-      "Bash(git push:*)",
+      "Bash(kubectl get secret:*)",
+      "Bash(kubectl get secrets:*)",
+      "Bash(kubectl get *secret*)",
+      "Bash(kubectl * get *secret*)",
+      "Bash(kubectl config view --raw:*)",
+      "Bash(helm get values:*)",
+      "Bash(helm get manifest:*)",
+      "Bash(ansible-lint --fix:*)",
+      "Bash(ansible-lint * --fix:*)",
       "Bash(kubectl apply -f:*)",
       "Bash(kubectl apply -k:*)",
       "Bash(kubectl delete:*)",
@@ -150,7 +155,6 @@
       "Bash(git rebase:*)",
       "Bash(git merge:*)",
       "Bash(git stash:*)",
-      "Bash(git tag:*)",
       "Bash(git branch -d:*)",
       "Bash(git branch -D:*)",
       "Bash(git branch -m:*)",
@@ -159,7 +163,8 @@
       "Bash(git rm:*)",
       "Bash(git mv:*)",
       "Bash(git pull:*)",
-      "Bash(git worktree:*)"
+      "Bash(git push * --delete*)",
+      "Bash(git push * :**)"
     ]
   }
 }

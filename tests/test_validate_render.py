@@ -279,7 +279,7 @@ def test_the_tenant_example_gate_passes_a_valid_manifest(tmp_path):
     assert _problems(_readme(tmp_path, _GOOD_EXAMPLE)) == []
 
 
-def test_the_tenant_example_gate_notices_a_mis_nested_key(tmp_path):
+def test_the_tenant_example_gate_notices_a_schema_invalid_value(tmp_path):
     """The defect the gate exists for: valid YAML the API rejects."""
     broken = _GOOD_EXAMPLE.replace("metadata:\n  name: example-app", "metadata:\n  name: 7")
     assert _problems(_readme(tmp_path, broken)), "a non-string object name was accepted"
@@ -371,9 +371,9 @@ def test_the_own_ref_arm_rejects_an_include_left_on_a_literal(monkeypatch, tmp_p
     assert "v0.1.0" in problems[0] and "inputs.lib_ref" in problems[0]
 
 
-def test_the_own_ref_arm_reports_a_tree_with_no_pipeline_of_its_own(monkeypatch, tmp_path):
-    """Reading the pipeline before testing that it exists raised out of the
-    validator instead of letting this arm return a verdict."""
+def test_the_own_ref_arm_does_not_raise_on_a_tree_with_no_pipeline(monkeypatch, tmp_path):
+    """With no pipeline this arm returns a clean verdict rather than raising;
+    the registered-copy arm below is the one that reports the missing pin."""
     _own_tree(monkeypatch, tmp_path, None)
     assert validate_render._assert_one_lib_ref() == []
 
@@ -638,7 +638,7 @@ def test_the_configmap_arm_fails_a_render_whose_pipeline_drops_the_flux_lint_inc
     """The ConfigMap paths come from the include's inputs, so a pipeline without
     it leaves the gates no substitution source — and must not read as empty."""
     (tmp_path / ".gitlab-ci.yml").write_text("include: []\n")
-    with pytest.raises(validate_render.Failure, match="no flux-lint include"):
+    with pytest.raises(validate_render.Failure, match="no /ci/validate/flux-lint.yml include"):
         validate_render._configmap_paths(tmp_path)
 
 
@@ -654,13 +654,13 @@ def test_the_substitution_arm_fails_a_render_without_the_versions_configmap(tmp_
                 file: /ci/validate/flux-lint.yml
                 inputs:
                   versions_configmap: kubernetes/missing.yaml
-                  flux_render_script: scripts/flux-render.sh
+                  flux_render_script: scripts/flux-env.sh
             """
         )
     )
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    (scripts / "flux-render.sh").write_text(
+    (scripts / "flux-env.sh").write_text(
         'set -euo pipefail\ntest -f "$2" || { echo "no such ConfigMap: $2" >&2; exit 1; }\n'
     )
     with pytest.raises(validate_render.Failure, match="export-versions"):
@@ -744,15 +744,13 @@ def test_the_validator_job_provisions_the_tools_flux_lint_needs():
             f"validate-rendered-cluster installs no {tool}, which the flux-lint "
             "check requires"
         )
-    assert before.count("sha256sum -c -") >= len(tools), (
-        "a fetched binary is installed without verifying its pinned sha256"
-    )
     assert "gettext-base.deb" in before and "dpkg-deb -x" in before, (
         "validate-rendered-cluster unpacks no envsubst, which the render's "
         "flux:lint precondition requires"
     )
     assert before.count("sha256sum -c -") >= len(tools) + 1, (
-        "the gettext-base package is unpacked without verifying its pinned sha256"
+        "a fetched binary or the gettext-base package is installed without "
+        "verifying its pinned sha256"
     )
 
 
@@ -860,3 +858,106 @@ def test_the_data_override_rejects_a_supplied_render(monkeypatch, capsys, tmp_pa
         validate_render.main()
     assert exit_info.value.code == 2
     assert "nothing to override" in capsys.readouterr().err
+
+
+def test_a_terraform_init_directory_is_not_a_root(tmp_path):
+    """Mutation case: `.terraform` beside the roots is tool state, not a root
+    missing its state backend."""
+    render = _tf_render(tmp_path, {"cloudflare": {}})
+    (render / "terraform" / ".terraform").mkdir()
+    assert validate_render.tf_state_backend_problems(render) == []
+
+
+def test_a_shared_key_every_root_omits_is_reported(tmp_path):
+    """Mutation case: the macro dropping the credential from every root leaves
+    the roots identical, and must still fail."""
+    render = _tf_render(
+        tmp_path, {"cloudflare": {"TF_HTTP_USERNAME": None}, "authentik": {"TF_HTTP_USERNAME": None}}
+    )
+    problems = validate_render.tf_state_backend_problems(render)
+    assert any("TF_HTTP_USERNAME is missing" in problem for problem in problems), problems
+
+
+def _fake_tracker_render(tmp_path: Path, tracker: str) -> Path:
+    render = tmp_path / "render"
+    (render / "scripts").mkdir(parents=True)
+    (render / "scripts" / "kubeconform-skipped.py").write_text(tracker)
+    (render / validate_render.EXPECTED_SKIPPED_RELPATH).write_text("# none\n")
+    return render
+
+
+def test_a_crashed_skip_tracker_is_a_failure(monkeypatch, tmp_path):
+    """Mutation case: a tracker that read nothing exits non-zero with an empty
+    stdout, which must not read as zero skipped kinds."""
+    render = _fake_tracker_render(tmp_path, "import sys\nprint('no resources', file=sys.stderr)\nsys.exit(2)\n")
+    monkeypatch.setattr(
+        validate_render, "_kubeconform",
+        lambda *_a, **_k: subprocess.CompletedProcess([], 0, "{}", ""),
+    )
+    with pytest.raises(validate_render.Failure, match="exited 2"):
+        validate_render._skipped_kinds(render, "1.33.0", ["kind: ConfigMap"])
+
+
+def test_an_empty_schema_audit_is_a_failure(monkeypatch, tmp_path):
+    render = _fake_tracker_render(tmp_path, "raise SystemExit(0)\n")
+    monkeypatch.setattr(
+        validate_render, "_kubeconform",
+        lambda *_a, **_k: subprocess.CompletedProcess([], 1, "", "catalog fetch failed"),
+    )
+    with pytest.raises(validate_render.Failure, match="no report"):
+        validate_render._skipped_kinds(render, "1.33.0", ["kind: ConfigMap"])
+
+
+def test_the_schema_audit_reports_valid_resources_too(monkeypatch, tmp_path):
+    """Mutation case: without -verbose kubeconform's JSON lists only invalid and
+    skipped resources, so a fully valid corpus reads as an empty render."""
+    render = _fake_tracker_render(tmp_path, "raise SystemExit(0)\n")
+    extras: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        validate_render, "_kubeconform",
+        lambda _r, _v, _m, *extra: extras.append(extra)
+        or subprocess.CompletedProcess([], 0, '{"resources": []}', ""),
+    )
+    validate_render._skipped_kinds(render, "1.33.0", ["kind: ConfigMap"])
+    assert "-verbose" in extras[0] and extras[0][-2:] == ("-output", "json")
+
+
+def test_the_build_corpus_fails_an_unknown_placeholder(monkeypatch, tmp_path):
+    """Mutation case: an unresolved `${key}` is a finding in both callers,
+    never an empty string handed to the gates."""
+    cluster = tmp_path / "kubernetes" / "clusters" / "demo"
+    cluster.mkdir(parents=True)
+    (cluster / "apps.yaml").write_text("spec:\n  path: ./kubernetes/apps\n")
+    built = "kind: ConfigMap\ndata:\n  a: ${cluster_known}\n  b: ${cluster_unknown}\n"
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        validate_render, "_run",
+        lambda cmd, **_k: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, built, ""),
+    )
+    builds, failures = validate_render._kustomization_builds(
+        [cluster], tmp_path, {"cluster_known": "x"}
+    )
+    assert builds == [] and "cluster_unknown" in failures[0]
+    assert calls[0] == ["kustomize", "build", "kubernetes/apps"]
+
+
+def test_the_yamllint_check_lints_what_the_include_names(monkeypatch, tmp_path):
+    """The targets come from the yaml-lint include, so a target the render lacks
+    is reported rather than silently dropped."""
+    monkeypatch.setattr(validate_render, "_need", lambda tool: tool)
+    (tmp_path / "lint").mkdir()
+    (tmp_path / validate_render.YAMLLINT_CONFIG).write_text("extends: relaxed\n")
+    (tmp_path / ".gitlab-ci.yml").write_text(
+        "include:\n  - project: x\n    file: /ci/lint/yaml-lint.yml\n    inputs:\n"
+        "      config: '-c lint/yamllint-relaxed.yml'\n      targets: 'lint/ .gitlab/'\n"
+    )
+    with pytest.raises(validate_render.Failure, match=r"\['.gitlab/'\]"):
+        validate_render.check_yamllint(tmp_path)
+    (tmp_path / ".gitlab").mkdir()
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        validate_render, "_run",
+        lambda cmd, **_k: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
+    validate_render.check_yamllint(tmp_path)
+    assert calls == [["yamllint", "-c", validate_render.YAMLLINT_CONFIG, "lint/", ".gitlab/"]]

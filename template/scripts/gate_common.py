@@ -19,6 +19,8 @@ except ImportError:
     raise SystemExit(2) from None
 
 DEFAULT_NAMESPACE = "default"
+# The apiserver stamps this label on every Namespace with the namespace's name.
+NAME_LABEL = "kubernetes.io/metadata.name"
 
 # The cluster-identity ConfigMap every post-sources Flux stage substitutes from.
 CLUSTER_CONFIG = "kubernetes/infrastructure/sources/cluster-config.yaml"
@@ -37,6 +39,11 @@ EMPTY_LIVE_INPUT_MESSAGE = (
 )
 
 SELECTOR_KEYS = {"matchLabels", "matchExpressions"}
+
+# One Alertmanager matcher, value quoted or bare; an entry may hold several.
+_AM_MATCHER = re.compile(
+    r'\s*([A-Za-z_][A-Za-z0-9_]*)\s*(=~|!=|!~|=)\s*(?:"((?:[^"\\]|\\.)*)"|([^,\s{}"]*))\s*,?'
+)
 
 
 class OperatorError(RuntimeError):
@@ -144,6 +151,12 @@ def doc_key(doc: dict) -> str:
     return f"{doc_namespace(doc)}/{doc.get('kind')}/{meta.get('name', '?')}"
 
 
+def api_group(doc: dict) -> str:
+    """The group half of `apiVersion`; the core group (`v1`) is the empty string."""
+    version = str(doc.get("apiVersion") or "")
+    return version.rpartition("/")[0] if "/" in version else ""
+
+
 def policy_types(spec: dict) -> set[str]:
     """A NetworkPolicy's policyTypes, inferring an absent field as the API does.
 
@@ -176,6 +189,144 @@ def selects_all_pods(selector: object) -> bool:
     if exprs is not None and not isinstance(exprs, list):
         return False
     return not (labels or exprs)
+
+
+# The apiserver's label validation: an optional DNS-subdomain prefix, then a
+# 63-char alphanumeric-bounded name; a value is that name shape or empty.
+_LABEL_NAME = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$")
+_LABEL_PREFIX = re.compile(
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
+_EXPRESSION_KEYS = {"key", "operator", "values"}
+_OPERATORS = ("In", "NotIn", "Exists", "DoesNotExist")
+
+# A whole Flux postBuild placeholder, which an unrendered tree carries where
+# substitution later writes a label value.
+_WHOLE_PLACEHOLDER = re.compile(r"\$\{[^{}]+\}")
+
+
+def label_key_is_valid(key: object) -> bool:
+    """Whether `key` is a label key the apiserver accepts."""
+    if not isinstance(key, str) or not key:
+        return False
+    prefix, slash, name = key.rpartition("/")
+    if slash and (not prefix or len(prefix) > 253 or not _LABEL_PREFIX.fullmatch(prefix)):
+        return False
+    return bool(_LABEL_NAME.fullmatch(name))
+
+
+def label_value_is_valid(value: object, *, placeholders: bool = False) -> bool:
+    """Whether `value` is a label value the apiserver accepts.
+
+    With `placeholders`, a value that is one whole `${...}` also passes.
+    """
+    if not isinstance(value, str):
+        return False
+    if value == "" or _LABEL_NAME.fullmatch(value):
+        return True
+    return placeholders and bool(_WHOLE_PLACEHOLDER.fullmatch(value))
+
+
+def label_selector_problem(selector: object, *, placeholders: bool = False) -> str | None:
+    """Why the apiserver would reject a LabelSelector, or None. Absent is valid.
+
+    Known keys and operators, typed terms, valid label keys and values, and a
+    non-empty value list for In/NotIn but none for Exists/DoesNotExist.
+    """
+    if selector is None:
+        return None
+    if not isinstance(selector, dict):
+        return "is not a mapping"
+    unknown = sorted(str(k) for k in set(selector) - SELECTOR_KEYS)
+    if unknown:
+        return f"carries {', '.join(unknown)}"
+    labels = selector.get("matchLabels")
+    if labels is not None and not isinstance(labels, dict):
+        return "has a matchLabels that is not a mapping"
+    for key, value in (labels or {}).items():
+        if not label_key_is_valid(key):
+            return f"has a matchLabels key {key!r} that is not a valid label key"
+        if not label_value_is_valid(value, placeholders=placeholders):
+            return f"has a matchLabels value {value!r} that is not a valid label value"
+    exprs = selector.get("matchExpressions")
+    if exprs is not None and not isinstance(exprs, list):
+        return "has a matchExpressions that is not a list"
+    for expr in exprs or []:
+        if (
+            not isinstance(expr, dict)
+            or set(expr) - _EXPRESSION_KEYS
+            or not label_key_is_valid(expr.get("key"))
+        ):
+            return f"has a malformed matchExpressions entry {expr!r}"
+        operator, values = expr.get("operator"), expr.get("values")
+        if operator not in _OPERATORS:
+            return f"has a matchExpressions operator {operator!r} this gate does not know"
+        if operator in ("In", "NotIn"):
+            wellformed = isinstance(values, list) and bool(values) and all(
+                label_value_is_valid(v, placeholders=placeholders) for v in values
+            )
+        else:
+            wellformed = values in (None, [])
+        if not wellformed:
+            return f"has a malformed matchExpressions entry {expr!r}"
+    return None
+
+
+def selector_matches(selector: object, labels: dict, *, placeholders: bool = False) -> bool:
+    """Kubernetes LabelSelector semantics: matchLabels AND every matchExpressions term.
+
+    An absent selector and one the apiserver would reject match nothing, so a
+    gate never credits a match the cluster would not make. `{}` matches all.
+    """
+    if not isinstance(selector, dict) or label_selector_problem(
+        selector, placeholders=placeholders
+    ):
+        return False
+    for key, value in (selector.get("matchLabels") or {}).items():
+        if key not in labels or labels[key] != value:
+            return False
+    for expr in selector.get("matchExpressions") or []:
+        key, operator = expr["key"], expr["operator"]
+        present = key in labels
+        listed = present and labels[key] in (expr.get("values") or [])
+        # NotIn and DoesNotExist hold for a label set that lacks the key.
+        if (
+            (operator == "In" and not listed)
+            or (operator == "NotIn" and listed)
+            or (operator == "Exists" and not present)
+            or (operator == "DoesNotExist" and present)
+        ):
+            return False
+    return True
+
+
+def condition_admits(
+    condition: object,
+    namespace: str,
+    labels: dict,
+    bad_patterns: list[tuple[str, re.error]] | None = None,
+) -> bool:
+    """Whether one ESO store condition admits a namespace with these labels.
+
+    An uncompilable namespaceRegexes entry admits nothing and is appended to
+    `bad_patterns` when the caller collects them.
+    """
+    if not isinstance(condition, dict):
+        return False
+    namespaces = condition.get("namespaces")
+    if isinstance(namespaces, list) and namespace in namespaces:
+        return True
+    patterns = condition.get("namespaceRegexes")
+    for pattern in patterns if isinstance(patterns, list) else []:
+        try:
+            if re.search(str(pattern), namespace):
+                return True
+        except re.error as exc:
+            if bad_patterns is not None:
+                bad_patterns.append((str(pattern), exc))
+            continue
+    selector = condition.get("namespaceSelector")
+    return selector is not None and selector_matches(selector, labels)
 
 
 def zero_prefix(cidr: object) -> bool:
@@ -265,3 +416,59 @@ def parse_exempt(values: list[str]) -> dict[str, str]:
             raise OperatorError(f"--exempt takes NS=REASON, got {raw!r}")
         exempt[ns.strip()] = reason.strip()
     return exempt
+
+
+def load_exempt(values: list[str], files: list[str]) -> dict[str, str]:
+    """`namespace/Kind/name=REASON` flags plus YAML mappings of the same."""
+    exempt: dict[str, str] = {}
+    for raw in values or []:
+        key, sep, reason = raw.partition("=")
+        if not sep or key.strip().count("/") != 2 or not reason.strip():
+            raise OperatorError(f"--exempt takes namespace/Kind/name=REASON, got {raw!r}")
+        exempt[key.strip()] = reason.strip()
+    for path in files or []:
+        try:
+            docs = load_docs(Path(path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, OperatorError) as exc:
+            raise OperatorError(f"--exempt-file {path}: {exc}") from exc
+        for doc in docs:
+            for key, reason in doc.items():
+                if str(key).count("/") != 2 or not str(reason or "").strip():
+                    raise OperatorError(
+                        f"--exempt-file {path}: {key!r} needs the namespace/Kind/name "
+                        f"form and a reason"
+                    )
+                exempt[str(key)] = str(reason).strip()
+    return exempt
+
+
+def report_exemptions(exempt: dict[str, str], used: set[str]) -> None:
+    """Print each exercised exemption with its reason, then the unexercised keys."""
+    for key in sorted(used):
+        print(f"  {key}: exempt ({exempt[key]})")
+    unused = sorted(set(exempt) - used)
+    if unused:
+        print(f"(exemptions declared but not exercised by this corpus: {', '.join(unused)})")
+
+
+def parse_alertmanager_matchers(entry: object) -> list[tuple[str, str, str]]:
+    """(label, operator, value) for every matcher in one Alertmanager matcher entry.
+
+    Takes `a="x"`, `{a="x",b=~"y|z"}` and bare values; quoted escapes are undone.
+    Raises ValueError when the entry is empty or does not parse.
+    """
+    text = str(entry).strip()
+    if text.startswith("{") and text.endswith("}"):
+        text = text[1:-1]
+    pos, parsed = 0, []
+    while pos < len(text):
+        match = _AM_MATCHER.match(text, pos)
+        if not match or match.end() == pos:
+            raise ValueError(f"matcher {entry!r} is unparseable")
+        label, op, quoted, bare = match.groups()
+        value = re.sub(r"\\(.)", r"\1", quoted) if quoted is not None else bare
+        parsed.append((label, op, value))
+        pos = match.end()
+    if not parsed:
+        raise ValueError(f"matcher {entry!r} is empty")
+    return parsed

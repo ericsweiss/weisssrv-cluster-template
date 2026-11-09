@@ -109,8 +109,6 @@ tasks:
       - task: test-integration-certs
 {% endraw %}{% if storage_backend == 'zfs' %}      - task: test-integration-storage
 {% endif %}{% raw %}
-  # Internal helper: runs `molecule test` from {{.MOLECULE_DIR}}.
-  # Resolves molecule via PATH, then python3 -m molecule, then pyenv.
   _molecule-run:
     internal: true
     dir: "{{.MOLECULE_DIR}}"

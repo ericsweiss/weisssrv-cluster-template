@@ -34,12 +34,35 @@ spec:
     remediation:
       retries: 3
       remediateLastFailure: true
-  # Image tags substituted from the cluster-versions ConfigMap. Values stay
-  # inline: HelmRelease.spec.valuesFrom has no namespace field, so a referenced
-  # ConfigMap would have to live in this namespace.
+  # Image tags are substituted from the cluster-versions ConfigMap.
   values:
-    # Canonical origin: the OIDC issuer is always the EXTERNAL host, even for
-    # internal-only apps (AUTHENTIK_WEB__BASE_URL in server.env/worker.env).
+    # Applied to both the server and the worker. BASE_URL is the external issuer
+    # host, which is the OIDC issuer even for internal-only apps (README).
+    global:
+      env:
+        - name: AUTHENTIK_WEB__BASE_URL
+          value: "https://auth.${cluster_external_domain}"
+        - name: AUTHENTIK_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: secret-key
+        - name: AUTHENTIK_POSTGRESQL__PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: postgresql-password
+        - name: AUTHENTIK_EMAIL__USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: smtp-username
+        - name: AUTHENTIK_EMAIL__PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: authentik-secrets
+              key: smtp-password
+
     authentik:
       email:
         host: ${cluster_smtp_host}
@@ -47,7 +70,7 @@ spec:
         use_tls: true
         use_ssl: false
         from: "Authentik SSO <authentik@${cluster_internal_domain}>"
-        # Credentials arrive via AUTHENTIK_EMAIL__* env below.
+        # Credentials arrive via AUTHENTIK_EMAIL__* in global.env above.
         username: ""
         password: ""
 
@@ -105,33 +128,6 @@ spec:
       image:
         tag: "${authentik_version}"
 
-      env:
-        # Base URL (scheme+host only): advisory in 2026.8, REQUIRED from 2026.11.
-        # The canonical origin is the EXTERNAL issuer host — the OIDC issuer is
-        # always auth.<external> even for internal-only apps.
-        - name: AUTHENTIK_WEB__BASE_URL
-          value: "https://auth.${cluster_external_domain}"
-        - name: AUTHENTIK_SECRET_KEY
-          valueFrom:
-            secretKeyRef:
-              name: authentik-secrets
-              key: secret-key
-        - name: AUTHENTIK_POSTGRESQL__PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: authentik-secrets
-              key: postgresql-password
-        - name: AUTHENTIK_EMAIL__USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: authentik-secrets
-              key: smtp-username
-        - name: AUTHENTIK_EMAIL__PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: authentik-secrets
-              key: smtp-password
-
       # The CPU request is sized so the HPA's 75% target sits well above idle
       # draw — otherwise the threshold trips at near-idle and the HPA pins to
       # maxReplicas. The VPA manages memory only here, so this stays static.
@@ -171,9 +167,7 @@ spec:
       image:
         tag: "${authentik_version}"
 
-      # The worker's healthcheck writes a PID file to /dev/shm; without this
-      # volume it fails with "open /dev/shm/authentik-worker.pid: no such file".
-      # The chart's keys are additionalVolumes/additionalVolumeMounts, not volumes.
+      # The worker's healthcheck writes its PID file to /dev/shm.
       additionalVolumes:
         - name: shm
           emptyDir:
@@ -205,33 +199,6 @@ spec:
         timeoutSeconds: 10
         failureThreshold: 30
 
-      env:
-        # Base URL (scheme+host only): advisory in 2026.8, REQUIRED from 2026.11.
-        # The canonical origin is the EXTERNAL issuer host — the OIDC issuer is
-        # always auth.<external> even for internal-only apps.
-        - name: AUTHENTIK_WEB__BASE_URL
-          value: "https://auth.${cluster_external_domain}"
-        - name: AUTHENTIK_SECRET_KEY
-          valueFrom:
-            secretKeyRef:
-              name: authentik-secrets
-              key: secret-key
-        - name: AUTHENTIK_POSTGRESQL__PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: authentik-secrets
-              key: postgresql-password
-        - name: AUTHENTIK_EMAIL__USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: authentik-secrets
-              key: smtp-username
-        - name: AUTHENTIK_EMAIL__PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: authentik-secrets
-              key: smtp-password
-
       resources:
         requests:
           cpu: 100m
@@ -239,8 +206,7 @@ spec:
         limits:
           memory: 1536Mi
 
-    # Bundled PostgreSQL. Move to an external/HA database if this becomes
-    # load-bearing for more than SSO.
+    # Bundled PostgreSQL, single instance.
     postgresql:
       enabled: true
       image:

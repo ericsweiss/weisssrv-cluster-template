@@ -5,7 +5,7 @@
 spec:
   inputs:
     lib_ref:
-      default: v0.23.0
+      default: v0.25.2
 ---
 # CI for the template itself. Generic jobs come from the shared library, and
 # every job is tag-less and non-root safe so it lands on the shared runner.
@@ -120,14 +120,15 @@ include:
     inputs:
       tags: []
       image: python:3.14
-      # jq: the nested `pytest tests scripts` inside the render collects
-      # scripts/test_collect_state_lib.py and test_deploy_verify_lib.py, which
-      # drive the shipped jq filters and fail rather than skip without it.
-      apt_packages: "jq"
+      # No apt: this repo's jobs run on the shared non-root runner, so jq (the
+      # render's collect-state tests drive its filters) comes from the fetcher
+      # in setup_command.
+      apt_packages: ""
       test_dir: "tests"
-      # ansible-core: the nested `pytest tests scripts` inside the render runs
-      # test_deploy_preflight.py, which fails rather than skips without it.
-      pip_packages: "copier==9.19.1 ansible-core==2.21.5"
+      # ansible-core: the nested render suite evaluates playbook expressions
+      # through Ansible's templar and fails without it under CI. Job variables,
+      # so GitLab expands the pins when the job starts.
+      pip_packages: "copier==$COPIER_VERSION ansible-core==$ANSIBLE_CORE_VERSION"
       # The library checkout the ruleset parity gate compares against; the
       # python:3.14 image already ships git.
       setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/${LIB_PROJECT}.git" "$WEISSSRV_LIB_PATH"'
@@ -189,8 +190,8 @@ include:
     inputs:
       tags: []
       # Interlocked, so stated rather than inherited: `timeout` must outlast
-      # ai_timeout (per CALL) x len(commands), plus image pull and clone.
-      # reasoning_effort `high` — xhigh overruns this timeout.
+      # ai_timeout (per CALL) x len(commands) at this reasoning_effort, plus
+      # image pull and clone.
       reasoning_effort: "high"
       ai_timeout: "1200"
       timeout: "45m"
@@ -216,8 +217,8 @@ validate-rendered-cluster:
   image: python:3.14
   tags: []
   needs: []
-  # Largest limits in the pipeline: on the quota-capped shared runner a
-  # pod-creation refusal arrives as a system failure - retry it as throttling.
+  # On the quota-capped shared runner a pod-creation refusal arrives as a
+  # system failure, so it is retried as throttling.
   retry:
     max: 2
     when:
@@ -234,8 +235,8 @@ validate-rendered-cluster:
     # go-task is outside scripts/ci-fetch-tools.py's set, and the flux-lint
     # check runs the render's own `task flux:lint`, so it is pinned here and
     # sha256-verified in before_script like every other fetched binary.
-    TASK_VERSION: "3.53.1"
-    TASK_SHA256: "a54a408f6861ff921f6e87774180db31bacd8c1e7c944ca696db9fea49a82fc7"
+    TASK_VERSION: "3.54.0"
+    TASK_SHA256: "680859dbb4d881a9c72d4d9a8f510825450849af8567deacd7302c01124416fb"
     # The render's `task flux:lint` renders through GNU envsubst; the runner is
     # not root, so the trixie gettext-base package is unpacked next to the
     # fetched binaries instead of installed.

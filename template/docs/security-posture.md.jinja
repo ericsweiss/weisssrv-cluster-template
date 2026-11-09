@@ -44,7 +44,7 @@ it, so a stale row is worse than a missing one.
 | LAN client to resolver | No | Plaintext `:53` is what clients actually use. The encrypted listeners exist, but nothing forces a client onto them |
 | Relay to smarthost | Yes | The relay authenticates to its upstream over TLS, and submission to the relay itself is `smtpd_tls_security_level: encrypt` against the internal wildcard |
 {%- if vpn_tailscale %}
-| Overlay VPN | Yes | The tailnet is WireGuard end to end. A subnet route is encrypted to the router and plaintext from there onward, so the last hop is as encrypted as the row above it |
+| Overlay VPN | Yes | The tailnet is WireGuard end to end. A subnet route is encrypted to the router and plaintext from there onward, so the last hop is only as encrypted as the protocol the destination speaks |
 {%- else %}
 | Overlay VPN | Confirm | Record the remote-access path and where its encryption stops. A subnet route is plaintext past the router |
 {%- endif %}

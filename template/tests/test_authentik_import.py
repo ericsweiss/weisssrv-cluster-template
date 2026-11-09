@@ -12,8 +12,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-AUTHENTIK = REPO_ROOT / "terraform" / "authentik"
+from conftest import REPO
+
+AUTHENTIK = REPO / "terraform" / "authentik"
 IMPORT_SH = "import.sh"
 
 # Resource type -> the sso.tf local map whose keys its addresses index.
@@ -204,3 +205,62 @@ def test_check_survives_an_imports_file_with_no_blocks(tmp_path):
     result = run_check(work)
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
+
+
+def fake_terraform(
+    tmp_path: Path, state_list_rc: int, state_list_err: str = "Error: HTTP 401"
+) -> tuple[Path, Path]:
+    """A `terraform` stub that logs each call and fails `state list` on demand."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls.log"
+    stub = bin_dir / "terraform"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$*" >> "{calls}"\n'
+        'if [ "$1 $2" = "state list" ]; then\n'
+        f'  [ {state_list_rc} -eq 0 ] || {{ echo "{state_list_err}" >&2; exit {state_list_rc}; }}\n'
+        "fi\n"
+    )
+    stub.chmod(0o755)
+    return bin_dir, calls
+
+
+def run_import(work: Path, bin_dir: Path) -> subprocess.CompletedProcess:
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    return subprocess.run(
+        ["bash", IMPORT_SH], cwd=work, env=env, capture_output=True, text=True, check=False
+    )
+
+
+def test_a_failed_state_list_stops_the_run_before_any_import(tmp_path):
+    """Mutation proof: a backend error surfaces instead of an import per pair."""
+    work = work_copy(tmp_path, FIXTURE_IMPORTS_TF)
+    bin_dir, calls = fake_terraform(tmp_path, state_list_rc=1)
+    result = run_import(work, bin_dir)
+    assert result.returncode != 0, result.stdout
+    assert "HTTP 401" in result.stderr
+    assert calls.read_text().splitlines() == ["state list"]
+
+
+def test_an_empty_state_imports_every_pair(tmp_path):
+    work = work_copy(tmp_path, FIXTURE_IMPORTS_TF)
+    bin_dir, calls = fake_terraform(tmp_path, state_list_rc=0)
+    result = run_import(work, bin_dir)
+    assert result.returncode == 0, result.stderr
+    imports = [c for c in calls.read_text().splitlines() if c.startswith("import ")]
+    assert len(imports) == 3, imports
+    assert "3 imported, 0 already in state" in result.stdout
+
+
+def test_a_missing_state_file_counts_as_empty_and_imports_every_pair(tmp_path):
+    """Adoption and DR start with no state: terraform exits 1 and the run goes on."""
+    work = work_copy(tmp_path, FIXTURE_IMPORTS_TF)
+    bin_dir, calls = fake_terraform(
+        tmp_path, state_list_rc=1, state_list_err="No state file was found!"
+    )
+    result = run_import(work, bin_dir)
+    assert result.returncode == 0, result.stderr
+    imports = [c for c in calls.read_text().splitlines() if c.startswith("import ")]
+    assert len(imports) == 3, imports
+    assert "3 imported, 0 already in state" in result.stdout

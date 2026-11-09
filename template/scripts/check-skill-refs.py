@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Assert every repo path the cluster-development skill names still exists.
+"""Assert every repo path an agent skill cites as a backticked path still exists.
 
-The skill cites files as backticked paths, not Markdown links, so
-check-doc-links.py sees nothing in it and a rename rots its pointers silently.
+Exit 0 clean, 1 a missing path, 2 a vacuous or unreadable scan.
+See docs/SCRIPTS.md.
 """
 from __future__ import annotations
 
@@ -12,81 +12,116 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SKILL_DIR = Path(".claude/skills/cluster-development")
 
 # A backticked path with at least one "/" and a known file extension. Bare
-# basenames (`hosts.yml`, `kustomization.yaml`) are prose shorthand, not
-# pointers, and directory mentions carry no extension to match.
+# basenames, directory mentions, `<placeholder>` and glob paths never match.
 PATH_RE = re.compile(
     r"`([A-Za-z0-9_.][A-Za-z0-9_./-]*/[A-Za-z0-9_./-]*"
     r"\.(?:md|py|sh|yml|yaml|tf|json|hujson|toml))`"
 )
 
-# Paths that belong to weisssrv-lib, which this repository does not contain.
-FOREIGN = {
-    "docs/INCLUDE-CONTRACT.md",
-    "docs/VERSIONING.md",
-    "docs/EXTENSIBILITY.md",
-}
-
-# Minimum tokens a healthy scan finds; a regex that stopped matching would make
-# the assertion vacuous. The skill ships SKILL.md plus the references/ pages,
-# and both answer fixtures resolve well over 40 paths.
+# The scan is vacuous below this many checked citations: a regex that stopped
+# matching, or a skill that lost its pages, would otherwise pass on nothing.
 MIN_TOKENS = 30
 
 
-def cited_paths(skill_dir: Path, repo_root: Path) -> list[tuple[Path, str]]:
-    """(skill file, cited path) for every resolvable-looking path token."""
-    top_level = {p.name for p in repo_root.iterdir()}
-    found: list[tuple[Path, str]] = []
-    for md in sorted(skill_dir.rglob("*.md")):
-        for match in PATH_RE.finditer(md.read_text(encoding="utf-8")):
+def _skill_pages(skill_dir: Path) -> list[Path]:
+    return sorted(p for p in skill_dir.rglob("*") if p.is_file() and ".md" in p.suffixes)
+
+
+class OperatorError(Exception):
+    """A skill page the scan cannot read, so the scan cannot inspect it."""
+
+
+Token = tuple[Path, str]
+
+
+def classify(
+    skill_dir: Path,
+    repo_root: Path,
+    foreign: frozenset[str] = frozenset(),
+    shorthand: tuple[Path, ...] = (),
+) -> tuple[list[Token], list[Token]]:
+    """-> (checked tokens, the ones resolving against no base).
+
+    The bases are the citing page's directory, the skill directory, the repo
+    root and each shorthand root.
+    """
+    checked: list[Token] = []
+    broken: list[Token] = []
+    for md in _skill_pages(skill_dir):
+        try:
+            text = md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise OperatorError(f"{md}: {exc}") from exc
+        for match in PATH_RE.finditer(text):
             raw = match.group(1)
-            if "<" in raw or "*" in raw or raw in FOREIGN:
+            if raw in foreign:
                 continue
-            if (md.parent / raw).exists():
-                found.append((md, raw))
-                continue
-            if raw.split("/", 1)[0] not in top_level:
-                continue
-            found.append((md, raw))
-    return found
+            checked.append((md, raw))
+            if not any((base / raw).exists()
+                       for base in (md.parent, skill_dir, repo_root, *shorthand)):
+                broken.append((md, raw))
+    return checked, broken
 
 
-def missing(tokens: list[tuple[Path, str]], repo_root: Path) -> list[str]:
-    return sorted(
-        {
-            f"{md.relative_to(repo_root)}: {raw}"
-            for md, raw in tokens
-            if not (md.parent / raw).exists() and not (repo_root / raw).exists()
-        }
-    )
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo-root", type=Path, default=REPO)
-    parser.add_argument("--skill-dir", type=Path, default=None)
-    args = parser.parse_args()
+    parser.add_argument(
+        "--skill-dir",
+        type=Path,
+        required=True,
+        help="the skill directory, relative to --repo-root or absolute",
+    )
+    parser.add_argument(
+        "--foreign",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="a cited path that lives in another repository; repeatable",
+    )
+    parser.add_argument(
+        "--shorthand-root",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="a directory, relative to --repo-root, that citations may name paths under; repeatable",
+    )
+    parser.add_argument("--min-tokens", type=int, default=MIN_TOKENS)
+    args = parser.parse_args(argv)
 
     repo_root = args.repo_root.resolve()
-    skill_dir = (args.skill_dir or (repo_root / SKILL_DIR)).resolve()
+    skill_dir = (repo_root / args.skill_dir).resolve()
 
-    if not skill_dir.is_dir() or not list(skill_dir.rglob("*.md")):
+    if not repo_root.is_dir() or not skill_dir.is_dir() or not _skill_pages(skill_dir):
         print(f"ERROR: no skill Markdown under {skill_dir}", file=sys.stderr)
         return 2
 
-    tokens = cited_paths(skill_dir, repo_root)
-    if len(tokens) < MIN_TOKENS:
+    shorthand = tuple((repo_root / r).resolve() for r in args.shorthand_root)
+    absent = [str(r) for r, path in zip(args.shorthand_root, shorthand) if not path.is_dir()]
+    if absent:
+        print(f"ERROR: --shorthand-root not a directory: {', '.join(absent)}", file=sys.stderr)
+        return 2
+
+    try:
+        tokens, broken = classify(skill_dir, repo_root, frozenset(args.foreign), shorthand)
+    except OperatorError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    if len(tokens) < args.min_tokens:
         print(
             f"ERROR: only {len(tokens)} backticked repo paths parsed out of the "
-            f"skill (expected at least {MIN_TOKENS}) - the scan is not seeing "
+            f"skill (expected at least {args.min_tokens}): the scan is not seeing "
             "its subject",
             file=sys.stderr,
         )
         return 2
 
-    gone = missing(tokens, repo_root)
+    gone = sorted(
+        f"{md.relative_to(repo_root) if md.is_relative_to(repo_root) else md}: {raw}"
+        for md, raw in set(broken)
+    )
     if gone:
         print("Skill cites paths that do not exist:", file=sys.stderr)
         for entry in gone:

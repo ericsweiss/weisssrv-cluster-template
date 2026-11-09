@@ -6,32 +6,14 @@ dependency off with no error. Driven with the library gate the template vendors.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
 
-import pytest
+from conftest import pinned_lib
 
 REPO = Path(__file__).resolve().parent.parent
 GATE = REPO / "template" / "scripts" / "check-ci-include-job-names.py"
-
-
-def _lib_checkout() -> Path | None:
-    """A weisssrv-lib checkout this machine can reach, or None.
-
-    Found the way the render's own gates find one: `$WEISSSRV_LIB_PATH` first,
-    then a sibling clone.
-    """
-    candidates = []
-    explicit = os.environ.get("WEISSSRV_LIB_PATH")
-    if explicit:
-        candidates.append(Path(explicit))
-    candidates.append(REPO.parent / "weisssrv-lib")
-    for candidate in candidates:
-        if (candidate / "scripts" / "check-ci-include-job-names.py").is_file():
-            return candidate
-    return None
 
 
 # An include naming a file outside both checkouts hides the jobs AND the needs
@@ -57,20 +39,11 @@ def test_the_vendored_gate_ships_in_the_template() -> None:
     assert GATE.is_file(), f"the template ships no {GATE.name}"
 
 
-def test_every_optional_need_in_this_pipeline_resolves() -> None:
-    """The library includes are resolved at the pinned ref's checkout, so a
-    `job_name` input this repository passes is read rather than assumed."""
-    lib = _lib_checkout()
-    if lib is None:
-        # A permanent skip in CI is this gate reporting success forever, and the
-        # job already clones the library for the ruleset parity gate.
-        if os.environ.get("CI"):
-            pytest.fail(
-                "CI ships no weisssrv-lib checkout — the optional-needs gate would "
-                "silently skip; set WEISSSRV_LIB_PATH in the python-tests job"
-            )
-        pytest.skip("no weisssrv-lib checkout to resolve the library includes")
-    extra = ["--lib-path", str(lib), "--require-optional-needs"]
+def test_every_optional_need_in_this_pipeline_resolves(tmp_path: Path) -> None:
+    """The library includes are read from the tree at this pipeline's declared
+    ref, whatever branch the checkout sits on."""
+    pinned = pinned_lib(tmp_path, "optional-needs gate", "check-ci-include-job-names.py")
+    extra = ["--lib-path", str(pinned), "--require-optional-needs"]
     for pattern, reason in UNREADABLE_INCLUDES.items():
         extra += ["--allow-unreadable-include", f"{pattern}={reason}"]
     result = _run(*extra)

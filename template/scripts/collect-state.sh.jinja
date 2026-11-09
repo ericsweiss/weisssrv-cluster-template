@@ -18,7 +18,10 @@ _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Host/IP roster, generated from ansible/inventories/prod/hosts.yml.
 # shellcheck source=scripts/hosts.env
 . "$_SCRIPT_DIR/hosts.env"
-
+{% endraw %}{% if git_backend == 'gitlab_selfhosted' %}{% raw %}# gitlab_health_code and gitlab_health_verdict, function-only.
+# shellcheck source=scripts/deploy-verify-lib.sh
+. "$_SCRIPT_DIR/deploy-verify-lib.sh"
+{% endraw %}{% endif %}{% raw %}
 # Site domains and the node-label prefix from cluster-config.yaml, the single
 # source. The remote heredocs are quoted, so remote_prelude exports these.
 if _domains=$("$_SCRIPT_DIR/cluster-config-value.sh" \
@@ -30,7 +33,16 @@ else
     CS_EXTERNAL_DOMAIN=""
     CS_NODE_LABEL_DOMAIN=""
 fi
-
+{% endraw %}{% if git_backend == 'gitlab_selfhosted' %}{% raw %}
+# The GitLab probe targets the forge host from cluster-config, not the library's
+# git.<internal domain> default; unresolved, the library default stands.
+if _git_host=$("$_SCRIPT_DIR/cluster-config-value.sh" cluster_git_host 2>&1); then
+    GITLAB_HEALTH_INTERNAL="${GITLAB_HEALTH_INTERNAL:-https://$_git_host}"
+    GITLAB_HEALTH_EXTERNAL="${GITLAB_HEALTH_EXTERNAL:-https://$_git_host}"
+else
+    echo "collect-state: cannot resolve the forge host: $_git_host" >&2
+fi
+{% endraw %}{% endif %}{% raw %}
 # Proxmox hosts by hostname (PVE_HOSTS in hosts.env); split the sourced
 # space-joined scalar into the array this script uses.
 read -ra PVE_HOSTS <<< "$PVE_HOSTS"
@@ -90,9 +102,9 @@ probe_pve_reachable() {
     echo "$up $total"
 }
 
-# ZFS pool health aggregated across all reachable Proxmox hosts. Sets
-# ZFS_DEGRADED_RESULT (non-ONLINE pools, plus pools a NAS host should list and does
-# not), ZFS_MISSING_RESULT (those pools, named) and ZFS_POOLS_RESULT under "detail".
+# ZFS pool health across all reachable Proxmox hosts. Sets ZFS_DEGRADED_RESULT
+# (non-ONLINE pools, a NAS host's missing ones, failed listings), ZFS_MISSING_RESULT
+# (those, named) and, under "detail", ZFS_POOLS_RESULT: every host's pools, tagged.
 probe_zfs_degraded() {
     local want_detail="${1:-}"
     local cols="name,health"
@@ -100,19 +112,32 @@ probe_zfs_degraded() {
     ZFS_DEGRADED_RESULT=0
     ZFS_POOLS_RESULT="[]"
     ZFS_MISSING_RESULT=""
-    local host pools listed host_degraded seen want absent
+    local host pools listed rc host_degraded seen want absent
     local -a expect_pools=()
     for host in ${PVE_HOSTS[@]+"${PVE_HOSTS[@]}"}; do
         listed=false
-        pools=""
+        rc=0
         # shellcheck disable=SC2029 # $cols is a trusted constant; expanding it
         # client-side is intended (the remote gets the same literal column list).
-        if pools=$(ssh_probe_cmd "${SSH_USER}@${host}" "zpool list -H -o ${cols} 2>/dev/null" 2>/dev/null); then
-            listed=true
+        pools=$(ssh_probe_cmd "${SSH_USER}@${host}" "zpool list -H -o ${cols} 2>/dev/null" 2>/dev/null) || rc=$?
+        # ssh fails with 255 and the backstop with 124, which the PVE reachability
+        # count covers. Any other non-zero is zpool failing on a host that answered.
+        case "$rc" in
+            0) listed=true ;;
+            124|255) pools="" ;;
+            *)
+                ZFS_DEGRADED_RESULT=$((ZFS_DEGRADED_RESULT + 1))
+                ZFS_MISSING_RESULT="${ZFS_MISSING_RESULT}${ZFS_MISSING_RESULT:+, }zpool list failed on $host"
+                continue
+                ;;
+        esac
+        if [ "$listed" = true ]; then
             host_degraded=$(echo "$pools" | awk -F'\t' 'NF>=2 && $2 != "ONLINE" {c++} END{print c+0}')
             ZFS_DEGRADED_RESULT=$((ZFS_DEGRADED_RESULT + host_degraded))
-            if [ "$want_detail" = "detail" ] && [ "$ZFS_POOLS_RESULT" = "[]" ]; then
-                ZFS_POOLS_RESULT=$(echo "$pools" | jq -R -s '[split("\n")[] | select(length>0) | split("\t") | {name:.[0], health:.[1], size:.[2], alloc:.[3], free:.[4]}]' 2>/dev/null || echo "[]")
+            if [ "$want_detail" = "detail" ]; then
+                ZFS_POOLS_RESULT=$(echo "$pools" | jq -R -s --arg host "$host" --argjson acc "$ZFS_POOLS_RESULT" \
+                    '$acc + [split("\n")[] | select(length>0) | split("\t") | {host:$host, name:.[0], health:.[1], size:.[2], alloc:.[3], free:.[4]}]' \
+                    2>/dev/null || echo "$ZFS_POOLS_RESULT")
             fi
         fi
         # A pool that failed to import has no `zpool list` row at all, so on the
@@ -144,7 +169,7 @@ probe_zfs_degraded() {
 
 # Flux readiness — Kustomizations and HelmReleases that are NOT reconciling:
 # Ready!=True OR suspended (a suspended object keeps a stale Ready=True forever).
-# Echoes the count, or "unknown" when the query could not run; a false 0 would lie.
+# Echoes the count, or "unknown" when the query could not run, never a false 0.
 probe_flux_not_ready() {
     local out=unknown json
     if json=$(kubectl "$@" get kustomizations.kustomize.toolkit.fluxcd.io,helmreleases.helm.toolkit.fluxcd.io -A -o json 2>/dev/null); then
@@ -254,6 +279,16 @@ if [ "${1:-}" = "--json" ]; then
     ALERTS_FIRING_NUM=$(coerce_int "$ALERTS_FIRING" 1)
     ALERTS_FIRING=$(coerce_int "$ALERTS_FIRING" null)
 
+{% endraw %}{% if git_backend == 'gitlab_selfhosted' %}{% raw %}    # GitLab is the GitOps source of truth, so its health degrades the verdict
+    # (never catastrophic). A whitelist-gated code is the collector's position,
+    # not a fault: the verdict input is 1 and the JSON carries null.
+    GITLAB_OK_RAW=$(gitlab_health_verdict "$(gitlab_health_code /-/health)")
+    GITLAB_OK_NUM=$(coerce_int "$GITLAB_OK_RAW" 1)
+    GITLAB_OK=$(coerce_int "$GITLAB_OK_RAW" null)
+{% endraw %}{% else %}{% raw %}    # No GitLab to probe: the verdict input is 1 and the JSON carries null.
+    GITLAB_OK_NUM=1
+    GITLAB_OK=null
+{% endraw %}{% endif %}{% raw %}
     # Collector context separates "cluster unhealthy" from "collector
     # misconfigured" (wrong kube_context, no ssh-agent keys, no LAN access).
     # Every value tolerates "unset / not available" so the run never aborts.
@@ -274,7 +309,7 @@ if [ "${1:-}" = "--json" ]; then
     # decided by classify_json (collect-state-lib.sh, unit-tested); Warning
     # events are advisory and do not gate green.
     JSON_VERDICT=$(classify_json "$PVE_UP" "$PVE_TOTAL" "$K3S_API_OK" \
-        "$K3S_READY" "$K3S_TOTAL" "$FLUX_NOT_READY_NUM" "$ZFS_DEGRADED" \
+        "$K3S_READY" "$K3S_TOTAL" "$FLUX_NOT_READY_NUM" "$ZFS_DEGRADED" "$GITLAB_OK_NUM" \
         "$ALERTS_FIRING_NUM")
     jq -n \
         --arg verdict "$JSON_VERDICT" \
@@ -292,6 +327,7 @@ if [ "${1:-}" = "--json" ]; then
         --argjson flux_not_ready "$FLUX_NOT_READY" \
         --argjson warning_events "$WARNING_EVENTS" \
         --argjson alerts_firing "$ALERTS_FIRING" \
+        --argjson gitlab_ok "$GITLAB_OK" \
         --arg ctx_host "$CTX_HOST" \
         --arg ctx_user "$CTX_USER" \
         --arg ctx_kubeconfig "$CTX_KUBECONFIG" \
@@ -305,6 +341,7 @@ if [ "${1:-}" = "--json" ]; then
             proxmox: { reachable: $pve_up, total: $pve_total },
             k3s: { nodes_ready: $k3s_ready, nodes_total: $k3s_total, api_reachable: $k3s_api_ok, version: $k3s_version, pods_running: $pod_running, pods_total: $pod_total },
             zfs: { pools: $zfs_pools, degraded_count: $zfs_degraded },
+            gitlab: { healthy: (if $gitlab_ok == null then null else $gitlab_ok == 1 end) },
             flux: { not_ready_count: $flux_not_ready },
             events: { warnings_last_hour: $warning_events },
             alerts: { firing: $alerts_firing },
@@ -618,21 +655,19 @@ if [ -d "$PVE_DUMP_DIR" ]; then
     cat /var/lib/node_exporter/vzdump_backup.prom 2>/dev/null | cs_emit "  No vzdump metrics"
     echo "pve-cluster backup metrics:"
     cat /var/lib/node_exporter/pve_cluster_backup.prom 2>/dev/null | cs_emit "  No pve-cluster backup metrics"
-    # restic to the offsite bucket is the last line of defence: report its
-    # timers and metrics, not just the schedule the generic timer list shows.
+    # The restic-offsite timers and metrics, beyond the schedule the generic
+    # timer list shows.
     echo "restic-offsite timers:"
     systemctl list-timers 'restic-offsite*' --all --no-pager 2>/dev/null | cs_capped 5 "  No restic-offsite timers"
     echo "restic-offsite metrics:"
     cat /var/lib/node_exporter/restic_offsite.prom 2>/dev/null | cs_emit "  No restic-offsite metrics"
     echo "restic-offsite verify metrics:"
     cat /var/lib/node_exporter/restic_offsite_verify.prom 2>/dev/null | cs_emit "  No restic-offsite verify metrics"
-    # A restore that has never been PROVEN is not a backup. These are the only
-    # series that say a drill ran and what it compared.
+    # Restore-drill series: the last drill run and what it compared.
     echo "restore-drill metrics:"
     cat /var/lib/node_exporter/backup_restore_drill.prom 2>/dev/null | cs_emit "  No restore-drill metrics"
-    # Recovery depth: retention states the INTENT, this states the truth. It
-    # reaches the offsite bucket, so a slow or failed list degrades to a marker
-    # rather than hanging the run.
+    # Recovery points actually held offsite, read from the bucket; a slow or
+    # failed list degrades to a marker rather than hanging the run.
     echo "restic recovery points (oldest/newest of the offsite repo):"
     snaps=$(sudo timeout 90 restic-offsitectl snapshots 2>&1); rc=$?
     if [ "$rc" -eq 124 ]; then
@@ -811,7 +846,8 @@ EOF
     [ "$rc" -eq 0 ] || echo "Failed (rc=$rc)"
 
     # Cluster-wide data (collected once from the first server node)
-    # Exit codes: 0 = collected, 2 = not a server (try next), other = SSH/remote failure
+    # Exit codes: 0 = collected, 2 = not a server (try next), 3 = API unresponsive
+    # (try next), other = SSH/remote failure.
     local cluster_rc
     if [ "$K3S_CLUSTER_COLLECTED" = "false" ]; then
         set +e
@@ -1114,9 +1150,9 @@ if kubectl --request-timeout=5s get nodes >/dev/null 2>&1; then
     K3S_API_OK=true
 fi
 
-# Health probes mirroring the --json branch's signals. Each falls back to "0"
-# so an operator-side issue never promotes a run, and the defaults below keep
-# set -u quiet if a probe is skipped.
+# Health probes mirroring the --json branch's signals. The flux and alert probes
+# report "unknown" on failure, which the verdict coerces to failing; the
+# Warning-event count stays advisory. See probe_zfs_degraded for unreachable hosts.
 FLUX_NOT_READY_REG=0
 ZFS_DEGRADED_REG=0
 ZFS_MISSING_REG=""
@@ -1151,11 +1187,24 @@ ZFS_MISSING_REG=$ZFS_MISSING_RESULT
 # Recent warning events — see probe_warning_events.
 WARNING_EVENTS_REG=$(probe_warning_events --request-timeout=5s)
 
-# See probe_firing_alerts. Unlike the advisory Warning-event count this DOES
-# gate OK: an artifact headed "Status: OK" while TargetDown is firing is the
-# exact lie this collector exists to prevent.
+# See probe_firing_alerts. Firing alerts gate OK, unlike the advisory
+# Warning-event count.
 ALERTS_FIRING_REG=$(probe_firing_alerts --request-timeout=5s)
 
+{% endraw %}{% if git_backend == 'gitlab_selfhosted' %}{% raw %}# GitLab application health — see gitlab_health_code. Unhealthy downgrades OK to
+# PARTIAL; a whitelist-gated code is the collector's position, not a fault, so
+# it coerces to the undegraded 1 and the header says so.
+GITLAB_HTTP_REG=$(gitlab_health_code /-/health)
+GITLAB_OK_RAW_REG=$(gitlab_health_verdict "$GITLAB_HTTP_REG")
+GITLAB_OK_REG=$(coerce_int "$GITLAB_OK_RAW_REG" 1)
+if [ "$GITLAB_OK_RAW_REG" = "unknown" ]; then
+    GITLAB_HEALTH_NOTE=" — not probeable from this collector (monitoring_whitelist); verdict unaffected"
+else
+    GITLAB_HEALTH_NOTE=""
+fi
+{% endraw %}{% else %}{% raw %}# No GitLab to probe, so the predicate passes.
+GITLAB_OK_REG=1
+{% endraw %}{% endif %}{% raw %}
 {
     for host in ${PROXMOX_HOSTS[@]+"${PROXMOX_HOSTS[@]}"}; do
         collect_host "$host"
@@ -1222,7 +1271,7 @@ ALERTS_FIRING_NUM=$(coerce_int "$ALERTS_FIRING_REG" 1)
 STATUS=$(classify_regular "$PVE_REACHABLE_REG" "$K3S_API_OK" \
     "$K3S_NODES_READY_REG" "$K3S_NODES_TOTAL_REG" \
     "$HOSTS_OK" "$HOSTS_TOTAL" "$HOST_COVERAGE_PCT" "$COVERAGE_FLOOR_PCT" \
-    "$FLUX_NOT_READY_NUM" "$ZFS_DEGRADED_REG" \
+    "$FLUX_NOT_READY_NUM" "$ZFS_DEGRADED_REG" "$GITLAB_OK_REG" \
     "$SECTIONS_OK" "$SECTIONS_TOTAL" "$ALERTS_FIRING_NUM")
 
 # Name the predicates that cost the run its OK, so a PARTIAL is actionable from
@@ -1230,7 +1279,7 @@ STATUS=$(classify_regular "$PVE_REACHABLE_REG" "$K3S_API_OK" \
 FAILING_PREDICATES=$(regular_failing_predicates "$PVE_REACHABLE_REG" "$K3S_API_OK" \
     "$K3S_NODES_READY_REG" "$K3S_NODES_TOTAL_REG" \
     "$HOSTS_OK" "$HOSTS_TOTAL" "$HOST_COVERAGE_PCT" "$COVERAGE_FLOOR_PCT" \
-    "$FLUX_NOT_READY_NUM" "$ZFS_DEGRADED_REG" \
+    "$FLUX_NOT_READY_NUM" "$ZFS_DEGRADED_REG" "$GITLAB_OK_REG" \
     "$SECTIONS_OK" "$SECTIONS_TOTAL" "$ALERTS_FIRING_NUM")
 
 # Render final output: status header + raw collection, redaction applied to the
@@ -1249,7 +1298,8 @@ FAILING_PREDICATES=$(regular_failing_predicates "$PVE_REACHABLE_REG" "$K3S_API_O
     echo "# ZFS degraded pools: $ZFS_DEGRADED_REG"
     [ -z "$ZFS_MISSING_REG" ] || echo "# ZFS pools not imported: $ZFS_MISSING_REG"
     echo "# Firing alerts (Watchdog/InfoInhibitor exempt): $ALERTS_FIRING_REG"
-    echo "# Warning events (last hour): $WARNING_EVENTS_REG"
+{% endraw %}{% if git_backend == 'gitlab_selfhosted' %}{% raw %}    echo "# GitLab health (/-/health on the forge host): HTTP ${GITLAB_HTTP_REG:-unreachable}$GITLAB_HEALTH_NOTE"
+{% endraw %}{% endif %}{% raw %}    echo "# Warning events (last hour): $WARNING_EVENTS_REG"
     echo "# Coverage floor: $COVERAGE_FLOOR_PCT% (run is FAILED below this)"
     echo "# Redacted: Yes"
     echo ""
@@ -1301,8 +1351,7 @@ while IFS= read -r file; do
     rm -f -- "$file"
     COUNT=$((COUNT + 1))
 done < <(
-    # One `ls -td` (an xargs split would sort each batch independently and keep
-    # 5 per batch); `|| true` absorbs the no-match exit under set -e.
+    # `|| true` absorbs the no-match exit under set -e.
     # shellcheck disable=SC2012 # ls -t for mtime sort; names are timestamped
     ls -td -- "$STATE_DIR"/cluster-state-*.txt 2>/dev/null \
         | tail -n +6 \

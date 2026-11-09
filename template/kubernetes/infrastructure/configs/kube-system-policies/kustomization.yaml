@@ -1,12 +1,8 @@
 ---
-# Every kube-system NetworkPolicy: the ingress default-deny (from
-# components/netpol-baseline) plus its complete allow set (coredns 53/9153,
-# metrics-server 10250, kured 8080). New workload, new allow.
+# Every kube-system NetworkPolicy: the ingress default-deny plus its complete
+# allow set. A new kube-system workload needs a new allow here.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# k3s owns the kube-system Namespace object; namespace.yaml adopts it only to
-# add the PSA labels (see that file). This transformer places the policies below
-# (and the component's deny) into the namespace.
 namespace: kube-system
 resources:
   - namespace.yaml

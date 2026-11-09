@@ -1,0 +1,334 @@
+---
+# promtool unit tests for windowed, aggregated and absent() platform rules:
+# probes, the Loki ruler, Flux, the secrets provider and two staleness gauges.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # EndpointDown: a failing target fires per instance; the WAN witness never does.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="https://grafana.example.internal"}'
+        values: '0+0x20'
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="https://auth.example.internal"}'
+        values: '1+0x20'
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="1.1.1.1"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: EndpointDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: EndpointDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'https://grafana.example.internal'
+
+  # BlackboxExporterDown: the prober down, then gone, fires; up is quiet.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prometheus-blackbox-exporter", instance="10.42.1.5:9115"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: BlackboxExporterDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BlackboxExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prometheus-blackbox-exporter", instance="10.42.1.5:9115"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BlackboxExporterDown
+        exp_alerts: []
+
+  # KeyEndpointProbeMissing: the harness leaves the placeholders unsubstituted,
+  # so the instance labels carry them verbatim. All three targets present is quiet.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="https://auth.${cluster_internal_domain}"}'
+        values: '1+0x30'
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="https://auth.${cluster_external_domain}"}'
+        values: '1+0x30'
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="1.1.1.1"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: KeyEndpointProbeMissing
+        exp_alerts: []
+
+  # The external auth target is gone; a sibling instance does not stand in.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="https://auth.${cluster_internal_domain}"}'
+        values: '1+0x30'
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="https://grafana.${cluster_external_domain}"}'
+        values: '1+0x30'
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="1.1.1.1"}'
+        values: '1+0x30'
+    alert_rule_test:
+      # Inside the 15m hold.
+      - eval_time: 10m
+        alertname: KeyEndpointProbeMissing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: KeyEndpointProbeMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'https://auth.${cluster_external_domain}'
+
+  # The internal auth target is gone; a sibling instance does not stand in.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="https://grafana.${cluster_internal_domain}"}'
+        values: '1+0x30'
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="https://auth.${cluster_external_domain}"}'
+        values: '1+0x30'
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="1.1.1.1"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: KeyEndpointProbeMissing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: KeyEndpointProbeMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: 'https://auth.${cluster_internal_domain}'
+
+  # The WAN witness is gone; a sibling instance does not stand in.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="https://auth.${cluster_internal_domain}"}'
+        values: '1+0x30'
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="https://auth.${cluster_external_domain}"}'
+        values: '1+0x30'
+      - series: 'probe_success{job="prometheus-blackbox-exporter", instance="8.8.8.8"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: KeyEndpointProbeMissing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: KeyEndpointProbeMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: '1.1.1.1'
+
+  # LokiRulerRulesMissing: zero loaded rules and no series at all both fire.
+  - interval: 1m
+    input_series:
+      - series: 'loki_prometheus_rule_group_rules{job="observability/loki", rule_group="a"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LokiRulerRulesMissing
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: LokiRulerRulesMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: LokiRulerRulesMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+
+  - interval: 1m
+    input_series:
+      - series: 'loki_prometheus_rule_group_rules{job="observability/loki", rule_group="a"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: LokiRulerRulesMissing
+        exp_alerts: []
+
+  # LokiRulerEvaluationFailures: a rising failure counter fires; a flat one is quiet.
+  - interval: 1m
+    input_series:
+      - series: 'loki_prometheus_rule_evaluation_failures_total{job="observability/loki", rule_group="a"}'
+        values: '0+1x40'
+      - series: 'loki_prometheus_rule_evaluation_failures_total{job="observability/loki", rule_group="b"}'
+        values: '3+0x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LokiRulerEvaluationFailures
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: LokiRulerEvaluationFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+
+  - interval: 1m
+    input_series:
+      - series: 'loki_prometheus_rule_evaluation_failures_total{job="observability/loki", rule_group="b"}'
+        values: '3+0x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: LokiRulerEvaluationFailures
+        exp_alerts: []
+
+  # LokiRulerNotificationFailures: send errors fire, and so does a ruler that
+  # discovered no Alertmanager; a healthy ruler is quiet.
+  - interval: 1m
+    input_series:
+      - series: 'loki_prometheus_notifications_errors_total{job="observability/loki", alertmanager="am"}'
+        values: '0+1x40'
+      - series: 'loki_prometheus_notifications_alertmanagers_discovered{job="observability/loki"}'
+        values: '1+0x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LokiRulerNotificationFailures
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: LokiRulerNotificationFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+
+  - interval: 1m
+    input_series:
+      - series: 'loki_prometheus_notifications_errors_total{job="observability/loki", alertmanager="am"}'
+        values: '0+0x40'
+      - series: 'loki_prometheus_notifications_alertmanagers_discovered{job="observability/loki"}'
+        values: '0+0x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: LokiRulerNotificationFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+
+  - interval: 1m
+    input_series:
+      - series: 'loki_prometheus_notifications_errors_total{job="observability/loki", alertmanager="am"}'
+        values: '0+0x40'
+      - series: 'loki_prometheus_notifications_alertmanagers_discovered{job="observability/loki"}'
+        values: '1+0x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: LokiRulerNotificationFailures
+        exp_alerts: []
+
+  # FluxReconciliationFailure: errors on one controller fire for that
+  # controller only.
+  - interval: 1m
+    input_series:
+      - series: 'controller_runtime_reconcile_errors_total{job="observability/flux-system", controller="kustomization", pod="kustomize-controller-0"}'
+        values: '0+1x40'
+      - series: 'controller_runtime_reconcile_errors_total{job="observability/flux-system", controller="helmrelease", pod="helm-controller-0"}'
+        values: '2+0x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: FluxReconciliationFailure
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: FluxReconciliationFailure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              controller: kustomization
+
+  # SecretsProviderDown: the harness leaves the placeholders unsubstituted, so
+  # the fixture carries them verbatim as label values.
+  - interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="${cluster_secrets_provider_namespace}", deployment="${cluster_secrets_provider_deployment}"}'
+        values: '1+0x4 0+0x20'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: SecretsProviderDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: SecretsProviderDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: '${cluster_secrets_provider_namespace}'
+              deployment: '${cluster_secrets_provider_deployment}'
+
+  - interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="${cluster_secrets_provider_namespace}", deployment="${cluster_secrets_provider_deployment}"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: SecretsProviderDown
+        exp_alerts: []
+
+  # OffsiteBackupVerifyStale: a failed verify fires, and so does a verify over
+  # 8 days old; a 7-day-old good verify is quiet.
+  - interval: 5m
+    input_series:
+      - series: 'restic_offsite_last_verify_success{job="node-exporter-host", instance="nas:9101"}'
+        values: '0+0x20'
+      - series: 'restic_offsite_last_verify_timestamp_seconds{job="node-exporter-host", instance="nas:9101"}'
+        values: '-600000+0x20'
+      - series: 'restic_offsite_last_verify_success{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '1+0x20'
+      - series: 'restic_offsite_last_verify_timestamp_seconds{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '-700000+0x20'
+      - series: 'restic_offsite_last_verify_success{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '1+0x20'
+      - series: 'restic_offsite_last_verify_timestamp_seconds{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '-600000+0x20'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: OffsiteBackupVerifyStale
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: OffsiteBackupVerifyStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'nas:9101'
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'pve-01:9101'
+
+  # EtcdSnapshotStale: no snapshot gauge at all fires after the 1h hold.
+  - interval: 5m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: EtcdSnapshotStale
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: EtcdSnapshotStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+
+  # A copy 27h old fires; one 25h old is inside the 26h budget.
+  - interval: 5m
+    input_series:
+      - series: 'etcd_snapshot_last_copy_timestamp_seconds{job="node-exporter-host", instance="192.0.2.31:9101"}'
+        values: '-97200+300x20'
+      - series: 'etcd_snapshot_last_copy_timestamp_seconds{job="node-exporter-host", instance="192.0.2.32:9101"}'
+        values: '-90000+300x20'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: EtcdSnapshotStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.31:9101'

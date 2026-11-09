@@ -76,9 +76,6 @@ tasks:
     preconditions:
       - sh: command -v op
         msg: "1Password CLI not installed"
-      # `op account list`, not `op whoami`: with the desktop-app integration
-      # whoami reports "not signed in" in the non-interactive shell Task uses
-      # here.
       - sh: op account list 2>/dev/null
         msg: "1Password CLI not authenticated. Run: eval $(op signin)"
       - sh: kubectl cluster-info 2>/dev/null
@@ -138,7 +135,7 @@ tasks:
         echo "This commits to the branch and pushes it."
         read -r -p "Continue? [y/N] " confirm
         [ "$confirm" = "y" ] || { echo "Aborted"; exit 1; }
-      - |
+{% endraw %}{% if git_backend == 'gitlab_selfhosted' %}{% raw %}      - |
         set -eo pipefail
         # Explicit read + emptiness check: a silent op failure would otherwise
         # run bootstrap with an empty token and fail with an opaque auth error.
@@ -153,7 +150,10 @@ tasks:
           --path={{.CLUSTER_DIR}} \
           --deploy-token-auth \
           --interval=1m
-
+{% endraw %}{% else %}      - |
+        echo "ERROR: flux:bootstrap has no implementation for git_backend '{{ git_backend }}'" >&2
+        exit 1
+{% endif %}{% raw %}
   reconcile:
     desc: Force a full reconcile (source → the infrastructure chain → apps)
     preconditions:
@@ -190,6 +190,9 @@ tasks:
           echo ""
           echo "ERROR: stage(s) did not reconcile to Ready:$FAILED"
           echo "  Every OTHER stage above was still reconciled."
+          echo "  infrastructure-metrics-server is off the dependsOn chain; if it"
+          echo "  failed, kubectl get apiservice v1beta1.metrics.k8s.io shows"
+          echo "  whether the Resource Metrics API still serves."
           exit 1
         fi
         echo "All Flux stages reconciled."
@@ -267,6 +270,8 @@ tasks:
   rotate-db-password:
     desc: "Rotate an app's in-cluster Postgres role passwords end to end (usage: task flux:rotate-db-password -- <authentik>)"
     preconditions: *flux_preconditions
+    env:
+      OP_VAULT: "{{.OP_VAULT}}"
     cmds:
       - bash scripts/flux-rotate-db-password.sh {{.CLI_ARGS}}
 
@@ -323,10 +328,12 @@ tasks:
     desc: Regenerate the per-host log-shipping alerts from the alloy_host play
     preconditions: *pyyaml_precondition
     cmds:
-      - python3 scripts/generate-host-log-staleness.py
+      - python3 scripts/generate-host-log-staleness.py --runbook "RUNBOOKS.md#per-host-log-shipping-alerts"
+
   dev-apply:
     desc: "Dev helper: render one path and apply it (Flux reverts it on the next reconcile)"
     preconditions:
+      - *kubectl_precondition
       - sh: command -v kustomize
         msg: "kustomize not installed"
       - sh: command -v envsubst
@@ -340,8 +347,9 @@ tasks:
           echo "Usage: task flux:dev-apply -- <path-to-kustomization-dir>"
           exit 1
         fi
-        # Substitute exactly what Flux substitutes at reconcile time, or the
-        # applied manifests carry literal ${...} placeholders.
+        # Substitute the keys of both ConfigMaps, as Flux does at reconcile
+        # time. gettext envsubst is not Flux's own strict parser; `task
+        # flux:lint` runs that one.
         VARS=$(scripts/flux-env.sh export-versions "{{.VERSIONS_CM}}") || exit 1
         eval "$VARS"
         echo "WARNING: Flux reverts this unless the change is committed."
@@ -349,6 +357,10 @@ tasks:
 
   lint:
     desc: Build every Flux Kustomization, substitute, schema-validate, and run the corpus gates
+    # validate-helm-values.py, run by flux-corpus-gates.sh, reads the catalog
+    # ref from the environment, so it resolves the same pinned sha as CI.
+    env:
+      CRD_CATALOG_REF: "{{.CRD_CATALOG_REF}}"
     preconditions:
       - sh: command -v kustomize
         msg: "kustomize not installed"
@@ -372,13 +384,14 @@ tasks:
         RENDER_ALL=$(mktemp)
         trap 'rm -f "$RENDER_ALL"' EXIT
 
-        # The render/scan/kubeconform loop is scripts/flux-lint.sh, run with the
-        # flags the CI flux-lint job passes — one implementation, so a floor
-        # cannot reach only one of them. require-cluster-root: see that include.
+        # scripts/flux-lint.sh is the loop the CI flux-lint job runs, so a floor
+        # reaches both. Local-only: the dependsOn enumerator, which the job has no
+        # input for. require-cluster-root: see that include.
         scripts/flux-lint.sh \
           --cluster-dir "{{.CLUSTER_DIR}}" \
           --versions-configmap "{{.VERSIONS_CM}}" \
           --render-script scripts/flux-env.sh \
+          --child-kustomizations scripts/flux-child-kustomizations.py \
           --skipped-script scripts/kubeconform-skipped.py \
           --expected-skipped scripts/kubeconform-expected-skipped.txt \
           --require-cluster-root false \

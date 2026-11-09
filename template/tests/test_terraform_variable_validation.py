@@ -33,16 +33,38 @@ EXPECTED_PATTERNS: dict[str, set[str]] = {
     },
 }
 
-# `can(regex("<pattern>", var.<name>))` — the only validation shape the roots use.
-_REGEX_VALIDATION = re.compile(r'can\(regex\("(?P<pattern>.*?)",\s*var\.(?P<name>\w+)\)\)')
+# Every `regex("<pattern>", <value>)` call. The literal may hold escaped quotes,
+# and the value may be any expression, such as a for-expression's element.
+_REGEX_CALL = re.compile(r'regex\(\s*"(?P<pattern>(?:[^"\\]|\\.)*)"\s*,\s*(?P<value>[^)]*)\)')
 
 
 def regex_validations(root: Path) -> list[tuple[Path, str, str]]:
-    """(file, variable name, regex literal) for every regex validation under `root`."""
+    """(file, value expression, regex literal) for every regex call under `root`."""
     return [
-        (path, match["name"], match["pattern"])
+        (path, match["value"].strip(), match["pattern"])
         for path in sorted(root.rglob("*.tf"))
-        for match in _REGEX_VALIDATION.finditer(path.read_text(encoding="utf-8"))
+        if ".terraform" not in path.relative_to(root).parts
+        for match in _REGEX_CALL.finditer(path.read_text(encoding="utf-8"))
+    ]
+
+
+def drift_problems(root: Path, expected: set[str]) -> list[str]:
+    """How the root's regex literals differ from its frozen set."""
+    found = {pattern for _path, _value, pattern in regex_validations(root)}
+    problems = []
+    if extra := sorted(found - expected):
+        problems.append(f"only in the tree: {extra}")
+    if missing := sorted(expected - found):
+        problems.append(f"only in the table: {missing}")
+    return problems
+
+
+def anchoring_problems(validations: list[tuple[Path, str, str]]) -> list[str]:
+    """Literals unanchored at either end, which match part of a value."""
+    return [
+        f"{path.relative_to(REPO) if path.is_relative_to(REPO) else path}: {value} = {pattern!r}"
+        for path, value, pattern in validations
+        if not (pattern.startswith("^") and pattern.endswith("$"))
     ]
 
 
@@ -82,11 +104,9 @@ def test_each_root_validates_with_the_frozen_regexes(root: Path) -> None:
     expected = EXPECTED_PATTERNS.get(root.name)
     if expected is None:
         pytest.skip(f"{root.name} is reported by the table check")
-    found = {pattern for _path, _name, pattern in regex_validations(root)}
-    assert found == expected, (
-        f"terraform/{root.name} validation regexes drifted\n"
-        f"  only in the tree:  {sorted(found - expected)}\n"
-        f"  only in the table: {sorted(expected - found)}"
+    problems = drift_problems(root, expected)
+    assert not problems, (
+        f"terraform/{root.name} validation regexes drifted\n  " + "\n  ".join(problems)
     )
 
 
@@ -94,11 +114,7 @@ def test_each_root_validates_with_the_frozen_regexes(root: Path) -> None:
 def test_every_regex_validation_is_anchored() -> None:
     """`regex` matches anywhere in the value, so an unanchored rule accepts any
     string that merely contains a valid one."""
-    loose = [
-        f"{path.relative_to(REPO)}: {name} = {pattern!r}"
-        for path, name, pattern in regex_validations(TERRAFORM)
-        if not (pattern.startswith("^") and pattern.endswith("$"))
-    ]
+    loose = anchoring_problems(regex_validations(TERRAFORM))
     assert not loose, "unanchored input validations:\n  " + "\n  ".join(loose)
 
 
@@ -119,9 +135,8 @@ def test_a_drifted_copy_is_reported(tmp_path) -> None:
         "}\n",
         encoding="utf-8",
     )
-    found = {pattern for _path, _name, pattern in regex_validations(root)}
-    assert found == {r"^[\\x20-\\x7e]{8,63}$", "^.{8,63}$"}
-    assert found != EXPECTED_PATTERNS["unifi"]
+    expected = {r"^[\\x20-\\x7e]{8,63}$"}
+    assert drift_problems(root, expected) == ["only in the tree: ['^.{8,63}$']"]
 
 
 def test_an_unanchored_regex_is_recognised(tmp_path) -> None:
@@ -131,6 +146,18 @@ def test_an_unanchored_regex_is_recognised(tmp_path) -> None:
     (root / "variables.tf").write_text(
         'condition = can(regex("[0-9a-f]{32}", var.account_id))\n', encoding="utf-8"
     )
-    patterns = [p for _path, _name, p in regex_validations(root)]
-    assert patterns == ["[0-9a-f]{32}"]
-    assert not (patterns[0].startswith("^") and patterns[0].endswith("$"))
+    assert len(anchoring_problems(regex_validations(root))) == 1
+
+
+def test_the_extractor_reads_escaped_quotes_and_any_value(tmp_path) -> None:
+    """Mutation case: an escaped quote does not end the literal, and a regex
+    over a for-expression element is still a validation."""
+    root = tmp_path / "dns"
+    root.mkdir()
+    (root / "variables.tf").write_text(
+        'condition = alltrue([for h in var.hosts : can(regex("^\\"[a-z]+\\"$", h))])\n',
+        encoding="utf-8",
+    )
+    assert [(value, p) for _path, value, p in regex_validations(root)] == [
+        ("h", '^\\"[a-z]+\\"$')
+    ]

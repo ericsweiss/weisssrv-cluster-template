@@ -1,16 +1,14 @@
 ---
-# The profile the CI yaml-lint job and the local lint command in README.md both
-# select with `-c lint/yamllint-relaxed.yml`. Kept at lint/: a repo-root
-# `.yamllint` lands in ansible-lint's discovery path and replaces its yaml rule.
+# The shared yamllint profile: yamllint's `relaxed` with line-length
+# off, document-start back on as a warning, and the comments and octal-values
+# settings ansible-lint requires of a yamllint config it loads.
+
+# Keep it off a repo-root `.yamllint`: ansible-lint discovers one there and
+# merges it over its own yaml[*] rules. Every caller passes `-c <path>`.
 extends: relaxed
 
 rules:
-  # `relaxed` keeps line-length at warning level and disables the comment
-  # rules. Here line-length is off outright, because inline documentation
-  # comments run long, and document-start comes back as a warning.
   line-length: disable
-  # Files under template/ are Jinja sources: a rendered document may legitimately
-  # start with a control block, so the `---` requirement is advisory here.
   document-start:
     present: true
     level: warning
@@ -26,3 +24,9 @@ rules:
   # One blank line between blocks (warning, as in `relaxed`).
   empty-lines:
     max: 1
+
+# Provider checkouts are not the repo's YAML, and a local tree has them
+# wherever `terraform init` ran.
+ignore: |
+  .terraform/
+  terraform/**/.terraform/

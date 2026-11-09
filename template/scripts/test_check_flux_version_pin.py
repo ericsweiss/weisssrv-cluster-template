@@ -10,9 +10,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 GATE = Path(__file__).resolve().parent / "check-flux-version-pin.py"
 
-CI = 'cluster-verify:\n  script:\n    - |\n      FLUX_VERSION="{version}"\n'
+CI = 'deploy-verify:\n  script:\n    - |\n      FLUX_VERSION="{version}"\n'
 CM = "apiVersion: v1\ndata:\n  flux_version: {version}\nkind: ConfigMap\n"
 GOTK = (
     "---\n"
@@ -105,6 +107,30 @@ def test_a_declared_set_the_manifest_does_not_match_still_fails(tmp_path):
     assert "not " + EXTRA in res.stdout
 
 
+def test_a_yaml_variable_pin_and_a_v_prefixed_configmap_value_pass(tmp_path):
+    root = _tree(tmp_path, gotk="2.9.0")
+    (root / ".gitlab-ci.yml").write_text('variables:\n  FLUX_VERSION: "2.9.0"\n')
+    cm = root / "kubernetes/infrastructure/sources/versions-configmap.yaml"
+    cm.write_text(CM.format(version='"v2.9.0"'))
+    res = _run(root)
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
+@pytest.mark.parametrize("value", ['"v2.8.0"', "'2.8.0'"], ids=["v-prefixed", "single-quoted"])
+def test_a_configmap_value_in_another_spelling_that_disagrees_fails(tmp_path, value):
+    res = _run(_tree(tmp_path, pin="2.9.0", cm=value, gotk="2.9.0"))
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert "2.8.0" in res.stdout
+
+
+def test_an_unquoted_yaml_variable_pin_that_disagrees_fails(tmp_path):
+    root = _tree(tmp_path, gotk="2.9.0")
+    (root / ".gitlab-ci.yml").write_text("variables:\n  FLUX_VERSION: 2.8.0\n")
+    res = _run(root)
+    assert res.returncode == 1
+    assert "disagree" in res.stdout
+
+
 def test_a_second_ci_pin_that_disagrees_fails(tmp_path):
     # The mutation first-match-only hides: a second job installs another CLI and
     # every pin after the first goes unchecked.
@@ -115,6 +141,45 @@ def test_a_second_ci_pin_that_disagrees_fails(tmp_path):
     res = _run(root)
     assert res.returncode == 1
     assert "pins several Flux versions" in res.stdout
+
+
+@pytest.mark.parametrize(
+    "second",
+    ['  FLUX_VERSION: "v2.8.0"\n', "  FLUX_VERSION: '2.8.0'\n", "export FLUX_VERSION=2.8.0\n"],
+    ids=["v-prefixed", "single-quoted", "exported"],
+)
+def test_a_second_ci_pin_in_another_spelling_that_disagrees_fails(tmp_path, second):
+    root = _tree(tmp_path, gotk="2.9.0")
+    (root / ".gitlab-ci.yml").write_text(CI.format(version="2.9.0") + second)
+    res = _run(root)
+    assert res.returncode == 1
+    assert "2.8.0" in res.stdout
+
+
+@pytest.mark.parametrize(
+    "pin",
+    ['FLUX_VERSION="v2.9.0"\n', "  FLUX_VERSION: v2.9.0\n"],
+    ids=["shell", "yaml-variable"],
+)
+def test_a_v_prefixed_ci_pin_fails_even_when_it_agrees(tmp_path, pin):
+    # ci-fetch-tools.py builds .../download/v{version}/, so v2.9.0 fetches vv2.9.0.
+    root = _tree(tmp_path, gotk="2.9.0")
+    (root / ".gitlab-ci.yml").write_text(pin)
+    res = _run(root)
+    assert res.returncode == 1
+    assert "Pin the bare version, 2.9.0" in res.stdout
+
+
+@pytest.mark.parametrize(
+    "pin",
+    ["  FLUX_VERSION: '2.9.0'\n", "export FLUX_VERSION=2.9.0\n"],
+    ids=["single-quoted", "exported"],
+)
+def test_an_agreeing_pin_in_another_spelling_passes(tmp_path, pin):
+    root = _tree(tmp_path, gotk="2.9.0")
+    (root / ".gitlab-ci.yml").write_text(pin)
+    res = _run(root)
+    assert res.returncode == 0, res.stdout + res.stderr
 
 
 def test_two_agreeing_ci_pins_pass(tmp_path):
@@ -150,7 +215,7 @@ def test_a_second_gotk_header_that_disagrees_fails(tmp_path):
 
 def test_a_missing_pin_reports_that_it_inspected_nothing(tmp_path):
     root = _tree(tmp_path, gotk="2.9.0")
-    (root / ".gitlab-ci.yml").write_text("cluster-verify:\n  script:\n    - flux --version\n")
+    (root / ".gitlab-ci.yml").write_text("deploy-verify:\n  script:\n    - flux --version\n")
     res = _run(root)
     assert res.returncode == 2
     assert "no FLUX_VERSION" in res.stderr
@@ -173,3 +238,29 @@ def test_a_non_utf8_pipeline_reports_that_it_inspected_nothing(tmp_path):
     res = _run(root)
     assert res.returncode == 2
     assert "unreadable" in res.stderr
+
+
+def test_a_non_utf8_gotk_components_reports_that_it_inspected_nothing(tmp_path):
+    """An undecodable manifest is not a missing header: the gate never read it."""
+    root = _tree(tmp_path, gotk="2.9.0")
+    gotk = root / "kubernetes/clusters/example/flux-system/gotk-components.yaml"
+    gotk.write_bytes(b"# Flux Version: v\xff\xfe\n")
+    res = _run(root)
+    assert res.returncode == 2
+    assert "unreadable" in res.stderr
+
+
+def test_a_missing_components_header_says_so(tmp_path):
+    root = _tree(tmp_path, gotk="2.9.0")
+    gotk = root / "kubernetes/clusters/example/flux-system/gotk-components.yaml"
+    gotk.write_text("# Flux Version: v2.9.0\n")
+    res = _run(root)
+    assert res.returncode == 1
+    assert "has no '# Components:' header" in res.stdout
+
+
+def test_this_repository_passes_on_the_real_tree():
+    """The subject `task lint:flux-version-pin` hands it: this repository's own
+    pipeline, versions ConfigMap and, once bootstrapped, gotk-components."""
+    res = _run(Path(__file__).resolve().parent.parent)
+    assert res.returncode == 0, res.stdout + res.stderr

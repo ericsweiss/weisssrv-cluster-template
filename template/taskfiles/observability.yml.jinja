@@ -55,6 +55,7 @@ tasks:
       # `notin` also matches objects with no such label, which is every
       # HelmRelease-backed workload here.
       - kubectl rollout restart deployment,statefulset,daemonset -n observability -l 'kustomize.toolkit.fluxcd.io/name notin (infrastructure-observability)'
+
   silence:
     desc: "Create an Alertmanager silence (ALERT=alertname, DURATION=2H — units S/M/H/d; works with BSD or GNU date)"
     vars:

@@ -20,19 +20,19 @@ Fix one upstream and re-copy it here; a local edit is lost on the next refresh.
 ## Prerequisites
 
 ```bash
-pip install -r ../requirements.txt   # molecule + molecule-plugins[docker], pinned
+pip install -r requirements.txt      # from the repo root: molecule + molecule-plugins[docker], pinned
 docker info                          # Docker must be running
 ```
 
-Each platform reads the bare `image: "${MOLECULE_TEST_IMAGE}"`, and the
-Taskfile exports it from the one declared ref
-(`scripts/check-lib-pins.py --print`), so a local run and a pipeline run pull
-the same `molecule-test` image from `registry.{{ git_host }}/{{ lib_project }}`.
+Each platform reads the bare `image: "${MOLECULE_TEST_IMAGE}"`. The Taskfile
+exports it from the one declared ref, `scripts/check-lib-pins.py --print`. A
+local run and a pipeline run therefore pull the same `molecule-test` image from
+`registry.{{ git_host }}/{{ lib_project }}`.
+
 weisssrv-lib and its `molecule-test` and `molecule-ci` images must exist on that
-registry under that path; the pipeline's `include: project:` entries already
-impose the same requirement. Run the scenarios through `task ansible:test*`:
-a bare `molecule test` resolves an empty image unless you export the variable
-yourself.
+registry under that path. The pipeline's `include: project:` entries need the
+same. Run the scenarios through `task ansible:test*`. A bare `molecule test`
+resolves an empty image unless you export the variable yourself.
 
 The collection itself is installed by molecule's `galaxy` dependency step from
 `ansible/requirements.yml`, so a scenario always exercises the pinned tag rather
@@ -74,16 +74,17 @@ would pass or fail depending on what DNS answers that day.
 `unbound` + `adguard_home` + `adguard_sync` across two servers (dns-01 primary,
 dns-02 replica) on a shared Docker network.
 
-Asserted: Unbound installs, runs and resolves over DoT; the converge-supplied
-`unbound_forwarders` reach the template (a negative check on a default-only
-forwarder catches a rename silently falling back); AdGuard Home installs, starts
-and answers on :3000; the codified `adguard_home_rewrites` are reconciled onto
-the primary through the role's API path; the sync unit and timer are configured
-and enabled on the primary.
+Asserted: Unbound installs, runs and resolves over DoT, so the scenario needs
+the internet. The converge-supplied `unbound_forwarders` reach the template, and
+a negative check on a default-only forwarder catches a renamed variable. AdGuard
+Home installs, starts and answers on :3000. The codified `adguard_home_rewrites`
+are reconciled onto the primary through the role's API path. The sync unit and
+timer are enabled on the primary, and one sync run delivers every codified
+rewrite to the replica.
 
-Not asserted: DNS on :53 through AdGuard, and full sync operation. The role
-skips the resolv.conf switch in-container, so AdGuard's own resolution path is
-not representative. `postflight.yml` covers both against the real resolvers.
+Not asserted: DNS on :53 through AdGuard. The role skips the resolv.conf switch
+in-container, so AdGuard's own resolution path is not representative.
+`postflight.yml` covers it against the real resolvers.
 
 ### Mail stack — `integration-tests/mail-stack/`
 
@@ -101,14 +102,14 @@ assertion keys on.
 ### Base infrastructure — `integration-tests/base-infrastructure/`
 
 `base` + `qol`{% if vpn_tailscale %} + `tailscale`{% endif %} on two hosts. Asserted: packages, admin user and
-sudoers, timezone, and the zsh/neovim configuration.
+sudoers, timezone, the zsh configuration and its theme, and the vim plugin manager.
 {%- if vpn_tailscale %}
 The Tailscale package lands and the unit is installed and enabled. `tailscale
 up` self-skips because the scenario sets no `TAILSCALE_AUTH_KEY`, which is what
-makes it runnable in a container; the daemon's runtime state is deliberately not
-asserted. The scenario therefore leaves `tailscale_require_authkey` at the role
-default of `false`, while `group_vars/all.yml` sets it to `true` so a real deploy
-without the key fails rather than leaving the host off the tailnet.
+makes it runnable in a container; the daemon's runtime state is not asserted.
+The converge therefore sets `tailscale_require_authkey: false`, while
+`group_vars/all.yml` sets it to `true` so a real deploy without the key fails
+rather than leaving the host off the tailnet.
 {%- endif %}
 {%- if storage_backend == 'zfs' %}
 
@@ -149,8 +150,13 @@ directory has no entry in the CI matrix.
 
 ## Idempotence
 
-Every stack runs `idempotence` in its `test_sequence`: converge runs twice and
-the second pass must report zero changes.
+Every stack except `cert-distribution` runs `idempotence` in its
+`test_sequence`: converge runs twice and the second pass must report zero
+changes.
+
+`cert-distribution` omits the step on purpose. The scenario generates a fresh
+SSH keypair per run and injects it with `add_host`, so the key deployment
+really changes on every converge.
 
 A stack that starts failing idempotence usually points at a task in the
 *collection* with a missing `changed_when`, an unconditional file write, or a
@@ -173,43 +179,16 @@ emulation, and some scenarios are slow enough that CI is the practical arbiter.
 
 ## Expected negative-path failures
 
-No stack declares one. If you add a scenario that drives a guard task to failure
-inside `block`/`rescue`, the junit callback records the raw failure even though
-the rescue handles it. List the task name in
-`molecule/default/expected-junit-failures.txt` and
-`scripts/sanitize-junit-expected-failures.py` (CI's last step, and only on a
-molecule success) downgrades exactly those entries. Undeclared failures stay
-red, and `scripts/molecule-retry.sh` clears the junit directory between attempts
-so a transient first try never uploads alongside a passing retry.
+No stack declares one. A scenario that drives a guard task to failure inside
+`block`/`rescue` lists that task in `expected-junit-failures.txt` beside the
+scenario's `molecule.yml`. CI then runs
+`scripts/sanitize-junit-expected-failures.py --strict`, which downgrades exactly
+those junit entries. weisssrv-lib's `docs/SCRIPTS.md` holds the file format.
 
-Each line of the file is a case-sensitive substring matched against the junit
-testcase name, and declares one testcase. A line ending in ` ::<n>` declares
-that it matches exactly n of them, where `<n>` is a positive integer. Blank
-lines and `#` comments are ignored.
-
-Keep every pattern narrow. CI passes `--strict`, so a declaration that matches
-no testcase, or a number of them other than its ` ::<n>` count, fails the job
-instead of warning. A renamed or deleted guard is then a finding, a pattern that
-stops firing cannot sit there unnoticed, and a broad pattern cannot green-wash a
-real failure elsewhere in the scenario. Without `--strict` the count is only a
-cap and a mismatch is a warning, so declare the number the run records rather
-than a margin.
-
-Count what the run records, not what the scenario reads like. The junit callback
-writes one testcase per task per host, so a guard that fires on two platforms
-counts twice. A scenario whose `test_sequence` includes `idempotence` replays
-converge, so a converge-driven guard counts twice unless its task or an
-enclosing block carries the `molecule-idempotence-notest` tag. A case driven
-under `ignore_errors: true` is recorded as passed, so it is never observed and
-must not be declared.
-
-Write the case so that a failure anywhere else still reds. Set the sentinel fact
-`false` as the last task inside the `block`, where it runs only if the guard did
-not fail. In the `rescue`, set it `true` behind
-`when: ansible_failed_task.name == '<the guard task name>'`, so an unrelated
-failure leaves the fact `false`. Assert the fact in a task *after* the block, not
-inside the rescue: a rescue that asserts cannot tell a handled guard from a
-broken scenario, and swallows the sentinel either way.
+Set a sentinel fact `true` in the `rescue`, only when the failed task is the
+guard. Assert it after the block, so a failure anywhere else still reds. The
+`idempotence` step replays converge, so tag a converge-driven guard
+`molecule-idempotence-notest` or declare it with a ` ::2` count.
 
 ## Pre-deployment checklist
 

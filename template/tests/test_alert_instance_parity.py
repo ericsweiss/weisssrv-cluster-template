@@ -25,8 +25,8 @@ NON_INVENTORY_TARGETS: dict[str, str] = {
     ),
 }
 
-_EXACT = re.compile(r'instance="([^"]+)"')
-_EXCLUDED = re.compile(r'instance!~"([^"]+)"')
+_EXACT = re.compile(r'instance!?="([^"]+)"')
+_REGEX = re.compile(r'instance[=!]~"([^"]+)"')
 _QUAD = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 needs_inventory = pytest.mark.skipif(
@@ -53,17 +53,17 @@ def unescape(value: str) -> str:
 
 
 def pinned_addresses(exprs: dict[str, str]) -> dict[str, set[str]]:
-    """address -> the alerts pinning it, over exact and excluded dotted quads.
+    """address -> the alerts pinning it, over every instance matcher's quads.
 
-    An `instance!~` exclusion pins the same addresses: a renumber leaves it
-    excluding something nothing serves, so the suppressor arm never fires.
+    A regex or negated matcher pins addresses as firmly as an exact one: after a
+    renumber an `instance!~` exclusion excludes nothing and `=~` matches nothing.
     """
     found: dict[str, set[str]] = {}
     for alert, expr in exprs.items():
         text = " ".join(str(expr).split())
         literals = list(_EXACT.findall(text))
-        for excluded in _EXCLUDED.findall(text):
-            literals += [unescape(member) for member in alternatives(excluded)]
+        for pattern in _REGEX.findall(text):
+            literals += [unescape(member) for member in alternatives(pattern)]
         for literal in literals:
             host = literal.rsplit(":", 1)[0]
             if _QUAD.match(host):
@@ -125,6 +125,16 @@ def test_the_collector_expands_an_exclusion_alternation():
     assert pinned_addresses({"Host": 'up{instance="10.0.0.5:9101"} == 0'}) == {
         "10.0.0.5": {"Host"}
     }
+
+
+def test_the_collector_reads_positive_regex_and_negated_matchers():
+    """Mutation case: an `instance=~` alternation and an `instance!=` literal
+    pin addresses too, port suffix and all."""
+    found = pinned_addresses(
+        {"Regex": 'up{instance=~"10\\\\.0\\\\.0\\\\.5:.*|(10\\\\.0\\\\.0\\\\.6):9100"} == 0'}
+    )
+    assert found == {"10.0.0.5": {"Regex"}, "10.0.0.6": {"Regex"}}
+    assert pinned_addresses({"Neg": 'up{instance!="10.0.0.7:9101"}'}) == {"10.0.0.7": {"Neg"}}
 
 
 def test_a_hostname_instance_is_not_read_as_an_address():

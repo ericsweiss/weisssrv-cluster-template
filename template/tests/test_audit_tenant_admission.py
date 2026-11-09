@@ -12,8 +12,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-import yaml
-from conftest import REPO, require_tool
+from conftest import REPO, policy_spec, require_tool
 
 SCRIPT = REPO / "scripts" / "audit-tenant-admission.sh"
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
@@ -137,6 +136,9 @@ def grant(ns: str = "demo", hosts: str = "demo.apps.test\n  demo.home.test \n\n"
     return {"metadata": {"name": f"tenant-routing-{ns}"}, "data": data}
 
 
+# The tenant-traefik-route-refs internal domain, from flux-system/cluster-config.
+CLUSTER_CONFIG = {"metadata": {"name": "cluster-config"},
+                  "data": {"cluster_internal_domain": "home.test"}}
 PROD = {"name": "letsencrypt-prod", "kind": "ClusterIssuer", "group": "cert-manager.io"}
 RESTRICTED_VOLUMES = [
     {"name": "cm", "configMap": {"name": "cm"}},
@@ -172,7 +174,9 @@ CLEAN_APP = {
     "persistentvolumeclaims": [claim("data", "tenant-local"), claim("pg-dump", "", "demo-pg-dump")],
     "ingressroutes": [
         named("web", {
-            "routes": [ROUTE],
+            "routes": [ROUTE, {"match": "Host(`demo.home.test`)", "services": [
+                {"name": "web", "port": 80}], "middlewares": [
+                {"name": "lan-tailscale-strict", "namespace": "traefik"}]}],
             "tls": {
                 "domains": [{"main": "demo.apps.test", "sans": ["demo.home.test"]}],
                 "options": {"name": "modern"},
@@ -187,8 +191,9 @@ CLEAN_APP = {
              "tls": [{"hosts": ["demo.home.test"]}]},
             {
                 "kubernetes.io/ingress.class": "traefik",
-                "traefik.ingress.kubernetes.io/router.middlewares":
-                    "traefik-hsts-header@kubernetescrd, authentik-authentik-auth@kubernetescrd",
+                "traefik.ingress.kubernetes.io/Router.Middlewares":
+                    "traefik-hsts-header@kubernetescrd, authentik-authentik-auth@kubernetescrd,"
+                    " traefik-lan-tailscale-strict@kubernetescrd",
                 "traefik.ingress.kubernetes.io/Router.TLS.Domains.0.main": "demo.apps.test",
                 "traefik.ingress.kubernetes.io/router.entrypoints": "websecure",
             },
@@ -224,6 +229,18 @@ CLEAN_APP = {
     ],
     "tlsoptions": [named("modern")],
     "tlsstores": [named("own")],
+    "kustomizations": [
+        named("app", {"serviceAccountName": "deployer",
+                      "sourceRef": {"kind": "GitRepository", "name": "app"}}),
+        named("db", {"serviceAccountName": "deployer",
+                     "sourceRef": {"kind": "GitRepository", "name": "app", "namespace": "demo"}}),
+    ],
+    "helmreleases": [
+        named("chart", {"serviceAccountName": "deployer", "chart": {"spec": {
+            "chart": "web", "sourceRef": {"kind": "HelmRepository", "name": "charts"}}}}),
+        named("oci", {"serviceAccountName": "deployer",
+                      "chartRef": {"kind": "OCIRepository", "name": "web", "namespace": "demo"}}),
+    ],
 }
 
 
@@ -231,8 +248,8 @@ def fixture(objects: dict, grants: list[dict] | None = None, tenants=("demo",)) 
     """`objects` per tenant namespace, with the grants in flux-system."""
     return {
         "tenants": list(tenants),
-        "objects": {**objects, "flux-system": {"configmaps": [grant()] if grants is None
-                                               else grants}},
+        "objects": {**objects, "flux-system": {"configmaps": [
+            *([grant()] if grants is None else grants), CLUSTER_CONFIG]}},
     }
 
 
@@ -317,7 +334,10 @@ def test_no_tenant_namespace_passes_and_says_so(tmp_path):
         ),
         (
             {"services": [service("bare")], "endpoints": [endpoints("bare")]},
-            "demo Endpoints/bare: no Service with a selector",
+            (
+                "demo Service/bare: no selector",
+                "demo Endpoints/bare: no Service with a selector",
+            ),
         ),
     ],
     ids=[
@@ -344,9 +364,8 @@ def test_each_pre_policy_object_is_reported(tmp_path, objects, finding):
     merged = {k: CLEAN_APP[k] + objects.get(k, []) for k in CLEAN_APP}
     result = run(tmp_path, fixture({"demo": merged}))
     assert result.returncode == 1, result.stdout + result.stderr
-    lines = result.stdout.splitlines()
-    assert finding in lines
-    assert not [line for line in lines if line != finding and "web" in line.replace("web-", "")]
+    expected = [finding] if isinstance(finding, str) else list(finding)
+    assert result.stdout.splitlines() == expected
 
 
 def test_a_controller_slice_whose_addresses_are_selected_pods_passes(tmp_path):
@@ -395,6 +414,8 @@ def test_every_tenant_namespace_is_audited(tmp_path):
         "pods",
         "cronjobs.batch",
         "persistentvolumeclaims",
+        "kustomizations.kustomize.toolkit.fluxcd.io",
+        "helmreleases.helm.toolkit.fluxcd.io",
     ],
 )
 def test_a_kubectl_failure_is_an_error_not_a_pass(tmp_path, resource):
@@ -421,6 +442,46 @@ def _cert(**changes) -> dict:
 
 # One object each that a tenant policy now refuses, and the one line it reports.
 POLICY_CASES = {
+    "route-internal-without-allowlist": (
+        _with("ingressroutes", _route(match="Host(`demo.home.test`)", middlewares=[
+            {"name": "hsts-header", "namespace": "traefik"}])),
+        "demo IngressRoute/bad: match Host(`demo.home.test`) is on the internal domain"
+        " without traefik/lan-tailscale-only or -strict",
+    ),
+    "route-internal-own-namespace-allowlist": (
+        _with("ingressroutes", _route(match="Host(`demo.home.test`)", middlewares=[
+            {"name": "lan-tailscale-only"}])),
+        "demo IngressRoute/bad: match Host(`demo.home.test`) is on the internal domain"
+        " without traefik/lan-tailscale-only or -strict",
+    ),
+    "kustomization-without-service-account": (
+        _with("kustomizations", named("bad", {"sourceRef": {"kind": "GitRepository",
+                                                            "name": "app"}})),
+        "demo Kustomization/bad: no spec.serviceAccountName, so the controller applies it"
+        " as itself",
+    ),
+    "kustomization-foreign-source": (
+        _with("kustomizations", named("bad", {"serviceAccountName": "deployer", "sourceRef": {
+            "kind": "GitRepository", "name": "platform", "namespace": "flux-system"}})),
+        "demo Kustomization/bad: source GitRepository/platform in namespace flux-system",
+    ),
+    "helmrelease-empty-service-account": (
+        _with("helmreleases", named("bad", {"serviceAccountName": "", "chart": {"spec": {
+            "chart": "web", "sourceRef": {"kind": "HelmRepository", "name": "charts"}}}})),
+        "demo HelmRelease/bad: no spec.serviceAccountName, so the controller applies it"
+        " as itself",
+    ),
+    "helmrelease-foreign-chart-source": (
+        _with("helmreleases", named("bad", {"serviceAccountName": "deployer", "chart": {
+            "spec": {"chart": "x", "sourceRef": {"kind": "HelmRepository", "name": "r",
+                                                 "namespace": "flux-system"}}}})),
+        "demo HelmRelease/bad: source HelmRepository/r in namespace flux-system",
+    ),
+    "helmrelease-foreign-chart-ref": (
+        _with("helmreleases", named("bad", {"serviceAccountName": "deployer", "chartRef": {
+            "kind": "OCIRepository", "name": "x", "namespace": "other"}})),
+        "demo HelmRelease/bad: source OCIRepository/x in namespace other",
+    ),
     "route-ungranted-host": (
         _with("ingressroutes", _route(match="Host(`grafana.apps.test`)")),
         "demo IngressRoute/bad: match Host(`grafana.apps.test`) is not Host() on granted"
@@ -533,6 +594,28 @@ POLICY_CASES = {
                 "traefik-hsts-header@kubernetescrd,other-mw@kubernetescrd"})),
         "demo Ingress/bad: annotation traefik.ingress.kubernetes.io/router.middlewares"
         " names other-mw@kubernetescrd, outside the platform allowlist",
+    ),
+    "ingress-internal-without-allowlist": (
+        _with("ingresses", _ingress({"rules": [{"host": "demo.home.test"}]}, {
+            "traefik.ingress.kubernetes.io/router.middlewares": "traefik-hsts-header@kubernetescrd"})),
+        "demo Ingress/bad: an internal-domain host without traefik-lan-tailscale-only or"
+        " -strict in router.middlewares",
+    ),
+    "ingress-internal-allowlist-missing-from-a-case-variant-key": (
+        _with("ingresses", _ingress({"rules": [{"host": "demo.home.test"}]}, {
+            "traefik.ingress.kubernetes.io/router.middlewares":
+                "traefik-lan-tailscale-only@kubernetescrd",
+            "traefik.ingress.kubernetes.io/Router.Middlewares":
+                "traefik-hsts-header@kubernetescrd"})),
+        "demo Ingress/bad: an internal-domain host without traefik-lan-tailscale-only or"
+        " -strict in router.middlewares",
+    ),
+    "ingress-internal-allowlist-under-an-ignored-key": (
+        _with("ingresses", _ingress({"rules": [{"host": "demo.home.test"}]}, {
+            "Traefik.ingress.kubernetes.io/router.middlewares":
+                "traefik-lan-tailscale-only@kubernetescrd"})),
+        "demo Ingress/bad: an internal-domain host without traefik-lan-tailscale-only or"
+        " -strict in router.middlewares",
     ),
     "service-provider-annotation": (
         _with("services", {**service("svc", {"app": "web"}), "metadata": {
@@ -748,7 +831,7 @@ POLICY_CASES = {
     # No default class: the field stays unset, and the policy refuses the claim
     # if it is ever recreated as written.
     "claim-class-unset": (
-        _with("persistentvolumeclaims", {k: v for k, v in claim("scratch", "").items()}
+        _with("persistentvolumeclaims", claim("scratch", "")
               | {"spec": {"resources": {"requests": {"storage": "1Gi"}}}}),
         "demo PersistentVolumeClaim/scratch: storageClassName unset",
     ),
@@ -761,6 +844,26 @@ def test_each_policy_covered_kind_is_audited(tmp_path, case):
     result = run(tmp_path, fixture({"demo": objects}))
     assert result.returncode == 1, result.stdout + result.stderr
     assert result.stdout.splitlines() == [finding]
+
+
+@pytest.mark.parametrize(
+    ("match", "internal"),
+    [
+        ("Host(`demo.myhome.test`)", False),
+        ("Host(`demo.home.test.au`)", False),
+        ("Host(`home.test`)", True),
+        ('Host("demo.home.test")', True),
+        ("Host(`demo.apps.test`) || Host(`demo.home.test`)", True),
+    ],
+    ids=["substring-prefix", "substring-suffix", "apex", "double-quoted", "second-host"],
+)
+def test_only_a_quoted_internal_hostname_needs_the_allowlist(tmp_path, match, internal):
+    """A host that merely contains the internal domain is public, as in the policy."""
+    route = _route(match=match, middlewares=[{"name": "hsts-header", "namespace": "traefik"}])
+    result = run(tmp_path, fixture({"demo": _with("ingressroutes", route)}))
+    flagged = [line for line in result.stdout.splitlines() if "on the internal domain" in line]
+    assert flagged == ([f"demo IngressRoute/bad: match {match} is on the internal domain"
+                        " without traefik/lan-tailscale-only or -strict"] if internal else [])
 
 
 def test_a_priority_without_a_granted_ceiling_is_reported(tmp_path):
@@ -832,11 +935,7 @@ def _script_list(name: str) -> list[str]:
 
 
 def _policy_variable(policy: str, variable: str) -> list[str]:
-    spec = next(
-        d["spec"] for d in yaml.safe_load_all(POLICY.read_text())
-        if isinstance(d, dict) and d.get("kind") == "ValidatingAdmissionPolicy"
-        and d["metadata"]["name"] == policy
-    )
+    spec = policy_spec(POLICY, "ValidatingAdmissionPolicy", policy)
     expression = next(v["expression"] for v in spec["variables"] if v["name"] == variable)
     return ast.literal_eval(" ".join(expression.split()))
 
@@ -848,6 +947,8 @@ def _policy_variable(policy: str, variable: str) -> list[str]:
         ("PLATFORM_REFS", "tenant-traefik-ingress-refs", "platformRefs"),
         ("PLATFORM_FORWARD_AUTH", "tenant-traefik-object-refs", "platformForwardAuth"),
         ("PLATFORM_ISSUERS", "tenant-certificates", "platformIssuers"),
+        ("INTERNAL_ALLOWLISTS", "tenant-traefik-route-refs", "internalAllowlists"),
+        ("INTERNAL_ALLOWLIST_REFS", "tenant-traefik-ingress-refs", "internalAllowlistRefs"),
     ],
 )
 def test_the_audit_allowlists_are_the_policies(constant, policy, variable):
@@ -859,11 +960,7 @@ def test_the_audit_volume_set_is_the_policies():
     """The pod-volumes policy carries its allowlist inline, one has() per source.
     The audit checks each volume's keys instead, so its list adds `name`; a
     Volume carries exactly one source, so the two refuse the same volumes."""
-    spec = next(
-        d["spec"] for d in yaml.safe_load_all(POLICY.read_text())
-        if isinstance(d, dict) and d.get("kind") == "ValidatingAdmissionPolicy"
-        and d["metadata"]["name"] == "tenant-pod-volumes"
-    )
+    spec = policy_spec(POLICY, "ValidatingAdmissionPolicy", "tenant-pod-volumes")
     expression = " ".join(spec["validations"][0]["expression"].split())
     body = re.fullmatch(r"variables\.volumes\.all\(v, (.*)\)", expression)
     assert body, expression
@@ -874,11 +971,7 @@ def test_the_audit_volume_set_is_the_policies():
 
 
 def test_the_audit_forward_auth_pattern_is_the_policies():
-    spec = next(
-        d["spec"] for d in yaml.safe_load_all(POLICY.read_text())
-        if isinstance(d, dict) and d.get("kind") == "ValidatingAdmissionPolicy"
-        and d["metadata"]["name"] == "tenant-traefik-object-refs"
-    )
+    spec = policy_spec(POLICY, "ValidatingAdmissionPolicy", "tenant-traefik-object-refs")
     expression = " ".join(next(
         v["expression"] for v in spec["variables"] if v["name"] == "ownServiceAddress"
     ).split())
@@ -886,3 +979,23 @@ def test_the_audit_forward_auth_pattern_is_the_policies():
     text = SCRIPT.read_text()
     assert f"OWN_SERVICE_HEAD='{head}'" in text
     assert f"OWN_SERVICE_TAIL='{tail}'" in text
+
+
+@pytest.mark.parametrize("policy", ["tenant-traefik-route-refs", "tenant-traefik-ingress-refs"])
+def test_the_audit_reads_the_internal_domain_the_policy_substitutes(policy):
+    """Both sides lowercase the substituted domain, so a mixed-case answer still matches."""
+    spec = policy_spec(POLICY, "ValidatingAdmissionPolicy", policy)
+    domain = next(v["expression"] for v in spec["variables"] if v["name"] == "internalDomain")
+    assert domain == "'${cluster_internal_domain}'.lowerAscii()"
+    assert "--arg d \"$(tr '[:upper:]' '[:lower:]' <<<\"$domain\")\"" in SCRIPT.read_text()
+    assert "cluster_internal_domain" in CLUSTER_CONFIG["data"]
+    assert "CLUSTER_CONFIG=cluster-config" in SCRIPT.read_text()
+
+
+def test_a_missing_internal_domain_is_an_error_not_a_pass(tmp_path):
+    """Without the domain the internal-route check would match nothing."""
+    data = fixture({"demo": CLEAN_APP})
+    data["objects"]["flux-system"]["configmaps"] = [grant()]
+    result = run(tmp_path, data)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "no cluster_internal_domain in flux-system/cluster-config" in result.stderr

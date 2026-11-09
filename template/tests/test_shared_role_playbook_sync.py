@@ -1,108 +1,57 @@
 """Hold the cross-cutting roles in step between site.yml and the stack playbooks.
 
-site.yml applies node_exporter_host and alloy_host in plays of their own, and
-each stack playbook re-applies them, so this asserts per host that the two agree.
+site.yml and each stack playbook apply node_exporter_host and alloy_host; this
+asserts per host that the two agree, parsing with check-deploy-host-coverage.py.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
-import yaml
-from conftest import REPO
+from conftest import REPO, load_script
+
+coverage = load_script("check-deploy-host-coverage.py")
 
 PLAYBOOKS = REPO / "ansible" / "playbooks"
-INVENTORY_HOSTS = REPO / "ansible" / "inventories" / "prod" / "hosts.yml"
 SITE = "site.yml"
 
 # The roles the "Shared with site.yml" comments mark. A third cross-cutting role
 # in site.yml belongs here and in every stack playbook it covers.
 SHARED_ROLES = frozenset({"node_exporter_host", "alloy_host"})
 MARKER = "Shared with site.yml"
-
-needs_ansible = pytest.mark.skipif(
-    not (PLAYBOOKS.is_dir() and INVENTORY_HOSTS.is_file()),
-    reason="no ansible/playbooks or inventory in this repository",
-)
+# A play whose only role is this one runs on the cert authority to re-seed the
+# playbook's own guests, so the authority is not one of the playbook's hosts.
+RESEED_ONLY = frozenset({"acme_certs"})
 
 
-def group_index(tree: dict) -> dict[str, set[str]]:
-    """group name -> every host under it, children resolved."""
-    direct: dict[str, set[str]] = {}
-    children: dict[str, set[str]] = {}
-
-    def walk(name: str, body) -> None:
-        body = body or {}
-        direct.setdefault(name, set()).update((body.get("hosts") or {}).keys())
-        kids = body.get("children") or {}
-        children.setdefault(name, set()).update(kids)
-        for kid, kid_body in kids.items():
-            walk(kid, kid_body)
-
-    for name, body in (tree or {}).items():
-        walk(name, body)
-
-    def resolve(name: str, seen: set[str]) -> set[str]:
-        if name in seen:
-            return set()
-        seen.add(name)
-        found = set(direct.get(name, ()))
-        for kid in children.get(name, ()):
-            found |= resolve(kid, seen)
-        return found
-
-    return {name: resolve(name, set()) for name in set(direct) | set(children)}
+def _shared(roles) -> set[str]:
+    return {role.rsplit(".", 1)[-1] for role in roles} & SHARED_ROLES
 
 
-def expand(pattern: str, groups: dict[str, set[str]]) -> set[str]:
-    """A `a:b:c` host pattern as a set of hosts. A token naming no group is a host.
-
-    `!group` tokens are dropped: the reachability ledger groups the deploy plays
-    exclude exist only at runtime, so no inventory host can be one.
-    """
-    hosts: set[str] = set()
-    for token in str(pattern).split(":"):
-        token = token.strip()
-        if token and not token.startswith("!"):
-            hosts |= groups.get(token, {token})
-    return hosts
-
-
-def _plays(playbook: str) -> list[dict]:
-    body = yaml.safe_load((PLAYBOOKS / playbook).read_text()) or []
-    return [play for play in body if isinstance(play, dict) and "hosts" in play]
-
-
-def _play_roles(play: dict) -> set[str]:
-    """The role names a play applies, bare of their collection prefix."""
-    names: set[str] = set()
-    for entry in play.get("roles") or []:
-        name = entry if isinstance(entry, str) else (entry or {}).get("role")
-        if isinstance(name, str):
-            names.add(name.rsplit(".", 1)[-1])
-    return names
-
-
-def shared_by_host(playbook: str, groups: dict[str, set[str]]) -> dict[str, set[str]]:
+def shared_by_host(playbook: str, groups: dict[str, set[str]], root: Path = REPO) -> dict[str, set[str]]:
     """host -> the SHARED_ROLES that playbook applies to it."""
     result: dict[str, set[str]] = {}
-    for play in _plays(playbook):
-        shared = _play_roles(play) & SHARED_ROLES
+    for play in coverage.parse_playbook(playbook, root):
+        shared = _shared(play["roles"])
         if not shared:
             continue
-        for host in expand(play["hosts"], groups):
+        for host in coverage.expand(play["hosts"], groups):
             result.setdefault(host, set()).update(shared)
     return result
 
 
-def mismatches(playbook: str, groups: dict[str, set[str]]) -> list[str]:
-    site = shared_by_host(SITE, groups)
-    applied = shared_by_host(playbook, groups)
+def mismatches(playbook: str, groups: dict[str, set[str]], root: Path = REPO) -> list[str]:
+    """Hosts the playbook configures whose shared roles differ from site.yml's.
+    Scope is the plays that apply a role themselves, the cert re-seed aside: a
+    play applying only acme_certs puts no host in scope."""
+    site = shared_by_host(SITE, groups, root)
+    applied = shared_by_host(playbook, groups, root)
     covered: set[str] = set()
-    for play in _plays(playbook):
-        # A tasks-only helper play configures no host with a role.
-        if not _play_roles(play):
+    for play in coverage.parse_playbook(playbook, root, follow_task_files=False):
+        if {role.rsplit(".", 1)[-1] for role in play["roles"]} <= RESEED_ONLY:
             continue
-        covered |= expand(play["hosts"], groups)
+        covered |= coverage.expand(play["hosts"], groups)
     return [
         f"{host}: {playbook} is missing {sorted(site.get(host, set()) - applied.get(host, set()))}, "
         f"declares unshared {sorted(applied.get(host, set()) - site.get(host, set()))}"
@@ -111,26 +60,28 @@ def mismatches(playbook: str, groups: dict[str, set[str]]) -> list[str]:
     ]
 
 
-@pytest.fixture(scope="module")
-def groups() -> dict[str, set[str]]:
-    index = group_index(yaml.safe_load(INVENTORY_HOSTS.read_text()) or {})
-    assert any(index.values()), f"{INVENTORY_HOSTS} resolved to no hosts"
-    return index
+def _playbook_files() -> list[Path]:
+    """Every playbook directly under ansible/playbooks/, either YAML suffix."""
+    return sorted(p for suffix in ("yml", "yaml") for p in PLAYBOOKS.glob(f"*.{suffix}"))
 
 
 def stack_playbooks() -> list[str]:
     """Playbooks, site.yml aside, whose plays apply a shared role."""
-    if not PLAYBOOKS.is_dir():
-        return []
     return sorted(
         path.name
-        for path in PLAYBOOKS.glob("*.yml")
+        for path in _playbook_files()
         if path.name != SITE
-        and any(_play_roles(play) & SHARED_ROLES for play in _plays(path.name))
+        and any(_shared(play["roles"]) for play in coverage.parse_playbook(path.name, REPO))
     )
 
 
-@needs_ansible
+@pytest.fixture(scope="module")
+def groups() -> dict[str, set[str]]:
+    index = coverage.build_inventory(REPO)
+    assert index.get("all"), "the inventory resolved to no hosts"
+    return index
+
+
 def test_some_stack_playbook_reapplies_a_shared_role():
     """Every comparison below is vacuously true with no such playbook."""
     assert stack_playbooks(), (
@@ -139,7 +90,6 @@ def test_some_stack_playbook_reapplies_a_shared_role():
     )
 
 
-@needs_ansible
 @pytest.mark.parametrize("playbook", stack_playbooks())
 def test_stack_playbook_matches_site_yml(playbook, groups):
     problems = mismatches(playbook, groups)
@@ -152,13 +102,12 @@ def test_stack_playbook_matches_site_yml(playbook, groups):
     )
 
 
-@needs_ansible
 def test_every_marked_playbook_applies_a_shared_role():
     """The marker comment is the signpost; a playbook keeping it after losing the
     role it marks sends the next reader to a play that no longer exists."""
     marked = {
         path.name
-        for path in PLAYBOOKS.glob("*.yml")
+        for path in _playbook_files()
         if path.name != SITE and MARKER in path.read_text(encoding="utf-8")
     }
     stale = sorted(marked - set(stack_playbooks()))
@@ -168,50 +117,64 @@ def test_every_marked_playbook_applies_a_shared_role():
     )
 
 
-@needs_ansible
 def test_the_comparison_fails_when_a_shared_role_is_dropped(groups):
     """Mutation case: a comparison of two empty sets would pass on every playbook."""
-    playbook = stack_playbooks()[0]
-    applied = shared_by_host(playbook, groups)
+    playbooks = stack_playbooks()
+    assert playbooks, "no stack playbook to mutate"
+    applied = shared_by_host(playbooks[0], groups)
     site = shared_by_host(SITE, groups)
-    assert applied, f"{playbook} declares no shared role — the parser stopped matching"
+    assert applied, f"{playbooks[0]} declares no shared role — the parser stopped matching"
     dropped = {host: roles - {"alloy_host"} for host, roles in applied.items()}
     assert [host for host in dropped if site.get(host, set()) != dropped[host]], (
-        f"dropping alloy_host from {playbook} produced no mismatch — the comparison "
+        f"dropping alloy_host from {playbooks[0]} produced no mismatch — the comparison "
         "is not actually comparing role sets"
     )
 
 
-def test_a_role_less_side_play_does_not_widen_coverage(monkeypatch):
-    """A tasks-only play (mail.yml re-seeds the cert key on the DNS primary) must
-    not put its host in scope, while a host the playbook does configure still is.
-    """
-    index = group_index({"all": {"hosts": {"h1": None, "h2": None}}})
-    plays = {
-        SITE: [{"hosts": "h1:h2", "roles": ["weisssrv.infra.alloy_host"]}],
-        "side.yml": [
-            {"hosts": "h1", "roles": ["weisssrv.infra.alloy_host"]},
-            {"hosts": "h2", "tasks": []},
-        ],
-        "bare.yml": [{"hosts": "h1", "roles": ["weisssrv.infra.base"]}],
-    }
-    monkeypatch.setitem(globals(), "_plays", lambda name: plays[name])
-    assert mismatches("side.yml", index) == []
-    assert len(mismatches("bare.yml", index)) == 1
+def _fixture_repo(root: Path, playbooks: dict[str, str]) -> dict[str, set[str]]:
+    inventory = root / coverage.HOSTS_YML
+    inventory.parent.mkdir(parents=True)
+    inventory.write_text("all:\n  hosts:\n    h1:\n    h2:\n")
+    book_dir = root / "ansible" / "playbooks"
+    book_dir.mkdir(parents=True)
+    for name, body in playbooks.items():
+        (book_dir / name).write_text(body)
+    return coverage.build_inventory(root)
 
 
-def test_the_pattern_expander_unions_groups_and_hosts():
-    """`a:b` is a union, and a token naming no group is a host name."""
-    index = group_index(
+def test_a_role_less_side_play_does_not_widen_coverage(tmp_path):
+    """A tasks-only play must not put its host in scope, while a host the
+    playbook configures with a role still is."""
+    index = _fixture_repo(
+        tmp_path,
         {
-            "all": {
-                "children": {
-                    "parent": {"children": {"child": {"hosts": {"h1": None}}}},
-                    "other": {"hosts": {"h2": None}},
-                }
-            }
-        }
+            SITE: "- hosts: h1:h2\n  roles: [weisssrv.infra.alloy_host]\n",
+            "side.yml": (
+                "- hosts: h1\n  roles: [weisssrv.infra.alloy_host]\n"
+                "- hosts: h2\n  tasks: []\n"
+            ),
+            "bare.yml": "- hosts: h1\n  roles: [weisssrv.infra.base]\n",
+        },
     )
-    assert index["parent"] == {"h1"}
-    assert expand("parent:other", index) == {"h1", "h2"}
-    assert expand("parent:h3", index) == {"h1", "h3"}
+    assert mismatches("side.yml", index, tmp_path) == []
+    assert len(mismatches("bare.yml", index, tmp_path)) == 1
+
+
+def test_a_reseed_play_does_not_make_the_authority_a_host(tmp_path):
+    """The re-seed shape: a play on another host applying only acme_certs puts
+    no host in scope, while any other role still does."""
+    reseed = (
+        "  tasks:\n    - ansible.builtin.include_role:\n"
+        "        name: weisssrv.infra.acme_certs\n        tasks_from: reseed\n"
+    )
+    index = _fixture_repo(
+        tmp_path,
+        {
+            SITE: "- hosts: h1:h2\n  roles: [weisssrv.infra.alloy_host]\n",
+            "side.yml": "- hosts: h1\n  roles: [weisssrv.infra.alloy_host]\n- hosts: h2\n" + reseed,
+            "wide.yml": "- hosts: h1\n  roles: [weisssrv.infra.alloy_host]\n- hosts: h2\n"
+            + reseed.replace("acme_certs", "base"),
+        },
+    )
+    assert mismatches("side.yml", index, tmp_path) == []
+    assert len(mismatches("wide.yml", index, tmp_path)) == 1

@@ -1,6 +1,6 @@
 # Site data: the apex, the issuance policy and the mail policy. Service names
-# belong to external-dns. Each map key is the record's state address and the
-# per-record flags pick the resource; see README.md, Record map keys.
+# belong to external-dns. Each map key is a state address and the per-record
+# flags pick the resource: README.md, Record map keys and destroy protection.
 locals {
   dns_records = {
     # Protected: deleting it is a full outage. The DDNS CronJob owns the
@@ -72,7 +72,7 @@ locals {
 
     # Mail policy for a domain that sends no mail: hard fail, and protected
     # because silently dropping a `p=reject` record is a security regression.
-    # Pointing a real sender at this zone: README.md, Destroy protection.
+    # Pointing a real sender at this zone, or an off-zone rua: README.md, Mail policy.
     spf = {
       name      = "@"
       type      = "TXT"
@@ -80,9 +80,6 @@ locals {
       comment   = "No host sends mail as this domain"
       protected = true
     }
-    # An rua address outside this zone needs <external_domain>._report._dmarc
-    # TXT "v=DMARC1" in the RUA domain (RFC 7489) before reporters will send;
-    # drop rua if you do not control that domain.
     dmarc = {
       name      = "_dmarc"
       type      = "TXT"

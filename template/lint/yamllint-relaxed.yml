@@ -1,10 +1,10 @@
 ---
-# yamllint's `relaxed` (comment rules off, line-length and most style rules at
-# warning level) with line-length off outright, document-start back on as a
-# warning, and the rules ansible-lint's yaml rule requires. See lint/README.md.
+# The shared yamllint profile: yamllint's `relaxed` with line-length
+# off, document-start back on as a warning, and the comments and octal-values
+# settings ansible-lint requires of a yamllint config it loads.
 
-# CRITICAL: never vendor this as a repo-root `.yamllint`. ansible-lint discovers
-# one there and merges it over its own yaml[*] rules.
+# Keep it off a repo-root `.yamllint`: ansible-lint discovers one there and
+# merges it over its own yaml[*] rules. Every caller passes `-c <path>`.
 extends: relaxed
 
 rules:

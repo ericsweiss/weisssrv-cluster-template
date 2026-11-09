@@ -7,9 +7,9 @@
 # Run `task flux:sync-versions` to regenerate. CI fails if out of sync.
 apiVersion: v1
 data:
-  adguard_home_version: 0.107.79
-  adguard_sync_version: 0.9.5
-  alloy_host_version: 1.21.2-1
+  adguard_home_version: 0.107.80
+  adguard_sync_version: 0.9.6
+  alloy_host_version: 1.21.3-1
   authentik_version: 2026.8.5
   busybox_version: '1.38'
 {%- if vpn_tailscale %}
@@ -17,35 +17,38 @@ data:
 {%- endif %}
   flux_version: 2.9.6
 {%- if git_backend == 'gitlab_selfhosted' %}
-  gitlab_runner_helm_version: 0.94.1
+  gitlab_runner_helm_version: 0.94.3
 {%- endif %}
-  helm_chart_versions_alloy: 1.14.3
+  helm_chart_versions_alloy: 1.15.0
   helm_chart_versions_cert_manager: v1.21.3
 {%- if postgres_operator %}
   helm_chart_versions_cloudnative_pg: 0.29.1
 {%- endif %}
   helm_chart_versions_external_dns: 1.23.0
   helm_chart_versions_external_secrets: 2.14.0
-  helm_chart_versions_kube_prometheus_stack: 92.14.1
+  helm_chart_versions_kube_prometheus_stack: 93.1.0
   helm_chart_versions_kured: 6.1.0
-  helm_chart_versions_loki: 20.0.2
+  helm_chart_versions_loki: 21.0.0
   helm_chart_versions_metallb: 0.15.3
+  helm_chart_versions_metrics_server: 3.14.0
 {%- if gpu == 'nvidia' %}
   helm_chart_versions_nvidia_device_plugin: 0.20.1
 {%- endif %}
+{%- if secrets_backend == 'onepassword' %}
   helm_chart_versions_onepassword_connect: 2.4.3
+{%- endif %}
 {%- if postgres_operator %}
   helm_chart_versions_plugin_barman_cloud: 0.8.1
 {%- endif %}
-  helm_chart_versions_prometheus_blackbox_exporter: 11.20.2
-  helm_chart_versions_prometheus_operator_crds: 32.0.2
+  helm_chart_versions_prometheus_blackbox_exporter: 11.21.1
+  helm_chart_versions_prometheus_operator_crds: 33.0.1
   helm_chart_versions_reloader: 2.2.19
 {%- if vpn_tailscale %}
-  helm_chart_versions_tailscale_operator: 1.104.2
+  helm_chart_versions_tailscale_operator: 1.104.4
 {%- endif %}
-  helm_chart_versions_traefik: 42.1.3
-  helm_chart_versions_vpa: 5.1.0
-  k3s_version: v1.37.1+k3s1
+  helm_chart_versions_traefik: 42.3.1
+  helm_chart_versions_vpa: 5.2.0
+  k3s_version: v1.37.2+k3s1
 {%- if tenant_storage %}
   local_path_provisioner_version: v0.0.37
 {%- endif %}
@@ -57,7 +60,7 @@ data:
   postgresql_version: 18.6-trixie
   registry_cache_version: 3.1.2
 {%- if vpn_tailscale %}
-  tailscale_version: 1.104.4
+  tailscale_version: 1.104.5
 {%- endif %}
 kind: ConfigMap
 metadata:

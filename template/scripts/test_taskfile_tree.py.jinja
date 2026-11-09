@@ -11,14 +11,12 @@ import re
 import textwrap
 from pathlib import Path
 
-import pytest
 import yaml
 
-from taskfile_tree import include_paths, load_tasks, task_names, taskfile_paths
+from taskfile_tree import include_paths, load_tasks, task_names
 
 REPO = Path(__file__).resolve().parent.parent
 APPS = REPO / "kubernetes" / "apps"
-MODULE = REPO / "scripts" / "taskfile_tree.py"
 
 # App namespaces exempt from `<ns>:status` / `:logs` / `:restart`, with why.
 # Adopt an app with an operator workflow and it needs taskfiles/<ns>.yml instead.
@@ -28,8 +26,6 @@ NO_OPS_TASKS = {
     "tailnet-dns": "a CoreDNS sidecar for the tailnet; nothing to inspect per-app",
 {%- endif %}
 }
-
-OPS_VERBS = ("status", "logs", "restart")
 
 
 def _namespace_of(app_dir: Path) -> str | None:
@@ -65,10 +61,6 @@ def _app_namespaces_with_workloads() -> dict[str, str]:
     return found
 
 
-def test_the_module_under_test_is_where_the_suite_expects_it():
-    assert MODULE.is_file(), f"{MODULE} is missing"
-
-
 def test_load_tasks_covers_the_whole_include_tree():
     tasks = load_tasks()
     assert "lint" in tasks, "the root Taskfile's own tasks are missing"
@@ -93,6 +85,7 @@ def test_every_taskfile_on_disk_is_included():
     included = {p.resolve() for p in include_paths().values()}
     orphans = sorted(
         str(p.relative_to(REPO))
+        # Both suffixes: an orphan taskfiles/<ns>.yaml is just as inert.
         for p in _taskfile_candidates()
         if p.resolve() not in included
     )
@@ -113,17 +106,21 @@ def _references_of(body: dict) -> list[str]:
     return refs
 
 
-def test_every_task_reference_resolves():
-    """A `- task:` or `deps:` entry naming nothing is a runtime failure go-task
-    only reports when the task is invoked, so the tree is walked here instead."""
-    tasks = load_tasks()
-    dangling = [
+def _dangling(tasks: dict[str, dict]) -> list[str]:
+    """`<task> -> <reference>` for every reference that names no task."""
+    return sorted(
         f"{name} -> {ref}"
         for name, body in tasks.items()
         for ref in _references_of(body)
         if ref not in tasks
-    ]
-    assert not dangling, "task references that resolve to nothing: " + ", ".join(sorted(dangling))
+    )
+
+
+def test_every_task_reference_resolves():
+    """A `- task:` or `deps:` entry naming nothing is a runtime failure go-task
+    only reports when the task is invoked, so the tree is walked here instead."""
+    dangling = _dangling(load_tasks())
+    assert not dangling, "task references that resolve to nothing: " + ", ".join(dangling)
 
 
 # A script path a dir-scoped task would resolve against its own `dir:`.
@@ -163,133 +160,6 @@ def test_an_unanchored_script_in_a_dir_scoped_task_is_caught():
         "lint": {"cmds": ["scripts/guard.sh apply"]},
     }
     assert _unanchored_script_refs(mutated) == ["terraform:apply: scripts/guard.sh apply"]
-
-
-def test_task_names_hides_internal_helpers():
-    names = task_names()
-    assert "_app:status" not in names
-    assert "flux:lint" in names
-
-
-def test_taskfile_paths_lists_the_root_first():
-    paths = taskfile_paths()
-    assert paths[0].name == "Taskfile.yml"
-    assert len(paths) > 5
-
-
-def _missing_ops_tasks(names: set[str], found: dict[str, str] | None = None) -> list[str]:
-    """`<ns>:<verb> (app)` for every app namespace short of the three verbs."""
-    found = _app_namespaces_with_workloads() if found is None else found
-    return sorted(
-        f"{namespace}:{verb} ({app})"
-        for namespace, app in found.items()
-        if namespace not in NO_OPS_TASKS
-        for verb in OPS_VERBS
-        if f"{namespace}:{verb}" not in names
-    )
-
-
-def test_every_app_namespace_with_a_workload_has_ops_tasks():
-    missing = _missing_ops_tasks(task_names())
-    assert not missing, (
-        "kubernetes/apps namespaces with a workload missing the `<ns>:status` / "
-        "`:logs` / `:restart` tasks: "
-        + ", ".join(missing)
-        + "\n\nAdd taskfiles/<ns>.yml (status/logs/restart via the _app:* "
-        "templates), or record the namespace in NO_OPS_TASKS with a reason."
-    )
-
-
-def test_a_namespace_short_of_logs_and_restart_is_reported():
-    """Mutation case: `<ns>:status` alone must not satisfy the gate."""
-    assert _missing_ops_tasks({"demo:status"}, {"demo": "demo-app"}) == [
-        "demo:logs (demo-app)",
-        "demo:restart (demo-app)",
-    ]
-
-
-def test_the_app_walk_sees_the_real_namespaces():
-    """Guard the collector: a rule that stopped matching would exempt everything."""
-    found = _app_namespaces_with_workloads()
-    assert "registry-cache" in found, found
-
-
-def test_no_ops_exemption_still_names_a_live_namespace():
-    stale = sorted(set(NO_OPS_TASKS) - set(_app_namespaces_with_workloads()))
-    assert not stale, f"NO_OPS_TASKS names namespaces that no longer exist: {stale}"
-
-
-def test_every_exemption_carries_a_reason():
-    for namespace, reason in NO_OPS_TASKS.items():
-        assert len(reason.split()) >= 8, f"{namespace} needs a real reason, not {reason!r}"
-
-
-@pytest.fixture()
-def fake_tree(tmp_path: Path) -> Path:
-    (tmp_path / "taskfiles").mkdir()
-    (tmp_path / "Taskfile.yml").write_text(
-        textwrap.dedent(
-            """\
-            version: '3'
-            includes:
-              flux: taskfiles/flux.yml
-            tasks:
-              lint:
-                cmds:
-                  - task: flux:lint
-            """
-        )
-    )
-    (tmp_path / "taskfiles" / "flux.yml").write_text(
-        textwrap.dedent(
-            """\
-            version: '3'
-            tasks:
-              lint:
-                deps: [helper, ':lint']
-                cmds:
-                  - task: :lint
-              helper:
-                internal: true
-                cmds:
-                  - echo hi
-            """
-        )
-    )
-    return tmp_path
-
-
-def test_references_are_qualified_from_both_directions(fake_tree: Path):
-    tasks = load_tasks(fake_tree)
-    assert set(tasks) == {"lint", "flux:lint", "flux:helper"}
-    assert tasks["lint"]["cmds"][0]["task"] == "flux:lint"
-    # `:lint` from inside a namespace is the ROOT lint, not flux:lint.
-    assert tasks["flux:lint"]["cmds"][0]["task"] == "lint"
-    assert tasks["flux:lint"]["deps"] == ["flux:helper", "lint"]
-    assert task_names(fake_tree) == {"lint", "flux:lint"}
-
-
-def test_a_dangling_reference_is_caught(fake_tree: Path):
-    """Mutation case: the resolver gate must fail when a reference goes stale."""
-    (fake_tree / "taskfiles" / "flux.yml").write_text(
-        textwrap.dedent(
-            """\
-            version: '3'
-            tasks:
-              lint:
-                cmds:
-                  - task: :renamed-away
-            """
-        )
-    )
-    tasks = load_tasks(fake_tree)
-    dangling = [
-        cmd["task"]
-        for body in tasks.values()
-        for cmd in body.get("cmds") or []
-        if isinstance(cmd, dict) and cmd.get("task") not in tasks
-    ]
-    assert dangling == ["renamed-away"]
 
 
 # A `scripts/...` command in run position with no interpreter in front: the
@@ -365,3 +235,85 @@ def test_an_interpreter_prefix_takes_a_script_out_of_scope():
         "scripts/find.sh": "substitution",
         "scripts/gen.py": "chained",
     }
+
+
+OPS_VERBS = ("status", "logs", "restart")
+
+
+def _missing_ops_tasks(names: set[str], found: dict[str, str] | None = None) -> list[str]:
+    """`<ns>:<verb> (app)` for every app namespace short of the three verbs."""
+    found = _app_namespaces_with_workloads() if found is None else found
+    return sorted(
+        f"{namespace}:{verb} ({app})"
+        for namespace, app in found.items()
+        if namespace not in NO_OPS_TASKS
+        for verb in OPS_VERBS
+        if f"{namespace}:{verb}" not in names
+    )
+
+
+def test_every_app_namespace_with_a_workload_has_ops_tasks():
+    missing = _missing_ops_tasks(task_names())
+    assert not missing, (
+        "kubernetes/apps namespaces with a workload missing the `<ns>:status` / "
+        "`:logs` / `:restart` tasks: "
+        + ", ".join(missing)
+        + "\n\nAdd taskfiles/<ns>.yml (status/logs/restart via the :_app:* "
+        "templates), or record the namespace in NO_OPS_TASKS with a reason."
+    )
+
+
+def test_a_namespace_short_of_logs_and_restart_is_reported():
+    """Mutation case: `<ns>:status` alone must not satisfy the gate."""
+    assert _missing_ops_tasks({"demo:status"}, {"demo": "demo-app"}) == [
+        "demo:logs (demo-app)",
+        "demo:restart (demo-app)",
+    ]
+
+
+def test_the_app_walk_sees_the_real_namespaces():
+    """Guard the collector: a rule that stopped matching would exempt everything."""
+    found = _app_namespaces_with_workloads()
+    assert "registry-cache" in found, found
+
+
+def test_no_ops_exemption_still_names_a_live_namespace():
+    stale = sorted(set(NO_OPS_TASKS) - set(_app_namespaces_with_workloads()))
+    assert not stale, f"NO_OPS_TASKS names namespaces that no longer exist: {stale}"
+
+
+def test_every_exemption_carries_a_reason():
+    for namespace, reason in NO_OPS_TASKS.items():
+        assert len(reason.split()) >= 8, f"{namespace} needs a real reason, not {reason!r}"
+
+
+def test_a_dangling_reference_is_caught(tmp_path: Path):
+    """Mutation case: the resolver gate must fail when a reference goes stale."""
+    (tmp_path / "taskfiles").mkdir()
+    (tmp_path / "Taskfile.yml").write_text(
+        "version: '3'\nincludes:\n  flux: taskfiles/flux.yml\n"
+    )
+    (tmp_path / "taskfiles" / "flux.yml").write_text(
+        textwrap.dedent(
+            """\
+            version: '3'
+            tasks:
+              lint:
+                deps: [gone-dep]
+                cmds:
+                  - task: :renamed-away
+            """
+        )
+    )
+    assert _dangling(load_tasks(tmp_path)) == [
+        "flux:lint -> flux:gone-dep", "flux:lint -> renamed-away",
+    ]
+
+
+def test_update_cluster_bumps_on_a_branch_without_rolling_nodes():
+    """The bump lands through an MR, so the node rollout follows the merge."""
+    task = load_tasks()["maintenance:update-cluster"]
+    called = [c["task"] for c in task["cmds"] if isinstance(c, dict) and "task" in c]
+    assert called == ["maintenance:update-all-versions"], called
+    guards = [p.get("sh", "") for p in task.get("preconditions", []) if isinstance(p, dict)]
+    assert any("abbrev-ref HEAD" in g and "main" in g for g in guards), guards

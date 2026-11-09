@@ -8,34 +8,28 @@ from __future__ import annotations
 
 import functools
 import re
-import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
-from conftest import CONFIGMAP_INVENTORY_MIRROR, LOCAL_CHECKOUT, REPO, _lib_root, load_script
+from conftest import (
+    CONFIGMAP_INVENTORY_MIRROR,
+    LIB_CHECKOUT,
+    REPO,
+    REQUIREMENTS,
+    disk_role_defaults,
+    lib_git,
+    load_script,
+    pinned_source,
+    role_defaults,
+)
 
 INVENTORY = REPO / "ansible" / "inventories" / "prod"
-REQUIREMENTS = REPO / "ansible" / "requirements.yml"
 CLUSTER_CONFIG = REPO / "kubernetes/infrastructure/sources/cluster-config.yaml"
+ROLES_RELPATH = f"{load_script('check-role-default-flips.py').COLLECTION}/roles"
 # Both guest-provisioning roles default to /24; only the inventory knows better.
 PREFIX_VARS = ("proxmox_lxc_netmask_bits", "proxmox_vm_cloudinit_prefix_len")
 
-
-def _lib_checkout() -> Path:
-    """The library checkout, resolved as the vendored-copy gate resolves it.
-
-    A second copy of that resolution drifts from it. The absence of a checkout
-    is a skip below: an installed collection answers the same question.
-    """
-    try:
-        return _lib_root()
-    except AssertionError:
-        return REPO / LOCAL_CHECKOUT
-
-
-LIB_CHECKOUT = _lib_checkout()
-_ROLES_RELPATH = "ansible_collections/weisssrv/infra/roles"
 
 # Variables rendered straight from a copier answer. The inventory spells them
 # out because the answer chooses them, so equalling the role default is a
@@ -56,6 +50,12 @@ _REQUIRED_BY_OPT_IN_GATE = {
     "vfio_passthrough_enabled",
 }
 
+# Boot-ordering knobs the setup guide sends the operator to the inventory for.
+# The declaration is where the operator finds the knob, so it stays.
+_DOCUMENTED_IN_SETUP = {
+    "nas_storage_encrypted_bind_sources",
+}
+
 # (inventory file relative to ansible/inventories/prod, variable) pairs where the
 # starter inventory restates the role default. Debt, not configuration: delete the
 # inventory line and the entry together.
@@ -71,8 +71,6 @@ ACKNOWLEDGED: set[tuple[str, str]] = {
     ("group_vars/dns.yml", "adguard_home_install_path"),
     ("group_vars/dns.yml", "adguard_home_protection_enabled"),
     ("group_vars/dns.yml", "adguard_home_tls_enabled"),
-    ("group_vars/dns.yml", "adguard_home_user_rules"),
-    ("group_vars/dns.yml", "adguard_sync_features"),
     ("group_vars/dns.yml", "unbound_port"),
     ("group_vars/k3s.yml", "k3s_etcd_snapshot_nfs_export"),
     ("group_vars/k3s.yml", "k3s_flannel_backend"),
@@ -112,99 +110,6 @@ def _load(name: str):
     return load_script(name)
 
 
-def pinned_collection_version() -> str:
-    """The weisssrv.infra version ansible/requirements.yml installs."""
-    requirements = yaml.safe_load(REQUIREMENTS.read_text()) or {}
-    for entry in requirements.get("collections") or []:
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("name", ""))
-        if "weisssrv-lib" in name or name.endswith("weisssrv/infra") or name == "weisssrv.infra":
-            return str(entry.get("version", "")).lstrip("v")
-    raise AssertionError("ansible/requirements.yml no longer pins weisssrv.infra")
-
-
-def _git(lib: Path, *args: str) -> tuple[int, str]:
-    result = subprocess.run(["git", "-C", str(lib), *args], capture_output=True, text=True)
-    return result.returncode, result.stdout
-
-
-def _defaults_from_disk(roles: Path) -> dict[str, list[tuple[str, object]]]:
-    found: dict[str, list[tuple[str, object]]] = {}
-    for role in sorted(roles.iterdir()):
-        path = role / "defaults" / "main.yml"
-        if not path.is_file():
-            continue
-        for key, value in (yaml.safe_load(path.read_text()) or {}).items():
-            found.setdefault(key, []).append((role.name, value))
-    assert found, f"parsed no role defaults out of {roles}"
-    return found
-
-
-@functools.lru_cache(maxsize=1)
-def pinned_source() -> tuple[str, str]:
-    """Where the pinned collection is readable: ('disk', roles path) or ('git', tag).
-
-    An installed copy at that exact version wins; otherwise the library checkout
-    is read at the matching tag.
-    """
-    pinned = pinned_collection_version()
-    for candidate in (
-        # The three places this repo's own installs land: ansible-lint's
-        # auto-install, a root-relative galaxy install, then the galaxy default
-        # that `task ansible:install-collections` writes to.
-        REPO / ".ansible-home/collections/ansible_collections/weisssrv/infra",
-        REPO / "ansible_collections/weisssrv/infra",
-        Path.home() / ".ansible/collections/ansible_collections/weisssrv/infra",
-    ):
-        manifest = candidate / "MANIFEST.json"
-        if not manifest.is_file():
-            continue
-        match = re.search(r'"version"\s*:\s*"([^"]+)"', manifest.read_text())
-        if match and match.group(1) == pinned and (candidate / "roles").is_dir():
-            return "disk", str(candidate / "roles")
-
-    ref = pinned if pinned.startswith("v") else f"v{pinned}"
-    if not (LIB_CHECKOUT / ".git").exists():
-        pytest.skip(
-            f"no weisssrv.infra {pinned} installed and no library checkout at "
-            f"{LIB_CHECKOUT} — run `task ansible:install-collections`, or "
-            "`task lib:sync`, or set $WEISSSRV_LIB_PATH"
-        )
-    code, _ = _git(LIB_CHECKOUT, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
-    assert code == 0, (
-        f"{LIB_CHECKOUT} has no {ref} — fetch its tags, or install the collection "
-        "with `ansible-galaxy install -r ansible/requirements.yml --force`"
-    )
-    return "git", ref
-
-
-def _defaults_from_git(ref: str) -> dict[str, list[tuple[str, object]]]:
-    code, listing = _git(LIB_CHECKOUT, "ls-tree", "-r", "--name-only", f"{ref}:{_ROLES_RELPATH}")
-    assert code == 0, f"could not list the roles of {ref} in {LIB_CHECKOUT}"
-
-    found: dict[str, list[tuple[str, object]]] = {}
-    for relpath in listing.split():
-        if not relpath.endswith("defaults/main.yml"):
-            continue
-        role = relpath.split("/", 1)[0]
-        code, blob = _git(LIB_CHECKOUT, "show", f"{ref}:{_ROLES_RELPATH}/{relpath}")
-        if code != 0:
-            continue
-        for key, value in (yaml.safe_load(blob) or {}).items():
-            found.setdefault(key, []).append((role, value))
-    assert found, f"parsed no role defaults out of {ref}"
-    return found
-
-
-def role_defaults() -> dict[str, list[tuple[str, object]]]:
-    """{variable: [(role, default), ...]} for the pinned collection."""
-    kind, source = pinned_source()
-    if kind == "disk":
-        return _defaults_from_disk(Path(source))
-    return _defaults_from_git(source)
-
-
 @functools.lru_cache(maxsize=1)
 def role_names() -> tuple[str, ...]:
     """The pinned collection's role directory names, longest first so the most
@@ -213,7 +118,7 @@ def role_names() -> tuple[str, ...]:
     if kind == "disk":
         names = [path.name for path in Path(source).iterdir() if path.is_dir()]
     else:
-        code, listing = _git(LIB_CHECKOUT, "ls-tree", "--name-only", f"{source}:{_ROLES_RELPATH}")
+        code, listing = lib_git("ls-tree", "--name-only", f"{source}:{ROLES_RELPATH}")
         assert code == 0, f"could not list the roles of {source} in {LIB_CHECKOUT}"
         names = [line.rstrip("/") for line in listing.split()]
     assert names, "the pinned collection lists no roles"
@@ -244,22 +149,28 @@ def collection_mentions(candidates: set[str]) -> set[str]:
     if kind == "disk":
         return mentioned_in(candidates, Path(source))
     alternation = "|".join(sorted(map(re.escape, candidates)))
-    code, out = _git(
-        LIB_CHECKOUT, "grep", "-h", "-o", "-w", "-E", alternation, source, "--", _ROLES_RELPATH
-    )
+    code, out = lib_git("grep", "-h", "-o", "-w", "-E", alternation, source, "--", ROLES_RELPATH)
     assert code in (0, 1), f"git grep failed against {source} in {LIB_CHECKOUT}"
     return {token for token in re.findall(r"[A-Za-z0-9_]+", out) if token in candidates}
+
+
+def _inventory_files(inventory: Path) -> list[Path]:
+    """Every vars file in the inventory, both YAML suffixes. The emptiness
+    assert is a floor: a moved tree would otherwise make every check pass."""
+    paths = sorted(
+        path
+        for sub in ("group_vars", "host_vars")
+        for suffix in ("*.yml", "*.yaml")
+        for path in (inventory / sub).rglob(suffix)
+    )
+    assert paths, f"no vars files under {inventory}/group_vars or host_vars"
+    return paths
 
 
 def role_prefixed_keys(inventory: Path, names: tuple[str, ...]) -> list[tuple[str, str]]:
     """(file, variable) for every inventory key that starts with `<role>_`."""
     found: list[tuple[str, str]] = []
-    for path in sorted(
-        [
-            *(inventory / "group_vars").rglob("*.yml"),
-            *(inventory / "host_vars").rglob("*.yml"),
-        ]
-    ):
+    for path in _inventory_files(inventory):
         site = yaml.safe_load(path.read_text()) or {}
         if not isinstance(site, dict):
             continue
@@ -280,18 +191,13 @@ def derived_exemptions() -> set[str]:
         if service.get("checksum_var"):
             tracked.add(service["checksum_var"])
     mirrors = {var_name for _file, var_name in CONFIGMAP_INVENTORY_MIRROR.values()}
-    return tracked | mirrors | _ANSWER_DRIVEN | _REQUIRED_BY_OPT_IN_GATE
+    return tracked | mirrors | _ANSWER_DRIVEN | _REQUIRED_BY_OPT_IN_GATE | _DOCUMENTED_IN_SETUP
 
 
 def restatements(inventory: Path, defaults, exempt: set[str]) -> list[tuple[str, str, str]]:
     """(file, variable, role) for every inventory value equal to a role default."""
     found = []
-    for path in sorted(
-        [
-            *(inventory / "group_vars").rglob("*.yml"),
-            *(inventory / "host_vars").rglob("*.yml"),
-        ]
-    ):
+    for path in _inventory_files(inventory):
         site = yaml.safe_load(path.read_text()) or {}
         if not isinstance(site, dict):
             continue
@@ -323,9 +229,7 @@ def test_no_new_variable_restates_its_role_default(found):
 def _declared(inventory: Path) -> set[tuple[str, str]]:
     """(file, variable) for everything the inventory actually declares."""
     declared = set()
-    for path in sorted(
-        [*(inventory / "group_vars").rglob("*.yml"), *(inventory / "host_vars").rglob("*.yml")]
-    ):
+    for path in _inventory_files(inventory):
         site = yaml.safe_load(path.read_text()) or {}
         if isinstance(site, dict):
             rel = str(path.relative_to(inventory))
@@ -357,6 +261,22 @@ def test_the_collector_reports_a_restatement(tmp_path):
         ("group_vars/all.yml", "demo_port", "demo")
     ]
     assert restatements(inventory, defaults, {"demo_port"}) == []
+
+
+def test_a_yaml_suffixed_vars_file_is_read(tmp_path):
+    """Mutation case: a `.yaml` vars file is inventory too."""
+    inventory = tmp_path / "inv"
+    (inventory / "host_vars").mkdir(parents=True)
+    (inventory / "host_vars" / "node.yaml").write_text("demo_port: 8080\n")
+    defaults = {"demo_port": [("demo", 8080)]}
+    assert restatements(inventory, defaults, set()) == [
+        ("host_vars/node.yaml", "demo_port", "demo")
+    ]
+
+
+def test_an_inventory_with_no_vars_files_is_vacuous(tmp_path):
+    with pytest.raises(AssertionError, match="no vars files"):
+        restatements(tmp_path, {}, set())
 
 
 def lan_prefix_length() -> int:
@@ -423,3 +343,39 @@ def test_a_misspelled_role_variable_is_unknown(tmp_path):
     (roles / "main.yml").write_text("- debug: var=demo_port\n")
     known = mentioned_in({key for _file, key in found}, tmp_path / "roles")
     assert known == {"demo_port"}
+
+
+def test_a_split_defaults_directory_wins_over_main_yml(tmp_path):
+    """Ansible reads defaults/main/ before main.yml, and main.yml before
+    main.yaml, so a role that splits its defaults is still in the corpus."""
+    roles = tmp_path / "roles"
+    (roles / "split" / "defaults" / "main").mkdir(parents=True)
+    (roles / "split" / "defaults" / "main" / "a.yml").write_text("split_port: 1\n")
+    (roles / "split" / "defaults" / "main" / "b.yaml").write_text("split_port: 2\n")
+    (roles / "split" / "defaults" / "main.yml").write_text("split_ignored: 1\n")
+    (roles / "both" / "defaults").mkdir(parents=True)
+    (roles / "both" / "defaults" / "main.yml").write_text("both_port: yml\n")
+    (roles / "both" / "defaults" / "main.yaml").write_text("both_port: yaml\n")
+    (roles / "bare" / "tasks").mkdir(parents=True)
+    assert disk_role_defaults(roles) == {
+        "both_port": [("both", "yml")],
+        "split_port": [("split", 2)],
+    }
+
+
+@pytest.mark.parametrize("ci, outcome", [("1", pytest.fail.Exception), ("", pytest.skip.Exception)])
+def test_a_missing_collection_fails_under_ci_and_skips_locally(tmp_path, monkeypatch, ci, outcome):
+    """With no installed collection and no checkout, the role-defaults gates would
+    pass empty; CI must red rather than skip."""
+    import conftest
+
+    monkeypatch.setenv("CI", ci)
+    monkeypatch.setattr(conftest, "REPO", tmp_path / "repo")
+    monkeypatch.setattr(conftest, "LIB_CHECKOUT", tmp_path / "no-checkout")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    conftest.pinned_source.cache_clear()
+    try:
+        with pytest.raises(outcome, match="no library checkout"):
+            conftest.pinned_source()
+    finally:
+        conftest.pinned_source.cache_clear()

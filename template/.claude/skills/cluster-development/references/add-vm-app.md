@@ -1,7 +1,9 @@
 # Add a Proxmox guest
 
 A guest is a VM or an LXC container that Ansible provisions and the cluster
-fronts. Canonical procedure: `docs/RUNBOOKS.md`.
+fronts. `docs/RUNBOOKS.md` § Deploying an Ansible change, § Making a guest
+highly available and § Guest autostart and boot order are canonical for the
+procedures; § Backups and restore covers its backups.
 
 ## Checklist
 

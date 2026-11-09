@@ -5,7 +5,8 @@
 # Needs a wall-clock `timeout` (`gtimeout` on macOS) to bound each SSH.
 
 _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# timeout_cmd (shared helper). shellcheck source=scripts/shell-lib.sh
+# timeout_cmd (shared helper).
+# shellcheck source=scripts/shell-lib.sh
 . "$_SCRIPT_DIR/shell-lib.sh" || { echo "ERROR: cannot source shell-lib.sh — run from a full scripts/ checkout (needs sibling shell-lib.sh + hosts.env)" >&2; exit 1; }
 # Host/IP roster, generated from the Ansible inventory by `task hosts:sync`.
 # shellcheck source=scripts/hosts.env
@@ -15,8 +16,7 @@ echo "=== Network Diagnostics for {{ cluster_name }} ==="
 echo "Generated: $(date)"
 echo ""
 
-# This script addresses Proxmox hosts by IP (not the Tailscale hostnames the
-# Taskfile uses); K3S_SERVERS is already IPs in hosts.env.
+# Proxmox hosts are addressed by IP; K3S_SERVERS is already IPs in hosts.env.
 PVE_HOSTS="$PVE_IPS"
 
 # ARP entries that matter when chasing a MAC flap: the service IPs from
@@ -26,9 +26,11 @@ VIP_EXTRA_IPS="$("$_SCRIPT_DIR/cluster-config-value.sh" \
     echo "ERROR: cannot read the VIPs from cluster-config.yaml" >&2
     exit 1
 }
-VIP_OCTET_RE="$(
+# Whole addresses as the first field of `ip neigh`, so .10.1 never matches .10.100.
+# An empty roster entry is dropped: grep reads an empty alternative unreliably.
+VIP_ARP_RE="$(
     printf '%s\n' $DNS_IPS $MAIL_IPS $VIP_EXTRA_IPS \
-        | sed 's/.*\(\.[0-9]*\)$/\1/' | sort -u | paste -sd'|' - | sed 's/^/(/; s/$/)/; s/\./\\./g'
+        | sed '/^$/d' | sort -u | sed 's/\./\\./g' | paste -sd'|' - | sed 's/^/^(/; s/$/) /'
 )"
 
 # ServerAlive* bound a post-connect stall even on the no-timeout fallback path,
@@ -55,18 +57,14 @@ CLUSTER_ENTRY="${CLUSTER_ENTRY:-${PVE_HOSTS%% *}}"
 echo "Cluster entry point for cluster-wide queries: $CLUSTER_ENTRY"
 echo ""
 
-# Helper function for cross-platform ping with timeout
-# On Linux: -W is timeout in seconds
-# On macOS/BSD: -W is timeout in milliseconds, -t is TTL (not timeout)
+# One ping with a timeout: -W is milliseconds on macOS and seconds on Linux.
 ping_check() {
     local host="$1"
     local timeout_sec="${2:-2}"
     if [[ "$(uname)" == "Darwin" ]]; then
-        # macOS: -W is timeout in milliseconds, so multiply seconds by 1000
         local timeout_ms=$((timeout_sec * 1000))
         ping -c 1 -W "$timeout_ms" "$host" &>/dev/null
     else
-        # Linux: -W is timeout in seconds
         ping -c 1 -W "$timeout_sec" "$host" &>/dev/null
     fi
 }
@@ -111,7 +109,7 @@ for host in $PVE_HOSTS; do
     if [ "$arp_rc" -ne 0 ]; then
         echo "Host unreachable (ssh rc=$arp_rc)"
     else
-        arp_vips=$(printf '%s\n' "$arp_out" | grep -E "$VIP_OCTET_RE" || true)
+        arp_vips=$(printf '%s\n' "$arp_out" | grep -E "$VIP_ARP_RE" || true)
         if [ -n "$arp_vips" ]; then printf '%s\n' "$arp_vips"; else echo "No VIP entries in the ARP table"; fi
     fi
     echo ""
@@ -163,7 +161,6 @@ for host in $PVE_HOSTS; do
     if ping_check "$host" 2; then
         ssh_cmd {{ admin_user }}@"$host" "cat /etc/network/interfaces 2>/dev/null | grep -A 10 'auto vmbr'" || echo "SSH failed (host reachable but SSH error)"
     else
-        # Try SSH anyway in case ICMP is blocked but host is reachable
         ssh_cmd {{ admin_user }}@"$host" "cat /etc/network/interfaces 2>/dev/null | grep -A 10 'auto vmbr'" 2>/dev/null || echo "Host unreachable (ping failed, SSH failed)"
     fi
     echo ""

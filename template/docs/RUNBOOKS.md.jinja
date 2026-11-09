@@ -29,9 +29,9 @@ DNS split) lives in the template's
 | Which secret references does this repo use? | `task secrets:show` (references only, never values) |
 | Why is this service down? | its dashboard, then its logs, then its NetworkPolicy |
 
-There is no state-snapshot task: the repository *is* the intended state, and
-`task flux:status` plus `task infra:verify` are how you compare the cluster
-against it.
+The repository is the intended state. `task flux:status` and `task
+infra:verify` compare the cluster against it. `task collect-state` writes a
+redacted snapshot of every host to `CLUSTER_STATUS.txt`.
 
 `task infra:verify` is read-only with one exception: it starts a single
 adguardhome-sync run on the DNS primary to prove the service sandbox can start,
@@ -59,6 +59,8 @@ tool (`task lint` names each one in its precondition message), an unauthenticate
 | `LokiRulerNotificationFailures` | the ruler cannot reach Alertmanager, so a firing log alert reaches no receiver | the ruler's Alertmanager URL and the NetworkPolicy between them |
 | `ContainerMemoryNearLimit` | a container has held unreclaimable memory above 90% of its memory limit | raise the limit in git, and the paired VPA `maxAllowed` with it |
 | `ContainerOOMKilled` | the kernel killed a container at its memory limit, and it restarted cleanly | same, and check whether the charge was tmpfs or kernel memory rather than RSS |
+| `LokiRequestFailures` | Loki answers 5xx on over 5% of requests, so pushes may be lost | `kubectl -n observability logs sts/loki`, then the NAS volume it writes to |
+| `AlertmanagerNotificationsDropping` | some notifications failed in 6 hours without crossing the paging ratio | the receiver's endpoint, then `kubectl -n observability logs sts/alertmanager-kube-prometheus-stack-alertmanager` |
 
 The three Loki ruler alerts matter more than their severity suggests: the ruler
 is the only alert path that does not run through Prometheus, so nothing else
@@ -107,10 +109,11 @@ to read on:
 | `FluxReconciliationFailure` | a Kustomization or source stopped reconciling | When Flux is unhappy |
 | `FluxResourceNotReady` | a reconciled object never became ready | When Flux is unhappy |
 | `MetalLBSpeakerNotScheduled` | no metallb-speaker pod is scheduled, so no LoadBalancer VIP is announced | When Flux is unhappy, "A MetalLB VIP receives nothing" |
-| `VPARecommendationCapped` | a VPA wants more than its policy ceiling allows | Adding an application |
 | `ExternalSecretSyncFailure` | a Secret is no longer being produced from the vault | Rotating a secret |
 | `SecretsProviderDown` | the secrets backend itself is unreachable | Rotating a secret |
 | `RegistryCacheDown` | the pull-through registry cache is down or unscrapable | Registry pull-through cache |
+| `LokiDiscardsRateLimited` / `LokiDiscardsOutOfOrder` | Loki dropped pushed lines | Per-host log-shipping alerts |
+| `KubeCPUQuotaOvercommitNonCI` / `KubeMemoryQuotaOvercommitNonCI` | the non-CI ResourceQuota hard limits exceed 1.5x allocatable | Adding an application |
 
 ---
 
@@ -192,6 +195,30 @@ After a pod delete, wait on the new pod with
 `kubectl wait --for=condition=ready -l <selector>`. Run against the old pods it
 passes immediately, so give the delete a moment to take effect first.
 
+### Moving an object between Kustomizations
+
+Every Flux Kustomization here prunes. An object that moves from one
+Kustomization's path to another's is deleted by the first and recreated by the
+second. The second runs only after its `dependsOn` chain is Ready, so the
+object is absent for that whole wait. An ExternalSecret with
+`creationPolicy: Owner` takes its Secret down with it.
+
+Hand the object over without a prune pass:
+
+1. Before the merge, mark each live object as exempt from pruning.
+
+   ```bash
+   kubectl -n <namespace> annotate <kind>/<name> kustomize.toolkit.fluxcd.io/prune=disabled
+   ```
+
+2. Merge the move. The old Kustomization drops the object from its inventory
+   and leaves it in place. The new one adopts it on its next reconcile.
+3. Once the new Kustomization is Ready, remove the annotation.
+
+   ```bash
+   kubectl -n <namespace> annotate <kind>/<name> kustomize.toolkit.fluxcd.io/prune-
+   ```
+
 ### A changed PV mountOption that nothing picked up
 
 The kubelet reads `mountOptions` at mount time only. Flux reconciles the PV and
@@ -240,7 +267,7 @@ The narrower tasks are for re-runs once that ordering has been satisfied once:
 task infra:base            # base.yml only — users, SSH, packages, resolver config
 task dns:deploy            # dns.yml — resolvers, then ACME issuance and sync
 task storage:deploy        # storage.yml — the NAS alone
-task proxmox:ha            # HA rules, resource pools, replication
+task proxmox:ha            # HA rules and replication
 task zfs:encrypt           # encryption mechanism + boot units, where pools are encrypted
 ```
 
@@ -296,6 +323,15 @@ against the host once it is back:
 task infra:deploy -- --limit <host>
 ```
 
+The storage-replication play in `proxmox-ha.yml` fails instead. An unreachable
+compute node fails the deploy unless `deploy_expected_absent_hosts` lists it,
+because a failover to it would find no replica. Re-run the play once the node is
+back:
+
+```bash
+task proxmox:ha -- --tags proxmox_ha_replication
+```
+
 ---
 
 ## Upgrades
@@ -331,12 +367,14 @@ recovers it with `reset-failed` then `start` — never `restart`, which waits on
 the same stop.
 
 Silence the alerts a planned restart will trip **before** starting, or the next
-real incident arrives in a channel everyone has learned to ignore. There is no
-task for this; go through Alertmanager directly:
+real incident arrives in a channel everyone has learned to ignore. Run
+`task observability:silence ALERT=<name> DURATION=<n>H`, one call per alert.
+
+The task matches on the alert name only. A silence that needs another matcher
+goes through the Alertmanager UI:
 
 ```bash
-kubectl get svc -n observability                     # find the Alertmanager service
-kubectl -n observability port-forward svc/<alertmanager-svc> 9093:9093
+kubectl -n observability port-forward svc/kube-prometheus-stack-alertmanager 9093:9093
 # then http://localhost:9093 → Silences → New Silence
 ```
 
@@ -391,8 +429,10 @@ fails. Raise them together.
 
 ### Kubernetes nodes
 
+Bump `k3s_version` in `group_vars/all.yml` on a branch and merge it through an
+MR. Then, from main:
+
 ```bash
-# bump k3s_version in group_vars/all.yml, then:
 task maintenance:update-k3s-nodes         # cordons, upgrades and uncordons node by node
 task k3s:status
 ```
@@ -401,7 +441,10 @@ It cordons rather than drains: containerd keeps running pods alive across the
 kubelet restart, and draining would evict the CI executor pod running the job.
 Servers first, one at a time, watching the etcd quorum. Rolling back is a
 version bump in the other direction plus the same task.
-`task maintenance:update-cluster` chains the node upgrade and the pin sweep.
+`task maintenance:update-cluster` bumps every outdated pin on a feature branch
+and stops for the MR. Flux rolls the in-cluster pins after the merge. If
+`k3s_version` moved, run `task maintenance:update-k3s-nodes` from main after the
+merge.
 
 ### The platform library
 
@@ -507,6 +550,10 @@ than from any band written down elsewhere.
 4. `task k3s:deploy -- --limit <vm>`
 5. `kubectl get nodes` — the new node is `Ready` and carries its labels.
 
+A create that stopped part way leaves the VM tagged
+`weisssrv-create-incomplete`, and the next run refuses it. Run `qm destroy <id>`
+on its host and re-run step 3. The data zvols survive the destroy and reattach.
+
 Adding a **server** additionally changes the etcd quorum: go from three to five,
 never to four, and verify `kubectl get nodes -l node-role.kubernetes.io/etcd`
 before and after. Server addresses also feed
@@ -545,6 +592,11 @@ proxmox_ha_replication_jobs:
 Add the replication job before the resource: a guest that fails over to a node
 holding no copy of its disk does not start there.
 
+`paused: true` on a job holds it disabled and keeps the replica, for maintenance
+on the target node. `enabled: false` deletes the job and its replica. A job,
+rule or resource dropped from these lists is reported as an orphan and never
+deleted. The `proxmox_ha` role README names the cleanup commands.
+
 ---
 
 ## Guest autostart and boot order
@@ -564,11 +616,16 @@ task proxmox:configure-autostart          # add -- --limit <host> to narrow it
 
 It reads each guest's live config through its `proxmox_host` and writes only on
 a difference, so it is safe to re-run and safe against a powered-off guest.
-Leave HA-managed guests out of the groups it walks: HA starts them, so `onboot`
-is meaningless for them and setting it invites two owners for one decision. The
-`services` group is out of scope for the same reason. An appliance VM this
-cluster does provision belongs in `app_servers` with `ansible_connection: local`,
-a `vmid` and a `proxmox_host`, so the reconcile reaches it.
+It walks `lxc_containers`, `k3s`, `app_servers` and `services`. It picks `pct`
+or `qm` from each guest's type in the cluster resource list. Leave HA-managed
+guests out of these groups. HA starts them, so `onboot` is meaningless for them
+and setting it invites two owners for one decision.
+
+An appliance VM is a guest Ansible cannot log into. It belongs in `services`,
+with `ansible_connection: local`, a `vmid` and a `proxmox_host`. Every task for
+it is delegated to its Proxmox host. Never put it in `app_servers`. That group
+also gets the host roles and the apt upgrades, which would then run on the
+Ansible controller.
 
 ---
 
@@ -580,6 +637,8 @@ a `vmid` and a `proxmox_host`, so the reconcile reaches it.
 |---|---|---|
 | `HostLogShippingStaleAll` | no journald line from ANY host in 45 minutes | the host-side collector unit on one host, then the Loki push IngressRoute, then the Loki pod |
 | `HostLogShippingStale` | no journald line from the named host in 45 minutes | `systemctl status alloy` on that host, then the Loki push IngressRoute and the Loki pod |
+| `LokiDiscardsRateLimited` | Loki drops pushed lines against a `limits_config` cap | raise `ingestion_rate_mb` or `per_stream_rate_limit` in `loki/release.yaml`, or find the loud sender |
+| `LokiDiscardsOutOfOrder` | Loki drops lines behind its out-of-order window, half of `ingester.max_chunk_age`, or past `reject_old_samples_max_age` | keep the window above `alloy_host_journal_max_age`, or shorten the sender's replay |
 
 `kubernetes/infrastructure/observability/loki/host-log-staleness.yaml` is
 generated. LogQL cannot group by label and alert on absence, so per-host
@@ -668,6 +727,10 @@ If the app gets an HPA, size its CPU request first. `averageUtilization` is a
 percentage of the container's `requests.cpu`, so an under-sized request puts the
 target at noise level and the HPA sits at `maxReplicas` even when the app is
 idle. The fix is to raise the request, not the threshold.
+
+`KubeCPUQuotaOvercommitNonCI` and `KubeMemoryQuotaOvercommitNonCI` fire when
+the hard limits of the ResourceQuotas outside the CI runner namespaces exceed
+1.5 times allocatable. Shrink a quota or add capacity.
 
 **As a guest**: define the VM or container in `hosts.yml` with its resources and
 any `vm_additional_disks` zvols, add a playbook, and route to it through the
@@ -822,6 +885,17 @@ Keep both halves pointing at the same service. A name that resolves to the
 internal VIP inside and to a stale public address outside is the failure mode
 that looks like an app fault from one network and works fine from the other.
 
+### Recursive resolver alerts
+
+| Alert | Means | First move |
+|---|---|---|
+| `UnboundDown` | Unbound does not answer its control socket, so that resolver cannot recurse | `systemctl status unbound` on the guest |
+| `UnboundExporterDown` | Prometheus cannot scrape `unbound_exporter` on a resolver | `systemctl status unbound-exporter` on the guest |
+| `UnboundSERVFAILRatioHigh` | over 5% of answers are SERVFAIL | `journalctl -u unbound`; the upstreams, their certificates or DNSSEC |
+
+`UnboundSERVFAILRatioHigh` reads the rcode counters, which Unbound exports only
+with `extended-statistics` on.
+
 ---
 
 ## Mail relay
@@ -844,6 +918,11 @@ Three states matter:
 | Queue growing | mail is accepted and not delivered | the upstream hop, not Postfix |
 | Deferred climbing | repeated delivery failures | `mail.log` for the SASL or TLS error |
 | Relay unreachable | senders cannot hand mail over | the service, then the firewall between sender and relay |
+
+The alerts map onto those states. `PostfixQueueBacklog` is the queue growing.
+`PostfixDown` is Postfix itself stopped. `PostfixQueueCollectorStale` means the
+queue collector stopped, so the other two read stale inputs: check
+`journalctl -u postfix-queue-collector.service` on the relay.
 
 After fixing the upstream, flush the queue rather than waiting out the retry
 timer:
@@ -928,8 +1007,16 @@ automatic. This is a one-time step per cluster, not a runbook you return to.
 task flux:suspend -- <ns>/<kind>/<name>        # stop reconciling one resource
 task flux:resume  -- <ns>/<kind>/<name>        # same arguments
 
-git revert <commit> && git push                # the normal rollback
 helm history <release> -n <ns>                 # while suspended, if you must
+```
+
+The normal rollback is a revert merged through an MR. Flux reconciles once the
+merge lands:
+
+```bash
+git switch -c revert-<topic> origin/main
+git revert <commit>
+git push -u origin revert-<topic>              # then merge the MR
 ```
 
 Suspend from leaf to root so no stage reconciles into a half-suspended state.
@@ -1018,9 +1105,18 @@ scrub has completed in 35 days, or none ever has.
 
 ```bash
 zpool status -v <pool>          # which device, which errors
-zpool replace <pool> <old> /dev/disk/by-id/<new>
+zpool replace <pool> /dev/disk/by-id/<old> /dev/disk/by-id/<new>
 zpool status 1                  # watch the resilver
 ```
+
+To replace a disk:
+
+1. Insert the new disk with the old one still attached when a bay is free, so
+   the pool keeps its redundancy during the resilver.
+2. Run the `zpool replace` above. Do not start a scrub until the resilver ends.
+3. Swap the serial in the `nas_storage_smartd_<pool>_disks` list in
+   `group_vars/nas.yml` and run `task storage:deploy`.
+4. Confirm the SMART metrics carry the new serial, then pull the old disk.
 
 Always reference disks by `/dev/disk/by-id/`. Check SMART on the surviving
 members before assuming the failure is isolated; drives bought together fail
@@ -1282,9 +1378,106 @@ journalctl -t encrypted-swap -b
 systemctl status encrypted-swap-finalize.service
 ```
 
-Re-running `task infra:deploy --limit <host>` re-applies the role. A mapper that
+Re-running `task infra:deploy -- --limit <host>` re-applies the role. A mapper that
 fails again needs the journal: an `/dev/pve/swap` that is still in use by the
 plaintext device is the usual cause, and that clears on the next reboot.
+
+### ZFS pool capacity
+
+`ZFSPoolSpaceWarning` and `ZFSPoolSpaceCritical` fire at 80% and 90% of a
+pool's allocation. Filesystem usage cannot stand in for them: a dataset shrinks
+as zvols fill the pool. Free space by pruning snapshots with
+`zfs list -t snapshot -o name,used -s used`, or grow the pool.
+
+`ZFSPoolCollectorStale` means the pool collector stopped, never ran, or reports
+no pool. Every pool alert on that host reads stale or no inputs until it
+recovers. Check `journalctl -u zpool-status-collector.service`.
+
+### NFS server down
+
+`NFSServerDown` fires when nfsd runs with zero threads, or when a host that
+served NFS in the last week stops reporting nfsd. Every NFS-backed PV stalls.
+
+```bash
+sudo systemctl status nfs-server
+sudo systemctl reset-failed nfs-server && sudo systemctl start nfs-server
+```
+
+Pods holding an established mount may see stale handles after recovery. Delete
+them so they remount.
+
+---
+
+## Host and hypervisor alerts
+
+These rules read the host node-exporters on :9101. The Proxmox-only ones key on
+the corosync collector, which runs on every hypervisor and nowhere else.
+
+### Host node-exporter alerts
+
+| Alert | Means | First move |
+|---|---|---|
+| `HostExporterDown` | a host exporter stopped answering, so that host's other alerts stop evaluating | `systemctl status prometheus-node-exporter`, then the metrics firewall rule |
+| `HostTextfileCollectorScrapeError` | a `.prom` file no longer parses | look for a truncated file in the textfile directory |
+| `HostClockNotSynchronising` | no NTP sync and the error has grown past 16s | `timedatectl status` and the time daemon |
+| `HostFilesystemReadOnly` | the kernel remounted a filesystem read-only | `dmesg -T`, SMART and the pool state before remounting |
+| `HostConntrackEntriesHigh` | the conntrack table is over 75% full | `conntrack -L` for the storm, or raise `nf_conntrack_max` |
+| `NodeSystemdServiceFailed` | a unit has been failed for 15 minutes | `systemctl status <unit>` and its journal |
+| `NodeSystemdServiceCrashlooping` | a unit keeps restarting | `journalctl -u <unit>` |
+| `NodeExporterSystemdCollectorFailed` | the systemd collector errors, so the two rules above are blind | `journalctl -u prometheus-node-exporter` |
+
+### Host network alerts
+
+| Alert | Means | First move |
+|---|---|---|
+| `HostNetworkTransmitErrs` / `HostNetworkReceiveErrs` | a physical NIC fails over 1% of its packets for an hour | `ethtool -S <nic>`, the kernel log and the switch counters |
+| `HostNetworkInterfaceFlapping` | a link bounced at least three times in 10 minutes | the cable and switch port |
+| `HostBondingDegraded` | a bond runs with fewer slaves than configured | `cat /proc/net/bonding/<bond>` |
+
+### Host memory and slab alerts
+
+| Alert | Means | First move |
+|---|---|---|
+| `HostMemAvailableLow` / `HostMemAvailableCritical` | under 8% or 2% of RAM available | guest ballooning, the ARC against its cap, then SUnreclaim |
+| `HostSlabLeakSuspected` | unreclaimable slab exceeds the ARC by 16 GiB for a day | schedule a reboot; `slabtop -o -s c` names the cache |
+| `HostSlabCacheGrowing` | a cache the slabinfo collector publishes grew 6 GiB in a day | schedule a reboot while there is headroom |
+| `SlabinfoCollectorDegraded` | the opt-in slabinfo collector stopped producing usable series | `systemctl status slabinfo-collector.timer` |
+| `EncryptedSwapMetricsMissing` | the encrypted-swap gauges vanished, so those alerts are blind | `encrypted_swap.prom` in the textfile directory, then the last boot's finalize run |
+| `NASSwapNotClearing` | swap stayed above 2 GiB for 2 days on a swap-clean host | `journalctl -t swap-clean` |
+| `NASSwapGone` | a swap-clean host has no swap at all | `swapon --show` and `/etc/fstab` |
+| `SwapCleanGuestRestartFailed` | swap-clean stopped a guest that did not come back | `qm start <vmid>`, then `journalctl -t swap-clean` |
+
+`HostSlabLeakSuspected` inhibits the warning tier of the memory and swap-clean
+alerts on its own host. `HostMemAvailableCritical` is never inhibited.
+
+### Hypervisor and cluster alerts
+
+| Alert | Means | First move |
+|---|---|---|
+| `ProxmoxHostDown` | a hypervisor stopped answering scrapes for 5 minutes | the host console; its guests are down or failing over |
+| `CorosyncWedged` | corosync is pinned near 100% CPU, so pmxcfs stopped replicating | `systemctl restart corosync` on that host |
+| `PmxcfsStale` | the HA manager status has not changed in 10 minutes | compare `/etc/pve/ha/manager_status` across nodes, then restart `corosync pve-cluster` on the stale one |
+| `CorosyncHealthCollectorStale` | the corosync collector stopped, so the two rules above read stale inputs | `journalctl -u corosync-health-collector.service` |
+| `ProxmoxHostIOPressure` / `ProxmoxHostMemoryPressure` | tasks stall on I/O or memory reclaim for 15 minutes | `iotop` for the heavy writer, then swap and the ARC |
+| `NodeNotReadyProlonged` | a node has been NotReady for 6 hours | return the node, or cordon and drain it |
+| `KubeNodeReadyFlapping` | a node's Ready condition flapped more than twice in a day, each spell too short to page | the node's kubelet and k3s journal, its host and its network path |
+| `EtcdQuorumAtRisk` | an etcd member has been down for 6 hours, so one more loss ends quorum | restore the missing k3s server |
+
+`PmxcfsStale` stays quiet on a cluster that has never run HA. Once the status
+file has existed, a deleted file fires it for a week.
+
+### Hardware temperature alerts
+
+| Alert | Means | First move |
+|---|---|---|
+| `SATADriveTempCritical` | a SATA drive at 55C | the airflow for that bay |
+| `NVMeDriveTempHigh` / `NVMeDriveTempCritical` | an NVMe drive at 75C, which is null-routed, or at its 80C throttle point | the drive's airflow and heatsink |
+| `CPUTempWarning` / `CPUTempCritical` | a CPU sustained at 90C, or at 95C | load, fans and thermal paste |
+| `HostGpuTempWarning` / `HostGpuTempCritical` | a host GPU at 85C, or at 95C | the GPU's load and airflow |
+| `NICTempWarning` | a NIC at 90C for 10 minutes | the card's airflow |
+
+The SATA threshold suits hard disks. Raise it in the release when a host's
+SATA drives are all SSDs.
 
 ---
 
@@ -1303,7 +1496,7 @@ plaintext device is the usual cause, and that clears on the next reboot.
 | `VzdumpBackupFailed` / `VzdumpBackupStale` | a hypervisor guest backup failed or stopped | the vzdump job on the owning host |
 | `VzdumpBackupNoGuests` | a vzdump run succeeded having selected no guest at all | the guest selection on that host's backup schedule |
 | `PveClusterBackupFailed` / `PveClusterBackupStale` | the /etc/pve backup failed or stopped; both stay inert until `nas_storage_pve_cluster_backup_enabled` is true | the backup storage's free space |
-| `BackupArtifactStale` / `BackupArtifactZeroBytes` | an application dump stopped landing, or landed empty | that app's dump CronJob and its last pod's logs |
+| `BackupArtifactStale` / `BackupArtifactStaleCritical` / `BackupArtifactZeroBytes` | an application dump stopped landing for 50 hours or 4 days, or landed empty | that app's dump CronJob and its last pod's logs |
 | `BackupArtifactNeverLanded` | no dump has ever landed for an app: the job never ran, or it writes outside the collector's glob | that app's dump CronJob, then the collector's glob for it |
 | `LocalPathPVExists` | a claim bound to the local-path class instead of {% if tenant_storage %}a static volume or `tenant-local`{% else %}a static volume{% endif %} | Storage, "Something landed on the wrong storage class" |
 
@@ -1357,7 +1550,7 @@ proxmox_backup_vzdump_jobs:
     compress: zstd
     all: true
     # k3s nodes are rebuildable from the inventory and keep their data on zvols;
-    # restoring a stale server image can corrupt etcd quorum. Exclude them here.
+    # restoring a stale server image can corrupt etcd quorum. List their vmids.
     exclude: []
     # KiB/s PER NODE. An `all` job fires on every node at once against this one
     # target, so the per-node cap is what bounds the aggregate write.
@@ -1388,9 +1581,13 @@ nas_storage_archive_backup_sources:
   - ssd/appdata      # every app's live data, including the zvols
   - tank/backups     # the logical dumps + etcd snapshot copies
   - tank/share
+  - tank/proxmox     # the tier 2 vzdump target
 # The dataset receiving cluster-wide vzdump writes over NFS. Snapshotted only
 # once those writes quiesce, so a half-written .vma is never captured.
-nas_storage_archive_backup_vzdump_target: ""
+nas_storage_archive_backup_vzdump_target: tank/proxmox
+# The vzdump target's prune-backups keeps its own monthly dumps, so no monthlies.
+nas_storage_archive_backup_keep_monthly_overrides:
+  tank/proxmox: 0
 ```
 
 In the **same change**, flip `cluster_archive_backup_probe_metric` in
@@ -1439,8 +1636,52 @@ Inspect what exists:
 ```bash
 task k3s:backup                                              # take an etcd snapshot now
 ssh {{ admin_user }}@{{ nas_host }} 'zfs list -t snapshot'   # local snapshots
-ssh {{ admin_user }}@{{ nas_host }} 'ls /var/lib/vz/dump'    # hypervisor guest backups
+ssh {{ admin_user }}@<host> 'sudo pvesm list <backup-storage> --content backup'  # guest backups
 ```
+
+### Restoring from the archive pool
+
+`archive-backupctl` on the storage host restores a replicated dataset. A target
+is the basename of a `nas_storage_archive_backup_sources` entry.
+
+`sudo archive-backupctl restore <target>` is the safe default. It receives the
+newest archive snapshot into `<dataset>-restore-<timestamp>` and mounts it under
+`/mnt/restore/<target>/<timestamp>/`. The live dataset is not touched. Copy what
+you need out of it, then destroy it.
+
+`sudo archive-backupctl restore-force <target>` replaces the live dataset. It
+renames the live tree to `<dataset>-pre-restore-<timestamp>`, unmounts it and
+receives the copy under the original name. A failed receive destroys the
+partial tree and renames the old one back. The old tree keeps its space until
+you destroy it.
+
+The tool checks every target before it touches any of them. It refuses when:
+
+- a zvol or mounted filesystem in the subtree is held open by a guest, a
+  container or a process;
+- a filesystem in the subtree is exported over NFS;
+- it cannot run that check, for example because `fuser` is missing;
+- the subtree holds a child listed in `nas_storage_archive_backup_exclude`.
+
+`--force-held` overrides the first three. `--force-excluded` overrides the last.
+Neither is part of a normal restore. Stop the guests and NFS consumers instead.
+A Kubernetes pod scaled to zero does not release a zvol, because its VM holds
+it.
+
+1. Stop the guests and consumers holding the dataset.
+2. Run `sudo archive-backupctl restore-force <target>`.
+3. An encrypted backup comes back without its key. Run the `zfs load-key`
+   command the tool prints, and confirm the data reads before restarting
+   anything.
+4. Re-run `task storage:deploy` to re-assert the dataset properties.
+5. Destroy `<dataset>-pre-restore-<timestamp>` once the restore is trusted.
+
+To restore one child of a subtree that holds an excluded child, restore it on
+its own. Receive its newest archive snapshot under a new name, then swap it in
+with `zfs rename`.
+
+Never load a key on, or mount, a dataset under the archive pool. It breaks the
+raw incremental chain and forces a full re-seed.
 
 ### Restoring etcd from a snapshot
 
@@ -1457,6 +1698,21 @@ demand. Restoring is a whole-control-plane operation, in this order:
 Step 3 is the one that gets skipped, and skipping it leaves a divergent control
 plane: the reset node is a single-member cluster while the others still hold
 their own etcd data.
+
+When every server is rebuilt and no local snapshot survives, restore from the
+off-node copy. It needs the original cluster token, the `credential` field of
+the `K3s Cluster Token` item. Without it k3s cannot decrypt the snapshot.
+
+1. Fetch the newest copy from `/mnt/tank/backups/k3s-etcd/<node>/` on the
+   storage host, or from the offsite repository.
+2. Rebuild the servers with `task k3s:deploy`, then stop k3s on every server.
+3. Copy the snapshot into `/var/lib/rancher/k3s/server/db/snapshots/` on one
+   server and run
+   `sudo k3s server --cluster-reset --cluster-reset-restore-path=<file> --token <token>`.
+   Start k3s and wait for Ready.
+4. On each other server, run `sudo rm -rf /var/lib/rancher/k3s/server/db/etcd`
+   and `sudo systemctl start k3s`, so it rejoins the restored member. Never run
+   `--cluster-reset` on more than one server.
 
 Rehearse restores on a schedule, not after an incident:
 
@@ -1480,10 +1736,11 @@ the `netpol-baseline` component plus a complete allow set, all of it in
 
 The deny is only safe while the allow set is complete, so the two must land in
 the same reconcile and be reviewed together. kured is reconciled by the
-controllers stage and CoreDNS and metrics-server by k3s itself; splitting the
-policies to sit beside each workload would let the deny land while an allow's
-stage is still pending. The `resources:` list is ordered allows-first because
-kustomize emits in list order and the component appends the deny last.
+controllers stage, metrics-server by its own infrastructure-metrics-server
+stage, and CoreDNS by k3s itself; splitting the policies to sit beside each
+workload would let the deny land while an allow's stage is still pending. The
+`resources:` list is ordered allows-first because kustomize emits in list order
+and the component appends the deny last.
 
 **CoreDNS is the one allow that can break the cluster if it is narrowed.** A
 query reaches those pods three ways, which is why one rule carries three peer
@@ -1500,10 +1757,12 @@ and the pod CIDR is a subset of what the namespace selector already admits.
 Confirm no host-side unit queries the cluster DNS ClusterIP before narrowing the
 LAN peer.
 
-metrics-server's allow is label-scoped to `k8s-app: metrics-server`, the k3s
-AddOn's label. Replacing the AddOn with the upstream chart needs a second policy
-selecting `app.kubernetes.io/name: metrics-server`; NetworkPolicies are
-additive, so two objects cover both label sets.
+metrics-server's allow is label-scoped to `app.kubernetes.io/name: metrics-server`,
+the chart's label. The k3s AddOn is off through `metrics-server` in `k3s_disable`.
+The AddOn and the chart share object names, so Helm refuses the chart's install
+while the AddOn exists. On a cluster still running the AddOn, `task k3s:deploy`
+deletes it and the Resource Metrics API is down until the chart installs. Run
+`flux reconcile helmrelease metrics-server -n kube-system` right after it.
 
 Current residents and their ingress: CoreDNS `53/udp`+`53/tcp` from everything
 and `9153` from observability; metrics-server `10250` from the aggregation
@@ -1551,6 +1810,18 @@ wants zero pods, usually because no node carries the
 `${cluster_node_label_domain}/ingress` label, so every VIP is still assigned and
 nothing announces it.
 
+### A Traefik VIP is not assigned
+
+`TraefikPublicVipMissing` and `TraefikInternalVipMissing` fire when the
+`traefik` or `traefik-internal` Service has lost its MetalLB address for 10
+minutes. Every route behind that VIP is down, so the `EndpointDown` alerts that
+follow are symptoms, not app faults.
+
+```bash
+kubectl -n traefik get svc traefik traefik-internal
+kubectl -n metallb-system get ipaddresspools,l2advertisements,pods
+```
+
 ---
 
 ## Post-failover reconciliation
@@ -1575,6 +1846,12 @@ task lint
 Copier three-way-merges: files you never touched update cleanly, files you
 rewrote produce conflicts you resolve by hand. Review the diff — a template
 update can change defaults, not just add files.
+
+Read the release notes of every template tag between the recorded `_commit` and
+the target. Each release's Breaking changes section lists the hand work it
+needs. When the update changes the tenant policies, run
+`scripts/audit-tenant-admission.sh` on the update branch and fix what it lists
+before merging.
 
 To change a site value copier baked in (a VIP, a domain), edit the value in
 `.copier-answers.yml`, run `copier update`, and check that the corresponding

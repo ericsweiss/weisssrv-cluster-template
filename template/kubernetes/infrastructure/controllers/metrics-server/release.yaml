@@ -1,0 +1,84 @@
+---
+# CRITICAL: metrics-server is the Resource Metrics API behind every HPA and the
+# VPA recommender. Its k3s_disable entry (group_vars/k3s.yml) and this release
+# are one unit. The entry without the release leaves no metrics; dropping the
+# entry after this release installs makes k3s re-apply its AddOn over Helm's
+# objects. Its Flux stage is clusters/<name>/infrastructure-metrics-server.yaml.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: metrics-server
+  namespace: kube-system
+spec:
+  interval: 30m
+  releaseName: metrics-server
+  # Revert out-of-band edits (repo rule in traefik/release.yaml). The chart
+  # renders no webhook and no HPA, so nothing here fights the drift check.
+  driftDetection:
+    mode: enabled
+  chart:
+    spec:
+      chart: metrics-server
+      version: "${helm_chart_versions_metrics_server}"
+      sourceRef:
+        kind: HelmRepository
+        name: metrics-server
+        namespace: flux-system
+      interval: 12h
+  install:
+    remediation:
+      # -1: a conflicted install records nothing (Helm checks ownership before
+      # writing the release), so retrying until it can own the APIService is safe.
+      retries: -1
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true
+  values:
+    # 2 replicas + a PDB: the sole metric source for every HPA and the VPA
+    # recommender, so one pod blinds both. The replicas are stateless scrapers;
+    # a second costs a duplicate kubelet scrape, nothing else.
+    replicas: 2
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    # Cluster-critical, not node-critical: it outranks the `platform` class
+    # (sources/priorityclasses.yaml) but it is not a per-node daemon.
+    priorityClassName: system-cluster-critical
+    # Hard anti-affinity: two replicas on one node buy nothing against the node
+    # loss they exist for.
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: metrics-server
+            topologyKey: kubernetes.io/hostname
+    # Tolerations that keep the server and storage nodes eligible.
+    tolerations:
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      - key: ${cluster_node_label_domain}/nas
+        operator: Exists
+        effect: PreferNoSchedule
+    # The metrics-server VPA maxAllowed.memory in configs/vpa/platform.yaml
+    # equals this limit; move both together.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 96Mi
+      limits:
+        memory: 192Mi
+    # Verify the kubelet connection against the cluster CA (no
+    # --kubelet-insecure-tls) and restrict the serving cipher suites instead of
+    # taking the chart's unrestricted Go default.
+    defaultArgs:
+      - --cert-dir=/tmp
+      - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+      - --kubelet-use-node-status-port
+      - --metric-resolution=15s
+      - >-
+        --tls-cipher-suites=TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305

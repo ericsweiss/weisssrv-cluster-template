@@ -67,6 +67,11 @@ releases:
     chart: reloader
     repo_name: stakater
     repo_url: https://stakater.github.io/stakater-charts
+  - name: metrics-server
+    manifest: kubernetes/infrastructure/controllers/metrics-server/release.yaml
+    chart: metrics-server
+    repo_name: metrics-server
+    repo_url: https://kubernetes-sigs.github.io/metrics-server
 {%- if postgres_operator %}
   - name: cnpg
     manifest: kubernetes/infrastructure/controllers/cnpg/release.yaml

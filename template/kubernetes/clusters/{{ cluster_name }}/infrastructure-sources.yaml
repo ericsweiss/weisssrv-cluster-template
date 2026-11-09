@@ -1,10 +1,7 @@
 ---
-# Stage 1/5 — HelmRepository sources plus the cluster-versions and
+# HelmRepository sources, the PriorityClasses and the cluster-versions and
 # cluster-config ConfigMaps every later stage reads. No postBuild: this stage
 # creates them and carries no placeholders of its own.
-
-# wait:false: these CRs are usable the moment they are applied, and waiting on
-# chart index fetches would stall the crds -> controllers -> configs chain.
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
@@ -19,4 +16,6 @@ spec:
     name: flux-system
   path: ./kubernetes/infrastructure/sources
   prune: true
+  # These CRs are usable once applied; waiting on chart index fetches would
+  # stall the whole downstream chain. helm-controller already waits per chart.
   wait: false

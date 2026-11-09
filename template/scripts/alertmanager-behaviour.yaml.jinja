@@ -16,17 +16,31 @@ route_cases:
     labels: [alertname=ZFSPoolNotOnline, severity=critical]
   - receiver: chat-default
     labels: [alertname=DiskUsageWarning, severity=warning]
-  # severity=info has its own child route ahead of the root, carrying repeat_interval 24h.
-  - receiver: chat-default
-    labels: [alertname=NodeOutageStormControl, severity=info]
+  - receiver: "null"
+    labels: [alertname=NodeOutageStormControl, severity=none]
   - receiver: chat-default
     labels: [alertname=SomeUnlabelledAlert]
+  # The durability and latch branches keep the root receivers, at a longer repeat.
+  - receiver: email-and-chat
+    labels: [alertname=ZFSPoolDataErrors, severity=critical]
+  - receiver: chat-default
+    labels: [alertname=MaintenanceRebootDeferred, severity=warning]
+  - receiver: chat-default
+    labels: [alertname=AlertmanagerNotificationsDropping, severity=info]
 
 # Route-case alertnames that deliberately name no rule. Only the fall-through
 # case, whose point is that an alert matching no child route still reaches the
 # root receiver.
 synthetic_route_alerts:
   - SomeUnlabelledAlert
+
+# Rule trees the Prometheus extractor never reads: Loki's ruler evaluates these
+# as plain `groups:` documents, so their alertnames and severities need listing.
+rule_corpora:
+  - kubernetes/infrastructure/observability/loki/host-log-staleness.yaml
+{%- if git_backend == 'gitlab_selfhosted' %}
+  - kubernetes/infrastructure/observability/loki/runner-reaper.yaml
+{%- endif %}
 
 # Alerts shipped by the kube-prometheus-stack chart's own rule groups. Every
 # alertname in an inhibit rule must resolve to a rule this repository ships or

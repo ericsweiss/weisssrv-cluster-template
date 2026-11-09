@@ -1,71 +1,85 @@
 #!/usr/bin/env python3
 """Assert every hand-written LAN address is a real inventory host.
 
-EndpointSlice/Endpoints addresses and per-host NFS /32s must equal an
-`ansible_host` (`cluster_lan_gateway` aside), and an export admits a k3s group whole.
+An endpoint address or export client inside a declared host CIDR must cover an
+`ansible_host`, and an export admits a scoped group whole. docs/SCRIPTS.md.
 """
 from __future__ import annotations
 
 import argparse
 import ipaddress
-import re
 import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-try:
-    import gate_common  # noqa: E402
-    import inventory_tree  # noqa: E402
-except ImportError as exc:  # pragma: no cover - environment guard
-    print(
-        f"ERROR: {exc.name or 'the companion module'}.py must sit next to this "
-        "script - re-vendor it from weisssrv-lib.",
-        file=sys.stderr,
-    )
-    raise SystemExit(2) from None
+from typing import Dict, List, Set, Tuple
 
 try:
-    import yaml  # noqa: E402
+    import yaml
 except ImportError:
     print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
     raise SystemExit(2) from None
 
-_PLACEHOLDER = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-MANIFEST_TREE = "kubernetes"
+# Both companions are reported at once: a consumer vendoring the gate alone
+# otherwise fixes one name, re-runs, and is told about the next.
+_MISSING = []
+try:
+    import gate_common  # noqa: E402
+except ImportError:
+    _MISSING.append("gate_common.py")
+try:
+    import inventory_tree  # noqa: E402
+except ImportError:
+    _MISSING.append("inventory_tree.py")
+if _MISSING:
+    print(
+        f"ERROR: {' and '.join(_MISSING)} must sit next to this script — vendor "
+        "them (see weisssrv-lib scripts/vendorable-paths.yml).",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+DEFAULT_INVENTORY = "ansible/inventories/prod"
+DEFAULT_MANIFEST_TREE = "kubernetes"
 # Both YAML spellings reach the cluster, so both are walked: a `.yml` manifest
 # left out takes its endpoints with it, uncompared and unreported.
 MANIFEST_GLOBS = ("*.yaml", "*.yml")
-HOSTS_YML = "ansible/inventories/prod/hosts.yml"
-CLUSTER_CONFIG = gate_common.CLUSTER_CONFIG
-GROUP_VARS = "ansible/inventories/prod/group_vars"
-NAS_GROUP = "nas"
+EXPORTS_KEY = "nas_storage_exports"
+# What Ansible itself skips in a vars directory. Everything else there is
+# parsed, an extensionless `group_vars/all` included.
+VARS_IGNORED_SUFFIXES = (".orig", ".bak", ".ini", ".cfg", ".retry", ".pyc", ".pyo")
 DEFAULT_LAN_CIDR_KEY = "cluster_lan_cidr"
 GATEWAY_KEY = "cluster_lan_gateway"
-# Groups whose members an export either admits in full or not at all.
-K3S_SCOPED_GROUPS = ("k3s_servers", "k3s_agents")
+# Groups an export either admits in full or not at all. A group of mixed roles
+# (`all`) would report every export that legitimately admits one role.
+DEFAULT_SCOPED_GROUPS = ("k3s_servers", "k3s_agents")
 
 
 class Vacuous(Exception):
     """The gate could not inspect its subject — exit 2, never a silent pass."""
 
 
-def inventory(root: Path) -> tuple[dict[str, str], dict[str, set[str]]]:
-    """({ansible_host: inventory_hostname}, {group: {ansible_host, ...}}).
+def inventory(root: Path, hosts_yml: str, scoped_groups: Tuple[str, ...]) -> Tuple[
+    Dict[str, str], Dict[str, Set[str]]
+]:
+    """({ansible_host: inventory_hostname}, {scoped group: {ansible_host, ...}}).
 
-    A group carries the addresses of its own hosts and of every child group, so
-    a membership question can be asked of `k3s_agents` or of `k3s`.
+    A membership question is asked of addresses, not host names, because an
+    export admits CIDRs and /32s.
     """
     try:
-        doc = inventory_tree.load_inventory(root / HOSTS_YML)
+        doc = inventory_tree.load_inventory(root / hosts_yml)
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-        raise Vacuous(f"{HOSTS_YML} unreadable: {exc}") from exc
+        raise Vacuous(f"{hosts_yml} unreadable: {exc}") from exc
     found = inventory_tree.hosts_by_address(doc)
+    if not found:
+        raise Vacuous(f"{hosts_yml} declares no ansible_host values")
     addresses = inventory_tree.addresses_by_host(doc)
     index = inventory_tree.group_index(doc)
-    groups: dict[str, set[str]] = {}
-    for name in index:
+    groups: Dict[str, Set[str]] = {}
+    for name in scoped_groups:
+        if name not in index:
+            continue
         try:
             resolved = inventory_tree.resolve_hosts(name, index, strict=True)
         except inventory_tree.InventoryCycle as exc:
@@ -73,225 +87,244 @@ def inventory(root: Path) -> tuple[dict[str, str], dict[str, set[str]]]:
         members = {addresses[host] for host in resolved if host in addresses}
         if members:
             groups[name] = members
-    if not found:
-        raise Vacuous(f"{HOSTS_YML} declares no ansible_host values")
     return found, groups
 
 
-def substitute(address: str, config: dict[str, str]) -> str:
-    """Resolve a `${cluster_*}` placeholder the way Flux's postBuild does.
+def inventory_var_files(root: Path, inventory_dir: str) -> List[Path]:
+    """Every group_vars and host_vars file Ansible would read, nested dirs too.
 
-    An unknown placeholder is left alone and fails the IP parse below.
+    A group's vars live in `<group>.yml`, `<group>.yaml`, a bare `<group>` or a
+    `<group>/` directory; one spelling alone passes over the rest.
     """
-    match = _PLACEHOLDER.fullmatch(address.strip())
-    if match and match.group(1) in config:
-        return config[match.group(1)]
-    return address
+    found: List[Path] = []
+    for tree in ("group_vars", "host_vars"):
+        directory = root / inventory_dir / tree
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            if not path.is_file() or path.name.startswith("."):
+                continue
+            if path.name.endswith("~") or path.suffix in VARS_IGNORED_SUFFIXES:
+                continue
+            found.append(path)
+    return sorted(set(found))
 
 
-def _endpoint_list(
-    value, config: dict[str, str], problems: list[str] | None = None, where: str = ""
-) -> list:
-    """The endpoints list, resolving a whole-list `${cluster_*}` roster key.
+def nfs_exports(root: Path, inventory_dir: str) -> Tuple[
+    List[Tuple[str, List[str], str]], List[str]
+]:
+    """((export path, client specs, the file it came from), unreadable files)."""
+    found: List[Tuple[str, List[str], str]] = []
+    skipped: List[str] = []
+    for path in inventory_var_files(root, inventory_dir):
+        rel = path.relative_to(root).as_posix()
+        try:
+            with path.open(encoding="utf-8") as handle:
+                doc = yaml.safe_load(handle) or {}
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            skipped.append(
+                f"{rel}: unreadable ({exc.__class__.__name__}: {exc}) — "
+                "its NFS exports were not checked"
+            )
+            continue
+        if not isinstance(doc, dict):
+            continue
+        for export in doc.get(EXPORTS_KEY) or []:
+            if not isinstance(export, dict):
+                continue
+            specs = [
+                str(client["spec"])
+                for client in export.get("clients") or []
+                if isinstance(client, dict) and client.get("spec")
+            ]
+            found.append((str(export.get("path", "?")), specs, rel))
+    return found, skipped
 
-    A roster that does not resolve or does not parse is appended to `problems`:
-    returning an empty list would drop every address it holds silently.
+
+def host_addresses(values) -> Tuple[Dict[str, object], List[str]]:
+    """({value: parsed address}, the values that are names instead).
+
+    An `ansible_host` is ordinarily an address but legally a name, and a name
+    cannot be placed in a CIDR, so containment reads the parsed map alone.
+    """
+    parsed: Dict[str, object] = {}
+    unparsed: List[str] = []
+    for value in values:
+        try:
+            parsed[str(value)] = ipaddress.ip_address(str(value))
+        except ValueError:
+            unparsed.append(str(value))
+    return parsed, sorted(unparsed)
+
+
+def _name_caveat(names: List[str]) -> str:
+    """The clause a containment finding carries when an ansible_host is a name.
+
+    A host behind a name is neither matched nor reported, so the finding may
+    name an address that is in fact live.
+    """
+    if not names:
+        return ""
+    return (
+        f" (ansible_host {', '.join(names)} is not an address, so no endpoint "
+        "can be matched against it)"
+    )
+
+
+def _networks(specs: List[str]) -> List[Tuple[str, object]]:
+    """(spec, network) for every client spec that is a CIDR or a bare address.
+
+    A hostname, netgroup or wildcard spec is a legal export client this gate
+    cannot resolve to an address, so it is left out rather than reported.
+    """
+    found = []
+    for spec in specs:
+        try:
+            found.append((spec, ipaddress.ip_network(spec, strict=False)))
+        except ValueError:
+            continue
+    return found
+
+
+def partial_group_exports(
+    exports: List[Tuple[str, List[str], str]], groups: Dict[str, Set[str]]
+) -> List[str]:
+    """Exports admitting some of a scoped group's nodes but not all of them.
+
+    A client list is frozen when it is written, so a node added or renumbered
+    later loses the mount on itself alone while the rest keep it.
+    """
+    problems = []
+    for export, specs, rel in exports:
+        networks = [network for _spec, network in _networks(specs)]
+        if not networks:
+            continue
+        for group, members in sorted(groups.items()):
+            placeable, named = host_addresses(members)
+            admitted = {
+                address
+                for address, parsed in placeable.items()
+                if any(parsed in net for net in networks)
+            }
+            if not admitted or admitted == set(placeable):
+                continue
+            problems.append(
+                f"{rel}: export {export} admits part of {group} but not "
+                f"{', '.join(sorted(set(placeable) - admitted))} — that node "
+                "mounts nothing while the rest do" + _name_caveat(named)
+            )
+    return problems
+
+
+def lan_network(config: Dict[str, str]):
+    """The host CIDR the gate scopes to, from cluster-config."""
+    value = config.get(DEFAULT_LAN_CIDR_KEY)
+    if not value:
+        raise Vacuous(
+            f"{gate_common.CLUSTER_CONFIG} declares no {DEFAULT_LAN_CIDR_KEY} — "
+            "the gate has no LAN to scope to"
+        )
+    try:
+        return ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise Vacuous(
+            f"{gate_common.CLUSTER_CONFIG} {DEFAULT_LAN_CIDR_KEY}={value!r}: {exc}"
+        ) from exc
+
+
+def _endpoint_list(value, config: Dict[str, str]) -> Tuple[List, str]:
+    """(entries, reason it could not be read), resolving a whole-list roster key.
+
+    A slice may spell its endpoints as one `${cluster_*}` placeholder holding a
+    JSON list; a reason, not a bare empty list, keeps a dropped slice visible.
     """
     if isinstance(value, str):
-        resolved = substitute(value, config)
+        resolved = gate_common.substitute(value, config)
         if resolved == value.strip():
-            if problems is not None:
-                problems.append(
-                    f"{where} endpoints are {value.strip()!r}, which cluster-config "
-                    "does not define — its addresses were not checked"
-                )
-            return []
+            return [], f"{value.strip()!r} names no cluster-config key"
         try:
             value = yaml.safe_load(resolved)
         except yaml.YAMLError as exc:
-            if problems is not None:
-                problems.append(f"{where} endpoints roster does not parse: {exc}")
-            return []
-    return [entry for entry in (value or []) if isinstance(entry, dict)]
+            return [], f"{value!r} resolves to unparsable YAML ({exc.__class__.__name__})"
+    entries = [entry for entry in (value or []) if isinstance(entry, dict)]
+    if value and not entries:
+        return [], f"{value!r} resolves to no list of endpoint entries"
+    return entries, ""
 
 
-def endpoint_addresses(
-    root: Path, config: dict[str, str], unreadable: list[str] | None = None
-) -> list[tuple[str, str, str]]:
-    """(address, resource, file) for every address a hand-written endpoint names.
-
-    An unparseable file or an unresolved roster placeholder goes to `unreadable`:
-    dropping either leaves its addresses uncompared and unreported.
-    """
-    found = []
-    tree = root / MANIFEST_TREE
+def endpoint_addresses(root: Path, tree_name: str, config: Dict[str, str]) -> Tuple[
+    List[Tuple[str, str, str]], List[str]
+]:
+    """((address, resource, file) per hand-written endpoint, unreadable files)."""
+    found: List[Tuple[str, str, str]] = []
+    skipped: List[str] = []
+    tree = root / tree_name
     for path in sorted({p for glob in MANIFEST_GLOBS for p in tree.rglob(glob)}):
         rel = path.relative_to(root).as_posix()
         try:
             with path.open(encoding="utf-8") as handle:
                 docs = list(yaml.safe_load_all(handle))
         except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-            if unreadable is not None:
-                unreadable.append(f"{rel} unparseable, its objects were not checked: {exc}")
+            skipped.append(
+                f"{rel}: unreadable ({exc.__class__.__name__}: {exc}) — "
+                "this gate could not inspect it"
+            )
             continue
         for doc in docs:
             if not isinstance(doc, dict):
                 continue
             name = (doc.get("metadata") or {}).get("name", "?")
             if doc.get("kind") == "EndpointSlice":
-                where = f"{rel}: EndpointSlice/{name}"
-                for endpoint in _endpoint_list(doc.get("endpoints"), config, unreadable, where):
+                entries, reason = _endpoint_list(doc.get("endpoints"), config)
+                if reason:
+                    skipped.append(
+                        f"{rel}: EndpointSlice/{name} endpoints {reason} — "
+                        "this gate could not inspect it"
+                    )
+                for endpoint in entries:
                     for address in endpoint.get("addresses") or []:
                         found.append((str(address), f"EndpointSlice/{name}", rel))
             elif doc.get("kind") == "Endpoints":
-                where = f"{rel}: Endpoints/{name}"
-                for subset in _endpoint_list(doc.get("subsets"), config, unreadable, where):
+                entries, reason = _endpoint_list(doc.get("subsets"), config)
+                if reason:
+                    skipped.append(
+                        f"{rel}: Endpoints/{name} subsets {reason} — "
+                        "this gate could not inspect it"
+                    )
+                for subset in entries:
                     for address in subset.get("addresses") or []:
                         if not isinstance(address, dict):
                             continue
                         if address.get("ip"):
                             found.append((str(address["ip"]), f"Endpoints/{name}", rel))
-    return found
+    return found, skipped
 
 
-def nas_group_var_files(root: Path) -> list[Path]:
-    """Every file holding the nas group's vars, in Ansible's merge order.
-
-    A group's vars live in `<group>.yml`, `<group>.yaml` or a `<group>/`
-    directory; reading only the first spelling passes silently on the others.
-    """
-    base = root / GROUP_VARS
-    found = [
-        path
-        for path in (base / f"{NAS_GROUP}.yml", base / f"{NAS_GROUP}.yaml")
-        if path.is_file()
-    ]
-    directory = base / NAS_GROUP
-    if directory.is_dir():
-        found += sorted(p for p in directory.rglob("*.yml") if p.is_file())
-        found += sorted(p for p in directory.rglob("*.yaml") if p.is_file())
-    return found
-
-
-def nfs_exports(
-    root: Path, unreadable: list[str] | None = None
-) -> list[tuple[str, list[str], str]]:
-    """(export path, every client spec, the file it came from) per NFS export."""
-    paths = nas_group_var_files(root)
-    if not paths:
+def check(root: Path) -> Tuple[List[str], int]:
+    """(problems, number of in-LAN addresses compared against the inventory)."""
+    hosts_yml = f"{DEFAULT_INVENTORY}/hosts.yml"
+    known, groups = inventory(root, hosts_yml, DEFAULT_SCOPED_GROUPS)
+    hosts, named_hosts = host_addresses(known)
+    if not hosts:
         raise Vacuous(
-            f"no {NAS_GROUP} group vars under {GROUP_VARS}/ — expected "
-            f"{NAS_GROUP}.yml, {NAS_GROUP}.yaml or {NAS_GROUP}/"
+            f"every ansible_host in {hosts_yml} is a name, not an address, so no "
+            "endpoint or export client can be matched against one"
         )
-    found = []
-    for path in paths:
-        rel = path.relative_to(root).as_posix()
-        try:
-            with path.open(encoding="utf-8") as handle:
-                doc = yaml.safe_load(handle) or {}
-        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-            if unreadable is not None:
-                unreadable.append(f"{rel} unparseable, its exports were not checked: {exc}")
-            continue
-        if not isinstance(doc, dict):
-            continue
-        for export in doc.get("nas_storage_exports") or []:
-            if not isinstance(export, dict):
-                continue
-            specs = [
-                str(client.get("spec", ""))
-                for client in export.get("clients") or []
-                if isinstance(client, dict) and client.get("spec")
-            ]
-            found.append((str(export.get("path", "?")), specs, rel))
-    return found
-
-
-def partial_group_exports(
-    exports: list[tuple[str, list[str], str]], groups: dict[str, set[str]]
-) -> list[str]:
-    """Exports that admit some of a k3s group's nodes but not all of them.
-
-    A per-host client list is frozen when the inventory is written, so a node
-    added later loses the mount on itself alone.
-    """
-    problems = []
-    for export, specs, rel in exports:
-        if not specs or not all(spec.endswith("/32") for spec in specs):
-            continue
-        admitted = {spec[: -len("/32")] for spec in specs}
-        for group in K3S_SCOPED_GROUPS:
-            members = groups.get(group) or set()
-            missing = sorted(members - admitted)
-            if not missing or not (members & admitted):
-                continue
-            problems.append(
-                f"{rel}: export {export} admits part of {group} but not "
-                f"{', '.join(missing)} — that node mounts nothing while the rest do"
-            )
-    return problems
-
-
-def lan_networks(config: dict[str, str], keys: list[str], extra: list[str]) -> list:
-    """Every network the gate scopes to, from cluster-config keys then literals.
-
-    A multi-VLAN site splits management from storage or a DMZ, so membership is
-    an ANY-match over this list rather than one flat CIDR.
-    """
-    found = []
-    for key in keys:
-        value = config.get(key)
-        if not value:
-            continue
-        try:
-            found.append(ipaddress.ip_network(value, strict=False))
-        except ValueError as exc:
-            raise Vacuous(f"{CLUSTER_CONFIG} {key}={value!r}: {exc}") from exc
-    for value in extra:
-        try:
-            found.append(ipaddress.ip_network(value, strict=False))
-        except ValueError as exc:
-            raise Vacuous(f"--extra-lan-cidr {value!r}: {exc}") from exc
-    if not found:
-        raise Vacuous(
-            f"{CLUSTER_CONFIG} declares none of {', '.join(keys)} and no "
-            "--extra-lan-cidr was passed — the gate has no LAN to scope to"
-        )
-    return found
-
-
-def check(
-    root: Path,
-    lan_cidr_keys: list[str] | None = None,
-    extra_lan_cidrs: list[str] | None = None,
-) -> list[str]:
-    return check_detailed(root, lan_cidr_keys, extra_lan_cidrs)[0]
-
-
-def check_detailed(
-    root: Path,
-    lan_cidr_keys: list[str] | None = None,
-    extra_lan_cidrs: list[str] | None = None,
-) -> tuple[list[str], int]:
-    """(problems, addresses actually compared against the inventory)."""
-    known, groups = inventory(root)
     try:
         config = gate_common.load_cluster_config(root)
     except gate_common.OperatorError as exc:
         raise Vacuous(str(exc)) from exc
-    keys = list(lan_cidr_keys or [DEFAULT_LAN_CIDR_KEY])
-    lans = lan_networks(config, keys, list(extra_lan_cidrs or []))
+    lan = lan_network(config)
     # A cluster that declares no gateway key simply gets no gateway allowance.
     gateway = config.get(GATEWAY_KEY, "")
-    unreadable: list[str] = []
-    addresses = [
-        (substitute(a, config), resource, rel)
-        for a, resource, rel in endpoint_addresses(root, config, unreadable)
-    ]
+    raw, skipped = endpoint_addresses(root, DEFAULT_MANIFEST_TREE, config)
+    addresses = [(gate_common.substitute(a, config), resource, rel) for a, resource, rel in raw]
     if not addresses:
-        raise Vacuous(f"no EndpointSlice/Endpoints address found under {MANIFEST_TREE}/")
+        raise Vacuous(
+            f"no EndpointSlice/Endpoints address found under {DEFAULT_MANIFEST_TREE}/"
+        )
 
-    problems = list(unreadable)
+    problems = list(skipped)
     checked = 0
     for address, resource, rel in addresses:
         try:
@@ -299,59 +332,70 @@ def check_detailed(
         except ValueError:
             problems.append(f"{rel}: {resource} address {address!r} is not an IP address")
             continue
-        if not any(parsed in lan for lan in lans) or address == gateway:
+        if parsed not in lan or address == gateway:
             continue
         checked += 1
         if address not in known:
             problems.append(
                 f"{rel}: {resource} points at {address}, which is no ansible_host "
-                f"in {HOSTS_YML} — the guest was renumbered on one side only"
+                f"in {hosts_yml} — the guest was renumbered on one side only"
+                + _name_caveat(named_hosts)
             )
-    exports = nfs_exports(root, problems)
+
+    exports, export_skipped = nfs_exports(root, DEFAULT_INVENTORY)
+    problems.extend(export_skipped)
     for export, specs, rel in exports:
-        for spec in specs:
-            if not spec.endswith("/32"):
+        for spec, network in _networks(specs):
+            # An overlap either way is in scope: a spec CONTAINING a host CIDR
+            # is the broadest client list an exports file can carry, and
+            # containment in one direction alone never saw it.
+            if lan.version != network.version or not (
+                network.subnet_of(lan) or network.supernet_of(lan)
+            ):
                 continue
-            address = spec[: -len("/32")]
             checked += 1
-            if address not in known:
+            if network != lan and lan.subnet_of(network):
                 problems.append(
-                    f"{rel}: export {export} allows {spec}, which is no "
-                    f"ansible_host in {HOSTS_YML} — the guest was renumbered on one side only"
+                    f"{rel}: export {export} admits {spec}, which is wider than "
+                    f"the host CIDR {lan} — it admits every address in that "
+                    "CIDR and beyond, whatever the inventory holds"
+                )
+                continue
+            if not any(host in network for host in hosts.values()):
+                problems.append(
+                    f"{rel}: export {export} admits {spec}, which covers no "
+                    f"ansible_host in {hosts_yml} — the client list was written "
+                    "for an address range the inventory no longer uses"
+                    + _name_caveat(named_hosts)
                 )
     problems.extend(partial_group_exports(exports, groups))
+
     if not checked:
-        scope = ", ".join(str(lan) for lan in lans)
-        raise Vacuous(f"no address inside {scope} reached the comparison")
+        raise Vacuous(f"no address inside {lan} reached the comparison")
     return problems, checked
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Guest endpoint addresses vs the inventory")
+    parser = argparse.ArgumentParser(
+        description="Guest endpoint addresses and NFS export clients vs the inventory"
+    )
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parent.parent))
-    parser.add_argument(
-        "--lan-cidr-key", action="append", default=None,
-        help="cluster-config key holding a LAN CIDR; repeatable, one per network "
-             f"this site declares (default: {DEFAULT_LAN_CIDR_KEY})",
-    )
-    parser.add_argument(
-        "--extra-lan-cidr", action="append", default=None,
-        help="a LAN CIDR cluster-config does not declare; repeatable",
-    )
     args = parser.parse_args(argv)
-    root = Path(args.repo_root)
 
     try:
-        problems, checked = check_detailed(root, args.lan_cidr_key, args.extra_lan_cidr)
+        problems, total = check(Path(args.repo_root))
     except (Vacuous, OSError, UnicodeDecodeError) as exc:
         print(f"check-guest-endpoint-parity inspected nothing: {exc}", file=sys.stderr)
         return 2
     if problems:
-        print("Guest endpoint addresses have drifted from the inventory:", file=sys.stderr)
+        print("Hand-written LAN addresses have drifted from the inventory:", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         return 1
-    print(f"Guest endpoint addresses agree with the inventory ({checked} addresses checked).")
+    print(
+        "Guest endpoint addresses and NFS export clients agree with the inventory "
+        f"({total} LAN address(es) checked)."
+    )
     return 0
 
 

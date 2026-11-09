@@ -24,6 +24,7 @@ next to `weisssrv-lib`, `weisssrv-app-template` and a generated cluster, and
 | a backend seam (secrets / dns / git-CI / vpn / sso / gpu / gateway / storage / ingress) | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § Backend seams, and weisssrv-lib `docs/EXTENSIBILITY.md` |
 | the library pin | [docs/VERSIONING.md](docs/VERSIONING.md) § Which library release the template is validated against and [docs/CI.md](docs/CI.md) § Library pin — `copier.yml`'s `lib_ref` default and this repo's own declared `lib_ref` input move in one MR, the latter with `scripts/check-lib-pins.py --bump vX.Y.Z` |
 | a vendored script under `scripts/` or `template/scripts/` | [docs/CI.md](docs/CI.md) — these are byte-identical copies of weisssrv-lib's; fix them THERE, tag, re-vendor. TWO manifests register them: `scripts/vendored-manifest.yml` for this repository's copies, `template/scripts/vendored-manifest.yml` for the ones every generated cluster carries — adding or moving a copy edits both |
+| the tenant wiring shape | `template/kubernetes/clusters/{{ cluster_name }}/tenants/README.md.jinja` — canonical for every tenant; weisssrv-app-template's `docs/ONBOARDING.md` renders a tenant's values into it, so a shape change lands there too |
 | CI | [docs/CI.md](docs/CI.md) |
 | operator prose | [docs/PRE-SETUP.md](docs/PRE-SETUP.md), [docs/SETUP.md](docs/SETUP.md), [docs/RUNBOOKS.md](docs/RUNBOOKS.md) |
 
@@ -31,12 +32,13 @@ next to `weisssrv-lib`, `weisssrv-app-template` and a generated cluster, and
 
 The commands are in [README.md § Local gates](README.md#local-gates). Run that
 whole set, including the ruff, shellcheck and link lines, and do not keep a
-second copy here. It is the CI lint and test stages, and all three
-renders are part of it.
+second copy here. The set mirrors the CI lint and test stages and includes all
+three renders.
 
 ## House rules
 
-- Never push to `main`; every change is a branch and a merge request.
+- Never push to `main`; every change is a branch and a merge request. Keep the
+  branch local until the merge request is ready.
 - No secrets in the tree — `op://` references and item titles only.
 - No AI or assistant attribution anywhere: commits, MRs, code or docs.
 - Comments state the current rule and why it holds. No history, no narration, no
@@ -59,8 +61,8 @@ renders are part of it.
   no consumer at all. The `ci-jobs` PriorityClass is gated because only the
   runner modules name it; a module that merely defaults to a `git_host`-derived
   value, like `registry-cache`, is not — its upstream is an edit-here knob, not
-  a forge dependency. `git_backend: github` is validator-blocked today, so every
-  such gate is forward-compatible scaffolding.
+  a forge dependency. `git_backend: github` is validator-blocked, so every such
+  gate is forward-compatible scaffolding.
 - A manifest comment is at most three lines and describes the current state.
   Longer explanation goes to the nearest `README.md` or to
   `template/docs/RUNBOOKS.md.jinja`, and the manifest points at it by name.

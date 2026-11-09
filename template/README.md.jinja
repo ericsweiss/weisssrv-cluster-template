@@ -35,7 +35,8 @@ as Flux substitutions, never as literals.
 First time only, in this order. Each phase leaves a working state.
 
 1. **Prerequisites** — hosts reachable over SSH as `{{ admin_user }}` with
-   passwordless sudo, ZFS pools created, vault items present.
+   passwordless sudo, {% if storage_backend == 'zfs' %}ZFS pools{% else %}storage pools{% endif %} created, and the
+   {% if secrets_backend == 'onepassword' %}1Password{% else %}{{ secrets_backend }}{% endif %} vault items present.
 2. **Collection** — `task ansible:install-collections`. The roles are fetched at
    `{{ lib_ref }}`, not vendored, so nothing Ansible-shaped works before this.
 3. **Inventory** — fill in `hosts.yml` (every name and address in it is a
@@ -55,29 +56,27 @@ First time only, in this order. Each phase leaves a working state.
    compares them against — that gate never skips, so it fails rather than
    passing quietly on a machine with no library to compare with.
 5. **Base layer** — `task infra:check`, then `task infra:deploy`, then
-   `task infra:verify`. `infra:deploy` runs `site.yml`, which is the only entry
-   point that orders the certificate plays before the NAS plays — use it on a
-   fresh cluster rather than the per-stage tasks. Point DHCP at the new
-   resolvers once DNS is up.
+   `task infra:verify`. `infra:deploy` runs `site.yml`. It is the only entry
+   point that orders the certificate plays before the NAS plays, so use it on
+   a fresh cluster. Point DHCP at the new resolvers once DNS is up.
 
-   **A fresh cluster takes two passes here, not one.** Ansible installs and
-   renews the wildcard certificate but never issues the first one, and the push
-   targets cannot be pinned before the containers that carry those host keys
-   exist. So: `task infra:deploy -- --limit '!{{ nas_host.split('.')[0] }}'`,
-   then `task certs:show-host-keys` and paste each pin into
-   `_acme_certs_targets` in `ansible/inventories/prod/group_vars/dns.yml`, then
-   one manual `acme.sh --issue` on `dns-01` (the certificate play prints the
-   exact command), then `task disaster-recovery:storage-bootstrap` to create
-   the datasets `group_vars/nas.yml` declares inside the hand-made pools, then
-   a full `task infra:deploy`. `nas_storage` fails loudly on a declared dataset
-   that does not exist rather than creating it (`docs/RUNBOOKS.md` § Storage
-   bootstrap). A single pass instead stops on the storage host, where `nfs_tls`
-   hard-fails on the missing certificate.
-   The cluster template's `docs/SETUP.md` § 4 walks it, and
-   `docs/RUNBOOKS.md` § Certificates has it too.
+   **A fresh cluster takes two passes here.** Ansible renews the wildcard
+   certificate but never issues the first one. A single pass stops on the
+   storage host, where `nfs_tls` fails on the missing certificate.
+
+   1. `task infra:deploy -- --limit '!{{ nas_host.split('.')[0] }}'`.
+   2. `task certs:show-host-keys`, then paste each pin into
+      `_acme_certs_targets` in `ansible/inventories/prod/group_vars/dns.yml`.
+   3. Run one manual `acme.sh --issue` on `dns-01`. The certificate play
+      prints the exact command.
+   4. `task disaster-recovery:storage-bootstrap` creates the datasets
+      `group_vars/nas.yml` declares inside the hand-made pools.
+   5. Run a full `task infra:deploy`.
+
+   `docs/RUNBOOKS.md` § Certificates and § Storage bootstrap hold the detail.
 6. **Kubernetes nodes** — `task k3s:provision-vms`, `task k3s:deploy`,
    `task k3s:kubeconfig`, then `export KUBECONFIG=~/.kube/config-k3s`.
-7. **GitOps** — put `1password-credentials.json` in this repository's root, run
+7. **GitOps** — {% if secrets_backend == 'onepassword' %}put `1password-credentials.json` in this repository's root, {% endif %}run
    `task flux:bootstrap-secrets` to create the two bootstrap Secrets, push this
    repository, then `task flux:bootstrap`.
 8. **Publish** — `task terraform:init` (once per module, per checkout — the
@@ -88,23 +87,23 @@ First time only, in this order. Each phase leaves a working state.
    WLANs: import what the console already holds, then
    `task terraform:unifi-init`, `task terraform:unifi-plan` and
    `task terraform:unifi-apply` (read `terraform/unifi/README.md` first).
-   Register CI runners.
-{%- else %} Forward `443/tcp` to `{{ metallb_public_vip }}` and register CI
-   runners.
+{%- else %} Forward `443/tcp` to `{{ metallb_public_vip }}`.
 {%- endif %}
-9. **Single sign-on** — the platform is green but nothing can be signed into
-   yet: Grafana is SSO-only and its identity provider is this cluster's own
-   Authentik, freshly deployed and empty. Run the one-time
-   `https://auth.{{ external_domain }}/if/flow/initial-setup/` flow (available
-   only until an admin exists) from a machine already using the new resolvers
-   (step 5). That external name is the canonical origin Authentik builds its
-   links from, and `group_vars/dns.yml` answers it with the internal VIP on the
-   LAN; `kubernetes/apps/authentik/README.md` has the detail. Then mint an
-   `akadmin` token into the vault and run
-   `task terraform:authentik-init`, `task terraform:authentik-plan`,
-   `task terraform:authentik-apply`. The cluster template's `docs/SETUP.md`
-   § 7 step 4 covers the group membership and the two `Grafana SSO` fields that
-   must be real values.
+9. **CI runners** — register the CI runners. `docs/ci-pipeline.md` § Runner
+   names what each job needs from one.
+10. **Single sign-on** — the platform is green but nothing can be signed into
+    yet: Grafana is SSO-only and its identity provider is this cluster's own
+    Authentik, freshly deployed and empty. Run the one-time
+    `https://auth.{{ external_domain }}/if/flow/initial-setup/` flow (available
+    only until an admin exists) from a machine already using the new resolvers
+    (step 5). That external name is the canonical origin Authentik builds its
+    links from, and `group_vars/dns.yml` answers it with the internal VIP on the
+    LAN; `kubernetes/apps/authentik/README.md` has the detail. Then mint an
+    `akadmin` token into the vault and run
+    `task terraform:authentik-init`, `task terraform:authentik-plan`,
+    `task terraform:authentik-apply`. The cluster template's `docs/SETUP.md`
+    § 7 step 4 covers the group membership and the two `Grafana SSO` fields that
+    must be real values.
 
 Once the cluster is up, a few one-time follow-ups:
 

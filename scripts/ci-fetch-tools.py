@@ -51,9 +51,8 @@ class Tool:
 # cross-checked against the project's published checksums; shellcheck
 # publishes none. `{version}` renders from the effective version.
 
-# This table is the one place a tool bump lands: every ci/ template and example
-# workflow installing the same tool another way is held equal to it by
-# tests/test_pin_parity.py.
+# A tool bump lands here. In weisssrv-lib, tests/test_pin_parity.py holds every
+# ci/ template and example workflow that installs the same tool equal to it.
 TOOLS: dict[str, Tool] = {
     "amtool": Tool(
         version="0.34.1",
@@ -61,6 +60,13 @@ TOOLS: dict[str, Tool] = {
         sha256="265b9d1e55ef0d5306a436018af6d2b686c2ce051f03d968f7464ecb1372a7e8",
         kind="tar.gz",
         member="alertmanager-{version}.linux-amd64/amtool",
+    ),
+    "flux": Tool(
+        version="2.9.6",
+        url="https://github.com/fluxcd/flux2/releases/download/v{version}/flux_{version}_linux_amd64.tar.gz",
+        sha256="b4d22673e9246cbd628881f1a9ef3b090085dced291e42d804555cee8e8d42c5",
+        kind="tar.gz",
+        member="flux",
     ),
     "jq": Tool(
         version="1.8.2",
@@ -95,6 +101,13 @@ TOOLS: dict[str, Tool] = {
         sha256="8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198",
         kind="tar.xz",
         member="shellcheck-v{version}/shellcheck",
+    ),
+    "task": Tool(
+        version="3.54.0",
+        url="https://github.com/go-task/task/releases/download/v{version}/task_linux_amd64.tar.gz",
+        sha256="680859dbb4d881a9c72d4d9a8f510825450849af8567deacd7302c01124416fb",
+        kind="tar.gz",
+        member="task",
     ),
     "terraform": Tool(
         version="1.16.5",

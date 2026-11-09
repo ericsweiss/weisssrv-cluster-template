@@ -2,6 +2,9 @@
 # Policy data for check-hpa-vpa-invariant.py (--policy-config) and the shared
 # CPU-limit allowlist in validate-helm-values.py; both run in `task flux:lint`
 # and the CI flux-lint job. Field reference: weisssrv-lib docs/SCRIPTS.md.
+
+# Workloads whose HPA comes from a Helm chart, so absent from the kustomize
+# corpus. Each needs a mutating VPA excluding cpu (--require-chart-native-vpas).
 chart_native_hpa_targets:
   - namespace: traefik
     kind: Deployment

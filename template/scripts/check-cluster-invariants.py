@@ -39,13 +39,12 @@ DEFAULT_VIP_KEYS = (
     "cluster_metallb_public_vip",
     "cluster_metallb_internal_vip",
 )
-DEFAULT_LAN_CIDR_KEY = "cluster_lan_cidr"
+LAN_CIDR_KEY = "cluster_lan_cidr"
 
 # An exact `instance="host[:port]"` selector in an alert rule. `instance=~` is a
 # regex alternation the operator maintains deliberately, so only the exact form
 # is held to the inventory.
 INSTANCE_LITERAL = re.compile(r'instance\s*=\s*"([^"\s]+)"')
-DEFAULT_RULES_GLOB = "**/*.y*ml"
 
 
 def vip_keys(data: dict) -> tuple:
@@ -104,7 +103,7 @@ def vip_collisions(hosts: Dict[str, dict], data: dict, keys) -> List[str]:
     if not claimed:
         raise OperatorError(
             "the cluster config declares none of %s, so the VIP arm is examining "
-            "nothing; pass --allow-missing-vip if this consumer declares no VIP"
+            "nothing"
             % ", ".join(keys)
         )
     out = []
@@ -134,7 +133,7 @@ def outside_lan(hosts: Dict[str, dict], cidrs) -> Tuple[List[str], int]:
     return out, compared
 
 
-def rule_files(paths, glob: str) -> List[Path]:
+def rule_files(paths) -> List[Path]:
     """Every rule file under the given files and directories, deduplicated."""
     found: List[Path] = []
     for raw in paths:
@@ -142,7 +141,7 @@ def rule_files(paths, glob: str) -> List[Path]:
         if path.is_file():
             candidates = [path]
         elif path.is_dir():
-            candidates = sorted(p for p in path.glob(glob) if p.is_file())
+            candidates = sorted(p for p in path.glob("**/*.y*ml") if p.is_file())
         else:
             raise OperatorError("no such rules path: %s" % path)
         for candidate in candidates:
@@ -207,55 +206,14 @@ def main(argv=None) -> int:
         default=Path("kubernetes/infrastructure/sources/cluster-config.yaml"),
     )
     parser.add_argument(
-        "--vip-key", action="append", default=None,
-        help="cluster-config key holding a VIP; repeatable (default: every "
-             "cluster_*_vip key the config declares)",
-    )
-    parser.add_argument(
-        "--lan-cidr-key", action="append", default=None,
-        help="cluster-config key holding a LAN CIDR; repeatable (default: %s)"
-             % DEFAULT_LAN_CIDR_KEY,
-    )
-    parser.add_argument(
         "--rules-dir", action="append", default=None, metavar="PATH",
         help="alert-rule file or directory whose exact `instance=\"<ipv4>\"` "
              "literals must be inventory addresses; repeatable",
     )
     parser.add_argument(
-        "--rules-glob", default=DEFAULT_RULES_GLOB,
-        help="glob applied inside each --rules-dir directory (default: %s)"
-             % DEFAULT_RULES_GLOB,
-    )
-    parser.add_argument(
         "--allow-instance", action="append", default=None, metavar="ADDRESS",
         help="address an alert rule may pin although no inventory host holds "
              "it; repeatable, and a stale entry is an error",
-    )
-    parser.add_argument(
-        "--allow-missing-cluster-config", action="store_true",
-        help="the VIP and LAN arms are a pass for a consumer with no cluster config",
-    )
-    parser.add_argument(
-        "--allow-missing-lan-cidr", action="store_true",
-        help="the LAN arm is a pass for a consumer whose config declares no LAN CIDR",
-    )
-    parser.add_argument(
-        "--allow-missing-lan-addresses", action="store_true",
-        help="the LAN arm is a pass for a consumer that addresses hosts by name",
-    )
-    parser.add_argument(
-        "--allow-missing-vip", action="store_true",
-        help="the VIP arm is a pass for a consumer whose config declares no VIP",
-    )
-    parser.add_argument(
-        "--allow-missing-vmid", action="store_true",
-        help="the duplicate-vmid arm is a pass for an inventory that keeps "
-             "vmid in host_vars rather than hosts.yml",
-    )
-    parser.add_argument(
-        "--allow-missing-ansible-host", action="store_true",
-        help="the duplicate-ansible_host arm is a pass for an inventory that "
-             "resolves hosts by name",
     )
     args = parser.parse_args(argv)
 
@@ -264,7 +222,6 @@ def main(argv=None) -> int:
         return 2
 
     findings: List[str] = []
-    skipped_arms: List[str] = []
     data: dict = {}
     try:
         hosts = inventory_hosts(args.hosts)
@@ -277,79 +234,55 @@ def main(argv=None) -> int:
         ):
             clashes, declared = duplicates(hosts, field)
             if not declared:
-                if not getattr(args, "allow_missing_%s" % field):
-                    raise OperatorError(
-                        "no inventory host declares %s, so the duplicate-%s arm "
-                        "is examining nothing; pass --allow-missing-%s if this "
-                        "consumer has none"
-                        % (field, field, field.replace("_", "-"))
-                    )
-                skipped_arms.append(field)
-                continue
+                raise OperatorError(
+                    "no inventory host declares %s, so the duplicate-%s arm "
+                    "is examining nothing" % (field, field)
+                )
             if clashes:
                 findings.append(
                     "duplicate %s in the inventory (%s):\n  %s"
                     % (field, tail, "\n  ".join(clashes))
                 )
 
-        if args.cluster_config.is_file():
-            data = cluster_config(args.cluster_config)
-            keys = args.vip_key or vip_keys(data)
-            if not any(data.get(key) for key in keys) and args.allow_missing_vip:
-                skipped_arms.append("VIP")
-            else:
-                collisions = vip_collisions(hosts, data, keys)
-                if collisions:
-                    findings.append(
-                        "inventory hosts configured on a cluster VIP:\n  %s"
-                        % "\n  ".join(collisions)
-                    )
-            lan_keys = args.lan_cidr_key or [DEFAULT_LAN_CIDR_KEY]
-            cidrs = [data[key] for key in lan_keys if data.get(key)]
-            if not cidrs and not args.allow_missing_lan_cidr:
-                raise OperatorError(
-                    "the cluster config declares none of %s, so the LAN arm is "
-                    "examining nothing; pass --allow-missing-lan-cidr if this "
-                    "consumer has none" % ", ".join(lan_keys)
-                )
-            if cidrs:
-                outside, compared = outside_lan(hosts, cidrs)
-                if not compared and "ansible_host" not in skipped_arms:
-                    if not args.allow_missing_lan_addresses:
-                        raise OperatorError(
-                            "no inventory host declares an IP-literal "
-                            "ansible_host, so the LAN arm is examining nothing; "
-                            "pass --allow-missing-lan-addresses if this consumer "
-                            "addresses hosts by name"
-                        )
-                    skipped_arms.append("LAN addresses")
-                if outside:
-                    findings.append(
-                        "hosts addressed outside %s (%s):\n  %s"
-                        % (", ".join(lan_keys),
-                           ", ".join(str(c) for c in cidrs),
-                           "\n  ".join(outside))
-                    )
-            else:
-                skipped_arms.append("LAN")
-        elif args.allow_missing_cluster_config:
-            skipped_arms += ["VIP", "LAN"]
-        else:
+        if not args.cluster_config.is_file():
             raise OperatorError(
-                "no cluster config at %s, so the VIP and LAN arms cannot run; "
-                "pass --allow-missing-cluster-config if this consumer has none"
+                "no cluster config at %s, so the VIP and LAN arms cannot run"
                 % args.cluster_config
+            )
+        data = cluster_config(args.cluster_config)
+        collisions = vip_collisions(hosts, data, vip_keys(data))
+        if collisions:
+            findings.append(
+                "inventory hosts configured on a cluster VIP:\n  %s"
+                % "\n  ".join(collisions)
+            )
+        cidr = data.get(LAN_CIDR_KEY)
+        if not cidr:
+            raise OperatorError(
+                "the cluster config declares no %s, so the LAN arm is examining "
+                "nothing" % LAN_CIDR_KEY
+            )
+        outside, compared = outside_lan(hosts, [cidr])
+        if not compared:
+            raise OperatorError(
+                "no inventory host declares an IP-literal ansible_host, so the "
+                "LAN arm is examining nothing"
+            )
+        if outside:
+            findings.append(
+                "hosts addressed outside %s (%s):\n  %s"
+                % (LAN_CIDR_KEY, cidr, "\n  ".join(outside))
             )
 
         if args.rules_dir:
             allowed = {str(a) for a in args.allow_instance or []}
-            literals = instance_literals(rule_files(args.rules_dir, args.rules_glob))
+            literals = instance_literals(rule_files(args.rules_dir))
             if not literals:
                 raise OperatorError(
-                    "no `instance=\"<ipv4>\"` literal under %s (glob %s), so the "
+                    "no `instance=\"<ipv4>\"` literal under %s, so the "
                     "instance-parity arm is examining nothing; drop --rules-dir "
                     "if this consumer pins no address"
-                    % (", ".join(str(p) for p in args.rules_dir), args.rules_glob)
+                    % ", ".join(str(p) for p in args.rules_dir)
                 )
             stale = sorted(allowed - set(literals))
             if stale:
@@ -381,11 +314,7 @@ def main(argv=None) -> int:
         for finding in findings:
             print("FAIL %s" % finding, file=sys.stderr)
         return 1
-    if skipped_arms:
-        print("inventory invariants OK (%d hosts; %s arm(s) skipped by request)"
-              % (len(hosts), " and ".join(skipped_arms)))
-    else:
-        print("inventory invariants OK (%d hosts)" % len(hosts))
+    print("inventory invariants OK (%d hosts)" % len(hosts))
     return 0
 
 

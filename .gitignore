@@ -1,5 +1,5 @@
-# Secrets / local env — never commit these. NOT `*.env`: scripts/hosts.env is
-# generated but committed.
+# Secrets / local env — never commit these. NOT `*.env`: the template ships
+# template/scripts/hosts.env.
 .env
 .env.*
 .tmp/

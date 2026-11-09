@@ -15,6 +15,7 @@ kubernetes/
 │   ├── infrastructure-controllers.yaml # stage 3  (dependsOn sources + crds)
 │   ├── infrastructure-configs.yaml     # stage 4  (dependsOn controllers)
 │   ├── infrastructure-observability.yaml  # stage 5 (dependsOn configs)
+│   ├── infrastructure-metrics-server.yaml # off the chain: dependsOn sources only
 │   ├── apps.yaml                       # dependsOn configs — parallel to observability
 │   ├── kustomization.yaml
 │   └── tenants/                        # one file per external repo that deploys here
@@ -39,7 +40,8 @@ directory to put them in.
 ## Reconciliation order
 
 `sources → crds → controllers → configs`, then `observability` and `apps` in
-parallel. Two choices in that graph are deliberate and worth keeping:
+parallel, and `infrastructure-metrics-server` off `sources` alone. Three choices
+in that graph are deliberate and worth keeping:
 
 - **`crds` is its own stage.** On a fresh cluster the Traefik chart renders a
   ServiceMonitor and hard-fails when the `monitoring.coreos.com` API is absent,
@@ -47,6 +49,21 @@ parallel. Two choices in that graph are deliberate and worth keeping:
   late. Installing them first breaks the circle.
 - **`apps` depends on `configs`, not on `observability`.** A failed metrics or
   logging upgrade must never freeze reconciliation of every workload.
+- **`infrastructure-metrics-server` hangs off `sources` alone.** Nothing
+  `dependsOn` it. Its readiness also depends on an Ansible-side flag, the
+  `metrics-server` entry in `k3s_disable`. A gap between a merge and
+  `task k3s:deploy` therefore cannot freeze any other stage. Its path sits
+  inside `controllers/`, and the controllers kustomization leaves that directory
+  out, so one Kustomization owns each object.
+
+**The `k3s_disable` entry and the metrics-server release deploy together.** The
+k3s AddOn and the chart share object names, so Helm refuses the install while
+the AddOn exists. Until `task k3s:deploy` runs, the AddOn keeps serving the
+Resource Metrics API. That run deletes the AddOn, and the API stays down until
+the HelmRelease installs, so every HPA and the VPA recommender are blind. Close
+that window right after `task k3s:deploy`: run
+`flux reconcile helmrelease metrics-server -n kube-system --force`, then check
+that `kubectl get apiservice v1beta1.metrics.k8s.io` reports `Available=True`.
 
 ## No site literals — the `cluster-config` ConfigMap
 
@@ -213,8 +230,9 @@ cannot be drained: Traefik's PodDisruptionBudget blocks the second eviction.
 
 Not every row is a node label: `runner-class` is set on CI job pods, and the
 last two are set on Namespaces. They live in this table because they share the
-prefix and the same opt-in-by-label mechanism — and because getting one of them
-wrong fails silently rather than loudly.
+prefix and the same opt-in-by-label mechanism. A wrong `runner-class` label
+fails silently. A missing `cluster-secrets` label fails loudly, as the section
+below describes.
 
 ## Scheduling priority
 
@@ -294,16 +312,9 @@ manifests in this repository, and the built-in `admin` ClusterRole grants only
 
 {% if git_backend == 'gitlab_selfhosted' %}## Before you register the CI runners
 
-Read `apps/gitlab-runner-privileged/README.md` first, and take one rule from it
-into the bring-up itself:
-
-> **The privileged runner must be registered as a PROJECT runner locked to this
-> repository. Never an instance runner; never a group runner over a group that
-> contains untrusted projects.**
-
-Tags are cooperative routing, not access control. That module's README carries
-the reasoning, the residual risk `protected: false` accepts, and the
-`GET /api/v4/runners/<id>` check to run after every registration.
+Read `apps/gitlab-runner-privileged/README.md` first. It owns the
+registration rule for the privileged runner, the reasoning behind it and the
+check to run after every registration.
 
 {% endif %}## Bootstrap and day-2
 

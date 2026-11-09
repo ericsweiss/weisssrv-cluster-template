@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parent.parent
@@ -46,14 +47,19 @@ def ci_variables() -> dict:
     return (docs[-1] if docs else {}).get("variables") or {}
 
 
-def test_the_ansible_pin_matches_the_ci_variable():
-    """Several CI jobs pip-install `variables.ANSIBLE_VERSION` directly."""
-    ci_pin = ci_variables().get("ANSIBLE_VERSION")
-    assert ci_pin, "variables.ANSIBLE_VERSION is where the CI jobs read the pin"
-    local = pinned("ansible")
+@pytest.mark.parametrize("package,variable", [
+    ("ansible", "ANSIBLE_VERSION"),
+    ("ansible-core", "ANSIBLE_CORE_VERSION"),
+    ("pyyaml", "PYYAML_VERSION"),
+])
+def test_the_requirements_pin_matches_the_ci_variable(package, variable):
+    """CI jobs pip-install the variable directly."""
+    ci_pin = ci_variables().get(variable)
+    assert ci_pin, f"variables.{variable} is where the CI jobs read the pin"
+    local = pinned(package)
     assert local == str(ci_pin), (
-        f"requirements.txt pins ansible=={local} but .gitlab-ci.yml's "
-        f"ANSIBLE_VERSION is {ci_pin!r}. They are one pin — bump both."
+        f"requirements.txt pins {package}=={local} but .gitlab-ci.yml's "
+        f"{variable} is {ci_pin!r}. They are one pin — bump both."
     )
 
 
@@ -68,15 +74,4 @@ def test_the_ruff_pin_matches_the_python_lint_include_input():
     assert not off, (
         f"requirements.txt pins ruff=={local} but python-lint's ruff_version is "
         f"{off}. They are one pin — bump both."
-    )
-
-
-def test_the_pyyaml_pin_matches_the_ci_variable():
-    """The corpus gates import PyYAML; CI installs `variables.PYYAML_VERSION`."""
-    ci_pin = ci_variables().get("PYYAML_VERSION")
-    assert ci_pin, "variables.PYYAML_VERSION is where the CI jobs read the pin"
-    local = pinned("pyyaml")
-    assert local == str(ci_pin), (
-        f"requirements.txt pins pyyaml=={local} but .gitlab-ci.yml's "
-        f"PYYAML_VERSION is {ci_pin!r}. They are one pin — bump both."
     )

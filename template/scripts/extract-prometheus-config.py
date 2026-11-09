@@ -36,9 +36,7 @@ def _load(path: Path) -> dict:
     return doc if isinstance(doc, dict) else {}
 
 
-def dummy_for(name: str, overrides: dict[str, str] | None = None) -> str:
-    if overrides and name in overrides:
-        return overrides[name]
+def dummy_for(name: str) -> str:
     return DUMMY_URL if name.lower().endswith("url") else DUMMY_SCALAR
 
 
@@ -106,17 +104,11 @@ def extract_rules(
     return 0
 
 
-def render_placeholders(template: str, overrides: dict[str, str] | None = None) -> str:
-    return _PLACEHOLDER_RE.sub(
-        lambda m: '"' + dummy_for(m.group(1), overrides) + '"', template
-    )
+def render_placeholders(template: str) -> str:
+    return _PLACEHOLDER_RE.sub(lambda m: '"' + dummy_for(m.group(1)) + '"', template)
 
 
-def extract_alertmanager(
-    out: Path,
-    am_config: Path = DEFAULT_AM_CONFIG,
-    overrides: dict[str, str] | None = None,
-) -> int:
+def extract_alertmanager(out: Path, am_config: Path = DEFAULT_AM_CONFIG) -> int:
     doc = _load(am_config)
     # `(x or {})` at every hop: a key present with an explicit null value makes
     # .get(k, {}) return None, not the default.
@@ -126,7 +118,7 @@ def extract_alertmanager(
     if not template:
         print(f"ERROR: alertmanager.yaml template not found in {am_config}", file=sys.stderr)
         return 1
-    rendered = render_placeholders(template, overrides)
+    rendered = render_placeholders(template)
     if "{{" in rendered:
         print("ERROR: unrendered template expression remains after substitution", file=sys.stderr)
         print(rendered, file=sys.stderr)
@@ -134,16 +126,6 @@ def extract_alertmanager(
     out.write_text(rendered)
     print(f"Wrote rendered Alertmanager config to {out}")
     return 0
-
-
-def _parse_dummy(values: list[str]) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for item in values:
-        key, sep, value = item.partition("=")
-        if not sep or not key:
-            raise SystemExit(f"--dummy expects NAME=VALUE, got {item!r}")
-        out[key] = value
-    return out
 
 
 def main(argv: list[str]) -> int:
@@ -154,9 +136,8 @@ def main(argv: list[str]) -> int:
             "rules is the union of additionalPrometheusRulesMap and every "
             "--rules-dir (repeatable); "
             "a group defined twice is caught by promtool's duplicate-name check.\n"
-            "--dummy (repeatable) overrides the value substituted for an ESO "
-            "`{{ .name | quote }}` placeholder. An unset name renders as a dummy "
-            "https URL when it ends in `url`, and as the literal `dummy` otherwise."
+            "An ESO `{{ .name | quote }}` placeholder renders as a dummy https URL "
+            "when the name ends in `url`, and as the literal `dummy` otherwise."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -169,7 +150,6 @@ def main(argv: list[str]) -> int:
              "ships, e.g. the shared rules dir plus the per-app one",
     )
     parser.add_argument("--am-config", type=Path, default=DEFAULT_AM_CONFIG)
-    parser.add_argument("--dummy", action="append", default=[], metavar="NAME=VALUE")
     parser.add_argument(
         "--require-release-rules", action="store_true",
         help="fail when the HelmRelease declares no inline rule groups, for a "
@@ -199,7 +179,7 @@ def main(argv: list[str]) -> int:
             return 2
         return extract_rules(args.out, args.release, rules_dirs,
                              args.require_release_rules)
-    return extract_alertmanager(args.out, args.am_config, _parse_dummy(args.dummy))
+    return extract_alertmanager(args.out, args.am_config)
 
 
 if __name__ == "__main__":

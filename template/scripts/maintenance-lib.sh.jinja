@@ -58,5 +58,5 @@ deployment_replicas_ok() {
 # each of <deployment>'s pods' nodeName, or "<unscheduled>". The SafeEncode
 # pod-template-hash match keeps a name-prefix sibling out.
 deployment_pod_nodes() {
-  awk -F'\t' -v d="$1" '$1 ~ "^"d"-[b-df-hj-np-tv-z2-9]+-" {print ($2 == "" ? "<unscheduled>" : $2)}'
+  awk -F'\t' -v d="$1" '$1 ~ "^"d"-[b-df-hj-np-tv-xz24-9]+-" {print ($2 == "" ? "<unscheduled>" : $2)}'
 }{% endraw %}

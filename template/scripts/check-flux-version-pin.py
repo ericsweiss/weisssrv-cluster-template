@@ -21,8 +21,12 @@ GOTK_GLOB = "kubernetes/clusters/*/flux-system/gotk-components.yaml"
 # change, not a version bump.
 CONTROLLERS = "source-controller,kustomize-controller,helm-controller,notification-controller"
 
-PIN_RE = re.compile(r'^\s*FLUX_VERSION="([0-9][0-9.]*)"\s*$', re.MULTILINE)
-CM_RE = re.compile(r'^\s*flux_version:\s*"?([0-9][0-9.]*)"?\s*$', re.MULTILINE)
+# The v is matched so a v-prefixed pin cannot hide, then rejected: the flux
+# download URL adds its own v.
+PIN_RE = re.compile(
+    r'^\s*(?:export\s+)?FLUX_VERSION[=:]\s*["\']?(v?)([0-9][0-9.]*)["\']?\s*$', re.MULTILINE
+)
+CM_RE = re.compile(r'^\s*flux_version:\s*["\']?v?([0-9][0-9.]*)["\']?\s*$', re.MULTILINE)
 GOTK_RE = re.compile(r"^# Flux Version: v([0-9][0-9.]*)\s*$", re.MULTILINE)
 COMPONENTS_RE = re.compile(r"^# Components: (.+)$", re.MULTILINE)
 
@@ -56,9 +60,10 @@ def main() -> int:
 
     # Every pin in each file, so a second job or a second key cannot drift
     # behind the first one the gate happens to read.
-    pins = sorted({m.group(1) for m in PIN_RE.finditer(ci)})
+    matches = list(PIN_RE.finditer(ci))
+    pins = sorted({m.group(2) for m in matches})
     if not pins:
-        print(f'ERROR: no FLUX_VERSION="..." pin in {CI_FILE}', file=sys.stderr)
+        print(f"ERROR: no FLUX_VERSION pin in {CI_FILE}", file=sys.stderr)
         return 2
     cms = sorted({m.group(1) for m in CM_RE.finditer(cm_text)})
     if not cms:
@@ -67,6 +72,10 @@ def main() -> int:
 
     pin_v = pins[0]
     failed = False
+    for prefixed in sorted({m.group(2) for m in matches if m.group(1)}):
+        print(f"{CI_FILE} pins FLUX_VERSION as v{prefixed}; the flux download adds the v.")
+        print(f"Pin the bare version, {prefixed}.")
+        failed = True
     if len(pins) > 1:
         print(f"{CI_FILE} pins several Flux versions: {', '.join(pins)}.")
         print("Every job installs one CLI; keep a single FLUX_VERSION pin.")
@@ -90,7 +99,10 @@ def main() -> int:
 
     for gotk in gotk_files:
         rel = gotk.relative_to(root)
-        text = _read(gotk) or ""
+        text = _read(gotk)
+        if text is None:
+            print(f"ERROR: {rel} is unreadable — the gate inspected nothing", file=sys.stderr)
+            return 2
         headers = sorted({m.group(1) for m in GOTK_RE.finditer(text)})
         if not headers:
             print(f"{rel} has no '# Flux Version:' header.")
@@ -101,8 +113,8 @@ def main() -> int:
             failed = True
         components = [m.group(1).strip() for m in COMPONENTS_RE.finditer(text)]
         if not components:
-            print(f"{rel} lists <no '# Components:' header>, not {args.components}.")
-            print("A cluster bootstrapped with --components-extra passes the matching --components.")
+            print(f"{rel} has no '# Components:' header; expected {args.components}.")
+            print("Re-export it with `flux install --export`, which writes the header.")
             failed = True
         for listed in (c for c in components if c != args.components):
             print(f"{rel} lists {listed}, not {args.components}.")

@@ -9,11 +9,11 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from pathlib import Path
 
+import pytest
 import yaml
+from conftest import REPO
 
-REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "bootstrap-proxmox-host.sh"
 TASKFILE = REPO / "Taskfile.yml"
 
@@ -35,7 +35,7 @@ def test_no_arguments_prints_usage_and_fails():
     assert "Usage:" in result.stdout
 
 
-def test_a_key_only_call_still_fails():
+def test_a_host_only_call_still_fails():
     """Mutation case: a host with no key would create a passworded account and
     leave no way in."""
     result = subprocess.run(
@@ -48,6 +48,19 @@ def test_a_key_only_call_still_fails():
 def test_root_is_refused_as_the_admin_user():
     result = subprocess.run(
         ["bash", str(SCRIPT), "192.0.2.11", "ssh-ed25519 AAAA key", "root"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1, result.stdout
+    assert "not a usable admin username" in result.stderr
+
+
+@pytest.mark.parametrize("user", ["-admin", "1admin", "Admin", "ad.min"])
+def test_a_username_useradd_would_reject_is_refused(user):
+    """The name must start with a letter or underscore, so it can never read as an option."""
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "192.0.2.11", "ssh-ed25519 AAAA key", user],
         capture_output=True,
         text=True,
         check=False,

@@ -1,7 +1,7 @@
 ---
-# Connect's API is reachable only from ESO in the same namespace, plus Traefik
-# for the internal ingress that host-side clients (e.g. boot-time storage
-# key fetches) use. Kubelet probes come from the host network and bypass policy.
+# Connect's API is reachable only from the ESO pods, plus Traefik for the
+# internal ingress that host-side clients, such as boot-time storage key
+# fetches, use. Kubelet probes come from the host network and bypass policy.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -14,14 +14,14 @@ spec:
   policyTypes:
     - Ingress
   ingress:
+    # ESO calls the API port only; the sync sidecar talks to it over localhost.
     - from:
-        - podSelector: {}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: external-secrets
       ports:
         - protocol: TCP
           port: 8080
-        - protocol: TCP
-          port: 8081
-    # Only the API port is published; the sync sidecar stays in-namespace.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -31,9 +31,9 @@ spec:
           port: 8080
 
 ---
-# The egress half of the same contract: the external-secrets namespace runs
-# default-deny egress, so ESO needs this to reach Connect. Matched by pod, not
-# ClusterIP — kube-proxy DNATs before policy evaluation.
+# The egress half: the external-secrets namespace runs default-deny egress, so
+# ESO needs this to reach Connect. Matched by pod, not ClusterIP, because
+# kube-proxy DNATs before policy evaluation.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -53,5 +53,3 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-        - protocol: TCP
-          port: 8081

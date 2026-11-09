@@ -1,0 +1,589 @@
+---
+# promtool unit tests for platform.host-exporter, the rules scoped to the
+# :9101 host exporters. The in-cluster DaemonSet job is pinned out wherever the
+# host job carries a collector the DaemonSet does not run.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # HostExporterDown: one down target fires below TargetDown's 10% floor, and
+  # its healthy peer does not.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="192.0.2.12:9101"}'
+        values: '0+0x20'
+      - series: 'up{job="node-exporter-host", instance="192.0.2.11:9101"}'
+        values: '1+0x20'
+    alert_rule_test:
+      # Inside the 15m hold.
+      - eval_time: 10m
+        alertname: HostExporterDown
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: HostExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.12:9101'
+
+  # A scrape that recovers inside the hold is a reboot, not an outage.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="192.0.2.12:9101"}'
+        values: '0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: HostExporterDown
+        exp_alerts: []
+
+  # The whole job vanishing leaves every host unmonitored, so absent() fires.
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: HostExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+
+  # HostTextfileCollectorScrapeError: a malformed .prom on one host.
+  - interval: 1m
+    input_series:
+      - series: 'node_textfile_scrape_error{job="node-exporter-host", instance="192.0.2.11:9101"}'
+        values: '1+0x20'
+      - series: 'node_textfile_scrape_error{job="node-exporter-host", instance="192.0.2.12:9101"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: HostTextfileCollectorScrapeError
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: HostTextfileCollectorScrapeError
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.11:9101'
+
+  # HostBondingDegraded: two configured slaves, one active; the full bond is quiet.
+  - interval: 1m
+    input_series:
+      - series: 'node_bonding_slaves{job="node-exporter-host", instance="192.0.2.12:9101", master="bond0"}'
+        values: '2+0x20'
+      - series: 'node_bonding_active{job="node-exporter-host", instance="192.0.2.12:9101", master="bond0"}'
+        values: '1+0x20'
+      - series: 'node_bonding_slaves{job="node-exporter-host", instance="192.0.2.11:9101", master="bond0"}'
+        values: '2+0x20'
+      - series: 'node_bonding_active{job="node-exporter-host", instance="192.0.2.11:9101", master="bond0"}'
+        values: '2+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HostBondingDegraded
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HostBondingDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.12:9101'
+              master: bond0
+
+  # HostFilesystemReadOnly: a real filesystem remounted ro pages; a squashfs
+  # and a healthy rw mount do not.
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_readonly{job="node-exporter-host", instance="192.0.2.11:9101", device="/dev/sda1", mountpoint="/", fstype="ext4"}'
+        values: '1+0x20'
+      - series: 'node_filesystem_readonly{job="node-exporter-host", instance="192.0.2.11:9101", device="/dev/sdb1", mountpoint="/mnt/data", fstype="ext4"}'
+        values: '0+0x20'
+      - series: 'node_filesystem_readonly{job="node-exporter-host", instance="192.0.2.11:9101", device="squash", mountpoint="/snap/x", fstype="squashfs"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: HostFilesystemReadOnly
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: HostFilesystemReadOnly
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node-exporter-host
+              instance: '192.0.2.11:9101'
+              device: /dev/sda1
+              mountpoint: /
+              fstype: ext4
+
+  # HostNetworkInterfaceFlapping: a bouncing physical link fires under both
+  # naming schemes, and five changes in 10m fire; one link event or four
+  # changes stay quiet. The bouncing links are pending at 6m.
+  - interval: 1m
+    input_series:
+      - series: 'node_network_up{job="node-exporter-host", instance="192.0.2.12:9101", device="nic0"}'
+        values: '1 0 1 0 1 0 1 0 1 0 1 0'
+      - series: 'node_network_up{job="node-exporter-host", instance="192.0.2.11:9101", device="enp3s0"}'
+        values: '1 0 1 0 1 0 1 0 1 0 1 0'
+      - series: 'node_network_up{job="node-exporter-host", instance="192.0.2.13:9101", device="nic0"}'
+        values: '1 1 1 1 0 1 1 1 1 1 1 1'
+      - series: 'node_network_up{job="node-exporter-host", instance="192.0.2.14:9101", device="nic0"}'
+        values: '1 1 1 1 1 0 1 0 1 1 1 1'
+      - series: 'node_network_up{job="node-exporter-host", instance="192.0.2.15:9101", device="nic0"}'
+        values: '1 1 1 1 0 1 0 1 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HostNetworkInterfaceFlapping
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: HostNetworkInterfaceFlapping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.11:9101'
+              device: enp3s0
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.12:9101'
+              device: nic0
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.15:9101'
+              device: nic0
+
+  # Per-guest and bridge interfaces come and go with every guest start; the
+  # device allow-list keeps them out.
+  - interval: 1m
+    input_series:
+      - series: 'node_network_up{job="node-exporter-host", instance="192.0.2.12:9101", device="fwbr150i0"}'
+        values: '1 0 1 0 1 0 1 0 1 0 1 0'
+      - series: 'node_network_up{job="node-exporter-host", instance="192.0.2.12:9101", device="veth150i0"}'
+        values: '1 0 1 0 1 0 1 0 1 0 1 0'
+      - series: 'node_network_up{job="node-exporter-host", instance="192.0.2.12:9101", device="vmbr0"}'
+        values: '1 0 1 0 1 0 1 0 1 0 1 0'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: HostNetworkInterfaceFlapping
+        exp_alerts: []
+
+  # HostClockNotSynchronising needs no sync AND a maxerror of at least 16s.
+  - interval: 1m
+    input_series:
+      - series: 'node_timex_sync_status{job="node-exporter-host", instance="192.0.2.31:9101"}'
+        values: '0+0x20'
+      - series: 'node_timex_maxerror_seconds{job="node-exporter-host", instance="192.0.2.31:9101"}'
+        values: '20+0x20'
+      - series: 'node_timex_sync_status{job="node-exporter-host", instance="192.0.2.32:9101"}'
+        values: '0+0x20'
+      - series: 'node_timex_maxerror_seconds{job="node-exporter-host", instance="192.0.2.32:9101"}'
+        values: '15+0x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: HostClockNotSynchronising
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: HostClockNotSynchronising
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.31:9101'
+
+  # HostNetworkTransmitErrs: a 5% failure ratio for an hour; a clean NIC is quiet.
+  - interval: 1m
+    input_series:
+      - series: 'node_network_transmit_errs_total{job="node-exporter-host", instance="192.0.2.12:9101", device="nic0"}'
+        values: '0+5x80'
+      - series: 'node_network_transmit_packets_total{job="node-exporter-host", instance="192.0.2.12:9101", device="nic0"}'
+        values: '0+100x80'
+      - series: 'node_network_transmit_errs_total{job="node-exporter-host", instance="192.0.2.11:9101", device="nic0"}'
+        values: '0+0x80'
+      - series: 'node_network_transmit_packets_total{job="node-exporter-host", instance="192.0.2.11:9101", device="nic0"}'
+        values: '0+100x80'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HostNetworkTransmitErrs
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: HostNetworkTransmitErrs
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.12:9101'
+              device: nic0
+
+  # HostNetworkReceiveErrs: just under 1% stays quiet, so the threshold is
+  # pinned from below as well as above.
+  - interval: 1m
+    input_series:
+      - series: 'node_network_receive_errs_total{job="node-exporter-host", instance="192.0.2.12:9101", device="bond0"}'
+        values: '0+5x80'
+      - series: 'node_network_receive_packets_total{job="node-exporter-host", instance="192.0.2.12:9101", device="bond0"}'
+        values: '0+100x80'
+      - series: 'node_network_receive_errs_total{job="node-exporter-host", instance="192.0.2.11:9101", device="nic0"}'
+        values: '0+9x80'
+      - series: 'node_network_receive_packets_total{job="node-exporter-host", instance="192.0.2.11:9101", device="nic0"}'
+        values: '0+1000x80'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HostNetworkReceiveErrs
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: HostNetworkReceiveErrs
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.12:9101'
+              device: bond0
+
+  # The [5m] window absorbs one missed scrape, so the 1h hold still completes.
+  - interval: 1m
+    input_series:
+      - series: 'node_network_receive_errs_total{job="node-exporter-host", instance="192.0.2.12:9101", device="nic0"}'
+        values: '0+5x30 _ 160+5x50'
+      - series: 'node_network_receive_packets_total{job="node-exporter-host", instance="192.0.2.12:9101", device="nic0"}'
+        values: '0+100x30 _ 3200+100x50'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: HostNetworkReceiveErrs
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.12:9101'
+              device: nic0
+
+  # HostMemAvailableLow: 6% for the full 30m fires; 19% does not.
+  - interval: 1m
+    input_series:
+      - series: 'node_memory_MemAvailable_bytes{job="node-exporter-host", instance="192.0.2.11:9101"}'
+        values: '1000000000+0x35'
+      - series: 'node_memory_MemTotal_bytes{job="node-exporter-host", instance="192.0.2.11:9101"}'
+        values: '16000000000+0x35'
+      - series: 'node_memory_MemAvailable_bytes{job="node-exporter-host", instance="192.0.2.12:9101"}'
+        values: '3000000000+0x35'
+      - series: 'node_memory_MemTotal_bytes{job="node-exporter-host", instance="192.0.2.12:9101"}'
+        values: '16000000000+0x35'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: HostMemAvailableLow
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: HostMemAvailableLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.11:9101'
+
+  # A dip that recovers inside the hold does not fire.
+  - interval: 1m
+    input_series:
+      - series: 'node_memory_MemAvailable_bytes{job="node-exporter-host", instance="192.0.2.11:9101"}'
+        values: '1000000000 1000000000 1000000000 1000000000 1000000000 3000000000+0x30'
+      - series: 'node_memory_MemTotal_bytes{job="node-exporter-host", instance="192.0.2.11:9101"}'
+        values: '16000000000+0x35'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: HostMemAvailableLow
+        exp_alerts: []
+
+  # HostMemAvailableCritical: 1.5% past 15m fires; 6% is the warning's ground.
+  - interval: 1m
+    input_series:
+      - series: 'node_memory_MemAvailable_bytes{job="node-exporter-host", instance="192.0.2.11:9101"}'
+        values: '240000000+0x25'
+      - series: 'node_memory_MemTotal_bytes{job="node-exporter-host", instance="192.0.2.11:9101"}'
+        values: '16000000000+0x25'
+      - series: 'node_memory_MemAvailable_bytes{job="node-exporter-host", instance="192.0.2.12:9101"}'
+        values: '1000000000+0x25'
+      - series: 'node_memory_MemTotal_bytes{job="node-exporter-host", instance="192.0.2.12:9101"}'
+        values: '16000000000+0x25'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HostMemAvailableCritical
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: HostMemAvailableCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node-exporter-host
+              instance: '192.0.2.11:9101'
+
+  # HostConntrackEntriesHigh: 90% fires; 70% stays under the 75% line.
+  - interval: 1m
+    input_series:
+      - series: 'node_nf_conntrack_entries{job="node-exporter-host", instance="192.0.2.11:9101"}'
+        values: '90000+0x20'
+      - series: 'node_nf_conntrack_entries_limit{job="node-exporter-host", instance="192.0.2.11:9101"}'
+        values: '100000+0x20'
+      - series: 'node_nf_conntrack_entries{job="node-exporter-host", instance="192.0.2.12:9101"}'
+        values: '70000+0x20'
+      - series: 'node_nf_conntrack_entries_limit{job="node-exporter-host", instance="192.0.2.12:9101"}'
+        values: '100000+0x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: HostConntrackEntriesHigh
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: HostConntrackEntriesHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.11:9101'
+
+  # NodeSystemdServiceFailed selects state="failed" AND == 1, not presence.
+  - interval: 1m
+    input_series:
+      - series: 'node_systemd_unit_state{job="node-exporter-host", instance="192.0.2.12:9101", name="zfs-load-key@tank.service", state="failed", type="oneshot"}'
+        values: '1+0x30'
+      - series: 'node_systemd_unit_state{job="node-exporter-host", instance="192.0.2.12:9101", name="zfs-load-key@tank.service", state="active", type="oneshot"}'
+        values: '0+0x30'
+      - series: 'node_systemd_unit_state{job="node-exporter-host", instance="192.0.2.12:9101", name="sshd.service", state="failed", type="notify"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NodeSystemdServiceFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: NodeSystemdServiceFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.12:9101'
+              name: zfs-load-key@tank.service
+              state: failed
+              type: oneshot
+
+  # The console gettys, the in-cluster DaemonSet job, and the oneshots that own
+  # a *_last_run_success alert stay out.
+  - interval: 1m
+    input_series:
+      - series: 'node_systemd_unit_state{job="node-exporter-host", instance="192.0.2.31:9101", name="serial-getty@ttyS0.service", state="failed", type="idle"}'
+        values: '1+0x30'
+      - series: 'node_systemd_unit_state{job="node-exporter-host", instance="192.0.2.23:9101", name="getty@tty1.service", state="failed", type="idle"}'
+        values: '1+0x30'
+      - series: 'node_systemd_unit_state{job="node-exporter", instance="10.42.1.7:9100", name="kubelet.service", state="failed", type="notify"}'
+        values: '1+0x30'
+      - series: 'node_systemd_unit_state{job="node-exporter-host", instance="192.0.2.11:9101", name="archive-backup.service", state="failed", type="oneshot"}'
+        values: '1+0x30'
+      - series: 'node_systemd_unit_state{job="node-exporter-host", instance="192.0.2.11:9101", name="swap-clean.service", state="failed", type="oneshot"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NodeSystemdServiceFailed
+        exp_alerts: []
+
+  # The exclusion is per unit: the timer and a oneshot with no alert of its
+  # own, such as the etcd snapshot copy, still page.
+  - interval: 1m
+    input_series:
+      - series: 'node_systemd_unit_state{job="node-exporter-host", instance="192.0.2.11:9101", name="archive-backup.timer", state="failed", type="oneshot"}'
+        values: '1+0x30'
+      - series: 'node_systemd_unit_state{job="node-exporter-host", instance="192.0.2.31:9101", name="k3s-etcd-snapshot-copy.service", state="failed", type="oneshot"}'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NodeSystemdServiceFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.11:9101'
+              name: archive-backup.timer
+              state: failed
+              type: oneshot
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.31:9101'
+              name: k3s-etcd-snapshot-copy.service
+              state: failed
+              type: oneshot
+
+  # NodeSystemdServiceCrashlooping: one restart a minute fires; two in five
+  # minutes is the boundary and does not; a getty never does.
+  - interval: 1m
+    input_series:
+      - series: 'node_systemd_service_restart_total{job="node-exporter-host", instance="192.0.2.23:9101", name="postfix.service"}'
+        values: '0+1x40'
+      - series: 'node_systemd_service_restart_total{job="node-exporter-host", instance="192.0.2.31:9101", name="serial-getty@ttyS0.service"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: NodeSystemdServiceCrashlooping
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: NodeSystemdServiceCrashlooping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.23:9101'
+              name: postfix.service
+
+  - interval: 1m
+    input_series:
+      - series: 'node_systemd_service_restart_total{job="node-exporter-host", instance="192.0.2.23:9101", name="postfix.service"}'
+        values: '0+0x5 1+0x5 2+0x30'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: NodeSystemdServiceCrashlooping
+        exp_alerts: []
+
+  # NodeExporterSystemdCollectorFailed: only collector="systemd" on the host job.
+  - interval: 1m
+    input_series:
+      - series: 'node_scrape_collector_success{job="node-exporter-host", instance="192.0.2.12:9101", collector="systemd"}'
+        values: '0+0x40'
+      - series: 'node_scrape_collector_success{job="node-exporter-host", instance="192.0.2.12:9101", collector="zfs"}'
+        values: '0+0x40'
+      - series: 'node_scrape_collector_success{job="node-exporter", instance="10.42.1.7:9100", collector="systemd"}'
+        values: '0+0x40'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: NodeExporterSystemdCollectorFailed
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: NodeExporterSystemdCollectorFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: '192.0.2.12:9101'
+              collector: systemd
+
+  # EncryptedSwapMetricsMissing: the gauge existed and vanished, so the
+  # encrypted-swap pair is blind on that host.
+  - interval: 5m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '1+0x30'
+      - series: 'encrypted_swap_finalize_last_run_seconds{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '1000 1000 1000'
+    alert_rule_test:
+      # Inside the 1h hold.
+      - eval_time: 60m
+        alertname: EncryptedSwapMetricsMissing
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: EncryptedSwapMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'pve-01:9101'
+
+  # A host that never published the gauges, and one that still does, are quiet.
+  - interval: 5m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '1+0x30'
+      - series: 'up{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '1+0x30'
+      - series: 'encrypted_swap_finalize_last_run_seconds{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '1000+0x30'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: EncryptedSwapMetricsMissing
+        exp_alerts: []
+
+  # SlabinfoCollectorDegraded, arm 1: /proc/slabinfo unreadable.
+  - interval: 5m
+    input_series:
+      - series: 'node_slabinfo_collector_success{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: SlabinfoCollectorDegraded
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: SlabinfoCollectorDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'pve-01:9101'
+
+  # Arm 2: the timer is dead, so the success timestamp stops advancing.
+  - interval: 5m
+    input_series:
+      - series: 'node_slabinfo_collector_success{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '1+0x18'
+      - series: 'node_slabinfo_collector_last_success_seconds{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '600+0x18'
+      - series: 'node_slab_cache_present{job="node-exporter-host", instance="pve-01:9101", cache="skbuff_ext_cache"}'
+        values: '1+0x18'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: SlabinfoCollectorDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'pve-01:9101'
+
+  # Arm 3: a configured cache disappeared from /proc/slabinfo.
+  - interval: 5m
+    input_series:
+      - series: 'node_slabinfo_collector_success{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '1+0x12'
+      - series: 'node_slabinfo_collector_last_success_seconds{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+300x12'
+      - series: 'node_slab_cache_present{job="node-exporter-host", instance="pve-01:9101", cache="skbuff_ext_cache"}'
+        values: '1+0x12'
+      - series: 'node_slab_cache_present{job="node-exporter-host", instance="pve-01:9101", cache="file_lock_cache"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: SlabinfoCollectorDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'pve-01:9101'
+
+  # Arm 4: the textfile vanished after the collector had run, on any host.
+  - interval: 5m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '1+0x12'
+      - series: 'node_slabinfo_collector_success{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '1 1 1'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: SlabinfoCollectorDegraded
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: SlabinfoCollectorDegraded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'pve-02:9101'
+
+  # A host that never ran the collector, and a healthy one, are quiet.
+  - interval: 5m
+    input_series:
+      - series: 'up{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '1+0x24'
+      - series: 'up{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '1+0x24'
+      - series: 'node_slabinfo_collector_success{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '1+0x24'
+      - series: 'node_slabinfo_collector_last_success_seconds{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '0+300x24'
+      - series: 'node_slab_cache_present{job="node-exporter-host", instance="pve-02:9101", cache="skbuff_ext_cache"}'
+        values: '1+0x24'
+    alert_rule_test:
+      - eval_time: 115m
+        alertname: SlabinfoCollectorDegraded
+        exp_alerts: []

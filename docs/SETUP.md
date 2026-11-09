@@ -16,8 +16,13 @@ generate → inventory → gates → base infra → k3s → Flux → publish
 
 ```bash
 pipx install 'copier>=9.15.0'   # or: uv tool install 'copier>=9.15.0'
-copier copy https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
+copier copy https://github.com/ericsweiss/weisssrv-cluster-template.git ~/src/mycluster
 ```
+
+The commands on this page use the public GitHub mirrors. The canonical
+projects live on `git.ericsweiss.com`, which needs an account on that instance.
+Without one, keep to the mirrors and read [PRE-SETUP.md](PRE-SETUP.md) § 6
+before answering `lib_url` and `lib_project`.
 
 9.15.0 is the release that resolves the `_envops.undefined` setting `copier.yml`
 renders with, and `_min_copier_version` refuses an older client. That refusal
@@ -40,29 +45,30 @@ Useful flags:
 The template runs no post-generation scripts, so `--trust` is not required.
 
 There is also a library CLI wrapper that checks the source and destination
-before handing off to copier. The console script is `weisssrv-new-project`;
-`new-cluster` is a subcommand of it and takes **two** positionals — the template
-source and the destination:
-
-Install the wrapper, substituting the library release you will answer for
-`lib_ref` (its default is in `copier.yml`):
+before handing off to copier. Install it, substituting the library release you
+will answer for `lib_ref`. Its default is in `copier.yml`.
 
 ```bash
-pipx install 'weisssrv-lib-cli[cluster] @ git+https://git.ericsweiss.com/eric/weisssrv-lib.git@vX.Y.Z#subdirectory=cli'
+pipx install 'weisssrv-lib-cli[cluster] @ git+https://github.com/ericsweiss/weisssrv-lib.git@vX.Y.Z#subdirectory=cli'
 ```
+
+The console script is `weisssrv-new-project`. Its `new-cluster` subcommand
+takes **two** positionals: the template source and the destination.
 
 ```bash
 weisssrv-new-project new-cluster \
-  https://git.ericsweiss.com/eric/weisssrv-cluster-template.git ~/src/mycluster
+  https://github.com/ericsweiss/weisssrv-cluster-template.git ~/src/mycluster
 ```
 
-Both *generation* commands above are runnable as written, which is why neither passes
-`--vcs-ref`: copier resolves an unpinned VCS source to the template's **latest
+Both *generation* commands above are runnable as written, which is why neither
+passes `--vcs-ref`: copier resolves an unpinned VCS source to the template's **latest
 release tag**, falling back to the branch tip only if the template has cut none.
 Add the flag from the table to pin an older release, and only with a tag that
 exists — a ref the template has not cut fails at clone time, before a single
 question is asked. Whichever ref is used is recorded as `_commit` in
-`.copier-answers.yml` and is what the next `copier update` diffs from.
+`.copier-answers.yml` and is what the next `copier update` diffs from. The
+source URL is recorded as `_src_path`, and every later `copier update` fetches
+from it.
 
 The library marks `new-cluster` **EXPERIMENTAL** and reserves the right to
 change its flags. Plain `copier copy` is the stable path; use the wrapper only
@@ -78,7 +84,7 @@ git commit -m "Generate cluster from weisssrv-cluster-template"
 git remote add origin git@<git_host>:<git_namespace>/<cluster_name>.git
 ```
 
-Do not push yet. Flux bootstrap (phase 5) will want to commit to this repository
+Do not push yet. Flux bootstrap (phase 6) will want to commit to this repository
 too, and it is easier to push once the tree is real.
 
 Run `pre-commit install` once in the new repository. It runs the secret scan and
@@ -222,7 +228,7 @@ allows nothing.
 ## 3. Install the collection, then run the gates
 
 The Ansible roles are not vendored: there is no `ansible/roles/` in the
-generated tree at all. The playbooks address the collection's 40 roles as
+generated tree at all. The playbooks address the collection's roles as
 `weisssrv.infra.<role>` by FQCN, and `ansible/requirements.yml` fetches the
 collection at the pinned `lib_ref`. Install it **first** — without it every
 playbook, and `task lint`'s `ansible:lint` step, fails with
@@ -243,10 +249,7 @@ default on a green play.
 
 ```bash
 task lib:sync      # clone weisssrv-lib at the pinned ref into .weisssrv-lib/
-task lint          # yamllint, shellcheck, ruff, doc-links, taskfile-smoke,
-                   # lib-pins, version-coverage, check-generated-files, netpol-parity,
-                   # invariants, ansible-lint, terraform fmt-check + validate,
-                   # flux:lint
+task lint          # every local gate; the root Taskfile's lint: task lists them
 task ansible:ping  # every host in the inventory answers
 ```
 
@@ -269,8 +272,8 @@ in § 2: duplicate addresses or vmids, an address outside `lan_cidr`, and a
 One expected exception, if you skipped the two sync commands in § 2:
 **`lint:repo-sync` fails, and that is the design.** It names the command to run.
 
-`task lint:prometheus-config` is **not** part of `task lint` (it needs
-`promtool` and `amtool`). Run it separately if you edit alert rules.
+`task lint` includes `lint:prometheus-config`, which needs `promtool` and
+`amtool` on PATH. Its precondition names whichever one is missing.
 
 ---
 
@@ -391,7 +394,7 @@ Notes on that table, because each one has bitten someone:
   relay *alone* later (an upstream smarthost, a SASL credential, a Postfix
   parameter).
 - **Run these through `task`, not bare `ansible-playbook`.** The tasks wrap the
-  playbook in `op run --`; the inventory deliberately fails with
+  playbook in `op run --`. The inventory fails on purpose with
   `undef(hint=...)` when the injected values are absent, so a bare invocation
   aborts before it changes anything.
 - If a host still prompts for a sudo password, `task infra:base-first-run`
@@ -420,8 +423,13 @@ in whatever vault its Connect server was granted, and that token sits on the
 host's disk. Re-vaulting order is grant the Connect *server* the new vault, mint
 the token, set the variable, converge, prove a real key load, then revoke the
 old token — a token cannot reach a vault its server was not granted. The
-[`zfs_encryption` role README](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles/zfs_encryption)
+[`zfs_encryption` role README](https://github.com/ericsweiss/weisssrv-lib/tree/main/ansible_collections/weisssrv/infra/roles/zfs_encryption)
 documents the rest of the variables.
+
+List every NFS export `bind_source` that sits on an encrypted dataset in
+`nas_storage_encrypted_bind_sources` in `group_vars/nas.yml`. Those bind mounts
+and nfsd then wait for the key load. A source left off the list is exported as
+an empty directory at boot.
 
 ---
 
@@ -502,8 +510,8 @@ commit it.
 The task creates the `external-secrets` namespace, mints a fresh Connect token
 (`<cluster_name>-eso` against the `<cluster_name>-connect` server) and writes
 the only two Kubernetes Secrets ever created by hand: `op-credentials` and
-`onepassword-connect-token`. The token is deliberately not stored as a vault
-item — it is re-mintable, and re-running this task is how you rotate it. Every
+`onepassword-connect-token`. The token is not stored as a vault item. It is
+re-mintable, and re-running this task is how you rotate it. Every
 other Secret in the cluster is generated by ESO from an `ExternalSecret` in git.
 
 If the task fails with an unknown-server error, the Connect server you created
@@ -694,16 +702,17 @@ Once the platform is Ready:
    open https://grafana.<internal_domain>
    ```
 
-   (Reloader is configured with `ignoreSecrets: true`, so a credential Secret
-   changing is deliberately a manual restart.)
+   Reloader runs with `ignoreSecrets: true`, so a changed credential Secret
+   needs this manual restart.
 
    **The third field on that item does not work this way.** `Grafana SSO` →
    `admin-password` is the break-glass built-in admin, and Grafana applies it
    only while its user table is empty — that is, at its **first** start, which
    has already happened by the time you read this. The refresh and restart above
    change the OIDC credentials and leave that account exactly as it was. If the
-   field held a placeholder in phase 0, the account still has the placeholder.
-   Fix it now, in one change, so the vault and the database agree:
+   field held a placeholder when you created it in PRE-SETUP, the account still
+   has the placeholder. Fix it now, in one change, so the vault and the database
+   agree:
 
    ```bash
    # 1. put a real random value in Grafana SSO -> admin-password
@@ -729,6 +738,19 @@ Once the platform is Ready:
    the generated repository is the operator-side reference: it covers which jobs
    need a **root-capable** runner (`flux-lint` and every deploy job do), the CI/CD
    variables each job expects, and the node-selector regex a runner must allow.
+
+   Tags, untagged jobs and the protected-branch setting are registration
+   settings in GitLab; the `glrt-*` token carries them and the HelmRelease does
+   not. Register two runners:
+
+   | Runner | Registered as | Tags | Run untagged jobs |
+   |---|---|---|---|
+   | `gitlab-runner` (shared) | instance runner | none | yes |
+   | `gitlab-runner-privileged` | project runner on this repository, locked to current projects | the `ci_runner_tag` answer | no |
+
+   Enable the privileged runner on another project only when it needs root +
+   DinD, from that project's **Settings > CI/CD > Runners**, never on a group or
+   the instance: every developer who can push there runs root on it.
 
    > **Register the privileged runner as a PROJECT runner, never instance-wide.**
    > It runs Docker-in-Docker as root, so an instance runner hands every project
@@ -813,7 +835,8 @@ it.
 | `nfs_tls` on the NAS: cert/key missing | the wildcard has not been issued or has not reached that host — § 4's certificate step |
 | Grafana redirects to a login you cannot pass | the OIDC objects, the groups or the client secret — § 7 step 4; the break-glass admin is in the same step |
 | `nas_storage` fails with `DATASET_MISSING` | the declared datasets were never created — run `task disaster-recovery:storage-bootstrap`, then re-run `task storage:deploy` |
-| Literal `${cluster_...}` in a live object | the ConfigMap is missing a key, or the Kustomization does not substitute from it |
+| Kustomization fails with an unresolved `${cluster_...}` | the ConfigMap is missing that key; strict substitution refuses the whole stage |
+| Literal `${cluster_...}` in a live object | the Kustomization has no `postBuild.substituteFrom` entry for that ConfigMap |
 
 Day-two operations, upgrades and incident procedures continue in
 `docs/RUNBOOKS.md` **inside your generated repository** — the template ships it

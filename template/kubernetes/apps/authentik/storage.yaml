@@ -50,12 +50,9 @@ spec:
   volumeName: authentik-postgres-data
 
 ---
-# CRITICAL: landing zone for the nightly logical pg_dump, on a file-walkable
-# dataset the offsite tier picks up. Deploy the storage host's Ansible role
-# first or the first CronJob run has nothing to mount. Mount by hostname with
-# xprtsec=tls: the server certificate has no IP SAN, so an IP mount fails the
-# handshake. `server` is immutable on a bound PV, so the force annotation lets
-# Flux delete and recreate it; Retain keeps the data.
+# Landing zone for the nightly pg_dump. Mounted by hostname with xprtsec=tls,
+# since the certificate has no IP SAN. The force annotation lets Flux recreate
+# the PV when `server` changes, and Retain keeps the data.
 apiVersion: v1
 kind: PersistentVolume
 metadata:

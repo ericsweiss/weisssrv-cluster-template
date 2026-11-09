@@ -128,3 +128,28 @@ tests:
               severity: warning
               instance: 'nas:9101'
               job: node-exporter-host
+
+  # BackupArtifactStaleCritical: four days without a dump pages; a dump that
+  # never landed (mtime 0) stays with BackupArtifactNeverLanded.
+  - interval: 5m
+    input_series:
+      - series: 'backup_artifact_last_mtime_seconds{app="authentik", instance="nas:9101", job="node-exporter-host"}'
+        values: '1+0x1200'
+      - series: 'backup_artifact_last_mtime_seconds{app="immich", instance="nas:9101", job="node-exporter-host"}'
+        values: '0+0x1200'
+      # Still landing, just inside four days old: a lower threshold reds it.
+      - series: 'backup_artifact_last_mtime_seconds{app="gitlab", instance="nas:9101", job="node-exporter-host"}'
+        values: '-345000+300x1200'
+    alert_rule_test:
+      # authentik passes four days at 96h05m, so 96h30m sits inside the 1h hold.
+      - eval_time: 96h30m
+        alertname: BackupArtifactStaleCritical
+        exp_alerts: []
+      - eval_time: 98h
+        alertname: BackupArtifactStaleCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              app: authentik
+              instance: 'nas:9101'
+              job: node-exporter-host

@@ -96,15 +96,13 @@ def render(
     flat: dict[str, str],
     vars_file: Path,
     *,
-    name: str = DEFAULT_NAME,
-    namespace: str = DEFAULT_NAMESPACE,
     regen_command: str = "generate-versions-configmap.py",
 ) -> str:
     """Return the full ConfigMap document text (header + YAML)."""
     cm = {
         "apiVersion": "v1",
         "kind": "ConfigMap",
-        "metadata": {"name": name, "namespace": namespace},
+        "metadata": {"name": DEFAULT_NAME, "namespace": DEFAULT_NAMESPACE},
         "data": flat,
     }
     return header(vars_file, regen_command) + yaml.safe_dump(
@@ -116,8 +114,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate a Flux versions ConfigMap.")
     parser.add_argument("--vars-file", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--name", default=DEFAULT_NAME)
-    parser.add_argument("--namespace", default=DEFAULT_NAMESPACE)
     parser.add_argument(
         "--nested-key", action="append", dest="nested_keys", default=None,
         help=f"repeatable; default: {DEFAULT_NESTED_KEYS[0]}",
@@ -162,13 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: no version keys extracted; check the vars file structure", file=sys.stderr)
         return 1
 
-    text = render(
-        flat,
-        args.vars_file,
-        name=args.name,
-        namespace=args.namespace,
-        regen_command=args.regen_command,
-    )
+    text = render(flat, args.vars_file, regen_command=args.regen_command)
     try:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(text)

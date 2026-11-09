@@ -26,6 +26,8 @@ RELEASE_HEAD = (
     "    defaultRules:\n"
     "      disabled:\n"
     "        AlertmanagerClusterFailedToSendAlerts: true\n"
+    # Every NOT_MIRRORED entry, so the fixture tracks the gate's exemptions.
+    + "".join(f"        {name}: true\n" for name in sorted(gate.NOT_MIRRORED))
 )
 
 
@@ -148,6 +150,23 @@ def test_an_operator_error_exits_2_not_1(tmp_path):
 
 def test_an_unparseable_release_exits_2(tmp_path):
     root = _tree(tmp_path, release_text="spec: [unclosed\n")
+    assert gate.main(["--repo-root", str(root)]) == 2
+
+
+@pytest.mark.parametrize("where", ["rule", "mirror"])
+def test_an_undecodable_rule_file_exits_2_not_a_traceback(tmp_path, where):
+    """The gate cannot inspect a file it cannot decode, so it exits 2."""
+    root = _tree(tmp_path, mirror_text="# Taken from kube-prometheus-stack 91.3.0\n")
+    target = (
+        root / gate.RULE_TREE / "rules" / "broken.yaml"
+        if where == "rule"
+        else root / gate.MIRROR_DIR / "upstream-etcd.rules.yaml"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"\xff\xfe not utf-8")
+    with pytest.raises(gate.OperatorError) as excinfo:
+        gate.check(root)
+    assert "could not be read" in str(excinfo.value)
     assert gate.main(["--repo-root", str(root)]) == 2
 
 

@@ -1,0 +1,80 @@
+---
+# promtool unit tests for RegistryCacheDown: the kube-state availability arms
+# and the scraped-target arm the app's ServiceMonitor feeds. Every arm carries
+# the same {namespace} label set, so an outage is one alert, never two.
+rule_files:
+  - rules.yaml
+evaluation_interval: 5m
+tests:
+  # Replica available and the :5001 scrape up - silent.
+  - interval: 5m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="registry-cache", deployment="registry-cache"}'
+        values: '1+0x12'
+      - series: 'up{namespace="registry-cache", service="registry-cache", job="registry-cache"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RegistryCacheDown
+        exp_alerts: []
+
+  # Deployment still reports an available replica while the registry stops
+  # answering the scrape. Only the `up` arm catches this.
+  - interval: 5m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="registry-cache", deployment="registry-cache"}'
+        values: '1+0x12'
+      - series: 'up{namespace="registry-cache", service="registry-cache", job="registry-cache"}'
+        values: '0+0x12'
+    alert_rule_test:
+      # Inside the 15m hold: a rollout restart must not page.
+      - eval_time: 10m
+        alertname: RegistryCacheDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RegistryCacheDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: registry-cache
+
+  # No available replica AND a dead scrape: two arms match, one alert.
+  - interval: 5m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="registry-cache", deployment="registry-cache"}'
+        values: '0+0x12'
+      - series: 'up{namespace="registry-cache", service="registry-cache", job="registry-cache"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RegistryCacheDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: registry-cache
+
+  # Neither series exists (kube-state gone) - both absent() arms. They carry
+  # identical labels, so `or` yields ONE alert rather than two pages.
+  - interval: 5m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RegistryCacheDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: registry-cache
+
+  # The ServiceMonitor yields no target at all (wrong port name, selector that
+  # matches nothing): `min()` over an empty vector cannot fire, absent() can.
+  - interval: 5m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="registry-cache", deployment="registry-cache"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RegistryCacheDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: registry-cache

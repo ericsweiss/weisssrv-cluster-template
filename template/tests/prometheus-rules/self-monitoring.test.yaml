@@ -1,0 +1,54 @@
+---
+# promtool unit tests for platform.self-monitoring: Loki's 5xx ratio, and
+# Alertmanager notifications failing under the paging ratio.
+rule_files:
+  - rules.yaml
+evaluation_interval: 1m
+tests:
+  # LokiRequestFailures: 10% 5xx for 15m fires.
+  - interval: 1m
+    input_series:
+      - series: 'loki_request_duration_seconds_count{job="observability/loki", route="loki_api_v1_push", status_code="204"}'
+        values: '0+90x30'
+      - series: 'loki_request_duration_seconds_count{job="observability/loki", route="loki_api_v1_push", status_code="500"}'
+        values: '0+10x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LokiRequestFailures
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: LokiRequestFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+
+  # 4% 5xx stays under the 5% line.
+  - interval: 1m
+    input_series:
+      - series: 'loki_request_duration_seconds_count{job="observability/loki", route="loki_api_v1_push", status_code="204"}'
+        values: '0+96x30'
+      - series: 'loki_request_duration_seconds_count{job="observability/loki", route="loki_api_v1_push", status_code="503"}'
+        values: '0+4x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: LokiRequestFailures
+        exp_alerts: []
+
+  # AlertmanagerNotificationsDropping: failures on one integration inside 6h,
+  # held for an hour; a clean integration is quiet.
+  - interval: 5m
+    input_series:
+      - series: 'alertmanager_notifications_failed_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", integration="webhook", pod="alertmanager-0"}'
+        values: '0+1x30'
+      - series: 'alertmanager_notifications_failed_total{job="kube-prometheus-stack-alertmanager", container="alertmanager", namespace="observability", integration="email", pod="alertmanager-0"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: AlertmanagerNotificationsDropping
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: AlertmanagerNotificationsDropping
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              integration: webhook

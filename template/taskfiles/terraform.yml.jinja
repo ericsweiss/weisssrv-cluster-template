@@ -29,9 +29,6 @@ x-preconditions:
       msg: "terraform not installed: https://developer.hashicorp.com/terraform/downloads"
     - sh: command -v op
       msg: "1Password CLI not installed"
-    # `op account list`, not `op whoami`: with the desktop-app integration
-    # whoami reports "not signed in" in the non-interactive shell Task uses
-    # here.
     - sh: op account list 2>/dev/null
       msg: "1Password CLI not authenticated. Run: eval $(op signin)"
 
@@ -138,8 +135,8 @@ tasks:
   authentik-init:
     desc: Initialize the SSO module
     dir: "{{.TERRAFORM_DIR}}/authentik"
-    # The anchor is shared by authentik-plan and authentik-apply, so all three
-    # tasks see the same credentials.
+    # Every authentik-* task aliases this anchor, so all of them see the same
+    # credentials.
     env: &tf_authentik_env
       TF_VAR_authentik_token: {% endraw %}{{ secret_ref('Authentik Terraform Token', 'credential') }}{% raw %}
       # Grafana's OIDC client secret is supplied to Authentik, not minted by it:
@@ -197,9 +194,9 @@ tasks:
   unifi-init:
     desc: Initialize the gateway network module
     dir: "{{.TERRAFORM_DIR}}/unifi"
-    # The anchor is shared by unifi-plan and unifi-apply, so all three tasks see
-    # the same credentials. One line per WLAN passphrase the root declares — a
-    # variable with no value fails the plan, which is the intent.
+    # Every unifi-* task aliases this anchor. One line per WLAN passphrase the
+    # root declares — a variable with no value fails the plan, which is the
+    # intent.
     env: &tf_unifi_env
       TF_VAR_unifi_api_url: {% endraw %}{{ secret_ref('UniFi Controller', 'url') }}{% raw %}
       TF_VAR_unifi_api_key: {% endraw %}{{ secret_ref('UniFi Controller', 'api-key') }}{% raw %}

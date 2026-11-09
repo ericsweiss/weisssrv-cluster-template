@@ -8,6 +8,26 @@ output "oauth2_client_ids" {
   value       = module.sso.oauth2_client_ids
 }
 
+output "oauth2_provider_ids" {
+  description = "OAuth2 provider pk per key. Record these: a disaster-recovery re-import needs them."
+  value       = module.sso.oauth2_provider_ids
+}
+
+output "proxy_provider_ids" {
+  description = "Proxy provider pk per key. Record these: a disaster-recovery re-import needs them."
+  value       = module.sso.proxy_provider_ids
+}
+
+output "saml_provider_ids" {
+  description = "SAML provider pk per key. Record these: a disaster-recovery re-import needs them."
+  value       = module.sso.saml_provider_ids
+}
+
+output "custom_scope_mapping_ids" {
+  description = "Scope-mapping ID per custom_scope_mappings key. Record these: a disaster-recovery re-import needs them."
+  value       = module.sso.custom_scope_mapping_ids
+}
+
 output "policy_binding_ids" {
   description = "Binding UUID per key. Record these: a disaster-recovery re-import needs them."
   value       = module.sso.policy_binding_ids

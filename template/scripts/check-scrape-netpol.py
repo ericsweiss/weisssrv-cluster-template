@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
-import re
 import sys
 from pathlib import Path
 
@@ -18,11 +17,13 @@ if _HERE not in sys.path:
 
 try:
     from gate_common import (  # noqa: E402  (resolved from this script's own directory)
+        NAME_LABEL,
         OperatorError,
         doc_namespace,
+        label_selector_problem,
         load_corpus,
-        parse_exempt,
         policy_types,
+        selector_matches,
         selects_all_pods,
     )
 except ImportError:
@@ -41,8 +42,7 @@ ENDPOINT_PORT_FIELDS = {
     "ServiceMonitor": ("port", "targetPort"),
     "PodMonitor": ("port", "portNumber", "targetPort"),
 }
-DEFAULT_OBSERVABILITY_NS = "observability"
-NS_NAME_LABEL = "kubernetes.io/metadata.name"
+OBSERVABILITY_NS = "observability"
 
 # Policy shapes declined for want of modelling, per namespace. Printed with that
 # namespace's failure: without them the message asserts no policy admits the
@@ -59,7 +59,6 @@ def note(namespace: str, message: str) -> None:
 
 def _selects_observability(
     peer: dict,
-    observability_ns: str,
     scraper_labels: dict | None = None,
     namespace: str = "",
     policy: str = "",
@@ -86,7 +85,7 @@ def _selects_observability(
         return decline(
             "its scrape peer is an ipBlock, credited only when the rule's unexcepted "
             "blocks span both address families; this gate resolves no CIDR against the "
-            f"{observability_ns} pod range"
+            f"{OBSERVABILITY_NS} pod range"
         )
     nssel = peer.get("namespaceSelector")
     if nssel is None:
@@ -118,8 +117,8 @@ def _selects_observability(
             "its scrape peer combines an empty namespaceSelector with a podSelector; "
             "declare the scraper pod labels with --prometheus-pod-label to have it judged"
         )
-    name_matched = labels.get(NS_NAME_LABEL) == observability_ns
-    extra_requirements = any(k != NS_NAME_LABEL for k in labels)
+    name_matched = labels.get(NAME_LABEL) == OBSERVABILITY_NS
+    extra_requirements = any(k != NAME_LABEL for k in labels)
     for expr in exprs:
         # The credited requirement must be fully valid: known fields only,
         # and `values` a real list — a STRING would do substring membership
@@ -131,17 +130,17 @@ def _selects_observability(
             )
         values = expr.get("values")
         if (
-            expr.get("key") == NS_NAME_LABEL
+            expr.get("key") == NAME_LABEL
             and expr.get("operator") == "In"
             and isinstance(values, list)
-            and observability_ns in values
+            and OBSERVABILITY_NS in values
         ):
             name_matched = True
         else:
             extra_requirements = True
     if extra_requirements:
         return decline(
-            f"its scrape peer selects the namespace by requirements beyond {NS_NAME_LABEL}, "
+            f"its scrape peer selects the namespace by requirements beyond {NAME_LABEL}, "
             "which this gate does not resolve to a namespace name"
         )
     if not name_matched:
@@ -152,32 +151,9 @@ def _selects_observability(
     if scraper_labels is None or _admits_scraper(peer.get("podSelector"), scraper_labels):
         return True
     return decline(
-        f"its scrape peer scopes the {observability_ns} namespace with a podSelector that "
+        f"its scrape peer scopes the {OBSERVABILITY_NS} namespace with a podSelector that "
         "the declared --prometheus-pod-label values do not match"
     )
-
-
-def _selector_matches(selector: object, labels: dict) -> bool:
-    """Whether an API-valid LabelSelector matches one label set."""
-    if not isinstance(selector, dict):
-        return False
-    for key, value in (selector.get("matchLabels") or {}).items():
-        if labels.get(key) != value:
-            return False
-    for expr in selector.get("matchExpressions") or []:
-        key = expr.get("key")
-        operator = expr.get("operator")
-        values = expr.get("values") or []
-        present = key in labels
-        if operator == "In" and labels.get(key) not in values:
-            return False
-        if operator == "NotIn" and present and labels.get(key) in values:
-            return False
-        if operator == "Exists" and not present:
-            return False
-        if operator == "DoesNotExist" and present:
-            return False
-    return True
 
 
 def _admits_scraper(pod_selector: object, scraper_labels: dict | None) -> bool:
@@ -188,69 +164,7 @@ def _admits_scraper(pod_selector: object, scraper_labels: dict | None) -> bool:
     """
     if selects_all_pods(pod_selector):
         return True
-    if scraper_labels is None or not _label_selector_is_api_valid(pod_selector):
-        return False
-    return _selector_matches(pod_selector, scraper_labels)
-
-
-# The apiserver's own label validation (validation.IsQualifiedName /
-# IsValidLabelValue): an optional DNS-subdomain prefix, then a 63-char
-# alphanumeric-bounded name; values are 63-char alphanumeric-bounded or empty.
-_LABEL_NAME = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$")
-_LABEL_PREFIX = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
-
-
-def _label_key_is_valid(key: object) -> bool:
-    if not isinstance(key, str) or not key:
-        return False
-    prefix, slash, name = key.rpartition("/")
-    if slash and (not prefix or len(prefix) > 253 or not _LABEL_PREFIX.fullmatch(prefix)):
-        return False
-    return bool(_LABEL_NAME.fullmatch(name))
-
-
-def _label_value_is_valid(value: object) -> bool:
-    return isinstance(value, str) and (value == "" or bool(_LABEL_NAME.fullmatch(value)))
-
-
-def _label_selector_is_api_valid(selector: object) -> bool:
-    """Structural validity of a LabelSelector, matching the apiserver: known
-    keys and operators, typed terms, valid label keys/values, and the
-    values-cardinality rules. Absent is valid."""
-    if selector is None:
-        return True
-    if not isinstance(selector, dict) or set(selector) - {"matchLabels", "matchExpressions"}:
-        return False
-    labels = selector.get("matchLabels")
-    if labels is not None:
-        if not isinstance(labels, dict):
-            return False
-        if not all(_label_key_is_valid(k) and _label_value_is_valid(v) for k, v in labels.items()):
-            return False
-    exprs = selector.get("matchExpressions")
-    if exprs is not None:
-        if not isinstance(exprs, list):
-            return False
-        for expr in exprs:
-            if not isinstance(expr, dict) or set(expr) - {"key", "operator", "values"}:
-                return False
-            if not _label_key_is_valid(expr.get("key")):
-                return False
-            operator = expr.get("operator")
-            values = expr.get("values")
-            if operator in ("In", "NotIn"):
-                if not (
-                    isinstance(values, list)
-                    and values
-                    and all(_label_value_is_valid(v) for v in values)
-                ):
-                    return False
-            elif operator in ("Exists", "DoesNotExist"):
-                if values not in (None, []):
-                    return False
-            else:
-                return False
-    return True
+    return scraper_labels is not None and selector_matches(pod_selector, scraper_labels)
 
 
 def _rule_ipblocks_cover_both_families(peers: list) -> bool:
@@ -267,9 +181,9 @@ def _rule_ipblocks_cover_both_families(peers: list) -> bool:
             return False
         ip_block = peer.get("ipBlock")
         if ip_block is None:
-            if not _label_selector_is_api_valid(
+            if label_selector_problem(
                 peer.get("namespaceSelector")
-            ) or not _label_selector_is_api_valid(peer.get("podSelector")):
+            ) or label_selector_problem(peer.get("podSelector")):
                 return False
             continue
         if (
@@ -553,9 +467,7 @@ def check_monitor_ports(docs: list[dict]) -> tuple[list[str], int]:
 
 
 def analyze(
-    docs: list[dict],
-    observability_ns: str = DEFAULT_OBSERVABILITY_NS,
-    scraper_labels: dict | None = None,
+    docs: list[dict], scraper_labels: dict | None = None
 ) -> tuple[dict[str, list[str]], set[str], set[str]]:
     """-> (scraped namespace -> reasons, ingress-restricted namespaces, allowed)."""
     scraped: dict[str, list[str]] = {}
@@ -614,7 +526,7 @@ def analyze(
                     allowed.add(ns)
                 for peer in peers or []:
                     if _selects_observability(
-                        peer, observability_ns, scraper_labels, ns, f"NetworkPolicy {ns}/{name}"
+                        peer, scraper_labels, ns, f"NetworkPolicy {ns}/{name}"
                     ):
                         allowed.add(ns)
 
@@ -640,18 +552,6 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--observability-namespace",
-        default=DEFAULT_OBSERVABILITY_NS,
-        help="namespace Prometheus scrapes from (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--exempt",
-        action="append",
-        default=[],
-        metavar="NS=REASON",
-        help="namespace exempt from the invariant, with its reason (repeatable)",
-    )
-    parser.add_argument(
         "--prometheus-pod-label",
         action="append",
         default=[],
@@ -661,9 +561,7 @@ def main(argv: list[str] | None = None) -> int:
              "judged; without them such a peer is credited unexamined",
     )
     args = parser.parse_args(argv)
-    observability_ns = args.observability_namespace
     try:
-        exempt = parse_exempt(args.exempt)
         scraper_labels = _scraper_labels(args.prometheus_pod_label)
     except OperatorError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -671,13 +569,13 @@ def main(argv: list[str] | None = None) -> int:
 
     docs = load_corpus()
 
-    scraped, restricted, allowed = analyze(docs, observability_ns, scraper_labels)
+    scraped, restricted, allowed = analyze(docs, scraper_labels)
     port_violations, ports_checked = check_monitor_ports(docs)
 
     violations: list[str] = []
     checked = 0
     for ns in sorted(scraped):
-        if ns not in restricted or ns in exempt:
+        if ns not in restricted:
             continue
         checked += 1
         if ns in allowed:
@@ -685,10 +583,10 @@ def main(argv: list[str] | None = None) -> int:
         reasons = ", ".join(sorted(set(scraped[ns])))
         violations.append(
             f"  {ns}: scraped ({reasons}) and ingress-restricted, but no "
-            f"NetworkPolicy admits the {observability_ns} namespace — the scrape "
-            f"is REJECTed at the CNI and TargetDown fires. Add an "
-            f"`allow-metrics-ingress` policy (namespaceSelector "
-            f"{NS_NAME_LABEL}: {observability_ns}) on the monitored port."
+            f"NetworkPolicy admits the {OBSERVABILITY_NS} namespace — the scrape "
+            f"is REJECTed at the CNI and TargetDown fires. Add a NetworkPolicy "
+            f"ingress rule with namespaceSelector "
+            f"{NAME_LABEL}: {OBSERVABILITY_NS} on the monitored port."
         )
         # A shape the gate declined for want of modelling may already admit the
         # scrape, so the operator is told which policy went unread.
@@ -723,9 +621,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    unused = sorted(ns for ns in exempt if ns not in scraped or ns not in restricted)
-    if unused:
-        print(f"(exemptions declared but not exercised by this corpus: {', '.join(unused)})")
     print(
         f"Scrape/NetworkPolicy invariant OK ({checked} scraped ingress-restricted "
         f"namespaces checked, {len(scraped)} scraped namespaces seen, "

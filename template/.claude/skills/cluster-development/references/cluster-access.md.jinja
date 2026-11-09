@@ -31,9 +31,10 @@ TITLE is `remoteRef.key` and the field is `remoteRef.property`.
 
 ## SSH
 
-Hosts are reached as `{{ admin_user }}` with passwordless sudo. An agent that
-pins a signing agent can fail intermittently when that agent is locked, so a
-scripted connection names its key explicitly instead.
+Hosts are reached as `{{ admin_user }}` with passwordless sudo. An SSH config
+that pins a key-signing agent, such as a password manager's, fails
+intermittently while that agent is locked. A scripted connection therefore
+names its key explicitly and bypasses the agent.
 
 ## Local toolchain
 

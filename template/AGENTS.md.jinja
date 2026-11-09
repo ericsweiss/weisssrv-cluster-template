@@ -1,12 +1,33 @@
 # AGENTS.md — {{ cluster_name }}
 
-Instructions for any coding agent working in this repository.
+Instructions for any coding agent working in this repository. This file is the
+entry point; `CLAUDE.md` imports it for Claude Code.
 
 **Read [`.claude/skills/cluster-development/SKILL.md`](.claude/skills/cluster-development/SKILL.md)
-first.** It is tool-neutral Markdown, and it holds the whole contract for this
-cluster plus the gates to run before proposing a merge. Nothing from it is
-restated here: a second copy of the rules is a second copy to keep current.
+before making any change.** It is plain Markdown. It holds the workflow, the
+invariants, the change-type decision tree and the pre-merge gates, and its
+`references/` files hold the procedures. Claude Code invokes it through the
+Skill tool; other agents read the files directly.
 
-`README.md` is the top-level fact source, `docs/RUNBOOKS.md` the day-two
-procedures, `docs/ci-pipeline.md` the pipeline, and `task --list` the command
-set. Never cite a `task` name that is not in `task --list`.
+## Template first
+
+This repository is one cluster of a shared platform. Inventory values,
+addresses, the application estate and this cluster's documents stay here.
+Anything generic goes upstream first: roles, CI job templates, Terraform
+modules and vendored gates to weisssrv-lib, repository shape to
+weisssrv-cluster-template, tenant-repository shape to weisssrv-app-template. A
+generic change landed only here is drift. The skill's § Where the generic half
+of a change goes has the detail.
+
+## Where the facts live
+
+| Subject | Canonical |
+|---|---|
+| Workflow, invariants, gates, decision tree | `.claude/skills/cluster-development/SKILL.md` |
+| Layout, bring-up, everyday operations, document index | `README.md` |
+| Day-two procedures and alert runbooks | `docs/RUNBOOKS.md` |
+| CI/CD pipeline | `docs/ci-pipeline.md` |
+| Command set | `task --list` |
+
+Comments describe the current state in the present tense, three lines per block
+at most; the skill's § Invariants has the full rule.

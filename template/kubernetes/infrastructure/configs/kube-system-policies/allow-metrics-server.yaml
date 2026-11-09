@@ -1,15 +1,15 @@
 ---
-# metrics-server's aggregated API on :10250 (k3s AddOn, `k8s-app: metrics-server`).
-# Peer is unrestricted: the aggregation call is DNAT'd and masqueraded, so no
-# source IP is pinnable — its own TLS and delegated authn/authz is the gate.
+# metrics-server's aggregated API (metrics.k8s.io) on :10250. The peer is
+# unrestricted because the aggregation call is DNAT'd and masqueraded; its TLS
+# and delegated authn are the gate. Label-scoped to the chart's pods.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-metrics-server-ingress
+  name: allow-metrics-server-chart-ingress
 spec:
   podSelector:
     matchLabels:
-      k8s-app: metrics-server
+      app.kubernetes.io/name: metrics-server
   policyTypes:
     - Ingress
   ingress:

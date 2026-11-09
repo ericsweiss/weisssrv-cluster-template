@@ -8,29 +8,28 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import jinja2
-import yaml
+from conftest import COMPUTED, QUESTIONS, copier_env
 from jinja2 import meta
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 README = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-CONFIG = yaml.safe_load((REPO_ROOT / "copier.yml").read_text(encoding="utf-8"))
-QUESTIONS = {
+TYPED = {
     name: question
-    for name, question in CONFIG.items()
-    if not name.startswith("_") and isinstance(question, dict) and "type" in question
+    for name, question in QUESTIONS.items()
+    if isinstance(question, dict) and "type" in question
 }
-# `when: false` entries are shared machinery: never prompted, never recorded, so
-# the operator-facing table does not list them.
-ASKED = {name: q for name, q in QUESTIONS.items() if q.get("when") is not False}
+# The operator-facing table lists only what copier asks.
+ASKED = {name: q for name, q in TYPED.items() if name not in COMPUTED}
 
 HEADING = "## The answers"
-# A cell deferring to the schema rather than restating a value, for the two
-# answers whose defaults are bumped as a pair.
+# A cell deferring to the schema rather than restating a value. Only the two
+# answers whose defaults are bumped as a pair may use it.
 DEFERRAL = "in `copier.yml`"
+DEFERRED = {"lib_url", "lib_ref"}
 
 _BACKTICKED = re.compile(r"`([^`]+)`")
-_ENV = jinja2.Environment()
+# The filter set copier renders with, so a default using one of them parses.
+_ENV = copier_env()
 
 
 def _cells(line: str) -> list[str]:
@@ -63,18 +62,28 @@ def _expected(question: dict) -> tuple[str, str]:
     default = question["default"]
     if isinstance(default, str) and "{{" in default:
         refs = sorted(meta.find_undeclared_variables(_ENV.parse(default)))
+        if not refs:
+            return "computed", "a value the cell describes"
         return "derived", ", ".join(refs)
-    return "literal", str(default)
+    return "literal", _spelled(default)
+
+
+def _spelled(default) -> str:
+    """A literal default as the table spells it: YAML's lower-case booleans."""
+    if isinstance(default, bool):
+        return str(default).lower()
+    return str(default)
 
 
 def _satisfied(rule: str, want: str, part: str) -> bool:
-    if DEFERRAL in part:
-        return True
     if rule == "no-default":
         return "—" in part or "asked" in part.lower()
+    if rule == "computed":
+        return bool(part) and "—" not in part
+    named = _BACKTICKED.findall(part)
     if rule == "derived":
-        return any(ref and ref in part for ref in want.split(", "))
-    return want.lower() in part.lower()
+        return all(ref in part for ref in want.split(", "))
+    return want in named
 
 
 def default_cell_problems(
@@ -93,6 +102,13 @@ def default_cell_problems(
                 problems.append(f"{name}: named in the table, not a question in copier.yml")
                 continue
             rule, want = _expected(question)
+            if DEFERRAL in part:
+                if name not in DEFERRED:
+                    problems.append(
+                        f"{name}: Default cell defers to copier.yml, which only "
+                        f"{sorted(DEFERRED)} may do"
+                    )
+                continue
             if not _satisfied(rule, want, part):
                 problems.append(
                     f"{name}: Default cell {part!r} does not carry its {rule} default "
@@ -116,7 +132,7 @@ def test_the_answer_table_names_every_asked_question():
 def test_answer_table_default_cells_agree_with_copier_yml():
     rows = answer_rows(README)
     assert rows, f"no rows found under README.md {HEADING} — this gate examined nothing"
-    problems = default_cell_problems(rows, QUESTIONS)
+    problems = default_cell_problems(rows, TYPED)
     assert not problems, (
         f"README.md {HEADING} states defaults copier.yml does not:\n  "
         + "\n  ".join(problems)
@@ -161,3 +177,36 @@ def test_a_grouped_row_is_checked_per_answer():
     rows = [(["k3s_pod_cidr", "k3s_service_cidr"], "`10.42.0.0/16` / `10.44.0.0/16`")]
     problems = default_cell_problems(rows, questions)
     assert len(problems) == 1 and "k3s_service_cidr" in problems[0]
+
+
+def test_a_computed_default_must_not_read_as_none():
+    """A default computed from no answer, such as the current year, still exists,
+    so a `—` cell for it is caught and a cell describing it passes."""
+    questions = {"license_year": {"type": "str", "default": "{{ '%Y' | strftime }}"}}
+    assert default_cell_problems([(["license_year"], "the current year")], questions) == []
+    problems = default_cell_problems([(["license_year"], "—")], questions)
+    assert len(problems) == 1 and "computed" in problems[0]
+
+
+def test_only_the_paired_pins_may_defer_to_copier_yml():
+    """Mutation case: a deferral replaces a stale literal default only where the
+    table documents it."""
+    questions = {
+        "lib_ref": {"type": "str", "default": "v1.0.0"},
+        "timezone": {"type": "str", "default": "UTC"},
+    }
+    rows = [(["lib_ref"], "defaults in `copier.yml`"), (["timezone"], "defaults in `copier.yml`")]
+    problems = default_cell_problems(rows, questions)
+    assert len(problems) == 1 and problems[0].startswith("timezone:")
+
+
+def test_a_default_is_matched_exactly_and_every_reference_is_named():
+    """Mutation case: `1` is not `10`, and a derived cell names every answer."""
+    questions = {
+        "count": {"type": "int", "default": 1},
+        "flag": {"type": "bool", "default": False},
+        "pair": {"type": "str", "default": "{{ lan_prefix }}.{{ cluster_name }}"},
+    }
+    rows = [(["count"], "`10`"), (["flag"], "`false`"), (["pair"], "`<lan_prefix>.x`")]
+    problems = default_cell_problems(rows, questions)
+    assert [p.split(":", 1)[0] for p in problems] == ["count", "pair"]

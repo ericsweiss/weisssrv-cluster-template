@@ -19,39 +19,27 @@
     - role: weisssrv.infra.nic_tuning
       tags: [nic_tuning, network]
 
-# weisssrv.infra.base above rewrites each guest's authorized_keys, dropping the
-# pinned cert-distribution key, so the next push from the cert primary would fail
-# until acme_certs runs again. Re-seed it from the primary here.
+# weisssrv.infra.base above rewrites each guest's authorized_keys, which drops
+# the pinned cert-distribution key. Re-seed every sudo target the probe reached;
+# the gate below reports a skipped one, and any other miss fails here.
 - name: Re-seed the cert-distribution key on every cert target
-  hosts: dns_primary
+  hosts: dns_primary:!deploy_skipped
   become: true
   gather_facts: false
   ignore_unreachable: true
   tasks:
     - name: Re-seed the cert-distribution targets
-      when: acme_certs_ssh_public_key | default('') | length > 0
-      block:
-        - name: Reset the cert-distribution reachability results
-          ansible.builtin.set_fact:
-            acme_certs_unreachable_targets: []
-
-        - name: Seed each reachable target
-          ansible.builtin.include_role:
-            name: weisssrv.infra.acme_certs
-            tasks_from: seed-target
-          loop: "{{ acme_certs_distribution_targets | default([]) }}"
-          loop_control:
-            loop_var: acme_certs_target
-            label: "{{ acme_certs_target.host }}"
-          when: not (acme_certs_target.ssh_no_sudo | default(false))
-
-    - name: Report a skipped re-seed
-      ansible.builtin.debug:
-        msg: >-
-          ACME_SSH_PUBLIC_KEY is unset, so the cert-distribution key was not
-          re-seeded. Re-run through the task wrapper, or run playbooks/dns.yml,
-          before the next certificate renewal.
-      when: acme_certs_ssh_public_key | default('') | length == 0
+      ansible.builtin.include_role:
+        name: weisssrv.infra.acme_certs
+        tasks_from: reseed
+      vars:
+        acme_certs_reseed_hosts: >-
+          {{ acme_certs_distribution_targets | default([])
+             | map(attribute='host')
+             | reject('in', acme_certs_distribution_targets | default([])
+                 | selectattr('ssh_no_sudo', 'defined')
+                 | selectattr('ssh_no_sudo') | map(attribute='host') | list)
+             | difference(groups['deploy_skipped'] | default([])) }}
 
 - name: Gate on the reachability ledger
   ansible.builtin.import_playbook: _reachability-gate.yml

@@ -5,8 +5,7 @@ platform-written static volume pre-bound by claimRef; any other class is refused
 from __future__ import annotations
 
 import pytest
-import yaml
-from conftest import REPO
+from conftest import REPO, assert_tenant_deny_binding, cel, policy_spec
 
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
 NAME = "tenant-pvc-storageclasses"
@@ -39,28 +38,10 @@ FINALIZING_CONDITIONS = [{
         "oldObject.metadata.annotations : {})"
     ),
 }]
-TENANT_MATCH = {
-    "namespaceSelector": {
-        "matchExpressions": [{"key": "fluxcd.io/tenant", "operator": "Exists"}]
-    }
-}
-
-
-def _docs() -> list[dict]:
-    return [d for d in yaml.safe_load_all(POLICY.read_text()) if isinstance(d, dict)]
 
 
 def _policy() -> dict:
-    found = [
-        d for d in _docs()
-        if d.get("kind") == "ValidatingAdmissionPolicy" and d["metadata"]["name"] == NAME
-    ]
-    assert len(found) == 1
-    return found[0]["spec"]
-
-
-def _cel(text: str) -> str:
-    return " ".join(text.split())
+    return policy_spec(POLICY, "ValidatingAdmissionPolicy", NAME)
 
 
 def test_the_policy_is_the_shape_the_mirror_evaluates():
@@ -75,28 +56,16 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
         ]
     }
     assert [
-        {"name": c["name"], "expression": _cel(c["expression"])} for c in spec["matchConditions"]
+        {"name": c["name"], "expression": cel(c["expression"])} for c in spec["matchConditions"]
     ] == FINALIZING_CONDITIONS
-    assert [(_cel(v["expression"]), v["message"]) for v in spec["validations"]] == [
+    assert [(cel(v["expression"]), v["message"]) for v in spec["validations"]] == [
         (VALIDATION, MESSAGE),
         (VOLUME_TYPE_VALIDATION, VOLUME_TYPE_MESSAGE),
     ]
 
 
 def test_the_policy_is_deny_bound_on_every_tenant_namespace():
-    bindings = [
-        d["spec"] for d in _docs()
-        if d.get("kind") == "ValidatingAdmissionPolicyBinding"
-        and d["spec"]["policyName"] == NAME
-    ]
-    assert bindings == [
-        {"policyName": NAME, "validationActions": ["Deny"], "matchResources": TENANT_MATCH}
-    ]
-
-
-def test_the_policy_is_the_last_in_the_file():
-    names = [d["metadata"]["name"] for d in _docs() if d.get("kind") == "ValidatingAdmissionPolicy"]
-    assert names[-1] == NAME
+    assert_tenant_deny_binding(POLICY, NAME)
 
 
 def allowed(claim: dict) -> bool:

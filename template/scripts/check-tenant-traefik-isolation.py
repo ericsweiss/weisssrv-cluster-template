@@ -1,0 +1,864 @@
+#!/usr/bin/env python3
+"""Fail tenant onboarding without the Deny-bound, shape-pinned tenant policies,
+whatever allowCrossNamespace says, or without each tenant's hostname grant.
+Exit 0 clean, 1 findings, 2 vacuous.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+try:
+    from gate_common import (  # noqa: E402  (resolved from this script's own directory)
+        OperatorError,
+    )
+    from tenant_common import (  # noqa: E402  (resolved from this script's own directory)
+        AGGREGATOR,
+        CERTIFICATE_POLICY,
+        FLUX_NAMESPACE,
+        GRANT_POLICIES,
+        GRANT_PREFIX,
+        HOSTNAME_POLICY,
+        routing_binding_spec,
+        SHARED,
+        TENANT_LABEL,
+        TENANT_STORAGE_CLASS,
+        Targets,
+        add_target_arguments,
+        discover_tenants_dir,
+        label,
+        kustomization_resources,
+        listed_resources,
+        load_mappings,
+        metadata,
+        of_kind,
+        resolve_targets,
+    )
+except ImportError as exc:  # pragma: no cover - environment guard
+    print(
+        f"ERROR: {exc}: tenant_common.py and gate_common.py must be vendored "
+        "beside this gate (see scripts/vendorable-paths.yml)",
+        file=sys.stderr,
+    )
+    raise SystemExit(2) from None
+
+# The tenant policies, pinned whole: fail closed, these resources, and exactly
+# these match conditions, variables and validation expressions (whitespace-normalized),
+# or a weakened copy passes by name. Change together with tenant-traefik-policy.yaml.
+TENANT_POLICY = "kubernetes/infrastructure/configs/tenant-traefik-policy.yaml"
+CONFIGS_KUSTOMIZATION = "kubernetes/infrastructure/configs/kustomization.yaml"
+WRITES = ["CREATE", "UPDATE"]
+# Every policy matching UPDATE on a kind with a spec, bar tenant-certificaterequests
+# (its Order rule admits the garbage collector), skips an UPDATE to a terminating
+# object that leaves spec and annotations unchanged, so it can shed its finalizer.
+FINALIZING_UNCHANGED = [
+    (
+        "enforce-unless-finalizing-unchanged",
+        "request.operation != 'UPDATE' || !has(object.metadata.deletionTimestamp) || "
+        "object.spec != oldObject.spec || (has(object.metadata.annotations) ? "
+        "object.metadata.annotations : {}) != (has(oldObject.metadata.annotations) ? "
+        "oldObject.metadata.annotations : {})",
+    ),
+]
+# Endpoints and EndpointSlices have no spec: the same exemption keys on their
+# routing data (subsets; addressType, endpoints, ports) plus labels and annotations.
+FINALIZING_UNCHANGED_ENDPOINTS = [
+    (
+        "enforce-unless-finalizing-unchanged",
+        "request.operation != 'UPDATE' || !has(object.metadata.deletionTimestamp) || (request.res"
+        "ource.resource == 'endpoints' ? (has(object.subsets) ? object.subsets : []) != (has(oldO"
+        "bject.subsets) ? oldObject.subsets : []) : (object.addressType != oldObject.addressType "
+        "|| object.endpoints != oldObject.endpoints || (has(object.ports) ? object.ports : []) !="
+        " (has(oldObject.ports) ? oldObject.ports : []))) || (has(object.metadata.labels) ? objec"
+        "t.metadata.labels : {}) != (has(oldObject.metadata.labels) ? oldObject.metadata.labels :"
+        " {}) || (has(object.metadata.annotations) ? object.metadata.annotations : {}) != (has(ol"
+        "dObject.metadata.annotations) ? oldObject.metadata.annotations : {})"
+    ),
+]
+# The route-level middleware rule, held on every per-service middlewares list too.
+MIDDLEWARE_REF = (
+    "!m.name.contains('@') && (!has(m.namespace) || m.namespace == variables.ns || "
+    "(m.namespace + '/' + m.name) in variables.platformMiddlewares)"
+)
+PLATFORM_MIDDLEWARES = (
+    "['traefik/lan-tailscale-only', 'traefik/lan-tailscale-strict', "
+    "'traefik/hsts-header', 'traefik/security-headers', "
+    "'authentik/authentik-auth']"
+)
+INTERNAL_ALLOWLISTS = "['lan-tailscale-only', 'lan-tailscale-strict']"
+# Lowered like the host it is compared with, so a mixed-case domain still matches.
+INTERNAL_DOMAIN = "'${cluster_internal_domain}'.lowerAscii()"
+# A quoted internal hostname ends in one of these; a domain merely containing it does not.
+INTERNAL_HOST_ENDS = (
+    "['.' + variables.internalDomain + '`', '`' + variables.internalDomain + '`', "
+    "'.' + variables.internalDomain + '\"', '\"' + variables.internalDomain + '\"']"
+)
+# Both VIPs serve the same entrypoints, so an internal-domain route or Ingress
+# must carry its own allowlist middleware or the public VIP serves it.
+INTERNAL_ROUTE_ALLOWLIST = (
+    "!has(object.spec.routes) || object.spec.routes.all(r, !has(r.match) || "
+    "!variables.internalHostEnds.exists(e, r.match.lowerAscii().contains(e)) || "
+    "(has(r.middlewares) && r.middlewares.exists(m, has(m.namespace) && "
+    "m.namespace == 'traefik' && m.name in variables.internalAllowlists)))"
+)
+INTERNAL_INGRESS_ALLOWLIST = (
+    "request.resource.resource != 'ingresses' || !has(object.spec) || "
+    "!has(object.spec.rules) || !object.spec.rules.exists(r, has(r.host) && "
+    "(r.host.lowerAscii() == variables.internalDomain || "
+    "r.host.lowerAscii().endsWith('.' + variables.internalDomain))) || "
+    "(has(object.metadata.annotations) && object.metadata.annotations.exists(k, "
+    "k.startsWith('traefik.ingress.kubernetes.io/') && "
+    "k.lowerAscii() == variables.routerMiddlewares) && "
+    "object.metadata.annotations.all(k, k.lowerAscii() != variables.routerMiddlewares || "
+    "object.metadata.annotations[k].split(',').exists(v, "
+    "v.trim() in variables.internalAllowlistRefs)))"
+)
+REQUIRED_POLICIES = {
+    "tenant-traefik-route-refs": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": ["traefik.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["ingressroutes", "ingressroutetcps", "ingressrouteudps"],
+            },
+        ],
+        "matchConditions": FINALIZING_UNCHANGED,
+        "variables": [
+            ("ns", "object.metadata.namespace"),
+            ("platformMiddlewares", PLATFORM_MIDDLEWARES),
+            ("internalDomain", INTERNAL_DOMAIN),
+            ("internalHostEnds", INTERNAL_HOST_ENDS),
+            ("internalAllowlists", INTERNAL_ALLOWLISTS),
+        ],
+        "validations": [
+            (
+                "!has(object.spec.routes) || object.spec.routes.all(r, !has(r.services) ||"
+                " r.services.all(s, !has(s.namespace) || s.namespace == variables.ns))"
+            ),
+            INTERNAL_ROUTE_ALLOWLIST,
+            (
+                "!has(object.spec.routes) || object.spec.routes.all(r, !has(r.middlewares)"
+                " || r.middlewares.all(m, !has(m.namespace) || m.namespace == variables.ns"
+                " || (m.namespace + '/' + m.name) in variables.platformMiddlewares))"
+            ),
+            (
+                "!has(object.spec.routes) || object.spec.routes.all(r, "
+                "(!has(r.middlewares) || r.middlewares.all(m, !m.name.contains('@'))) && "
+                "(!has(r.services) || r.services.all(s, !s.name.contains('@') && "
+                "(!has(s.serversTransport) || !s.serversTransport.contains('@')))))"
+            ),
+            (
+                "!has(object.spec.routes) || object.spec.routes.all(r, !has(r.services) || "
+                "r.services.all(s, !has(s.middlewares) || "
+                f"s.middlewares.all(m, {MIDDLEWARE_REF})))"
+            ),
+            (
+                "!has(object.spec.tls) || ((!has(object.spec.tls.options) || "
+                "((!has(object.spec.tls.options.namespace) || "
+                "object.spec.tls.options.namespace == variables.ns) && "
+                "!object.spec.tls.options.name.contains('@'))) && "
+                "(!has(object.spec.tls.store) || ((!has(object.spec.tls.store.namespace) "
+                "|| object.spec.tls.store.namespace == variables.ns) && "
+                "!object.spec.tls.store.name.contains('@'))))"
+            ),
+            "!has(object.spec.parentRefs) || size(object.spec.parentRefs) == 0",
+        ],
+    },
+    "tenant-traefik-object-refs": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": ["traefik.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["middlewares", "traefikservices"],
+            },
+        ],
+        "matchConditions": FINALIZING_UNCHANGED,
+        "variables": [
+            ("ns", "object.metadata.namespace"),
+            ("platformForwardAuth", (
+                "['http://authentik-server.authentik.svc.cluster.local/outpost.goauthentik.io/auth/traefik']"
+            )),
+            ("ownServiceAddress", (
+                "'^https?://[a-z]([-a-z0-9]*[a-z0-9])?[.]' + variables.ns + "
+                "'[.]svc([.]cluster[.]local)?(:[0-9]{1,5})?(/.*)?$'"
+            )),
+            ("platformMiddlewares", PLATFORM_MIDDLEWARES),
+        ],
+        "validations": [
+            (
+                "!has(object.spec.chain) || !has(object.spec.chain.middlewares) || "
+                "object.spec.chain.middlewares.all(m, !m.name.contains('@') && "
+                "(!has(m.namespace) || m.namespace == variables.ns))"
+            ),
+            (
+                "!has(object.spec.errors) || !has(object.spec.errors.service) || "
+                "!has(object.spec.errors.service.namespace) || "
+                "object.spec.errors.service.namespace == variables.ns"
+            ),
+            (
+                "!has(object.spec.forwardAuth) || object.spec.forwardAuth.address in "
+                "variables.platformForwardAuth || "
+                "object.spec.forwardAuth.address.matches(variables.ownServiceAddress)"
+            ),
+            "!has(object.spec.rateLimit) || !has(object.spec.rateLimit.redis)",
+            (
+                "!has(object.spec.weighted) || !has(object.spec.weighted.services) || "
+                "object.spec.weighted.services.all(s, !has(s.namespace) || s.namespace == "
+                "variables.ns)"
+            ),
+            (
+                "!has(object.spec.mirroring) || ((!has(object.spec.mirroring.namespace) ||"
+                " object.spec.mirroring.namespace == variables.ns) && "
+                "(!has(object.spec.mirroring.mirrors) || "
+                "object.spec.mirroring.mirrors.all(s, !has(s.namespace) || s.namespace == "
+                "variables.ns)))"
+            ),
+            (
+                "(!has(object.spec.errors) || !has(object.spec.errors.service) || "
+                "(!object.spec.errors.service.name.contains('@') && "
+                "(!has(object.spec.errors.service.serversTransport) || "
+                "!object.spec.errors.service.serversTransport.contains('@')))) && "
+                "(!has(object.spec.weighted) || !has(object.spec.weighted.services) || "
+                "object.spec.weighted.services.all(s, !s.name.contains('@') && "
+                "(!has(s.serversTransport) || !s.serversTransport.contains('@')))) && "
+                "(!has(object.spec.mirroring) || "
+                "(!object.spec.mirroring.name.contains('@') && "
+                "(!has(object.spec.mirroring.serversTransport) || "
+                "!object.spec.mirroring.serversTransport.contains('@')) && "
+                "(!has(object.spec.mirroring.mirrors) || "
+                "object.spec.mirroring.mirrors.all(s, !s.name.contains('@') && "
+                "(!has(s.serversTransport) || !s.serversTransport.contains('@'))))))"
+            ),
+            (
+                "!has(object.spec.highestRandomWeight) || "
+                "!has(object.spec.highestRandomWeight.services) || "
+                "object.spec.highestRandomWeight.services.all(s, (!has(s.namespace) || "
+                "s.namespace == variables.ns) && !s.name.contains('@') && "
+                "(!has(s.serversTransport) || !s.serversTransport.contains('@')))"
+            ),
+            (
+                "(!has(object.spec.errors) || !has(object.spec.errors.service) || "
+                "!has(object.spec.errors.service.middlewares) || "
+                f"object.spec.errors.service.middlewares.all(m, {MIDDLEWARE_REF})) && "
+                "(!has(object.spec.weighted) || !has(object.spec.weighted.services) || "
+                "object.spec.weighted.services.all(s, !has(s.middlewares) || "
+                f"s.middlewares.all(m, {MIDDLEWARE_REF}))) && "
+                "(!has(object.spec.highestRandomWeight) || "
+                "!has(object.spec.highestRandomWeight.services) || "
+                "object.spec.highestRandomWeight.services.all(s, !has(s.middlewares) || "
+                f"s.middlewares.all(m, {MIDDLEWARE_REF}))) && "
+                "(!has(object.spec.mirroring) || ((!has(object.spec.mirroring.middlewares) || "
+                f"object.spec.mirroring.middlewares.all(m, {MIDDLEWARE_REF})) && "
+                "(!has(object.spec.mirroring.mirrors) || object.spec.mirroring.mirrors.all(s, "
+                f"!has(s.middlewares) || s.middlewares.all(m, {MIDDLEWARE_REF})))))"
+            ),
+            "!has(object.spec.failover)",
+        ],
+    },
+    "tenant-traefik-ingress-refs": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": ["networking.k8s.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["ingresses"],
+            },
+            {
+                "apiGroups": [""],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["services"],
+            },
+        ],
+        "matchConditions": FINALIZING_UNCHANGED,
+        "variables": [
+            ("platformRefs", (
+                "['traefik-lan-tailscale-only@kubernetescrd', "
+                "'traefik-lan-tailscale-strict@kubernetescrd', "
+                "'traefik-hsts-header@kubernetescrd', "
+                "'traefik-security-headers@kubernetescrd', "
+                "'authentik-authentik-auth@kubernetescrd']"
+            )),
+            ("internalDomain", INTERNAL_DOMAIN),
+            ("internalAllowlistRefs", (
+                "['traefik-lan-tailscale-only@kubernetescrd', "
+                "'traefik-lan-tailscale-strict@kubernetescrd']"
+            )),
+            ("routerMiddlewares", "'traefik.ingress.kubernetes.io/router.middlewares'"),
+        ],
+        "validations": [
+            (
+                "!has(object.metadata.annotations) || object.metadata.annotations.all(k, "
+                "!k.startsWith('traefik.ingress.kubernetes.io/') || "
+                "object.metadata.annotations[k].split(',').all(v, !v.contains('@') || "
+                "v.trim() in variables.platformRefs))"
+            ),
+            INTERNAL_INGRESS_ALLOWLIST,
+        ],
+    },
+    "tenant-no-externalname-services": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": [""],
+                "apiVersions": ["v1"],
+                "operations": WRITES,
+                "resources": ["services"],
+            },
+        ],
+        "matchConditions": FINALIZING_UNCHANGED,
+        "variables": [],
+        "validations": [
+            "!has(object.spec.type) || object.spec.type != 'ExternalName'",
+            "has(object.spec.selector) && size(object.spec.selector) > 0",
+            (
+                "(!has(object.spec.type) || object.spec.type == 'ClusterIP') && "
+                "(!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0)"
+            ),
+            (
+                "!has(object.metadata.annotations) || "
+                "object.metadata.annotations.all(k, !k.startsWith('tailscale.com/'))"
+            ),
+        ],
+    },
+    "tenant-no-manual-endpoints": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": [""],
+                "apiVersions": ["v1"],
+                "operations": WRITES,
+                "resources": ["endpoints"],
+            },
+            {
+                "apiGroups": ["discovery.k8s.io"],
+                "apiVersions": ["v1"],
+                "operations": WRITES,
+                "resources": ["endpointslices"],
+            },
+        ],
+        "matchConditions": FINALIZING_UNCHANGED_ENDPOINTS,
+        "variables": [],
+        "validations": [
+            (
+                "request.userInfo.username == 'system:kube-controller-manager' || "
+                "request.userInfo.username in "
+                "['system:serviceaccount:kube-system:endpoint-controller', "
+                "'system:serviceaccount:kube-system:endpointslice-controller', "
+                "'system:serviceaccount:kube-system:endpointslicemirroring-controller']"
+            ),
+        ],
+    },
+    "tenant-no-tcp-udp-routes": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": ["traefik.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["ingressroutetcps", "ingressrouteudps"],
+            },
+        ],
+        "matchConditions": FINALIZING_UNCHANGED,
+        "variables": [],
+        "validations": ["false"],
+    },
+    "tenant-traefik-tls-defaults": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": ["traefik.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["tlsoptions", "tlsstores"],
+            },
+        ],
+        "matchConditions": FINALIZING_UNCHANGED,
+        "variables": [],
+        "validations": ["object.metadata.name != 'default'"],
+    },
+    "tenant-traefik-hostnames": {
+        "paramKind": {"apiVersion": "v1", "kind": "ConfigMap"},
+        "resourceRules": [
+            {
+                "apiGroups": ["traefik.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["ingressroutes"],
+            },
+            {
+                "apiGroups": ["networking.k8s.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["ingresses"],
+            },
+        ],
+        "matchConditions": FINALIZING_UNCHANGED,
+        "variables": [
+            ("isRoute", "request.resource.resource == 'ingressroutes'"),
+            ("hosts", "params.data.hosts.split('\\n').map(h, h.trim()).filter(h, h != '')"),
+            ("hostMatchers", "variables.hosts.map(h, 'Host(`' + h + '`)')"),
+        ],
+        "validations": [
+            "variables.hosts.all(h, !h.contains('*'))",
+            (
+                "!variables.isRoute || !has(object.spec.routes) || object.spec.routes.all(r, "
+                "r.match.matches('^Host[(]`[^`]+`[)]( && .*)?$') && "
+                "!r.match.contains('||') && !r.match.contains('HostRegexp(') && "
+                "r.match.findAll('Host[(]`[^`]*`[)]').all(h, h in variables.hostMatchers))"
+            ),
+            (
+                "!variables.isRoute || !has(object.spec.routes) || object.spec.routes.all(r, "
+                "!has(r.priority) || ('maxPriority' in params.data && "
+                "r.priority <= int(params.data.maxPriority)))"
+            ),
+            (
+                "!variables.isRoute || !has(object.spec.tls) || !has(object.spec.tls.domains) || "
+                "object.spec.tls.domains.all(d, (!has(d.main) || d.main in variables.hosts) && "
+                "(!has(d.sans) || d.sans.all(s, s in variables.hosts)))"
+            ),
+            "variables.isRoute || !has(object.spec) || !has(object.spec.defaultBackend)",
+            (
+                "variables.isRoute || !has(object.spec) || !has(object.spec.rules) || "
+                "object.spec.rules.all(r, has(r.host) && r.host in variables.hosts)"
+            ),
+            (
+                "variables.isRoute || !has(object.spec) || !has(object.spec.tls) || "
+                "object.spec.tls.all(t, !has(t.hosts) || t.hosts.all(h, h in variables.hosts))"
+            ),
+            (
+                "variables.isRoute || !has(object.metadata.annotations) || "
+                "object.metadata.annotations.all(k, "
+                "!k.lowerAscii().startsWith('traefik.ingress.kubernetes.io/router.tls.domains.') "
+                "|| object.metadata.annotations[k].split(',').all(d, d.trim() in variables.hosts))"
+            ),
+            (
+                "variables.isRoute || !has(object.metadata.annotations) || "
+                "object.metadata.annotations.all(k, !(k.lowerAscii() in "
+                "['traefik.ingress.kubernetes.io/router.rule', "
+                "'traefik.ingress.kubernetes.io/router.priority', "
+                "'traefik.ingress.kubernetes.io/router.rulesyntax']))"
+            ),
+            (
+                "variables.isRoute || ((!has(object.spec) || !has(object.spec.ingressClassName) "
+                "|| object.spec.ingressClassName == 'traefik') && "
+                "(!has(object.metadata.annotations) || object.metadata.annotations.all(k, "
+                "!k.startsWith('tailscale.com/') && (k != 'kubernetes.io/ingress.class' || "
+                "object.metadata.annotations[k] == 'traefik'))))"
+            ),
+        ],
+    },
+    "tenant-certificates": {
+        "paramKind": {"apiVersion": "v1", "kind": "ConfigMap"},
+        "resourceRules": [
+            {
+                "apiGroups": ["cert-manager.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["certificates"],
+            },
+        ],
+        "matchConditions": FINALIZING_UNCHANGED,
+        "variables": [
+            ("hosts", "params.data.hosts.split('\\n').map(h, h.trim()).filter(h, h != '')"),
+            ("platformIssuers", "['letsencrypt-prod', 'letsencrypt-staging']"),
+        ],
+        "validations": [
+            "variables.hosts.all(h, !h.contains('*'))",
+            (
+                "(!has(object.spec.dnsNames) || object.spec.dnsNames.all(n, "
+                "!n.contains('*') && n in variables.hosts)) && "
+                "(!has(object.spec.commonName) || (!object.spec.commonName.contains('*') && "
+                "object.spec.commonName in variables.hosts))"
+            ),
+            (
+                "!has(object.spec.literalSubject) && !has(object.spec.ipAddresses) && "
+                "!has(object.spec.uris) && !has(object.spec.emailAddresses) && "
+                "!has(object.spec.otherNames)"
+            ),
+            (
+                "(!has(object.spec.issuerRef.group) || object.spec.issuerRef.group in "
+                "['', 'cert-manager.io']) && (has(object.spec.issuerRef.kind) && "
+                "object.spec.issuerRef.kind == 'ClusterIssuer' ? "
+                "object.spec.issuerRef.name in variables.platformIssuers : "
+                "!has(object.spec.issuerRef.kind) || object.spec.issuerRef.kind in "
+                "['', 'Issuer'])"
+            ),
+        ],
+    },
+    "tenant-certificaterequests": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": ["cert-manager.io"],
+                "apiVersions": ["*"],
+                "operations": ["CREATE"],
+                "resources": ["certificaterequests"],
+            },
+            {
+                "apiGroups": ["acme.cert-manager.io"],
+                "apiVersions": ["*"],
+                "operations": ["CREATE"],
+                "resources": ["challenges"],
+            },
+            {
+                "apiGroups": ["acme.cert-manager.io"],
+                "apiVersions": ["*"],
+                "operations": WRITES,
+                "resources": ["orders"],
+            },
+        ],
+        "variables": [],
+        "validations": [
+            (
+                "request.resource.group == 'acme.cert-manager.io' || "
+                "request.userInfo.username == "
+                "'system:serviceaccount:cert-manager:cert-manager' || "
+                "((!has(object.spec.issuerRef.group) || object.spec.issuerRef.group in "
+                "['', 'cert-manager.io']) && (!has(object.spec.issuerRef.kind) || "
+                "object.spec.issuerRef.kind in ['', 'Issuer']))"
+            ),
+            (
+                "request.resource.group != 'acme.cert-manager.io' || "
+                "request.userInfo.username == "
+                "'system:serviceaccount:cert-manager:cert-manager' || "
+                "(request.operation == 'UPDATE' && request.userInfo.username == "
+                "'system:serviceaccount:kube-system:generic-garbage-collector')"
+            ),
+        ],
+    },
+    # Baseline Pod Security admits nfs and other node-mounted volumes; every
+    # tenant pod and pod template keeps to the restricted volume set.
+    "tenant-pod-volumes": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": [""],
+                "apiVersions": ["v1"],
+                "operations": ["CREATE"],
+                "resources": ["pods"],
+            },
+            {
+                "apiGroups": ["apps"],
+                "apiVersions": ["v1"],
+                "operations": WRITES,
+                "resources": ["deployments", "statefulsets", "daemonsets", "replicasets"],
+            },
+            {
+                "apiGroups": ["batch"],
+                "apiVersions": ["v1"],
+                "operations": ["CREATE"],
+                "resources": ["jobs"],
+            },
+            {
+                "apiGroups": ["batch"],
+                "apiVersions": ["v1"],
+                "operations": WRITES,
+                "resources": ["cronjobs"],
+            },
+        ],
+        "matchConditions": FINALIZING_UNCHANGED,
+        "variables": [
+            (
+                "volumes",
+                "request.resource.resource == 'pods' ? (has(object.spec) && "
+                "has(object.spec.volumes) ? object.spec.volumes : []) : "
+                "request.resource.resource == 'cronjobs' ? (has(object.spec) && "
+                "has(object.spec.jobTemplate) && has(object.spec.jobTemplate.spec) && "
+                "has(object.spec.jobTemplate.spec.template) && "
+                "has(object.spec.jobTemplate.spec.template.spec) && "
+                "has(object.spec.jobTemplate.spec.template.spec.volumes) ? "
+                "object.spec.jobTemplate.spec.template.spec.volumes : []) : "
+                "(has(object.spec) && has(object.spec.template) && "
+                "has(object.spec.template.spec) && has(object.spec.template.spec.volumes) ? "
+                "object.spec.template.spec.volumes : [])",
+            ),
+        ],
+        "validations": [
+            (
+                "variables.volumes.all(v, has(v.configMap) || has(v.csi) || "
+                "has(v.downwardAPI) || has(v.emptyDir) || has(v.ephemeral) || "
+                "has(v.persistentVolumeClaim) || has(v.projected) || has(v.secret))"
+            ),
+        ],
+    },
+    # Tenant claims stay on the backed-up, quota-bounded tenant-local class, or
+    # take "" for a platform-written static volume pre-bound by claimRef.
+    "tenant-pvc-storageclasses": {
+        "paramKind": None,
+        "resourceRules": [
+            {
+                "apiGroups": [""],
+                "apiVersions": ["v1"],
+                "operations": WRITES,
+                "resources": ["persistentvolumeclaims"],
+            },
+        ],
+        "matchConditions": FINALIZING_UNCHANGED,
+        "variables": [],
+        "validations": [
+            (
+                "has(object.spec.storageClassName) && "
+                f"(object.spec.storageClassName == '{TENANT_STORAGE_CLASS}' || "
+                "(object.spec.storageClassName == '' && has(object.spec.volumeName) && "
+                "object.spec.volumeName.startsWith(object.metadata.namespace + '-')))"
+            ),
+            "!has(object.metadata.annotations) || !('volumeType' in object.metadata.annotations)",
+        ],
+    },
+}
+# CEL int() reads only plain ASCII decimals; anything else errors the policy.
+MAX_PRIORITY = re.compile(r"[0-9]+", re.ASCII)
+MAX_PRIORITY_CEILING = 2147483647
+TENANT_MATCH = {
+    "namespaceSelector": {
+        "matchExpressions": [{"key": TENANT_LABEL, "operator": "Exists"}]
+    }
+}
+
+
+def _cel(text: object) -> str:
+    """A CEL expression with its whitespace normalized: YAML folding is not a change."""
+    return " ".join(str(text).split())
+
+
+def _entries(items: object) -> list[dict] | None:
+    """The items when they are a list of mappings, else None."""
+    if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
+        return None
+    return items
+
+
+def drift(spec: object, required: dict) -> list[str]:
+    """The parts of a policy spec that differ from the pinned shape: fail closed on
+    exactly the required paramKind and resources, under exactly the required match
+    conditions, with exactly the required variables and validations, in order."""
+    if not isinstance(spec, dict):
+        return ["spec is not a mapping"]
+    conditions = _entries(spec.get("matchConditions") or [])
+    variables = _entries(spec.get("variables") or [])
+    validations = _entries(spec.get("validations"))
+    parts = {
+        "failurePolicy": spec.get("failurePolicy") == "Fail",
+        "paramKind": spec.get("paramKind") == required["paramKind"],
+        "matchConstraints": spec.get("matchConstraints")
+        == {"resourceRules": required["resourceRules"]},
+        "matchConditions": conditions is not None
+        and [(c.get("name"), _cel(c.get("expression"))) for c in conditions]
+        == required.get("matchConditions", []),
+        "variables": variables is not None
+        and [(v.get("name"), _cel(v.get("expression"))) for v in variables]
+        == required["variables"],
+        "validations": validations is not None
+        and [_cel(v.get("expression")) for v in validations] == required["validations"],
+    }
+    return [part for part, pinned in parts.items() if not pinned]
+
+
+def policy_gaps(path: Path, root: Path) -> list[str]:
+    """Why the tenant policies do not hold, or nothing: the configs kustomization
+    applies the policy file, each required policy has its pinned shape, and each but
+    the grant policies, bound in each tenant's wiring file, has a Deny tenant binding."""
+    configs = root / CONFIGS_KUSTOMIZATION
+    if not path.is_file():
+        return [f"{label(path, root)} is missing"]
+    if not configs.is_file():
+        return [f"{label(configs, root)} is missing, so nothing applies the policies"]
+    if path.name not in kustomization_resources(configs, label(configs, root)):
+        return [f"{label(configs, root)} does not list {path.name}"]
+    docs = load_mappings(path, label(path, root))
+    policies: dict[str, list[object]] = {}
+    for doc in of_kind(docs, "ValidatingAdmissionPolicy"):
+        name = metadata(doc).get("name")
+        policies.setdefault(name, []).append(doc.get("spec"))
+    bound = set()
+    for doc in of_kind(docs, "ValidatingAdmissionPolicyBinding"):
+        spec = doc.get("spec")
+        if not isinstance(spec, dict):
+            continue
+        # The whole spec, not its parts: another match key narrows the binding,
+        # and a paramRef with parameterNotFoundAction Allow fails open.
+        name = spec.get("policyName")
+        if spec == {
+            "policyName": name,
+            "validationActions": ["Deny"],
+            "matchResources": TENANT_MATCH,
+        }:
+            bound.add(name)
+    gaps = []
+    for name, required in REQUIRED_POLICIES.items():
+        if name not in bound and name not in GRANT_POLICIES:
+            gaps.append(
+                f"{name}: no binding whose whole spec is Deny on the {TENANT_LABEL} label"
+            )
+        defined = policies.get(name, [])
+        if len(defined) != 1:
+            gaps.append(f"{name}: defined {len(defined)} times, not once")
+        elif parts := drift(defined[0], required):
+            gaps.append(f"{name}: {', '.join(parts)} differ from the pinned shape")
+    return gaps
+
+
+def _grant_problem(data: object) -> str | None:
+    """Why a tenant-routing ConfigMap's data grants nothing usable, or None."""
+    if not isinstance(data, dict):
+        return "has no data"
+    hosts = data.get("hosts")
+    if not isinstance(hosts, str) or not [h for h in hosts.split("\n") if h.strip()]:
+        return "grants no hosts (data.hosts: one hostname per line)"
+    if any("*" in h for h in hosts.split("\n")):
+        return "grants a wildcard host; the platform grant must list exact hostnames"
+    ceiling = data.get("maxPriority")
+    if ceiling is not None and not (
+        isinstance(ceiling, str)
+        and MAX_PRIORITY.fullmatch(ceiling)
+        and int(ceiling) <= MAX_PRIORITY_CEILING
+    ):
+        return (
+            "has a maxPriority that is not an ASCII whole number from 0 to "
+            f"{MAX_PRIORITY_CEILING} (the policy's CEL int() must parse it)"
+        )
+    return None
+
+
+def routing_problems_for(files: dict[str, list[dict]]) -> list[str]:
+    """Every tenant namespace a wiring file declares has its own Deny bindings of
+    the hostname and certificate policies and a non-empty hostname grant in
+    flux-system that both read, all within the files given."""
+    every = [d for file_docs in files.values() for d in file_docs]
+    specs = [d.get("spec") for d in of_kind(every, "ValidatingAdmissionPolicyBinding")]
+    grants = {
+        metadata(d).get("name"): d
+        for d in of_kind(every, "ConfigMap")
+        if metadata(d).get("namespace") == FLUX_NAMESPACE
+    }
+    problems = []
+    for tenant, file_docs in files.items():
+        # A nameless Namespace is no tenant name to grant; it never becomes "None".
+        namespaces = [
+            name
+            for d in of_kind(file_docs, "Namespace")
+            if (name := metadata(d).get("name"))
+        ]
+        if not namespaces:
+            problems.append(
+                f"{tenant} declares no Namespace, so the hostnames it may serve "
+                "cannot be checked"
+            )
+        for namespace in namespaces:
+            grant = GRANT_PREFIX + str(namespace)
+            for policy, risk in (
+                (HOSTNAME_POLICY, "its routes could match any hostname"),
+                (CERTIFICATE_POLICY, "it could be issued a certificate for any hostname"),
+            ):
+                if routing_binding_spec(str(namespace), policy) not in specs:
+                    problems.append(
+                        f"tenant namespace {namespace} has no binding of {policy} "
+                        "whose whole spec is Deny on that namespace alone with paramRef "
+                        f"{FLUX_NAMESPACE}/{grant} and parameterNotFoundAction Deny — "
+                        f"{risk}"
+                    )
+            if grant not in grants:
+                problems.append(
+                    f"tenant namespace {namespace} has no ConfigMap {FLUX_NAMESPACE}/"
+                    f"{grant} in the tenants tree granting its hostnames"
+                )
+            elif (why := _grant_problem(grants[grant].get("data"))) is not None:
+                problems.append(f"{FLUX_NAMESPACE}/{grant} for tenant namespace {namespace} {why}")
+    return problems
+
+
+def check(root: Path, tenants_dir: Path | None = None) -> list[str]:
+    """The tenants tree against the platform policies."""
+    base = tenants_dir or discover_tenants_dir(root)
+    kustomization = base / AGGREGATOR
+    if not kustomization.is_file():
+        return [f"{label(kustomization, root)} is missing — this gate no longer binds"]
+    where = label(kustomization, root)
+
+    resources = listed_resources(base)
+    if not resources:
+        return [f"{where} lists no resources — has the tenant wiring moved?"]
+
+    tenants = sorted(resources - SHARED)
+    docs: dict[str, list[dict]] = {}
+    problems = []
+    for tenant in tenants:
+        path = base / tenant
+        if not path.is_file():
+            problems.append(
+                f"{where} lists {tenant}, which does not exist — "
+                "its hostname grant cannot be checked"
+            )
+            continue
+        docs[tenant] = load_mappings(path, label(path, root))
+    problems += routing_problems_for(docs)
+    gaps = policy_gaps(root / TENANT_POLICY, root)
+    if not gaps:
+        return problems
+
+    # The policies bind by label, and a torn-down tenant's Namespace stays live
+    # with that label, so they are required with no tenant wired as well.
+    onboards = (
+        f"onboards {', '.join(tenants)} without" if tenants
+        else "wires no tenant, but the labelled Namespaces it left live still need"
+    )
+    return [
+        f"{where} {onboards} "
+        f"the complete Deny-bound tenant policies in {TENANT_POLICY}. "
+        "Those policies are required even when "
+        "providers.kubernetesCRD.allowCrossNamespace is false: plain Ingress "
+        "annotations, forwardAuth addresses, and Service endpoint resolution "
+        "can otherwise make Traefik cross the tenant boundary."
+        + "".join(f"\n    - {gap}" for gap in gaps)
+    ] + problems
+
+
+def check_files(targets: Targets) -> list[str]:
+    """Standalone wiring files: the per-tenant routing arm only, no platform files."""
+    docs = {
+        targets.label(path): load_mappings(path, targets.label(path))
+        for path in targets.files
+    }
+    return routing_problems_for(docs)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    add_target_arguments(ap, Path(__file__).resolve().parent.parent)
+    args = ap.parse_args(argv)
+
+    try:
+        targets = resolve_targets(args)
+        if targets.files:
+            problems = check_files(targets)
+        else:
+            problems = check(targets.root, targets.tenants_dir)
+    except OperatorError as exc:
+        print(f"check-tenant-traefik-isolation inspected nothing: {exc}", file=sys.stderr)
+        return 2
+    if problems:
+        print("check-tenant-traefik-isolation: FAILED", file=sys.stderr)
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
+        return 1
+    print("check-tenant-traefik-isolation: OK")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,122 @@
+---
+# promtool unit tests for the slab and swap half of platform.zfs-capacity. The
+# 24h and 2d windows set the 30m interval; swap-clean's own gauges scope the
+# swap rules to the hosts that run it.
+rule_files:
+  - rules.yaml
+evaluation_interval: 30m
+tests:
+  # HostSlabLeakSuspected: SUnreclaim 27 GB above ARC for 24h fires; a host
+  # at about its ARC does not.
+  - interval: 30m
+    input_series:
+      - series: 'node_memory_SUnreclaim_bytes{job="node-exporter-host", instance="nas:9101"}'
+        values: '39000000000+0x60'
+      - series: 'node_zfs_arc_size{job="node-exporter-host", instance="nas:9101"}'
+        values: '12000000000+0x60'
+      - series: 'node_memory_SUnreclaim_bytes{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '9000000000+0x60'
+      - series: 'node_zfs_arc_size{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '8000000000+0x60'
+    alert_rule_test:
+      # Inside the 24h hold.
+      - eval_time: 20h
+        alertname: HostSlabLeakSuspected
+        exp_alerts: []
+      - eval_time: 25h
+        alertname: HostSlabLeakSuspected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'nas:9101'
+
+  # NASSwapNotClearing: 3 GiB of swap in use for two days on the swap-clean
+  # host fires; the same swap on a host without swap-clean does not.
+  - interval: 30m
+    input_series:
+      - series: 'node_memory_SwapTotal_bytes{job="node-exporter-host", instance="nas:9101"}'
+        values: '8589934592+0x110'
+      - series: 'node_memory_SwapFree_bytes{job="node-exporter-host", instance="nas:9101"}'
+        values: '5368709120+0x110'
+      - series: 'swap_clean_last_run_success{job="node-exporter-host", instance="nas:9101"}'
+        values: '0+0x110'
+      - series: 'node_memory_SwapTotal_bytes{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '8589934592+0x110'
+      - series: 'node_memory_SwapFree_bytes{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '5368709120+0x110'
+    alert_rule_test:
+      # Inside the 1h hold.
+      - eval_time: 30m
+        alertname: NASSwapNotClearing
+        exp_alerts: []
+      - eval_time: 49h30m
+        alertname: NASSwapNotClearing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'nas:9101'
+
+  # One nightly reset that drops swap to 1 GiB breaks the two-day minimum.
+  - interval: 30m
+    input_series:
+      - series: 'node_memory_SwapTotal_bytes{job="node-exporter-host", instance="nas:9101"}'
+        values: '8589934592+0x110'
+      - series: 'node_memory_SwapFree_bytes{job="node-exporter-host", instance="nas:9101"}'
+        values: '5368709120+0x60 7516192768 5368709120+0x49'
+      - series: 'swap_clean_last_run_success{job="node-exporter-host", instance="nas:9101"}'
+        values: '1+0x110'
+    alert_rule_test:
+      - eval_time: 49h30m
+        alertname: NASSwapNotClearing
+        exp_alerts: []
+
+  # NASSwapGone: no swap on the swap-clean host fires; encrypted swap's own
+  # gauge takes over where it exists.
+  - interval: 30m
+    input_series:
+      - series: 'node_memory_SwapTotal_bytes{job="node-exporter-host", instance="nas:9101"}'
+        values: '0+0x6'
+      - series: 'swap_clean_last_run_success{job="node-exporter-host", instance="nas:9101"}'
+        values: '1+0x6'
+      - series: 'node_memory_SwapTotal_bytes{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+0x6'
+      - series: 'swap_clean_last_run_success{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '1+0x6'
+      - series: 'encrypted_swap_any_swap_active{job="node-exporter-host", instance="pve-01:9101"}'
+        values: '0+0x6'
+      - series: 'node_memory_SwapTotal_bytes{job="node-exporter-host", instance="pve-02:9101"}'
+        values: '0+0x6'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: NASSwapGone
+        exp_alerts: []
+      - eval_time: 1h
+        alertname: NASSwapGone
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'nas:9101'
+
+  # SwapCleanGuestRestartFailed fires on a failed restart and clears when the
+  # next run rewrites the gauge.
+  - interval: 30m
+    input_series:
+      - series: 'swap_clean_guest_restart_failures{job="node-exporter-host", instance="nas:9101"}'
+        values: '0 1+0x3 0+0x4'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: SwapCleanGuestRestartFailed
+        exp_alerts: []
+      - eval_time: 1h
+        alertname: SwapCleanGuestRestartFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node-exporter-host
+              instance: 'nas:9101'
+      - eval_time: 3h
+        alertname: SwapCleanGuestRestartFailed
+        exp_alerts: []

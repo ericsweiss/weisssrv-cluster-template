@@ -97,8 +97,9 @@ nas_storage_exports:
         options: "rw,sync,no_subtree_check,no_root_squash,fsid=13"
 {%- endfor %}
 
-  # REQUIRED by the authentik-pg-dump PV. Each app gets its own export with a
-  # fresh fsid, so one app's client cannot read another's dumps.
+  # REQUIRED by the authentik-pg-dump PV. Each app gets its own export and
+  # fsid, so its PV sees only its own dumps. Every agent is a client of every
+  # export, so the split scopes the PVs and is not an access boundary.
   - path: /export/backups-apps/authentik
     bind_source: /mnt/tank/backups/apps/authentik
     bind_source_check: /mnt/tank/backups
@@ -136,8 +137,8 @@ nas_storage_zfs_scrub_schedule: "Sun *-*-1..7 04:00:00"   # first Sunday, monthl
 # leaves the ZFS default of about half of RAM. Example: 4294967296 (4 GiB).
 nas_storage_zfs_arc_max_bytes: ""
 
-# Datasets on encrypted pools whose bind mounts wait for the key load, so an
-# export does not publish an empty directory at boot.
+# Bind sources on encrypted datasets. Their bind mounts and nfsd wait for the
+# key load, so an export never publishes an empty directory at boot.
 nas_storage_encrypted_bind_sources: []
 
 # NAS-side "the dump landed" signal, one entry per app with a landing zone
@@ -167,9 +168,9 @@ restic_offsite_enabled: false
 # it above the longest expected run; the deep verify has its own.
 # restic_offsite_timeout_start_sec: 6h
 
-# The other half of the swap-clean interlock below: without it a swap-clean
-# night starting after the upload took the lock still stops guests underneath
-# it. restic_offsite asserts this once nas_storage_swap_clean_enabled is true.
+# The offsite half of the swap-clean interlock: the upload skips while
+# swap-clean.service is active. nas_storage_swap_clean_conflicting_units covers
+# the reverse. restic_offsite asserts it once nas_storage_swap_clean_enabled is true.
 restic_offsite_conflicting_units:
   - swap-clean.service
 

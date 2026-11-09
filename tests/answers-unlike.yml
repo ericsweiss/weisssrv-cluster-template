@@ -1,7 +1,7 @@
 ---
-# Contrast fixture: every answer unlike answers-weisssrv-shaped.yml and every
-# optional module off, covering the branches the shaped render never takes.
-# Only `lib_ref` is unanswered, so both fixtures inherit copier.yml's default.
+# Contrast fixture: every free answer unlike answers-weisssrv-shaped.yml and
+# every optional module off. The one-choice backend seams and the library
+# location match; `lib_ref` is unanswered, so both take copier.yml's default.
 cluster_name: brinemoor
 internal_domain: internal.brinemoor.test
 external_domain: brinemoor.test
@@ -49,8 +49,7 @@ k3s_image_gc_high_threshold: 78
 # Every optional module OFF — the branches the shaped fixture never renders.
 vpn_tailscale: false
 # Never asked here (vpn_tailscale is false), but answered anyway so the fixture
-# covers the whole question set — and answered UNLIKE fixture A's, like every
-# other value in this file.
+# covers the whole question set, with a value unlike answers-weisssrv-shaped.yml's.
 tailnet_dns_suffix: tail9z8y7x.ts.net
 gpu: none
 # No terraform/unifi directory, no unifi-drift-plan job, no unifi tasks.

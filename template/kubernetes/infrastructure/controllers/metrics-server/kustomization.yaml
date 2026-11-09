@@ -1,0 +1,8 @@
+---
+# This lands in kube-system, whose Namespace k3s owns, so there is no
+# namespace.yaml and no netpol-baseline component here. The default-deny and the
+# :10250 allow live in ../../configs/kube-system-policies/ and stay together.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - release.yaml

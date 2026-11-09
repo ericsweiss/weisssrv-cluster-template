@@ -41,6 +41,7 @@ provisioner:
         acme_certs_enabled: true
         acme_certs_domain: "{{ internal_domain }}"
         acme_certs_email: test@example.com
+        acme_certs_local_cert_dir: /opt/AdGuardHome/certs
         # Test-local list driving the mock cert fixtures in converge/verify —
         # NOT a role knob (acme_certs issues acme_certs_domain plus its wildcard
         # and reads no domain-list variable).
@@ -52,9 +53,8 @@ provisioner:
         # converge.yml and injected onto dns-01's hostvars via add_host. The
         # role's assert surfaces a clear error if that injection fails.
 
-        # Certificate distribution targets. converge.yml slurps host_key from
-        # each cert_clients container and re-injects the whole list via
-        # add_host; the static fields stay here so verify.yml reads the shape.
+        # converge.yml replaces this list through add_host with one that also
+        # carries each client's slurped host_key.
         acme_certs_distribution_targets:
           - host: cert-client-01
             ip: cert-client-01

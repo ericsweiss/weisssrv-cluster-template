@@ -1,8 +1,8 @@
 ---
 {%- from "partials/molecule.jinja" import systemd_platform, galaxy_dependency,
     molecule_env, test_sequence with context %}
-# DNS Stack Integration Test
-# Tests: unbound + adguard_home + adguard_sync across two DNS servers
+# DNS stack integration test: unbound, adguard_home and adguard_sync across
+# two DNS servers.
 
 driver:
   name: docker
@@ -29,25 +29,20 @@ provisioner:
 {{- molecule_env() }}
   config_options:
     defaults:
-      # Use /tmp for remote_tmp to avoid Docker container stability issues
-      # The ~/.ansible/tmp directory can become inaccessible when containers restart
+      # ~/.ansible/tmp can become unreachable when a container restarts.
       remote_tmp: /tmp/.ansible-${USER}/tmp
   inventory:
     group_vars:
       dns:
-        # Docker containers have /etc/resolv.conf as a bind mount that can't be replaced
+        # The container bind-mounts /etc/resolv.conf, and the PrivateTmp and
+        # ProtectSystem mounts can crash it, so all three are off here.
         adguard_home_skip_resolv_conf_update: true
-        # Disable PrivateTmp in systemd service for Docker container compatibility
-        # PrivateTmp can cause container crashes when systemd tries to create private mounts
         adguard_home_use_private_tmp: false
-        # Disable ProtectSystem in systemd service for Docker container compatibility
-        # ProtectSystem=strict can crash containers when systemd creates private mounts over system directories
         adguard_home_use_protect_system: false
         # No certificates in these containers, so DoT/DoH/DoQ is off for the
         # WHOLE dns group: setting it per-host leaves the replica failing the
         # role's tls_server_name assert. The TLS path has its own lib scenario.
         adguard_home_tls_enabled: false
-        # AdGuard Home API configuration (required for full initialization)
         adguard_home_protection_enabled: true
         adguard_home_upstream_mode: "load_balance"
         adguard_home_fallback_dns: []
@@ -73,53 +68,30 @@ provisioner:
           - domain: "test-b.molecule.local"
             answer: "192.0.2.11"
         adguard_home_user_rules: []
+        adguard_home_http_port: 3000
+        adguard_home_dns_port: 53
+        adguard_home_admin_user: admin
+        # The role bcrypts this password itself.
+        adguard_home_admin_password: password
+        unbound_port: 5335
+        unbound_interface: 127.0.0.1
         # TRAP: must stay at GROUP level so the explicit unbound apply and
         # adguard_home's `dependencies: [unbound]` re-apply see the same list.
         # An include_role `vars:` block reaches only the first.
         unbound_forwarders:
           - {addr: "1.1.1.1", port: 853, name: "cloudflare-dns.com"}
           - {addr: "8.8.8.8", port: 853, name: "dns.google"}
-        # Versions come from production group_vars via converge.yml vars_files.
 
       dns_primary:
-        # Primary DNS server (dns-01)
-        adguard_home_http_port: 3000
-        adguard_home_dns_port: 53
-        adguard_home_admin_user: admin
-        # bcrypt hash is generated automatically from password by adguard_home role
-        adguard_home_admin_password: password
-        unbound_port: 5335
-        unbound_interface: 127.0.0.1
-        # Runs the rewrite/filtering API pass.
+        # Runs the rewrite and filtering API pass.
         adguard_home_is_primary: true
-        # AdGuard Sync configuration (sync FROM dns-01 TO dns-02)
+        # adguard_sync_features keeps the role default, the set production uses.
         adguard_sync_enabled: true
         # The sync role owns its own API credentials.
         adguard_sync_admin_user: admin
         adguard_sync_admin_password: password
         adguard_sync_origin: "http://dns-01:3000"
         adguard_sync_replica: "http://dns-02:3000"
-        adguard_sync_features:
-          dns:
-            accessLists: true
-            serverConfig: true
-            rewrites: true
-          dhcp:
-            serverConfig: false
-          filters: true
-          clients: true
-          settings:
-            generalSettings: true
-
-      dns_replica:
-        # Replica DNS server (dns-02)
-        adguard_home_http_port: 3000
-        adguard_home_dns_port: 53
-        adguard_home_admin_user: admin
-        # bcrypt hash is generated automatically from password by adguard_home role
-        adguard_home_admin_password: password
-        unbound_port: 5335
-        unbound_interface: 127.0.0.1
 
 verifier:
   name: ansible

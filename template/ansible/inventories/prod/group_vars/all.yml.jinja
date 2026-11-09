@@ -82,6 +82,12 @@ proxmox_startup_delay: 0
 # VPN and jump-host ranges here too; proxmox_firewall asserts it is non-empty.
 proxmox_firewall_admin_lan_cidrs:
   - {{ lan_cidr }}
+{%- if not vpn_tailscale %}
+
+# No tailnet, so no admin overlay: the role's default is the whole Tailscale
+# CGNAT range, which would open the admin ports to 100.64.0.0/10.
+proxmox_firewall_admin_ts_cidrs: []
+{%- endif %}
 
 # Host-network exporters Prometheus scrapes over the LAN. A new one without an
 # entry here is a permanently down target; sg-metrics covers the roles' own.
@@ -159,13 +165,13 @@ maintenance_ci_runner_namespaces:
 # `task flux:sync-versions` and commit the regenerated ConfigMap.
 
 # Host-side pins consumed by weisssrv.infra roles (no role default — required).
-adguard_home_version: "0.107.79"
-adguard_sync_version: "0.9.5"
-alloy_host_version: "1.21.2-1"    # apt package version, not the chart version
+adguard_home_version: "0.107.80"
+adguard_sync_version: "0.9.6"
+alloy_host_version: "1.21.3-1"    # apt package version, not the chart version
 {%- if vpn_tailscale %}
 # apt package pin, read from a tasks-only maintenance play where the role
 # default is out of scope. Not helm_chart_versions.tailscale_operator.
-tailscale_version: "1.104.4"
+tailscale_version: "1.104.5"
 {%- endif %}
 
 # Debian cloud image every VM is built from, a DATED directory rather than
@@ -175,7 +181,7 @@ proxmox_vm_cloud_image_name: "debian-13-generic-amd64-20260914-2601.qcow2"
 # yamllint disable-line rule:line-length
 proxmox_vm_cloud_image_checksum: "sha512:a733e7d49442a03e70d03e4eb5aaf3967f3efc69ef70952f9bb10fc1ee2c4876eb95956b5ad2d31350e5fada768feb651352535fb8cd1233f61998a5a7d2e93c"
 
-k3s_version: "v1.37.1+k3s1"
+k3s_version: "v1.37.2+k3s1"
 # sha256 of install.sh at that tag: it verifies the k3s binary, not itself.
 # Recompute on every k3s_version bump - docs/RUNBOOKS.md.
 k3s_install_script_checksum: "sha256:ed01f89fd977bf20ac1516bbebf8370bf3ddbaa55dac8aba610956a4c78cc00b"
@@ -200,26 +206,31 @@ helm_chart_versions:
   external_dns: "1.23.0"
   external_secrets: "2.14.0"
   metallb: "0.15.3"
-  traefik: "42.1.3"
+  traefik: "42.3.1"
   # Owns the monitoring.coreos.com CRDs; bump in lockstep with
   # kube_prometheus_stack so the CRDs match the operator.
-  prometheus_operator_crds: "32.0.2"
-  kube_prometheus_stack: "92.14.1"
-  loki: "20.0.2"
-  alloy: "1.14.3"
-  prometheus_blackbox_exporter: "11.20.2"
+  prometheus_operator_crds: "33.0.1"
+  kube_prometheus_stack: "93.1.0"
+  loki: "21.0.0"
+  alloy: "1.15.0"
+  prometheus_blackbox_exporter: "11.21.1"
+{%- if secrets_backend == 'onepassword' %}
   onepassword_connect: "2.4.3"
-  vpa: "5.1.0"
+{%- endif %}
+  vpa: "5.2.0"
   kured: "6.1.0"
   reloader: "2.2.19"
+  # Replaces the k3s AddOn, which k3s_disable turns off on the servers
+  # (infrastructure/controllers/metrics-server/release.yaml).
+  metrics_server: "3.14.0"
 {%- if postgres_operator %}
-  # CloudNativePG operator (chart 0.29.1 = operator 1.30.1) and its Barman
-  # Cloud plugin (chart 0.8.1 = plugin v0.15.1); one chart repository.
+  # CloudNativePG operator and its Barman Cloud plugin, from one chart
+  # repository. Both pins are chart versions, not app versions.
   cloudnative_pg: "0.29.1"
   plugin_barman_cloud: "0.8.1"
 {%- endif %}
 {%- if vpn_tailscale %}
-  tailscale_operator: "1.104.2"
+  tailscale_operator: "1.104.4"
 {%- endif %}
 {%- if gpu == 'nvidia' %}
   nvidia_device_plugin: "0.20.1"
@@ -255,5 +266,5 @@ coredns_tailnet_version: "1.15.0"
 {%- if git_backend == 'gitlab_selfhosted' %}
 
 # GitLab Runner chart, shared by both runner tiers.
-gitlab_runner_helm_version: "0.94.1"
+gitlab_runner_helm_version: "0.94.3"
 {%- endif %}

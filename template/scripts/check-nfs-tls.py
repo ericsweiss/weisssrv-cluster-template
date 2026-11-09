@@ -28,9 +28,6 @@ except ImportError:
     )
     raise SystemExit(2) from None
 
-DEFAULT_OPTION = "xprtsec=tls"
-
-
 def _is_ip(server: str) -> bool:
     try:
         ipaddress.ip_address(server)
@@ -39,9 +36,8 @@ def _is_ip(server: str) -> bool:
     return True
 
 
-def nfs_violations(docs: List[dict], required_option: str = DEFAULT_OPTION,
-                   cert_domain: str = "",
-                   allow_ip_server: bool = False) -> Tuple[List[str], int]:
+def nfs_violations(docs: List[dict],
+                   cert_domain: str = "") -> Tuple[List[str], int]:
     """-> (violations, NFS PVs inspected). The count feeds the vacuity guard."""
     out: List[str] = []
     seen = 0
@@ -59,15 +55,15 @@ def nfs_violations(docs: List[dict], required_option: str = DEFAULT_OPTION,
         # Kubernetes comma-joins mountOptions for the mount helper, so one
         # element may carry several options.
         flat = {part.strip() for element in options for part in element.split(",")}
-        if required_option not in flat:
+        if "xprtsec=tls" not in flat:
             out.append(
-                "%s: mountOptions lack %s (has %s) — the export "
-                "rejects plaintext" % (name, required_option, options or "none")
+                "%s: mountOptions lack xprtsec=tls (has %s) — the export "
+                "rejects plaintext" % (name, options or "none")
             )
         server = str(nfs.get("server", ""))
         if not server:
             out.append("%s: spec.nfs.server is empty" % name)
-        elif _is_ip(server) and not allow_ip_server:
+        elif _is_ip(server):
             out.append(
                 "%s: server %s is an IP — the %s has no IP SAN, "
                 "so the TLS handshake fails" % (name, server, certificate)
@@ -77,15 +73,9 @@ def nfs_violations(docs: List[dict], required_option: str = DEFAULT_OPTION,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--required-option", default=DEFAULT_OPTION)
     parser.add_argument(
         "--cert-domain", default="",
         help="wildcard cert domain, named in the IP-server message",
-    )
-    parser.add_argument(
-        "--allow-ip-server", action="store_true",
-        help="the server certificate carries an IP SAN, so an IP in "
-             "spec.nfs.server is allowed",
     )
     parser.add_argument(
         "--allow-empty", action="store_true",
@@ -96,9 +86,7 @@ def main(argv=None) -> int:
 
     docs = load_corpus()
 
-    found, seen = nfs_violations(
-        docs, args.required_option, args.cert_domain, args.allow_ip_server
-    )
+    found, seen = nfs_violations(docs, args.cert_domain)
     if found:
         print(
             "ERROR: NFS PersistentVolumes that cannot mount against the TLS-only "
@@ -118,9 +106,7 @@ def main(argv=None) -> int:
 
     print(
         "NFS TLS policy OK — %d NFS PersistentVolume(s) across %d document(s) "
-        "(every one mounts %s%s)"
-        % (seen, len(docs), args.required_option,
-           "" if args.allow_ip_server else " by hostname")
+        "(every one mounts xprtsec=tls by hostname)" % (seen, len(docs))
     )
     return 0
 

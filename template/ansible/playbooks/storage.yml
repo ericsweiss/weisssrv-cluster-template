@@ -14,6 +14,6 @@
     - weisssrv.infra.proxmox_backup
     - weisssrv.infra.zfs_exporter
     # Shared with site.yml; tests/test_shared_role_playbook_sync.py keeps the two
-    # in step, so a standalone storage deploy leaves the NAS unmetered.
+    # in step, so a standalone storage deploy still meters the NAS.
     - weisssrv.infra.node_exporter_host
     - weisssrv.infra.alloy_host

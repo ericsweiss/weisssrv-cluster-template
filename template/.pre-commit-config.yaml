@@ -1,7 +1,7 @@
 ---
 # Local guardrails: run `pre-commit install` once, then these run on every
-# commit. They mirror the secret scan and yamllint the pipeline runs, so
-# problems surface before the push. Revs are pinned; bump them in an MR.
+# commit. They mirror the secret scan, yamllint and the tool-light repo gates
+# the pipeline runs. Revs are pinned; bump them in an MR.
 repos:
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
@@ -23,33 +23,43 @@ repos:
       # there reds test_vendored_byte_identity.py, and the fix is upstream.
       - id: end-of-file-fixer
         exclude: &vendored_copies >-
-          (?x)^( ansible/molecule/prepare-common\.yml |
+          (?x)^( \.gitattributes | \.gitlab/secret-detection-ruleset\.toml | ruff\.toml |
+          ansible/molecule/prepare-common\.yml |
           ansible/molecule/tasks/container-warmup\.yml |
           ansible/molecule/tasks/prepare-apt-disable\.yml |
-          ansible/molecule/tasks/prepare-base\.yml | lint/yamllint-relaxed\.yml | scripts/(
+          ansible/molecule/tasks/prepare-base\.yml |
+          kubernetes/apps/gitlab-runner-reaper/kube_reaper\.py |
+          kubernetes/infrastructure/configs/cloudflare-ddns/cloudflare-ddns\.py |
+          lint/yamllint-relaxed\.yml | scripts/(
           check-alertmanager-behaviour\.py | check-backup-artifact-apps\.py |
           check-ci-include-job-names\.py |
-          check-cluster-invariants\.py | check-comment-length\.py | check-dashboards\.py |
-          check-default-deny-coverage\.py | check-deploy-coverage\.sh | check-doc-links\.py
-          | check-ephemeral-storage-cap\.py | check-helm-repo-parity\.py |
+          check-cluster-invariants\.py | check-comment-length\.py | check-crd-stage-order\.py |
+          check-dashboards\.py |
+          check-default-deny-coverage\.py | check-deploy-coverage\.sh |
+          check-deploy-preflight\.py | check-doc-links\.py |
+          check-ephemeral-storage-cap\.py | check-guest-endpoint-parity\.py |
+          check-helm-repo-parity\.py | check-image-gc-threshold\.py |
+          check-internal-route-allowlist\.py | check-kustomization\.py |
           check-hpa-vpa-invariant\.py | check-kubectl-version-pin\.py |
           check-lib-pins\.py |
           check-netpol-except-parity\.py | check-nfs-tls\.py | check-pvc-storageclass\.py |
-          check-role-inputs\.py |
+          check-role-default-flips\.py | check-role-inputs\.py |
           check-scrape-netpol\.py |
-          check-scrape-wiring\.py |
-          check-secretstore-scope\.py | check-taskfile\.sh |
+          check-scrape-wiring\.py | check-secret-rotation-coverage\.py |
+          check-secretstore-scope\.py | check-skill-refs\.py | check-taskfile\.sh |
+          check-tenant-traefik-isolation\.py | check-tenant-wiring\.py |
           check-version-checksums\.py | check-versions\.py | ci-fetch-tools\.py |
+          ci-run-check\.sh |
           ci_playbook_invocations\.py |
           ci_yaml\.py | cluster-config-value\.sh | collect-state-lib\.sh |
           deploy-verify-lib\.sh | extract-prometheus-config\.py | find-reachable-host\.sh |
-          flux-env\.sh | flux-lint\.sh | flux-render\.sh | flux-secret-consumers\.py |
+          flux-child-kustomizations\.py | flux-env\.sh | flux-lint\.sh | flux-secret-consumers\.py |
           gate_common\.py |
-          generate-hosts-env\.py |
+          generate-host-log-staleness\.py | generate-hosts-env\.py |
           generate-versions-configmap\.py | inventory_tree\.py | kubeconform-skipped\.py |
           lint-prometheus-config\.sh | maintenance-run-with-verify\.sh | molecule-retry\.sh
           | resolve-tool\.sh | sanitize-junit-expected-failures\.py | semantic-release\.py |
-          shell-lib\.sh | supervised-apply-guard\.sh | taskfile_tree\.py |
+          shell-lib\.sh | supervised-apply-guard\.sh | taskfile_tree\.py | tenant_common\.py |
           validate-helm-values\.py |
           version-bump-mr\.py ) )$
       - id: trailing-whitespace
@@ -91,10 +101,10 @@ repos:
         always_run: true
       - id: kustomization-coverage
         name: every manifest is listed, every kustomization lists one
-        entry: python scripts/check-kustomization-coverage.py kubernetes/
+        entry: python scripts/check-kustomization.py kubernetes --walk --min-kustomizations 20 --exempt scripts/kustomization-exempt.yaml
         language: python
         additional_dependencies: ["pyyaml==6.0.3"]
-        files: ^(kubernetes/|scripts/check-kustomization-coverage\.py)
+        files: ^(kubernetes/|scripts/check-kustomization\.py|scripts/kustomization-exempt\.yaml)
         pass_filenames: false
         always_run: true
       - id: flux-version-pin
@@ -121,16 +131,17 @@ repos:
         files: ^(ansible/|docker/|kubernetes/|scripts/|taskfiles/|Taskfile\.yml)
         pass_filenames: false
         always_run: true
+      # The same environment `task lint:doc-links` sets, so both scan the same paths.
       - id: doc-links
         name: doc links resolve
-        entry: python3 scripts/check-doc-links.py
+        entry: env CHECK_DOC_LINKS_PATHS=1 "CHECK_DOC_LINKS_IGNORE=docs/[A-Z]* terraform/state/* */tfplan */check-vendored-copies.py" python3 scripts/check-doc-links.py
         language: system
         files: \.md$
         pass_filenames: false
         always_run: true
       - id: check-skill-refs
         name: skill-cited repo paths resolve
-        entry: python3 scripts/check-skill-refs.py
+        entry: python3 scripts/check-skill-refs.py --skill-dir .claude/skills/cluster-development --foreign docs/INCLUDE-CONTRACT.md --foreign docs/VERSIONING.md --foreign docs/EXTENSIBILITY.md
         language: system
         files: ^(\.claude/|docs/|scripts/)
         pass_filenames: false

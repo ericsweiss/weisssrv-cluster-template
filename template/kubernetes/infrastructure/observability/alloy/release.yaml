@@ -46,7 +46,7 @@ spec:
       resources:
         requests:
           cpu: 10m
-          memory: 32Mi
+          memory: 64Mi
         limits:
           memory: 128Mi
 
@@ -65,16 +65,19 @@ spec:
         extra:
           - name: alloy-storage
             mountPath: /var/lib/alloy
+      # Hand-set limit; the VPA is RequestsOnly. The request is a bootstrap
+      # floor, and the VPA owns the live number.
       resources:
         requests:
           cpu: 25m
-          memory: 64Mi
-        limits:
           memory: 256Mi
+        limits:
+          memory: 640Mi
       configMap:
         content: |
           discovery.kubernetes "pods" {
             role = "pod"
+            // The chart sets HOSTNAME from spec.nodeName: this node's pods only.
             selectors {
               role = "pod"
               field = "spec.nodeName=" + sys.env("HOSTNAME")
@@ -158,6 +161,3 @@ spec:
 
     serviceMonitor:
       enabled: true
-
-    # The chart sets HOSTNAME from spec.nodeName via the downward API, so
-    # sys.env("HOSTNAME") above resolves to the node name.

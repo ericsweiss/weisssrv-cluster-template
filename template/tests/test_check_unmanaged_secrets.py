@@ -74,30 +74,6 @@ def test_helm_release_storage_is_managed(monkeypatch):
                 monkeypatch) == 0
 
 
-def test_helm_membership_annotation_is_managed(monkeypatch):
-    assert _run([_secret(annotations={"meta.helm.sh/release-name": "app"})],
-                monkeypatch) == 0
-
-
-def test_flux_label_is_managed(monkeypatch):
-    assert _run([_secret(labels={"kustomize.toolkit.fluxcd.io/name": "apps"})],
-                monkeypatch) == 0
-
-
-def test_cert_manager_tls_is_managed(monkeypatch):
-    cert = _secret(
-        name="example-com-tls",
-        labels={"controller.cert-manager.io/fao": "true"},
-        annotations={"cert-manager.io/certificate-name": "example-com"},
-    )
-    assert _run([cert], monkeypatch) == 0
-
-
-def test_tailscale_device_state_is_managed(monkeypatch):
-    assert _run([_secret(name="ts-x-0", ns="tailscale",
-                         labels={"tailscale.com/managed": "true"})], monkeypatch) == 0
-
-
 def test_an_allowlisted_secret_passes(monkeypatch):
     monkeypatch.setitem(mod.ALLOWLIST, "apps/hand-made", "out-of-band on purpose")
     boot = _secret(name="hand-made", ns="apps")
@@ -119,13 +95,61 @@ def _bootstrap_secrets() -> set[str]:
 
 def test_the_bring_up_secrets_are_credited():
     """A bootstrap Secret this repository creates itself has no controller to
-    own it, so an uncredited one reds the gate on correct state."""
+    own it, so an uncredited one reds the gate on correct state. A secrets
+    backend with no hand-made Secret credits none."""
     created = _bootstrap_secrets()
-    assert created, (
-        f"no `kubectl create secret` call found in {FLUX_TASKFILE.name}, so this "
-        "gate compared the allowlist against nothing"
-    )
     assert created <= set(mod.ALLOWLIST), sorted(created - set(mod.ALLOWLIST))
+    credited = {key for key, why in mod.ALLOWLIST.items() if why.startswith("ESO bootstrap")}
+    assert credited <= created, (
+        f"ALLOWLIST credits bootstrap Secrets {sorted(credited - created)} that no "
+        f"`kubectl create secret` call in {FLUX_TASKFILE.name} makes"
+    )
+
+
+# Component directory in the render -> the Secret its controller mints with no
+# ownership marker. A rendered component needs its entry; an absent one must
+# not leave a stale entry behind.
+CONTROLLER_MINTED = {
+    "kubernetes/infrastructure/controllers/vpa": "vpa-system/vpa-tls-secret",
+    "kubernetes/infrastructure/observability/kube-prometheus-stack": (
+        "observability/kube-prometheus-stack-admission"
+    ),
+    "kubernetes/infrastructure/controllers/tailscale-operator": "tailscale/operator",
+    "kubernetes/apps/gitlab-runner": "flux-system/gitlab-receiver-flux-system",
+}
+
+
+def minted_mismatches(root, allowlist) -> list[str]:
+    problems = []
+    for component, secret in sorted(CONTROLLER_MINTED.items()):
+        rendered = (root / component).is_dir()
+        if rendered and secret not in allowlist:
+            problems.append(f"{component} renders but {secret} is not allowlisted")
+        if not rendered and secret in allowlist:
+            problems.append(f"{secret} is allowlisted but {component} is not rendered")
+    return problems
+
+
+def test_every_rendered_component_s_minted_secret_is_allowlisted():
+    assert any((REPO / component).is_dir() for component in CONTROLLER_MINTED), (
+        "no component this gate knows renders, so it compared nothing"
+    )
+    problems = minted_mismatches(REPO, mod.ALLOWLIST)
+    assert not problems, "\n".join(problems)
+
+
+def test_a_missing_minted_secret_entry_is_reported(tmp_path):
+    """Mutation case: a rendered component without its entry, and an entry
+    without its component, are both reported."""
+    (tmp_path / "kubernetes/infrastructure/controllers/vpa").mkdir(parents=True)
+    assert minted_mismatches(tmp_path, {}) == [
+        "kubernetes/infrastructure/controllers/vpa renders but vpa-system/vpa-tls-secret "
+        "is not allowlisted"
+    ]
+    assert minted_mismatches(tmp_path, {"vpa-system/vpa-tls-secret": "x", "tailscale/operator": "x"}) == [
+        "tailscale/operator is allowlisted but "
+        "kubernetes/infrastructure/controllers/tailscale-operator is not rendered"
+    ]
 
 
 def test_the_flux_bootstrap_deploy_key_is_credited():
@@ -140,9 +164,63 @@ def test_every_allowlist_entry_states_a_reason(entry):
     assert mod.ALLOWLIST[entry].strip()
 
 
-def test_service_account_token_is_managed(monkeypatch):
+def test_a_hand_created_service_account_token_is_flagged(monkeypatch):
+    """A long-lived token with no owner is the credential this gate surfaces."""
     sa_token = _secret(name="sa-token", type="kubernetes.io/service-account-token")
+    assert _run([sa_token], monkeypatch) == 1
+
+
+def test_a_flux_applied_service_account_token_is_managed(monkeypatch):
+    sa_token = _secret(
+        name="sa-token",
+        type="kubernetes.io/service-account-token",
+        labels={"kustomize.toolkit.fluxcd.io/name": "apps"},
+    )
     assert _run([sa_token], monkeypatch) == 0
+
+
+# One marker per case, written where its manager writes it, so dropping any
+# single key from the script's ownership sets reds exactly one case.
+OWNERSHIP_MARKERS = {
+    "kustomize.toolkit.fluxcd.io/name": {"labels": {"kustomize.toolkit.fluxcd.io/name": "apps"}},
+    "helm.toolkit.fluxcd.io/name": {"labels": {"helm.toolkit.fluxcd.io/name": "app"}},
+    "meta.helm.sh/release-name": {"annotations": {"meta.helm.sh/release-name": "app"}},
+    "controller.cert-manager.io/fao": {"labels": {"controller.cert-manager.io/fao": "true"}},
+    "cert-manager.io/certificate-name": {
+        "annotations": {"cert-manager.io/certificate-name": "example-com"}
+    },
+    "tailscale.com/managed": {"labels": {"tailscale.com/managed": "true"}},
+    "reconcile.external-secrets.io/": {
+        "annotations": {"reconcile.external-secrets.io/data-hash": "abc"}
+    },
+    "listener.cattle.io/": {"annotations": {"listener.cattle.io/cn-192.0.2.1": "192.0.2.1"}},
+    "app.kubernetes.io/managed-by=Helm": {"labels": {"app.kubernetes.io/managed-by": "Helm"}},
+}
+
+
+@pytest.mark.parametrize("marker", sorted(OWNERSHIP_MARKERS))
+def test_each_ownership_marker_alone_is_managed(monkeypatch, marker):
+    assert _run([_secret(**OWNERSHIP_MARKERS[marker])], monkeypatch) == 0
+
+
+def test_every_ownership_key_has_a_positive_case():
+    declared = set(mod.MANAGED_KEYS) | set(mod.MANAGED_KEY_PREFIXES)
+    declared.add("=".join(mod.HELM_MANAGED_BY))
+    assert declared == set(OWNERSHIP_MARKERS)
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        {"labels": {"app.kubernetes.io/managed-by": "kubectl"}},
+        {"annotations": {"kustomize.toolkit.fluxcd.io/prune": "disabled"}},
+        {"labels": {"kustomize.toolkit.fluxcd.io/name": ""}},
+        {"annotations": {"meta.helm.sh/release-namespace": "apps"}},
+    ],
+    ids=["copied-managed-by", "hand-added-prune", "empty-flux-name", "helm-namespace-only"],
+)
+def test_a_self_asserted_marker_is_not_ownership(monkeypatch, meta):
+    assert _run([_secret(**meta)], monkeypatch) == 1
 
 
 def test_offender_message_lists_keys_not_values(monkeypatch, capsys):
@@ -154,3 +232,14 @@ def test_offender_message_lists_keys_not_values(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "openai-api-key" in err
     assert "c2VjcmV0" not in err
+
+
+def test_the_failure_output_points_at_docs_this_repository_has(monkeypatch, capsys):
+    hand_applied = _secret(
+        annotations={"kubectl.kubernetes.io/last-applied-configuration": "{}"}
+    )
+    assert _run([hand_applied], monkeypatch) == 1
+    err = capsys.readouterr().err
+    cited = set(re.findall(r"docs/[\w./-]*\w", err))
+    assert cited, "the failure output names no runbook"
+    assert all((REPO / doc).is_file() for doc in cited), sorted(cited)

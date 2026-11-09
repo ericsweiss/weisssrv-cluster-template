@@ -31,11 +31,6 @@ provisioner:
         # SSH hardening is covered by the base role's own molecule scenario.
         base_skip_ssh_config: true
         base_skip_dns_config: true  # DNS resolver needs real network
-{%- if vpn_tailscale %}
-        # No TAILSCALE_AUTH_KEY in the env, so the role installs and configures
-        # the daemon but never runs `tailscale up` — which is what makes this
-        # scenario runnable in a container.
-{%- endif %}
 
       qol_enabled:
         # Only OMZ-bundled plugins are supported: the role templates the

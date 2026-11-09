@@ -1,6 +1,6 @@
 ---
-# Mail Stack Integration Test - Converge
-# Deploys smtp_relay on relay server and postfix_null_client on clients
+# Mail stack integration test - converge.
+# smtp_relay on the relay server, postfix_null_client on the clients.
 
 - name: Converge - Mail Stack
   hosts: all
@@ -8,12 +8,11 @@
   gather_facts: true
   vars_files:
     - ../../../../inventories/prod/group_vars/all.yml
-  # Scenario mocks for keys all.yml does not define. vars_files OUTRANKS both
-  # play vars and inventory group_vars, so a key all.yml defines is steered only
-  # through molecule.yml's env (SMTP_RELAY_USER, ROOT_EMAIL_ALIAS).
+  # The relay reads the same molecule.yml env the null clients' all.yml keys
+  # read, as group_vars/mail.yml does in production.
   vars:
-    smtp_relay_sasl_user: relay_user
-    smtp_relay_sasl_password: test_relay_password
+    smtp_relay_sasl_user: "{{ lookup('ansible.builtin.env', 'SMTP_RELAY_USER') }}"
+    smtp_relay_sasl_password: "{{ lookup('ansible.builtin.env', 'SMTP_RELAY_PASSWORD') }}"
 
   pre_tasks:
     # molecule.yml platforms[].groups drive every `group_names` guard below; an
@@ -24,7 +23,7 @@
           - groups['relay_servers'] | default([]) | length == 1
           - groups['mail_clients'] | default([]) | length == 2
         fail_msg: >-
-          molecule.yml no longer produces relay_servers and mail_clients, so
+          molecule.yml does not produce relay_servers and mail_clients, so
           every guarded task in this scenario skips.
       run_once: true
 
@@ -37,7 +36,7 @@
           - curl
           - ca-certificates
           - systemd
-          - mailutils  # For testing mail
+          - mailutils
           - netcat-openbsd  # For port testing
           - openssl  # Mint the relay's self-signed STARTTLS cert (submission/587)
         state: present

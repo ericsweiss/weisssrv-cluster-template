@@ -5,8 +5,7 @@ No CEL engine ships here, so `allowed()` mirrors the validations."""
 from __future__ import annotations
 
 import pytest
-import yaml
-from conftest import REPO
+from conftest import REPO, assert_tenant_deny_binding, cel, policy_spec
 
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
 NAME = "tenant-no-externalname-services"
@@ -23,8 +22,8 @@ SHAPE_EXPRESSION = (
     " && (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0)"
 )
 SHAPE_MESSAGE = "tenant Services must be internal ClusterIP Services without externalIPs"
-# The Tailscale operator publishes any Service carrying one of its annotations,
-# with no Traefik in the path, whether or not this cluster installs it today.
+# The Tailscale operator publishes any Service carrying one of its annotations
+# with no Traefik in the path, so the prefix is refused whether or not it runs.
 TAILSCALE = "tailscale.com/"
 ANNOTATION_EXPRESSION = (
     "!has(object.metadata.annotations)"
@@ -42,19 +41,6 @@ FINALIZING_CONDITIONS = [{
         "oldObject.metadata.annotations : {})"
     ),
 }]
-TENANT_MATCH = {
-    "namespaceSelector": {
-        "matchExpressions": [{"key": "fluxcd.io/tenant", "operator": "Exists"}]
-    }
-}
-
-
-def _docs(kind: str) -> list[dict]:
-    return [
-        d for d in yaml.safe_load_all(POLICY.read_text())
-        if isinstance(d, dict) and d.get("kind") == kind
-        and d["metadata"]["name"] == NAME
-    ]
 
 
 def allowed(spec: dict, annotations: dict | None = None) -> bool:
@@ -70,9 +56,7 @@ def allowed(spec: dict, annotations: dict | None = None) -> bool:
 
 
 def test_the_policy_is_the_shape_the_mirror_evaluates():
-    found = _docs("ValidatingAdmissionPolicy")
-    assert len(found) == 1
-    spec = found[0]["spec"]
+    spec = policy_spec(POLICY, "ValidatingAdmissionPolicy", NAME)
     assert spec["failurePolicy"] == "Fail"
     assert spec["matchConstraints"]["resourceRules"] == [
         {
@@ -82,13 +66,12 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
             "resources": ["services"],
         }
     ]
-    assert list(spec)[:3] == ["failurePolicy", "matchConstraints", "matchConditions"]
     assert [
-        {"name": c["name"], "expression": " ".join(c["expression"].split())}
+        {"name": c["name"], "expression": cel(c["expression"])}
         for c in spec["matchConditions"]
     ] == FINALIZING_CONDITIONS
     assert [
-        {"expression": " ".join(v["expression"].split()), "message": v["message"]}
+        {"expression": cel(v["expression"]), "message": v["message"]}
         for v in spec["validations"]
     ] == [
         {"expression": EXPRESSION, "message": MESSAGE},
@@ -99,12 +82,7 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
 
 
 def test_the_binding_denies_on_every_tenant_namespace():
-    found = _docs("ValidatingAdmissionPolicyBinding")
-    assert len(found) == 1
-    spec = found[0]["spec"]
-    assert spec["policyName"] == NAME
-    assert spec["validationActions"] == ["Deny"]
-    assert spec["matchResources"] == TENANT_MATCH
+    assert_tenant_deny_binding(POLICY, NAME)
 
 
 def test_an_external_name_service_is_refused():

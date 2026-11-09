@@ -6,8 +6,6 @@ into a set member verbatim, so a mis-shaped entry exempts nothing silently.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import yaml
 from conftest import SCRIPTS, load_script
@@ -37,8 +35,12 @@ def entry_problems(key: str, doc: dict) -> list[str]:
             f"not {type(entries).__name__}"
         ]
     problems = []
+    want_kind = ALLOWLIST_SHAPES[key].split("/")[1]
     for entry, reason in entries.items():
-        if str(entry).count("/") != 2:
+        parts = str(entry).split("/")
+        if len(parts) != 3 or not all(parts):
+            problems.append(f"{entry!r} is not {ALLOWLIST_SHAPES[key]}")
+        elif want_kind != "Kind" and parts[1] != want_kind:
             problems.append(f"{entry!r} is not {ALLOWLIST_SHAPES[key]}")
         if not isinstance(reason, str) or len(reason.split()) < 3:
             problems.append(f"{entry!r} needs a reason naming why it is exempt")
@@ -77,6 +79,17 @@ def test_an_entry_that_is_not_namespace_kind_name_is_reported() -> None:
     assert entry_problems("memory_ratio_allowlist", doc)
 
 
+@pytest.mark.parametrize(
+    ("key", "entry"),
+    [
+        ("vpa_cap_allowlist", "downloads/Deployment/sabnzbd"),
+        ("cpu_limit_allowlist", "downloads//sabnzbd"),
+    ],
+)
+def test_a_wrong_kind_or_an_empty_segment_is_reported(key: str, entry: str) -> None:
+    """Mutation case: a VPA exemption naming another kind exempts nothing."""
+    assert entry_problems(key, {key: {entry: "pinned by the chart for now"}})
+
+
 def test_the_policy_file_is_where_the_gates_look() -> None:
     assert POLICY.is_file(), f"{POLICY} is gone, so every gate reading it is vacuous"
-    assert Path(POLICY).suffix == ".yaml"

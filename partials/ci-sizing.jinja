@@ -6,7 +6,8 @@
 {%- set compute_agents = compute_node_count | int -%}
 
 {#- The manager pod (components/gitlab-runner-common) counts against every
-    dimension of its namespace's quota, so each one carries slack for it. -#}
+    dimension of its namespace's quota. The constant each quota line ends in is
+    headroom for it; tests/test_render.py admits `concurrent` jobs beside it. -#}
 {%- set manager_cpu = 0.15 -%}
 {%- set manager_mem_gib = 0.125 -%}
 {%- set manager_mem_limit_gib = 0.5 -%}

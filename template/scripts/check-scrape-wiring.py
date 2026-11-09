@@ -19,9 +19,30 @@ except ImportError:
     print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
     raise SystemExit(2) from None
 
-DEFAULT_OBSERVABILITY_NS = "observability"
+_HERE = str(pathlib.Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+try:
+    from gate_common import (  # noqa: E402  (resolved from this script's own directory)
+        NAME_LABEL,
+        label_selector_problem,
+        policy_types,
+        selector_matches as label_selector_matches,
+    )
+except ImportError:
+    print(
+        "ERROR: gate_common.py must be vendored beside this gate "
+        "(see scripts/vendorable-paths.yml)", file=sys.stderr,
+    )
+    raise SystemExit(2) from None
+
+OBSERVABILITY_NS = "observability"
 DEFAULT_TREE = "kubernetes/flux"
-WORKLOAD_KINDS = ("Deployment", "StatefulSet", "DaemonSet")
+WORKLOAD_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob", "Pod")
+# A chart renders its pods outside the corpus, so only these kinds say a
+# namespace's workloads are written by hand; a CronJob beside a chart does not.
+LONG_RUNNING_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Pod")
 ENDPOINT_KEYS = {"PodMonitor": "podMetricsEndpoints", "ServiceMonitor": "endpoints"}
 
 # kustomize's own documents are build inputs, not resources, and share a kind
@@ -120,75 +141,14 @@ def mapping(value: object, subject: str, field: str) -> dict:
     return value
 
 
-SELECTOR_OPERATORS = ("In", "NotIn", "Exists", "DoesNotExist")
-
-# A Kubernetes label key: an optional DNS-subdomain prefix (63-char segments) and
-# "/", then a name of 1-63 alphanumerics, `-`, `_` or `.`, alphanumeric at both ends.
-_DNS_LABEL = r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?"
-LABEL_KEY = re.compile(
-    rf"^(?:(?=.{{1,253}}/){_DNS_LABEL}(?:\.{_DNS_LABEL})*/)?"
-    r"(?=.{1,63}$)[A-Za-z0-9](?:[-A-Za-z0-9_.]*[A-Za-z0-9])?$"
-)
-
-
-# A label value is empty or a name of the same 1-63 character shape.
-LABEL_VALUE = re.compile(r"^(?:[A-Za-z0-9](?:[-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?)?$")
-
-
-def label_key(key: object) -> bool:
-    """Is `key` a valid Kubernetes label key?"""
-    return isinstance(key, str) and LABEL_KEY.fullmatch(key) is not None
-
-
-def label_value(value: object) -> bool:
-    """Is `value` a valid Kubernetes label value, or a whole Flux placeholder?
-
-    An unrendered tree carries `${name}` where postBuild later writes the value.
-    """
-    return isinstance(value, str) and (
-        LABEL_VALUE.fullmatch(value) is not None or SUBSTITUTION.fullmatch(value) is not None
-    )
-
-
-NAME_LABEL = "kubernetes.io/metadata.name"
-
-
 def selector_problem(selector: object) -> str | None:
-    """Why `selector` is not a LabelSelector this gate can evaluate, or None."""
+    """Why `selector` is not a LabelSelector this gate can evaluate, or None.
+
+    An unrendered tree carries a whole `${name}` where postBuild writes a value.
+    """
     if not isinstance(selector, dict):
         return "is not a mapping"
-    unknown = sorted(str(k) for k in set(selector) - {"matchLabels", "matchExpressions"})
-    if unknown:
-        return f"carries {', '.join(unknown)}"
-    # Checked before any `or` default: an empty list or mapping of the wrong
-    # type is malformed, not an absent term.
-    if selector.get("matchLabels") is not None and not isinstance(selector["matchLabels"], dict):
-        return "has a matchLabels that is not a mapping"
-    for key, value in (selector.get("matchLabels") or {}).items():
-        if not label_key(key):
-            return f"has a matchLabels key {key!r} that is not a valid label key"
-        if not label_value(value):
-            return f"has a matchLabels value {value!r} that is not a valid label value"
-    expressions = selector.get("matchExpressions")
-    if expressions is not None and not isinstance(expressions, list):
-        return "has a matchExpressions that is not a list"
-    for entry in expressions or []:
-        if not isinstance(entry, dict) or not label_key(entry.get("key")):
-            return f"has a malformed matchExpressions entry {entry!r}"
-        operator, values = entry.get("operator"), entry.get("values")
-        if operator not in SELECTOR_OPERATORS:
-            return f"has a matchExpressions operator {operator!r} this gate does not know"
-        # The API requires a non-empty list of label values for In/NotIn, and no
-        # values (absent, null or []) for Exists/DoesNotExist.
-        if operator in ("In", "NotIn"):
-            wellformed = (
-                isinstance(values, list) and bool(values) and all(label_value(v) for v in values)
-            )
-        else:
-            wellformed = values is None or values == []
-        if not wellformed:
-            return f"has a malformed matchExpressions entry {entry!r}"
-    return None
+    return label_selector_problem(selector, placeholders=True)
 
 
 def selector_matches(selector: dict, labels: dict, subject: str = "a selector") -> bool:
@@ -200,22 +160,7 @@ def selector_matches(selector: dict, labels: dict, subject: str = "a selector") 
     if problem:
         note(f"{subject}: its selector {problem}, so it is not credited with a match")
         return False
-    for key, value in (selector.get("matchLabels") or {}).items():
-        if key not in labels or labels[key] != value:
-            return False
-    for entry in selector.get("matchExpressions") or []:
-        key, operator = entry["key"], entry["operator"]
-        present = key in labels
-        listed = present and labels[key] in (entry.get("values") or [])
-        # NotIn and DoesNotExist hold for a pod that lacks the key altogether.
-        if (
-            (operator == "In" and not listed)
-            or (operator == "NotIn" and listed)
-            or (operator == "Exists" and not present)
-            or (operator == "DoesNotExist" and present)
-        ):
-            return False
-    return True
+    return label_selector_matches(selector, labels, placeholders=True)
 
 
 def shown(selector: dict) -> dict:
@@ -282,28 +227,61 @@ def selected_workloads(documents: list[dict], pods: dict) -> list[Workload]:
         if document.get("kind") not in WORKLOAD_KINDS:
             continue
         subject = describe(document)
-        spec = mapping(document.get("spec"), subject, "spec")
-        template = mapping(spec.get("template"), subject, "spec.template")
+        prefix, template = pod_template(document, subject)
         labels = mapping(
-            mapping(template.get("metadata"), subject, "spec.template.metadata").get("labels"),
+            mapping(template.get("metadata"), subject, f"{prefix}metadata").get("labels"),
             subject,
-            "spec.template.metadata.labels",
+            f"{prefix}metadata.labels",
         )
         if not selector_matches(pods, labels, subject):
             continue
-        pod = mapping(template.get("spec"), subject, "spec.template.spec")
+        pod = mapping(template.get("spec"), subject, f"{prefix}spec")
         names: dict[str, int] = {}
         numbers: set[int] = set()
-        for container in pod.get("containers") or []:
-            for port in container.get("ports") or []:
+        for container in serving_containers(pod, subject, f"{prefix}spec"):
+            for port in entries(container.get("ports"), subject, "a container's ports"):
                 number = port.get("containerPort")
-                if not number:
+                # Prometheus scrapes over TCP, so a UDP or SCTP port serves nothing.
+                if not number or (port.get("protocol") or "TCP") != "TCP":
                     continue
                 numbers.add(number)
                 if port.get("name"):
                     names[port["name"]] = number
         selected.append(Workload(dict(labels), names, numbers, subject))
     return selected
+
+
+def pod_template(document: dict, subject: str) -> tuple[str, dict]:
+    """The pod a workload runs, as a `metadata` and `spec` mapping, with the field
+    path that prefixes both in a message; a Pod is its own, under no prefix."""
+    kind = document.get("kind")
+    if kind == "Pod":
+        return "", document
+    spec = mapping(document.get("spec"), subject, "spec")
+    path = "spec"
+    if kind == "CronJob":
+        job = mapping(spec.get("jobTemplate"), subject, "spec.jobTemplate")
+        spec = mapping(job.get("spec"), subject, "spec.jobTemplate.spec")
+        path = "spec.jobTemplate.spec"
+    return f"{path}.template.", mapping(spec.get("template"), subject, f"{path}.template")
+
+
+def entries(value: object, subject: str, field: str) -> list[dict]:
+    """A list the gate walks entry by entry; a non-mapping entry cannot be checked."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(e, dict) for e in value):
+        raise GateError(f"{subject}: {field} is not a list of mappings")
+    return value
+
+
+def serving_containers(pod: dict, subject: str, field: str) -> list[dict]:
+    """The containers that serve for the pod's lifetime, native sidecars included."""
+    sidecars = [
+        c for c in entries(pod.get("initContainers"), subject, f"{field}.initContainers")
+        if c.get("restartPolicy") == "Always"
+    ]
+    return entries(pod.get("containers"), subject, f"{field}.containers") + sidecars
 
 
 def spellings(number: int, names: dict[str, int]) -> set[int | str]:
@@ -559,10 +537,8 @@ def pod_port(
     return targets, by_hand
 
 
-def namespace_terms(
-    namespaces: dict, scrape_ns: str, subject: str
-) -> tuple[bool, list[str], bool]:
-    """-> (selects scrape_ns, unverifiable terms, names it by kubernetes.io/metadata.name).
+def namespace_terms(namespaces: dict, subject: str) -> tuple[bool, list[str], bool]:
+    """-> (selects OBSERVABILITY_NS, unverifiable terms, names it by kubernetes.io/metadata.name).
 
     Only the name label is known, so a term of any operator on another key
     cannot be verified: the namespace may carry the label a NotIn excludes.
@@ -587,10 +563,10 @@ def namespace_terms(
         "matchExpressions": kept,
     }
     named = NAME_LABEL in labels or any(e["key"] == NAME_LABEL for e in expressions)
-    return selector_matches(reduced, {NAME_LABEL: scrape_ns}, subject), unverifiable, named
+    return selector_matches(reduced, {NAME_LABEL: OBSERVABILITY_NS}, subject), unverifiable, named
 
 
-def scrape_allow(documents: list[dict], scrape_ns: str) -> str | None:
+def scrape_allow(documents: list[dict]) -> str | None:
     """The name of a NetworkPolicy admitting the observability namespace, if any.
 
     It is the repo's own statement that something here is scraped, so it stands
@@ -599,9 +575,10 @@ def scrape_allow(documents: list[dict], scrape_ns: str) -> str | None:
     for document in documents:
         if document.get("kind") != "NetworkPolicy":
             continue
-        spec = mapping(document.get("spec"), describe(document), "spec")
-        for rule in spec.get("ingress") or []:
-            for peer in rule.get("from") or []:
+        subject = describe(document)
+        spec = mapping(document.get("spec"), subject, "spec")
+        for rule in entries(spec.get("ingress"), subject, "spec.ingress"):
+            for peer in entries(rule.get("from"), subject, "an ingress rule's from"):
                 namespaces = peer.get("namespaceSelector")
                 # Absent or `{}` names no namespace; any other shape is judged.
                 if namespaces is None or (isinstance(namespaces, dict) and not namespaces):
@@ -609,7 +586,7 @@ def scrape_allow(documents: list[dict], scrape_ns: str) -> str | None:
                 name = (document.get("metadata") or {}).get("name")
                 # Narrowing is not consulted: this feeds the vacuity guard, which
                 # fails closed; admits() is where narrowing is judged.
-                selects, _, named = namespace_terms(namespaces, scrape_ns, name)
+                selects, _, named = namespace_terms(namespaces, name)
                 if selects and named:
                     return name
     return None
@@ -620,14 +597,11 @@ def scrape_allow(documents: list[dict], scrape_ns: str) -> str | None:
 SCRAPER_LABELS: dict[str, str] = {}
 
 
-def admits(policy: dict, pods: dict, accepted: set[int | str], scrape_ns: str) -> bool:
+def admits(policy: dict, pods: dict, accepted: set[int | str]) -> bool:
     """Does this NetworkPolicy let the observability namespace in on the port?"""
     spec = mapping(policy.get("spec"), describe(policy), "spec")
-    rules = spec.get("ingress") or []
-    declared = spec.get("policyTypes")
-    # The API infers Ingress from the presence of `ingress:` when policyTypes is
-    # absent, and an empty list round-trips as absent, so it infers too.
-    if not ("Ingress" in declared if declared else bool(rules)):
+    rules = entries(spec.get("ingress"), describe(policy), "spec.ingress")
+    if "Ingress" not in policy_types(spec):
         return False
     selected = mapping(spec.get("podSelector"), describe(policy), "spec.podSelector")
     name = (policy.get("metadata") or {}).get("name")
@@ -635,7 +609,7 @@ def admits(policy: dict, pods: dict, accepted: set[int | str], scrape_ns: str) -
     if not selector_matches(selected, pods, name):
         return False
     for rule in rules:
-        peers = rule.get("from") or []
+        peers = entries(rule.get("from"), describe(policy), "an ingress rule's from")
         # An absent or empty `from` matches every source, observability included.
         scoped = not peers
         for peer in peers:
@@ -668,7 +642,7 @@ def admits(policy: dict, pods: dict, accepted: set[int | str], scrape_ns: str) -
                 else:
                     scoped = True
                 continue
-            selects, narrowing, named = namespace_terms(namespaces, scrape_ns, name)
+            selects, narrowing, named = namespace_terms(namespaces, name)
             if not selects:
                 continue
             if not named and narrowing:
@@ -694,14 +668,14 @@ def admits(policy: dict, pods: dict, accepted: set[int | str], scrape_ns: str) -
                 or not selector_matches(pod_sel, SCRAPER_LABELS, name)
             ):
                 note(
-                    f"{name}: its peer for namespace {scrape_ns} selects pods by "
+                    f"{name}: its peer for namespace {OBSERVABILITY_NS} selects pods by "
                     f"{shown(pod_sel)}, which the declared scraper labels do not carry "
                     f"({SCRAPER_LABELS or 'none declared'}), so the peer is not credited"
                 )
                 continue
             if narrowing:
                 note(
-                    f"{name}: its peer for namespace {scrape_ns} narrows it with "
+                    f"{name}: its peer for namespace {OBSERVABILITY_NS} narrows it with "
                     f"{', '.join(narrowing)}, which this gate cannot resolve against "
                     "Prometheus's chart-installed pods, so the peer is not credited"
                 )
@@ -864,7 +838,6 @@ def check_monitor(
     namespaces: list[str | None],
     groups: dict[str | None, list[dict]],
     policies: dict[str | None, list[dict]],
-    scrape_ns: str,
     corpus: bool = False,
 ) -> tuple[int, int]:
     """One monitor's endpoints against the policies where its pods live.
@@ -917,7 +890,7 @@ def check_monitor(
                 # an object it does carry for the monitor is judged as written.
                 if (
                     corpus
-                    and not any(d.get("kind") in WORKLOAD_KINDS for d in members)
+                    and not any(d.get("kind") in LONG_RUNNING_KINDS for d in members)
                     and not chosen
                 ):
                     unrendered += 1
@@ -941,29 +914,27 @@ def check_monitor(
         hand_written += by_hand
         for target in targets:
             if any(
-                admits(policy, target.labels, target.spellings, scrape_ns)
+                admits(policy, target.labels, target.spellings)
                 for policy in policies.get(target.namespace) or []
             ):
                 continue
             message = (
-                f"{name}{target.subject}: no NetworkPolicy admits namespace {scrape_ns} "
+                f"{name}{target.subject}: no NetworkPolicy admits namespace {OBSERVABILITY_NS} "
                 f"on port {target.number}, so Prometheus cannot reach this target"
             )
             raise Violation("\n".join([message, *UNMODELLED]))
     return hand_written, chart_rendered
 
 
-def refuse_vacuous(
-    groups: dict[str | None, list[dict]], targeted: set[str | None], scrape_ns: str
-) -> None:
+def refuse_vacuous(groups: dict[str | None, list[dict]], targeted: set[str | None]) -> None:
     """A namespace that declares a scrape while no monitor here targets it."""
     for group_ns in sorted(groups, key=lambda ns: ns or ""):
         if group_ns in targeted:
             continue
-        declared = scrape_allow(groups[group_ns], scrape_ns)
+        declared = scrape_allow(groups[group_ns])
         if declared:
             raise GateError(
-                f"{declared} admits namespace {scrape_ns} but no ServiceMonitor "
+                f"{declared} admits namespace {OBSERVABILITY_NS} but no ServiceMonitor "
                 "or PodMonitor scrapes its namespace: a gate that checks nothing is not "
                 "a gate. Restore the monitor, or remove the scrape allow with it."
             )
@@ -971,7 +942,6 @@ def refuse_vacuous(
 
 def check(
     documents: list[dict],
-    scrape_ns: str = DEFAULT_OBSERVABILITY_NS,
     namespace: str | None = None,
     namespace_error: str | None = None,
     corpus: bool = False,
@@ -1001,7 +971,7 @@ def check(
         if document.get("kind") in ENDPOINT_KEYS
     ]
     if not monitors:
-        refuse_vacuous(groups, set(), scrape_ns)
+        refuse_vacuous(groups, set())
         print(
             f"{len(documents)} document(s), no ServiceMonitor or PodMonitor; "
             "nothing to check"
@@ -1020,18 +990,18 @@ def check(
         )
         targeted |= set(namespaces)
         counted, charted = check_monitor(
-            monitor, group_ns, namespaces, groups, policies, scrape_ns, corpus
+            monitor, group_ns, namespaces, groups, policies, corpus
         )
         hand_written += counted
         chart_rendered += charted
     # Corpus-wide only: a chart renders monitors a corpus does not carry, so a
     # single namespace's allow cannot be paired with one the way a tree's is.
     if not corpus:
-        refuse_vacuous(groups, targeted, scrape_ns)
+        refuse_vacuous(groups, targeted)
     tail = f"; {hand_written} target(s) have hand-written endpoints" if hand_written else ""
     if chart_rendered:
         tail += f"; {chart_rendered} endpoint(s) scrape pods a chart renders"
-    print(f"{len(monitors)} monitor(s); every scraped port is admitted from {scrape_ns}{tail}")
+    print(f"{len(monitors)} monitor(s); every scraped port is admitted from {OBSERVABILITY_NS}{tail}")
     return 0
 
 
@@ -1041,11 +1011,6 @@ def main(argv: list[str] | None = None) -> int:
         "directory",
         nargs="?",
         help=f"manifest directory to check (default: {DEFAULT_TREE})",
-    )
-    parser.add_argument(
-        "--observability-namespace",
-        default=DEFAULT_OBSERVABILITY_NS,
-        help="namespace Prometheus scrapes from (default: %(default)s)",
     )
     parser.add_argument(
         "--prometheus-pod-label",
@@ -1074,6 +1039,7 @@ def main(argv: list[str] | None = None) -> int:
              "so a monitor's matchNames resolves against it",
     )
     arguments = parser.parse_args(argv)
+    SCRAPER_LABELS.clear()
     for item in arguments.prometheus_pod_label:
         key, sep, value = item.partition("=")
         if not sep or not key:
@@ -1120,13 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
         namespace, namespace_error = tree_namespace(documents)
 
     try:
-        return check(
-            documents,
-            arguments.observability_namespace,
-            namespace,
-            namespace_error,
-            bool(arguments.corpus),
-        )
+        return check(documents, namespace, namespace_error, bool(arguments.corpus))
     except GateError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2

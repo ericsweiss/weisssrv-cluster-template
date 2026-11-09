@@ -22,7 +22,7 @@ kubeconfig
 tfplan
 tfplan.json
 plan.out
-# Local provider/backend overrides and crash dumps, never the committed state.
+# Local provider/backend overrides, never the committed state.
 override.tf
 override.tf.json
 *_override.tf
@@ -80,15 +80,13 @@ cluster-state-*.txt
 CLUSTER_STATUS.txt
 
 # Secret material that the bring-up path places IN the repo root.
-# flux:bootstrap-secrets reads ./1password-credentials.json, and SETUP tells
-# you to `git add -A` in the same session — without these it lands in git.
+# flux:bootstrap-secrets reads ./1password-credentials.json, and the first
+# commit is a `git add -A` in the same session.
 1password-credentials.json
 *.key
 *.pem
 *.tfvars
 *.tfvars.json
-crash.log
-crash.*.log
 **/secrets/
 
 # CI dependency/tool cache dirs (PIP_CACHE_DIR, collections, lint toolchains)

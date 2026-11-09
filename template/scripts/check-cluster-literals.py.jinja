@@ -16,17 +16,19 @@ except ImportError:  # pragma: no cover - environment guard
     print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
     raise SystemExit(2) from None
 
-# Trees a Flux Kustomization renders WITH substituteFrom, derived from the cluster
-# dir so a new or renamed stage cannot leave a tree unscanned. sources/ and
-# clusters/ fall out on their own: neither carries substituteFrom.
+# Trees this repo's own Flux Kustomizations render WITH substituteFrom, derived
+# from the cluster dir so a new stage cannot leave a tree unscanned. A tenant
+# Kustomization renders another repo's source, so its path is not credited.
 CLUSTER_DIR = "kubernetes/clusters/{{ cluster_name }}"
+# The GitRepository that renders this repo; any other sourceRef is a tenant's.
+OWN_SOURCE = ("GitRepository", "flux-system", "flux-system")
 # Rendered INTO those trees as a kustomize component, so it has no Kustomization
 # of its own and cannot be derived.
 EXTRA_TREES = ("kubernetes/components",)
 
 # Non-YAML generator sources kustomize renders into a substituted manifest.
 GENERATOR_SUFFIXES = (".json", ".py", ".toml", ".tpl")
-# Both YAML spellings: Flux reconciles a .yml manifest exactly like a .yaml one.
+# Both spellings kustomize reads, so a .yml manifest is still scanned.
 MANIFEST_SUFFIXES = (".yaml", ".yml")
 
 CLUSTER_CONFIG = "kubernetes/infrastructure/sources/cluster-config.yaml"
@@ -59,14 +61,12 @@ VALUE_KEYS = ("cluster_timezone",)
 
 
 def vip_keys(config: dict) -> tuple[str, ...]:
-    """Every `cluster_*_vip` key the config declares, ADDRESS_KEYS floor included.
+    """Every `cluster_*_vip` key the config declares.
 
     A VIP added to cluster-config alone would otherwise be scanned by no arm
     while the gate still reports OK.
     """
-    declared = {k for k in config if k.startswith("cluster_") and k.endswith("_vip")}
-    floor = {k for k in ADDRESS_KEYS if k.endswith("_vip")}
-    return tuple(sorted(declared | floor))
+    return tuple(sorted(k for k in config if k.startswith("cluster_") and k.endswith("_vip")))
 
 
 # cluster-config key -> where the same value lives in the Ansible inventory.
@@ -94,9 +94,8 @@ SECONDARY_MIRRORS: dict[str, tuple[str, str]] = {}
 DNS_SERVERS_KEY = "cluster_upstream_dns_servers"{% else %}# No tailnet resolver zone, so no cluster-config key mirrors `dns_servers`.
 DNS_SERVERS_KEY = None{% endif %}
 
-# Every key an arm of this gate consumes. Each arm is guarded by `if key not in
-# config`, so the whole set is asserted up front: a disappeared key is Vacuous
-# (exit 2), never a quiet pass over a smaller subject.
+# Every key an arm of this gate consumes, asserted before any arm runs: a
+# disappeared key is Vacuous (exit 2), never a quiet pass over a smaller subject.
 REQUIRED_KEYS = (
     set(DOMAIN_KEYS)
     | set(ADDRESS_KEYS)
@@ -107,14 +106,16 @@ REQUIRED_KEYS = (
 )
 
 
-def manifests(base: Path, *, recurse: bool = True) -> list[Path]:
-    """The YAML manifests in a directory, under either suffix."""
-    walk = base.rglob("*") if recurse else base.iterdir()
-    return sorted(p for p in walk if p.is_file() and p.suffix in MANIFEST_SUFFIXES)
-
-
 class Vacuous(Exception):
     """The gate could not inspect its subject — exit 2, never a silent pass."""
+
+
+def _read_text(path: Path, rel: str) -> str:
+    """Read one of the gate's inputs, or exit 2 through Vacuous."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise Vacuous(f"{rel} could not be read ({exc.__class__.__name__}: {exc})") from exc
 
 
 def _read_yaml(path: Path, rel: str, *, multi: bool = False):
@@ -123,15 +124,28 @@ def _read_yaml(path: Path, rel: str, *, multi: bool = False):
     An unreadable input means the gate could not inspect its subject, which is a
     different outcome from a finding and must not surface as a traceback.
     """
+    text = _read_text(path, rel)
     try:
-        text = path.read_text(encoding="utf-8")
         return list(yaml.safe_load_all(text)) if multi else (yaml.safe_load(text) or {})
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+    except yaml.YAMLError as exc:
         raise Vacuous(f"{rel} could not be read ({exc.__class__.__name__}: {exc})") from exc
 
 
+def manifests(base: Path, *, recurse: bool = False) -> list[Path]:
+    """Manifest files under `base`, in either YAML spelling."""
+    walk = base.rglob("*") if recurse else base.glob("*")
+    return sorted(p for p in walk if p.is_file() and p.suffix in MANIFEST_SUFFIXES)
+
+
+def renders_this_repo(doc: dict) -> bool:
+    """Whether a Kustomization's sourceRef is this repo's own GitRepository."""
+    ref = (doc.get("spec") or {}).get("sourceRef") or {}
+    namespace = ref.get("namespace") or (doc.get("metadata") or {}).get("namespace")
+    return (ref.get("kind"), ref.get("name"), namespace or OWN_SOURCE[2]) == OWN_SOURCE
+
+
 def substituted_trees(root: Path) -> tuple[str, ...]:
-    """Every tree a Flux Kustomization renders with a cluster-config substitution.
+    """Every tree this repo's Kustomizations render with a cluster-config substitution.
 
     Derived from spec.path. A path nested in another derived path is dropped, and
     a derived path missing from disk is a hard error, not a smaller scan.
@@ -140,17 +154,27 @@ def substituted_trees(root: Path) -> tuple[str, ...]:
     if not cluster.is_dir():
         raise Vacuous(f"{CLUSTER_DIR} not found — cannot derive the substituted trees")
     derived: set[str] = set()
-    for path in manifests(cluster, recurse=False):
-        for doc in _read_yaml(path, path.relative_to(root).as_posix(), multi=True):
+    for path in manifests(cluster, recurse=True):
+        rel = path.relative_to(root).as_posix()
+        for doc in _read_yaml(path, rel, multi=True):
             if not isinstance(doc, dict) or doc.get("kind") != "Kustomization":
                 continue
             if not str(doc.get("apiVersion", "")).startswith("kustomize.toolkit"):
                 continue
+            if not renders_this_repo(doc):
+                continue
             spec = doc.get("spec") or {}
             froms = (spec.get("postBuild") or {}).get("substituteFrom") or []
+            # Flux rejects any other shape, and skipping it would drop the tree.
+            if not isinstance(froms, list) or not all(isinstance(f, dict) for f in froms):
+                name = (doc.get("metadata") or {}).get("name")
+                raise Vacuous(
+                    f"{rel}: Kustomization {name!r} has a substituteFrom that is not "
+                    "a list of mappings — cannot tell whether it renders cluster-config"
+                )
             if not any(f.get("name") == "cluster-config" for f in froms):
                 continue
-            tree = str(spec.get("path") or "").lstrip("./")
+            tree = str(spec.get("path") or "").removeprefix("./").strip("/")
             if tree:
                 derived.add(tree)
     if not derived:
@@ -182,23 +206,13 @@ def load_config(root: Path) -> dict:
 
 
 def require_keys(config: dict) -> None:
-    """Every key the gate's arms consume must be present, or it degrades silently."""
+    """Every key the gate's arms consume must be present before any arm runs."""
     missing = sorted(REQUIRED_KEYS - set(config))
     if missing:
         raise Vacuous(
             f"{CLUSTER_CONFIG} is missing key(s) this gate checks: {', '.join(missing)}. "
-            "Each arm skips an absent key, so the gate would pass while enforcing less. "
             "Re-add the key, or delete it from the gate's key lists deliberately."
         )
-
-
-def mirror_check_count(config: dict) -> int:
-    """How many inventory-mirror assertions actually ran (never a constant)."""
-    return (
-        len([k for k in INVENTORY_MIRRORS if k in config])
-        + len([k for k in SECONDARY_MIRRORS if k in config])
-        + (1 if DNS_SERVERS_KEY and DNS_SERVERS_KEY in config else 0)
-    )
 
 
 COMMENT_LINE = re.compile(r"^\s*#")
@@ -272,31 +286,24 @@ def scan_text(rel: str, text: str, domains: list[str], addresses: dict) -> list[
 
 def check_literals(root: Path, config: dict, trees: tuple[str, ...]) -> list[str]:
     violations = []
-    domains = [config[k] for k in DOMAIN_KEYS if k in config]
-    address_keys = tuple(sorted(set(ADDRESS_KEYS) | set(vip_keys(config))))
-    addresses = {config[k]: k for k in address_keys if k in config}
-    values = {config[k]: k for k in VALUE_KEYS if k in config}
+    domains = [config[k] for k in DOMAIN_KEYS]
+    addresses = {config[k]: k for k in sorted(set(ADDRESS_KEYS) | set(vip_keys(config)))}
+    values = {config[k]: k for k in VALUE_KEYS}
     for tree in trees:
         base = root / tree
-        if not base.is_dir():
-            continue
         for path in sorted(
             p
             for p in base.rglob("*")
             if p.is_file() and p.suffix in GENERATOR_SUFFIXES
         ):
             rel = path.relative_to(root).as_posix()
-            if rel.startswith(RULES_TREE) or rel == CLUSTER_CONFIG:
+            if rel.startswith(RULES_TREE):
                 continue
             violations += scan_text(
-                rel, path.read_text(encoding="utf-8"), domains, {**addresses, **values}
+                rel, _read_text(path, rel), domains, {**addresses, **values}
             )
-        for path in manifests(base):
+        for path in manifests(base, recurse=True):
             rel = path.relative_to(root).as_posix()
-            # cluster-config is where the values are declared, so it is the one
-            # manifest that spells them literally.
-            if rel == CLUSTER_CONFIG:
-                continue
             in_rules = rel.startswith(RULES_TREE)
             # A manifest the gate cannot parse is a subject it did not inspect,
             # not literal drift: _read_yaml raises Vacuous and main() exits 2.
@@ -319,8 +326,6 @@ def check_inventory(root: Path, config: dict) -> list[str]:
     violations = []
     cache: dict[str, dict] = {}
     for key, (path, var) in list(INVENTORY_MIRRORS.items()) + list(SECONDARY_MIRRORS.items()):
-        if key not in config:
-            continue
         if path not in cache:
             cache[path] = _read_yaml(root / path, path)
         expected = cache[path].get(var)
@@ -336,12 +341,12 @@ def check_inventory(root: Path, config: dict) -> list[str]:
     # cannot see: name its inventory variable in INVENTORY_MIRRORS.
     mirrored = set(INVENTORY_MIRRORS) | set(SECONDARY_MIRRORS)
     for key in vip_keys(config):
-        if key in config and key not in mirrored:
+        if key not in mirrored:
             violations.append(
                 f"cluster-config {key}={config[key]!r} is mirrored by no arm of this "
                 "gate — add it to INVENTORY_MIRRORS with its inventory variable"
             )
-    if DNS_SERVERS_KEY and DNS_SERVERS_KEY in config:
+    if DNS_SERVERS_KEY:
         all_vars = cache.get(ANSIBLE_ALL) or _read_yaml(root / ANSIBLE_ALL, ANSIBLE_ALL)
         dns = all_vars.get("dns_servers")
         # A missing mirror is a violation, not a skip: silently dropping the
@@ -380,10 +385,13 @@ def main(argv=None) -> int:
         for violation in violations:
             print(f"  {violation}", file=sys.stderr)
         return 1
+    mirror_checks = (
+        len(INVENTORY_MIRRORS) + len(SECONDARY_MIRRORS) + (1 if DNS_SERVERS_KEY else 0)
+    )
     print(
         f"Cluster identity is placeholder-only across {len(trees)} substituted trees "
         f"({', '.join(trees)}), and cluster-config agrees with the Ansible inventory "
-        f"({mirror_check_count(config)} mirrored values checked)."
+        f"({mirror_checks} mirrored values checked)."
     )
     return 0
 

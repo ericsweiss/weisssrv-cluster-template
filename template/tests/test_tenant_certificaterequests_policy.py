@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 import yaml
-from conftest import REPO
+from conftest import REPO, assert_tenant_deny_binding, cel, policy_spec
 
 POLICY = REPO / "kubernetes" / "infrastructure" / "configs" / "tenant-traefik-policy.yaml"
 CERT_MANAGER = REPO / "kubernetes" / "infrastructure" / "controllers" / "cert-manager"
@@ -31,24 +31,10 @@ VALIDATIONS = [
         "tenant ACME Orders and Challenges are created by cert-manager's controller only",
     ),
 ]
-TENANT_MATCH = {
-    "namespaceSelector": {
-        "matchExpressions": [{"key": "fluxcd.io/tenant", "operator": "Exists"}]
-    }
-}
-
-
-def _docs() -> list[dict]:
-    return [d for d in yaml.safe_load_all(POLICY.read_text()) if isinstance(d, dict)]
 
 
 def _policy() -> dict:
-    found = [
-        d for d in _docs()
-        if d.get("kind") == "ValidatingAdmissionPolicy" and d["metadata"]["name"] == NAME
-    ]
-    assert len(found) == 1
-    return found[0]["spec"]
+    return policy_spec(POLICY, "ValidatingAdmissionPolicy", NAME)
 
 
 def test_the_policy_is_the_shape_the_mirror_evaluates():
@@ -79,19 +65,12 @@ def test_the_policy_is_the_shape_the_mirror_evaluates():
         ]
     }
     assert [
-        (" ".join(v["expression"].split()), v["message"]) for v in spec["validations"]
+        (cel(v["expression"]), v["message"]) for v in spec["validations"]
     ] == VALIDATIONS
 
 
 def test_the_policy_is_deny_bound_on_every_tenant_namespace():
-    bindings = [
-        d["spec"] for d in _docs()
-        if d.get("kind") == "ValidatingAdmissionPolicyBinding"
-        and d["spec"]["policyName"] == NAME
-    ]
-    assert bindings == [
-        {"policyName": NAME, "validationActions": ["Deny"], "matchResources": TENANT_MATCH}
-    ]
+    assert_tenant_deny_binding(POLICY, NAME)
 
 
 def test_the_controller_identity_is_the_release_the_platform_ships():
@@ -102,20 +81,23 @@ def test_the_controller_identity_is_the_release_the_platform_ships():
         d for d in yaml.safe_load_all((CERT_MANAGER / "release.yaml").read_text())
         if isinstance(d, dict) and d.get("kind") == "HelmRelease"
     )
-    assert release["metadata"]["namespace"] == "cert-manager"
-    assert release["spec"]["releaseName"] == "cert-manager"
     values = release["spec"]["values"]
     assert "serviceAccount" not in values
     assert "fullnameOverride" not in values and "nameOverride" not in values
     assert "namespace" not in values
-    assert CONTROLLER == "system:serviceaccount:cert-manager:cert-manager"
+    namespace = release["metadata"]["namespace"]
+    account = release["spec"]["releaseName"]
+    assert CONTROLLER == f"system:serviceaccount:{namespace}:{account}"
 
 
-MATCHED = {
-    ("cert-manager.io", "certificaterequests"): {"CREATE"},
-    ("acme.cert-manager.io", "challenges"): {"CREATE"},
-    ("acme.cert-manager.io", "orders"): {"CREATE", "UPDATE"},
-}
+def matched() -> dict[tuple[str, str], set[str]]:
+    """(API group, resource) -> the operations the shipped policy intercepts."""
+    return {
+        (group, resource): set(rule["operations"])
+        for rule in _policy()["matchConstraints"]["resourceRules"]
+        for group in rule["apiGroups"]
+        for resource in rule["resources"]
+    }
 
 
 def allowed(
@@ -129,7 +111,7 @@ def allowed(
     issuerRef and requester; an unmatched operation is admitted untouched."""
     acme = group == "acme.cert-manager.io"
     resource = resource or ("orders" if acme else "certificaterequests")
-    if operation not in MATCHED[(group, resource)]:
+    if operation not in matched()[(group, resource)]:
         return True
     core_issuer = issuer_ref.get("group", "") in ("", "cert-manager.io") and issuer_ref.get(
         "kind", ""

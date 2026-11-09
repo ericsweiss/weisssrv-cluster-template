@@ -1,0 +1,102 @@
+---
+# promtool unit tests for platform.cluster-health: the two 6h criticals. The
+# 30m interval keeps the 7h horizon cheap and still lands an evaluation inside
+# each hold.
+rule_files:
+  - rules.yaml
+evaluation_interval: 30m
+tests:
+  # NodeNotReadyProlonged: NotReady for 6h fires; a node back inside the hold
+  # and a Ready node do not.
+  - interval: 30m
+    input_series:
+      - series: 'kube_node_status_condition{condition="Ready", status="true", node="k3s-agt-01"}'
+        values: '0+0x16'
+      - series: 'kube_node_status_condition{condition="Ready", status="true", node="k3s-agt-02"}'
+        values: '0+0x8 1+0x8'
+      - series: 'kube_node_status_condition{condition="Ready", status="true", node="k3s-agt-03"}'
+        values: '1+0x16'
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: NodeNotReadyProlonged
+        exp_alerts: []
+      - eval_time: 7h
+        alertname: NodeNotReadyProlonged
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              condition: Ready
+              status: 'true'
+              node: k3s-agt-01
+
+  # EtcdQuorumAtRisk: one of three members down for 6h fires.
+  - interval: 30m
+    input_series:
+      - series: 'up{job="kube-etcd", instance="192.0.2.31:2381"}'
+        values: '1+0x16'
+      - series: 'up{job="kube-etcd", instance="192.0.2.32:2381"}'
+        values: '1+0x16'
+      - series: 'up{job="kube-etcd", instance="192.0.2.33:2381"}'
+        values: '0+0x16'
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: EtcdQuorumAtRisk
+        exp_alerts: []
+      - eval_time: 7h
+        alertname: EtcdQuorumAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+
+  # Every discovered member up is quiet, single-server clusters included.
+  - interval: 30m
+    input_series:
+      - series: 'up{job="kube-etcd", instance="192.0.2.31:2381"}'
+        values: '1+0x16'
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: EtcdQuorumAtRisk
+        exp_alerts: []
+
+  # count() over an empty vector returns nothing, so absent() catches every
+  # member down and the job gone alike.
+  - interval: 30m
+    input_series:
+      - series: 'up{job="kube-etcd", instance="192.0.2.31:2381"}'
+        values: '0+0x16'
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: EtcdQuorumAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+
+  - interval: 30m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: EtcdQuorumAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+
+  # Five servers with one down still tolerate another loss, and the rule pages
+  # anyway: any member short fires, whatever the server count.
+  - interval: 30m
+    input_series:
+      - series: 'up{job="kube-etcd", instance="192.0.2.31:2381"}'
+        values: '1+0x16'
+      - series: 'up{job="kube-etcd", instance="192.0.2.32:2381"}'
+        values: '1+0x16'
+      - series: 'up{job="kube-etcd", instance="192.0.2.33:2381"}'
+        values: '1+0x16'
+      - series: 'up{job="kube-etcd", instance="192.0.2.34:2381"}'
+        values: '1+0x16'
+      - series: 'up{job="kube-etcd", instance="192.0.2.35:2381"}'
+        values: '0+0x16'
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: EtcdQuorumAtRisk
+        exp_alerts:
+          - exp_labels:
+              severity: critical

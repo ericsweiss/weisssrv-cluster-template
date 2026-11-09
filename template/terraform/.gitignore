@@ -1,6 +1,6 @@
 # Terraform-local ignores, next to the code they protect. The root .gitignore
-# covers the same plan and state names; both levels carry them because a plan is
-# written from either the repo root or a module directory.
+# already covers each of them at any depth; this file only makes the rules
+# visible where terraform runs.
 
 # Saved plans. A plan resolves every variable, so it is a blob holding each
 # provider credential and client secret in the clear.
@@ -10,8 +10,7 @@ tfplan
 tfplan.json
 plan.out
 
-# Variable files - secret-bearing. Repeated from the root, since a tfvars is
-# written from whichever directory terraform ran in.
+# Variable files - secret-bearing.
 *.tfvars
 *.tfvars.json
 

@@ -1,6 +1,6 @@
 {%- set runner_tag = ci_runner_tag -%}
 {%- set cpu_selector = ci_cpu_selector -%}
-{#- Exact patch tag: a two-component tag floats, so a Terraform minor release
+{#- Exact patch tag: a two-component tag floats, so a Terraform patch release
     lands mid-pipeline between plan and apply. -#}
 {%- set terraform_image = 'hashicorp/terraform:1.15.9' -%}
 {%- set cluster_dir = 'kubernetes/clusters/' ~ cluster_name -%}
@@ -121,8 +121,8 @@ workflow:
     - if: '$CI_COMMIT_BRANCH == "main"'
       auto_cancel:
         on_new_commit: none
-    # Every schedule creates a pipeline; each opt-in job selects itself on
-    # $SCHEDULE_TYPE.
+    # Every schedule creates a pipeline. The opt-in jobs select themselves on
+    # $SCHEDULE_TYPE; the drift plans run on every schedule.
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
@@ -133,17 +133,17 @@ variables:
   # cluster actually resolves (a fork or mirror answers lib_project).
   LIB_PROJECT: "{{ lib_project }}"
   PYYAML_VERSION: "6.0.3"
-  # Pre-seeded for check-doc-links' backticked-path pass; inert until the library
-  # pin ships it.
-  CHECK_DOC_LINKS_PATHS: "1"
   # fnmatch exceptions for cited paths that are not files here: the library's own
   # docs, the forge-hosted terraform states, a gitignored plan file, and the
   # vendored-copy checker that lives in the library.
   CHECK_DOC_LINKS_IGNORE: "docs/[A-Z]* terraform/state/* */tfplan */check-vendored-copies.py"
   # Single source for the Ansible the local jobs pip-install. `include:` inputs
   # cannot read it (they resolve before this block exists), so the deploy-base
-  # entry below repeats the literal — bump the two together.
+  # entry below repeats it and ANSIBLE_CORE_VERSION — bump each pair together.
   ANSIBLE_VERSION: "14.5.0"
+  # ansible accepts any patch release of its core line; this holds the one the
+  # roles are tested on, installed beside it everywhere ansible is pip-installed.
+  ANSIBLE_CORE_VERSION: "2.21.5"
   # kustomize for the cluster-verify server-side dry-run, pinned with the
   # sha256 the script verifies the downloaded tarball against. Same pin as
   # scripts/ci-fetch-tools.py, so one kustomize version runs in every job.
@@ -153,9 +153,9 @@ variables:
   # goes through it rather than naming a backend CLI, so `secrets_backend` has
   # one runtime half here and one render-time half in the secret_ref macro.
   SECRET_RUNNER: "{{ secret_runner() }}"
-  # One exact patch tag for every terraform job, lint and credentialed alike.
-  # The plan/apply and drift jobs hold vault credentials, so append
-  # @sha256:<digest> here when you resolve one.
+  # One exact patch tag for every terraform validate, fmt, plan and apply job;
+  # tflint runs its own image. The plan/apply and drift jobs hold vault
+  # credentials, so append @sha256:<digest> here when you resolve one.
   TF_JOB_IMAGE: "{{ terraform_image }}"
   # The Python image for jobs that have already been handed vault credentials or
   # a kubeconfig, so a repointed upstream tag would execute there. Append
@@ -265,7 +265,7 @@ include:
 
   # tests/ + scripts/ = cluster invariants, the gate suites, the library-pin
   # gate. `changes:` must name every file they read — docs/ci-pipeline.md.
-  # test_vendored_byte_identity.py reads the library from the clone below.
+  # The vendored-copy suite reads the library clone below; GIT_CONFIG_* authenticates it.
   - project: {{ lib_project }}
     ref: $[[ inputs.lib_ref ]]
     file: /ci/test/python-tests.yml
@@ -273,12 +273,12 @@ include:
       tags: ["{{ runner_tag }}"]
       image: python:3.14
       # jq: test_collect_state_lib.py drives the collector's jq filters.
-      # ansible-core: test_deploy_preflight.py fails rather than skips without it,
-      # and the pin is the core line requirements.txt's `ansible==` resolves to.
+      # ansible via the ansible pin, so a suite that reaches for ansible runs the
+      # deployed version.
       apt_packages: "jq"
-      pip_packages: "ansible-core==2.21.5"
+      pip_packages: "ansible==$ANSIBLE_VERSION ansible-core==$ANSIBLE_CORE_VERSION"
       test_dir: "tests scripts"
-      setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/{{ lib_project }}.git" "$WEISSSRV_LIB_PATH"'
+      setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "https://${CI_SERVER_HOST}/{{ lib_project }}.git" "$WEISSSRV_LIB_PATH"'
       changes:
         - "tests/**/*"
         - "kubernetes/**/*"
@@ -319,9 +319,66 @@ include:
         - "terraform/**/*"
         - ".gitlab-ci.yml"
 
-  # flux-lint in substitute mode. flux_render_script is scripts/flux-env.sh, the
-  # wrapper that adds the second ConfigMap this cluster substitutes from;
-  # flux-render.sh parses one file — docs/ci-pipeline.md § flux-lint.
+  # One read-only `terraform plan -detailed-exitcode` per supervised root, on a
+  # schedule and on main. It never applies; docs/ci-pipeline.md § Drift plans.
+  # Each secrets_exports line names one variable the root declares.
+{%- if vpn_tailscale %}
+  - project: {{ lib_project }}
+    ref: $[[ inputs.lib_ref ]]
+    file: /ci/validate/terraform-drift-plan.yml
+    inputs:
+      image: $TF_JOB_IMAGE
+      job_name: tailscale-drift-plan
+      module_dir: "terraform/tailscale"
+      state_name: "tailscale"
+      tags: ["{{ runner_tag }}"]
+      changes:
+        - "terraform/tailscale/**/*"
+      secrets_exports: |
+        TF_VAR_tailscale_oauth_client_id=$({{ secret_read("Tailscale OAuth", "client id") }})
+        TF_VAR_tailscale_oauth_client_secret=$({{ secret_read("Tailscale OAuth", "credential") }})
+        export TF_VAR_tailscale_oauth_client_id TF_VAR_tailscale_oauth_client_secret
+{%- endif %}
+
+  - project: {{ lib_project }}
+    ref: $[[ inputs.lib_ref ]]
+    file: /ci/validate/terraform-drift-plan.yml
+    inputs:
+      image: $TF_JOB_IMAGE
+      job_name: authentik-drift-plan
+      module_dir: "terraform/authentik"
+      state_name: "authentik"
+      tags: ["{{ runner_tag }}"]
+      changes:
+        - "terraform/authentik/**/*"
+      secrets_exports: |
+        TF_VAR_authentik_token=$({{ secret_read("Authentik Terraform Token", "credential") }})
+        TF_VAR_oauth2_client_secret_grafana=$({{ secret_read("Grafana SSO", "oidc-client-secret") }})
+        export TF_VAR_authentik_token TF_VAR_oauth2_client_secret_grafana
+{%- if use_unifi %}
+
+  # The console is not published, so a runner off the LAN fails this plan.
+  - project: {{ lib_project }}
+    ref: $[[ inputs.lib_ref ]]
+    file: /ci/validate/terraform-drift-plan.yml
+    inputs:
+      image: $TF_JOB_IMAGE
+      job_name: unifi-drift-plan
+      module_dir: "terraform/unifi"
+      state_name: "unifi"
+      tags: ["{{ runner_tag }}"]
+      changes:
+        - "terraform/unifi/**/*"
+      secrets_exports: |
+        TF_VAR_unifi_api_url=$({{ secret_read("UniFi Controller", "url") }})
+        TF_VAR_unifi_api_key=$({{ secret_read("UniFi Controller", "api-key") }})
+        TF_VAR_wlan_passphrase_iot=$({{ secret_read("WiFi IoT", "password") }})
+        TF_VAR_wlan_passphrase_guest=$({{ secret_read("WiFi Guest", "password") }})
+        export TF_VAR_unifi_api_url TF_VAR_unifi_api_key TF_VAR_wlan_passphrase_iot TF_VAR_wlan_passphrase_guest
+{%- endif %}
+
+  # flux-lint in substitute mode: scripts/flux-env.sh exports both substitution
+  # ConfigMaps, cluster-versions and cluster-config — docs/ci-pipeline.md § flux-lint.
   - project: {{ lib_project }}
     ref: $[[ inputs.lib_ref ]]
     file: /ci/validate/flux-lint.yml
@@ -334,6 +391,7 @@ include:
       require_cluster_root: false
       cluster_dir: "{{ cluster_dir }}"
       versions_configmap: "{{ versions_cm }}"
+      # Spelled although it is the default: `task flux:lint` passes it as --render-script.
       flux_render_script: "scripts/flux-env.sh"
       skipped_script: "scripts/kubeconform-skipped.py"
       # The revision taskfiles/flux.yml pins as CRD_CATALOG_REF, so `task
@@ -360,6 +418,8 @@ include:
         - "scripts/check-netpol-except-parity.py"
         - "scripts/netpol-except.yaml"
         - "scripts/check-nfs-tls.py"
+        - "scripts/check-internal-route-allowlist.py"
+        - "scripts/check-crd-stage-order.py"
         - "scripts/gate_common.py"
         - "scripts/validate-helm-values.py"
         - "scripts/flux-corpus-gates.sh"
@@ -379,6 +439,8 @@ include:
     inputs:
       job_name: lint-docs-links
       tags: ["{{ runner_tag }}"]
+      # The backticked repo-path pass, as `task lint:doc-links` runs it.
+      check_paths: true
       changes:
         - "**/*.md"
         - "scripts/check-doc-links.py"
@@ -465,11 +527,9 @@ include:
       # library ANDs `gate` into that rule too.
       gate: '$VERSION_BUMP_BOT_TOKEN && ($SCHEDULE_TYPE == "version-bump" || $CI_PIPELINE_SOURCE == "web")'
       setup_command: "pip install --user --quiet pyyaml==$PYYAML_VERSION"
-      # CRITICAL: the soft-fail codes apply to the WHOLE check_command, so only
-      # the report step may reach rc 1 ("updates available"). Every later step
-      # remaps its failure to 2: on the soft-fail list a crashed step reads as
-      # "updates found", the bot then runs with an unmodified tree and the MR
-      # manager closes the standing bot MR.
+      # The soft-fail codes cover the WHOLE check_command, so only the report step
+      # may reach rc 1. Later steps remap failure to 2, or a crash reads as updates
+      # found and the MR manager closes the standing bot MR.
       check_soft_fail_exit_codes: "1"
       check_command: >-
         RC=0;
@@ -512,6 +572,7 @@ include:
       tags: ["{{ runner_tag }}"]
       op_vault: "{{ secret_vault() }}"
       ansible_version: "14.5.0"
+      ansible_core_version: "2.21.5"
 
   - project: {{ lib_project }}
     ref: $[[ inputs.lib_ref ]]
@@ -529,8 +590,7 @@ include:
 # CRITICAL: GitLab evaluates `rules:changes` as TRUE for every pipeline source
 # but push and merge_request_event, so without the `web` arm below a "Run
 # pipeline" button on main fires every deploy job unattended. Pulled in as
-# `- !reference [.skip-schedule-web, rules]`; `.drift-schedule-rule` further
-# down is the schedule-only twin the read-only drift jobs use.
+# `- !reference [.skip-schedule-web, rules]`.
 .skip-schedule-web:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
@@ -660,22 +720,8 @@ check-generated-files:
       # errexit explicit here so run_check's `set +e`/`set -e` pair restores a
       # known state rather than whatever the runner preamble left.
       set -euo pipefail
-      overall=0; failed=""
+      . scripts/ci-run-check.sh
       OUT=$(mktemp -d)
-
-      run_check() {
-        name="$1"; shift
-        printf 'section_start:%s:%s[collapsed=true]\r\033[0K== %s\n' "$(date +%s)" "$name" "$name"
-        # Not `"$@" || rc=$?`: bash suppresses errexit throughout an AND-OR
-        # list, so a check's own `set -e` never fires and a crashed generator
-        # reads as a pass. `set +e` is what lets the driver report every check.
-        set +e
-        ( set -eo pipefail; "$@" )
-        rc=$?
-        set -e
-        printf 'section_end:%s:%s\r\033[0K\n' "$(date +%s)" "$name"
-        if [ "$rc" -ne 0 ]; then overall=1; failed="$failed $name"; echo "FAILED: $name (rc=$rc)"; fi
-      }
 
       # Generated to a temp path rather than in place: the workspace stays clean
       # for the other checks, and the argv (which the generated header embeds)
@@ -708,14 +754,15 @@ check-generated-files:
 
       run_check hosts-env-sync check_hosts_env
       run_check flux-versions-sync check_versions_configmap
-      run_check host-log-staleness python3 scripts/generate-host-log-staleness.py --check
-      [ "$overall" -eq 0 ] || echo "Failed sync checks:$failed"
-      exit "$overall"
+      # --runbook: the vendored generator takes the rules' runbook as site data.
+      run_check host-log-staleness python3 scripts/generate-host-log-staleness.py --check --runbook "RUNBOOKS.md#per-host-log-shipping-alerts"
+      run_check_summary "sync checks"; exit $?
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes: &repo_sync_paths
+        - "scripts/ci-run-check.sh"
         - "ansible/inventories/prod/hosts.yml"
         - "ansible/inventories/prod/group_vars/all.yml"
         - "ansible/playbooks/site.yml"
@@ -776,17 +823,62 @@ cluster-literals:
 kustomization-coverage:
   extends: .pyyaml-gate
   script:
-    - python3 scripts/check-kustomization-coverage.py kubernetes/
+    - python3 scripts/check-kustomization.py kubernetes --walk --min-kustomizations 20 --exempt scripts/kustomization-exempt.yaml
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes: &kustomization_coverage_paths
         - "kubernetes/**/*"
-        - "scripts/check-kustomization-coverage.py"
+        - "scripts/check-kustomization.py"
+        - "scripts/kustomization-exempt.yaml"
         - ".gitlab-ci.yml"
     - if: '$CI_COMMIT_BRANCH == "main"'
       changes: *kustomization_coverage_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# check-doc-links' path arm skips a token whose top directory is gone and has
+# no floor; this gate resolves every skill citation and fails a vacuous scan.
+# Every MR. Mirrors `task lint:skill-refs`.
+skill-refs:
+  extends: .lint-gate
+  script:
+    - >-
+      python3 scripts/check-skill-refs.py
+      --skill-dir .claude/skills/cluster-development
+      --foreign docs/INCLUDE-CONTRACT.md
+      --foreign docs/VERSIONING.md
+      --foreign docs/EXTENSIBILITY.md
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# KubeletImageGCIneffective must fire above the kubelet's image-gc high
+# watermark, offset and capped as the rule's comment says. Mirrors
+# `task lint:image-gc-threshold`.
+image-gc-threshold:
+  extends: .pyyaml-gate
+  script:
+    - >-
+      python3 scripts/check-image-gc-threshold.py
+      --rules kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml
+      --alert-offset 5 --alert-cap 79 --min-prose-mentions 1
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &image_gc_threshold_paths
+        - "ansible/inventories/prod/group_vars/k3s.yml"
+        - "kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml"
+        - "kubernetes/infrastructure/observability/kube-prometheus-stack/alertmanager-config.yaml"
+        - "scripts/check-image-gc-threshold.py"
+        - "scripts/gate_common.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *image_gc_threshold_paths
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 # A scenario directory with no `parallel:matrix` entry never runs, and reads as
@@ -810,7 +902,7 @@ check-integration-matrix:
 
 # tflint over every root, mirroring `task terraform:tflint`. It catches what
 # fmt/validate do not: deprecated syntax, unused declarations and
-# provider-specific rules. No .tflint.hcl today, so --init fetches no plugins.
+# provider-specific rules. No .tflint.hcl ships, so --init fetches no plugins.
 terraform-tflint:
   stage: lint
   needs: []
@@ -962,12 +1054,14 @@ check-deploy-playbooks:
     # console scripts it installs (ansible-galaxy, ansible-playbook) on PATH,
     # which a --user install alone does not.
     - export PATH="$(python -m site --user-base)/bin:$PATH"
-    - pip install --user --quiet "ansible==$ANSIBLE_VERSION" "pyyaml==$PYYAML_VERSION"
+    - pip install --user --quiet "ansible==$ANSIBLE_VERSION" "ansible-core==$ANSIBLE_CORE_VERSION" "pyyaml==$PYYAML_VERSION"
     # --force: galaxy skips an already-installed collection, so a warm cache
     # would preflight against the previous release's roles after a pin bump.
     - for i in 1 2 3; do ansible-galaxy collection install --force -r ansible/requirements.yml && break; [ "$i" = 3 ] && exit 1; echo "galaxy install failed (attempt $i) - retrying in 20s"; sleep 20; done
   script:
-    - python3 scripts/deploy-preflight.py
+    # No --require-tag-selections: the deploy jobs run whole playbooks and
+    # select no tags, so every run resolves zero selections by design.
+    - python3 scripts/check-deploy-preflight.py
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
@@ -980,8 +1074,10 @@ check-deploy-playbooks:
         - "ansible/inventories/prod/**/*"
         - "ansible/requirements.yml"
         - "ansible/ansible.cfg"
-        - "scripts/deploy-preflight.py"
+        - "scripts/check-deploy-preflight.py"
+        # Imported from its own directory by the gate.
         - "scripts/ci_yaml.py"
+        - "scripts/ci_playbook_invocations.py"
         - ".gitlab-ci.yml"
     - if: '$CI_COMMIT_BRANCH == "main"'
       changes: *deploy_preflight_paths
@@ -999,7 +1095,7 @@ check-role-inputs:
   before_script:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
     - export PATH="$(python -m site --user-base)/bin:$PATH"
-    - pip install --user --quiet "ansible==$ANSIBLE_VERSION" "pyyaml==$PYYAML_VERSION"
+    - pip install --user --quiet "ansible==$ANSIBLE_VERSION" "ansible-core==$ANSIBLE_CORE_VERSION" "pyyaml==$PYYAML_VERSION"
     - ansible-galaxy collection install --force -r ansible/requirements.yml -p .ansible-home/collections
   script:
     # --allow-empty: a starter cluster composes no opt-in role, and an arm with
@@ -1069,6 +1165,10 @@ validation-gate:
       optional: true
     - job: kustomization-coverage
       optional: true
+    - job: skill-refs
+      optional: true
+    - job: image-gc-threshold
+      optional: true
     - job: cluster-literals
       optional: true
     - job: prometheus-config-lint
@@ -1080,6 +1180,12 @@ validation-gate:
     - job: check-integration-matrix
       optional: true
     - job: check-role-inputs
+      optional: true
+    - job: kubectl-version-pin
+      optional: true
+    - job: version-checksums
+      optional: true
+    - job: comment-length
       optional: true
     # Expands to one need per matrix instance, well under GitLab's 50-need cap.
     - job: integration-tests
@@ -1230,8 +1336,7 @@ deploy-ansible-mail:
     SMTP_RELAY_PASSWORD: "{{ secret_ref('SMTP Relay Auth', 'password') }}"
     SMTP_UPSTREAM_USER: "{{ secret_ref('SMTP Smarthost', 'username') }}"
     SMTP_UPSTREAM_PASSWORD: "{{ secret_ref('SMTP Smarthost', 'password') }}"
-    # base rewrites the relay's authorized_keys, so mail.yml re-seeds the
-    # cert-distribution key from the primary resolver afterwards.
+    # mail.yml re-seeds the cert-distribution key, which a re-provisioned relay loses.
     ACME_SSH_PUBLIC_KEY: "{{ secret_ref('Cert Distribution Key', 'public key') }}"
   script:
     - cd ansible
@@ -1399,118 +1504,6 @@ deploy-terraform:
       when: manual
       allow_failure: false
 {% endif %}
-# CRITICAL: no {{ gate_var }} guard here. A guard REMOVES the job
-# when the credential is revoked or rescoped, so out-of-band drift goes
-# undetected behind a green pipeline; unguarded, the vault read reds the job.
-.drift-schedule-rule:
-  rules:
-    # No changes: filter, so it catches an admin-console edit made when nothing
-    # in-repo moved.
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
-
-# Shared shape of the read-only terraform drift-plan jobs. Each job adds
-# TF_DRIFT_DIR, its own TF_HTTP_* state paths, the vault reads and the plan, and
-# its own rules.
-.terraform-drift-plan:
-  stage: validate
-  extends: .terraform-http-backend
-  needs: []
-  tags: ["{{ runner_tag }}"]
-  image:
-    name: $TF_JOB_IMAGE
-    entrypoint: [""]
-  before_script:
-    - !reference [.install-1password-alpine, before_script]
-    - cd "$TF_DRIFT_DIR"
-    # -lockfile=readonly: provider hashes are committed; CI rewriting them would
-    # mask supply-chain drift.
-    - terraform init -lockfile=readonly
-  # Exit 2 is the drift signal and stays advisory; exit 1 is a broken plan and
-  # turns the job red.
-  allow_failure:
-    exit_codes: [2]
-
-{%- if vpn_tailscale %}
-# Read-only drift plan for the tailnet ACL. It never applies — that stays
-# supervised (terraform/tailscale/README.md) — so a console hot-fix would
-# otherwise sit undetected until someone happened to plan.
-tailscale-drift-plan:
-  extends: .terraform-drift-plan
-  variables:
-    TF_DRIFT_DIR: "terraform/tailscale"
-    TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/tailscale"
-    TF_HTTP_LOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/tailscale/lock"
-    TF_HTTP_UNLOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/tailscale/lock"
-  script:
-    - |
-      set -eo pipefail
-      TF_VAR_tailscale_oauth_client_id=$({{ secret_read("Tailscale OAuth", "client id") }})
-      TF_VAR_tailscale_oauth_client_secret=$({{ secret_read("Tailscale OAuth", "credential") }})
-      export TF_VAR_tailscale_oauth_client_id TF_VAR_tailscale_oauth_client_secret
-      terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
-  rules:
-    - !reference [.drift-schedule-rule, rules]
-    # Post-merge, before the supervised apply. No merge_request_event rule:
-    # this materializes vault secrets into a job running an unmerged branch's
-    # own code, and an advisory signal does not justify that.
-    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
-      changes:
-        - "terraform/tailscale/**/*"
-{% endif %}
-# Read-only drift plan for the SSO objects. The apply is `task
-# terraform:authentik-apply`, which refuses to run non-interactively, so this job
-# is the only thing that notices an admin-UI edit. Own state name below.
-authentik-drift-plan:
-  extends: .terraform-drift-plan
-  variables:
-    TF_DRIFT_DIR: "terraform/authentik"
-    TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/authentik"
-    TF_HTTP_LOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/authentik/lock"
-    TF_HTTP_UNLOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/authentik/lock"
-  script:
-    - |
-      set -eo pipefail
-      # One line per client-secret variable the root declares: a missing one
-      # fails the plan, which is the intended behaviour, not drift.
-      TF_VAR_authentik_token=$({{ secret_read("Authentik Terraform Token", "credential") }})
-      TF_VAR_oauth2_client_secret_grafana=$({{ secret_read("Grafana SSO", "oidc-client-secret") }})
-      export TF_VAR_authentik_token TF_VAR_oauth2_client_secret_grafana
-      terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
-  rules:
-    - !reference [.drift-schedule-rule, rules]
-    # No merge_request_event rule: this job reads every OIDC client secret.
-    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
-      changes:
-        - "terraform/authentik/**/*"
-{% if use_unifi %}
-# Read-only drift plan for the gateway's own segmentation. The apply is `task
-# terraform:unifi-apply`, which refuses to run non-interactively. It reads the
-# console over the LAN, so a runner off the LAN fails the plan.
-unifi-drift-plan:
-  extends: .terraform-drift-plan
-  variables:
-    TF_DRIFT_DIR: "terraform/unifi"
-    TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/unifi"
-    TF_HTTP_LOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/unifi/lock"
-    TF_HTTP_UNLOCK_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/unifi/lock"
-  script:
-    - |
-      set -eo pipefail
-      # One line per WLAN passphrase variable the root declares: a missing one
-      # fails the plan, which is the intended behaviour, not drift.
-      TF_VAR_unifi_api_url=$({{ secret_read("UniFi Controller", "url") }})
-      TF_VAR_unifi_api_key=$({{ secret_read("UniFi Controller", "api-key") }})
-      TF_VAR_wlan_passphrase_iot=$({{ secret_read("WiFi IoT", "password") }})
-      TF_VAR_wlan_passphrase_guest=$({{ secret_read("WiFi Guest", "password") }})
-      export TF_VAR_unifi_api_url TF_VAR_unifi_api_key TF_VAR_wlan_passphrase_iot TF_VAR_wlan_passphrase_guest
-      terraform plan -input=false -no-color -lock-timeout=120s -detailed-exitcode
-  rules:
-    - !reference [.drift-schedule-rule, rules]
-    # No merge_request_event rule: this job reads every WLAN passphrase.
-    - if: '$CI_COMMIT_BRANCH == "main" && ${{ gate_var }}'
-      changes:
-        - "terraform/unifi/**/*"
-{% endif %}
 # ==============================================================================
 # VERIFY STAGE — verification only, runs after the deploy stage whatever it did.
 # ==============================================================================
@@ -1542,8 +1535,8 @@ deploy-verify:
 {%- endfor %}
 
 # The in-cluster half of verification: server-side dry-run of the rendered
-# manifests, a forced Flux reconcile, then Ready gates. Read-only, and separate
-# from deploy-verify so a missing kubeconfig spares the host-side checks.
+# manifests, a forced Flux reconcile, then Ready gates. The reconcile request is
+# its only write; a missing kubeconfig here spares deploy-verify's host checks.
 cluster-verify:
   stage: verify
   when: always
@@ -1565,12 +1558,10 @@ cluster-verify:
       # queries Flux CRs. Version and sha256 are one pin, so bump both;
       # check-flux-version-pin.py holds it equal to the ConfigMap and gotk.
       FLUX_VERSION="2.9.6"
-      # Per-job download dir: a fixed /tmp path collides when two jobs share /tmp.
-      dl=$(mktemp -d)
-      curl -fsSL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_amd64.tar.gz" -o "$dl/flux.tar.gz"
-      echo "b4d22673e9246cbd628881f1a9ef3b090085dced291e42d804555cee8e8d42c5  $dl/flux.tar.gz" | sha256sum -c -
-      tar xzf "$dl/flux.tar.gz" -C /usr/local/bin flux
-      rm -rf "$dl"
+      TOOL_FLUX_VERSION="$FLUX_VERSION" \
+        TOOL_FLUX_SHA256="b4d22673e9246cbd628881f1a9ef3b090085dced291e42d804555cee8e8d42c5" \
+        python3 scripts/ci-fetch-tools.py flux
+      export PATH="$CI_PROJECT_DIR/.bin:$PATH"
       flux --version
     - bash scripts/deploy-verify.sh
   environment:

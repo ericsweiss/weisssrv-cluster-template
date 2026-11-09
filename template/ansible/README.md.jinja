@@ -12,7 +12,7 @@ tests that exercise the roles together.
 
 | Path | What lives there |
 |---|---|
-| `requirements.yml` | The `weisssrv.infra` pin (`{{ lib_ref }}` today) and the galaxy collections it needs. Bumping the platform is a bump of `version:` here |
+| `requirements.yml` | The `weisssrv.infra` pin and the galaxy collections it needs. `scripts/check-lib-pins.py --bump` moves the pin |
 | `inventories/prod/hosts.yml` | Hosts, groups, guest sizing{% if storage_backend == 'zfs' %}, and the `vm_additional_disks` zvols{% endif %} |
 | `inventories/prod/group_vars/all.yml` | Single source for every version pin |
 | `inventories/prod/group_vars/<group>.yml`, `host_vars/<host>.yml` | Group and host values. The roles are generic, so the site data they need lives here |
@@ -30,7 +30,7 @@ the current set. Every task is idempotent and safe to re-run.
 Roles are not edited here. The workflow is:
 
 1. Change the role in weisssrv-lib. Its molecule scenario lives with it.
-2. Merge there and cut a release tag.
+2. Merge there. The library's release job cuts the tag.
 3. Here, in ONE merge request: `scripts/check-lib-pins.py --bump vX.Y.Z` (it
    moves the declared `lib_ref` input and every pin derived from it, this
    `version:` included), re-vendor the byte-identical scripts, then
@@ -38,7 +38,7 @@ Roles are not edited here. The workflow is:
 
 Step 3 also carries the inventory changes a renamed variable needs. Every role
 variable is read through `| default(...)`, so a name left un-renamed does not
-raise. It silently takes the role default. Each role's `README.md` in the
+raise. It takes the role default. Each role's `README.md` in the
 collection is the variable surface.
 
 To iterate against an unmerged library change, point `version:` at a branch,
@@ -47,11 +47,13 @@ a tag before opening the merge request.
 
 ## Guest playbooks and the cert-distribution key
 
-`weisssrv.infra.base` rewrites each guest's `authorized_keys`, which drops the
-`acme_certs` distribution key pinned there. The loss only shows at the next
-renewal, so `base.yml` and `mail.yml` each end with a play on `dns_primary` that
-re-seeds the targets through the role's `seed-target` tasks. A new playbook that
-applies `base` to a cert target needs the same play.
+`weisssrv.infra.base` rewrites a guest's `authorized_keys`, which drops the
+`acme_certs` distribution key, and the loss only shows at the next renewal. So
+`base.yml` and `mail.yml` each run a play on `dns_primary` after their role
+plays. It calls the `reseed` entry point of `weisssrv.infra.acme_certs`, which
+re-pins the key on each target it is given and fails the play on any target it
+could not pin. A new playbook that applies `base` to a cert target needs the
+same play.
 
 `acme_certs_distribution_targets` is derived in `group_vars/dns.yml` from
 `_acme_certs_targets`, and an entry with an empty `host_key` is filtered out.
@@ -59,8 +61,6 @@ Print the pins with `task certs:show-host-keys` and paste them in, or the target
 stops receiving the wildcard. `docs/RUNBOOKS.md` § Certificates has the rest.
 
 ## Code conventions
-
-`CLAUDE.md` and `AGENTS.md` point here rather than restating these.
 
 - **Fully-qualified names.** `ansible.builtin.apt`, not `apt`;
   `weisssrv.infra.base`, not `base`. `ansible-lint` enforces it under

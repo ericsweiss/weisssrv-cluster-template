@@ -1,0 +1,18 @@
+---
+# Default sizing for operator-created proxy StatefulSets; Services opt in with
+# the `tailscale.com/proxy-class: default-proxyclass` annotation. VPA does not
+# see these pods, so sizing is manual: request at p95, limit at twice the peak.
+apiVersion: tailscale.com/v1alpha1
+kind: ProxyClass
+metadata:
+  name: default-proxyclass
+spec:
+  statefulSet:
+    pod:
+      tailscaleContainer:
+        resources:
+          requests:
+            cpu: 10m
+            memory: 128Mi
+          limits:
+            memory: 256Mi

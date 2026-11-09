@@ -2,13 +2,9 @@
 {%- if vpn_tailscale %}{% set _ = roots.append(('tailscale', 'tailscale-acl')) %}{% endif -%}
 {%- if use_unifi %}{% set _ = roots.append(('unifi', 'unifi-network')) %}{% endif -%}
 ---
-# Every file beyond .gitlab-ci.yml and ansible/requirements.yml that repeats the
-# weisssrv-lib release tag, read by scripts/check-lib-pins.py. One entry per
-# Terraform root, so a root that stops pinning a library module fails by name.
-
-# A glob relative to the repo root plus a regex carrying exactly ONE capture
-# group: the ref, which must equal the declared one. An entry matching no ref
-# FAILS, so an optional root is listed only when its answer renders it.
+# Files beyond .gitlab-ci.yml and ansible/requirements.yml that repeat the
+# library tag, one entry per rendered Terraform root so a root that stops pinning
+# fails by name. check-lib-pins.py's docstring owns the entry contract.
 sites:
 {%- for dir, module in roots %}
   - path: terraform/{{ dir }}/main.tf

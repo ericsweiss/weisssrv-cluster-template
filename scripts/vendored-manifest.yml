@@ -8,6 +8,8 @@ vendored:
   # No directory walk reaches this one: the walks cover scripts/ trees only.
   - lib: lint/gitattributes
     consumer: .gitattributes
+  - lib: lint/ruff.toml
+    consumer: ruff.toml
   - scripts/check-comment-length.py
   - scripts/check-doc-links.py
   - scripts/check-lib-pins.py
@@ -16,10 +18,6 @@ vendored:
   - scripts/ci_yaml.py
   - scripts/ci-fetch-tools.py
   - scripts/semantic-release.py
-  # The check-lib-pins suite is canonical in the library. This repository
-  # vendors it because its own pipeline is where the rewriter runs; a generated
-  # cluster carries the script plus its own smoke test, matching weisssrv.
-  - tests/test_check_lib_pins.py
   # --- copies rendered into the generated cluster ---
   # The shared molecule scaffolding. No directory walk reaches it: the walks
   # cover scripts/ trees only.
@@ -31,6 +29,12 @@ vendored:
     consumer: template/ansible/molecule/tasks/prepare-apt-disable.yml
   - lib: ansible_collections/weisssrv/infra/molecule-shared/tasks/prepare-base.yml
     consumer: template/ansible/molecule/tasks/prepare-base.yml
+  # Imported by gitlab-runner-reaper.py from the CronJob's mounted ConfigMap.
+  - lib: kubernetes/reapers/kube_reaper.py
+    consumer: template/kubernetes/apps/{% if git_backend == 'gitlab_selfhosted' %}gitlab-runner-reaper{% endif %}/kube_reaper.py
+  # Mounted by the cloudflare-ddns CronJob's configMapGenerator.
+  - lib: kubernetes/ddns/cloudflare-ddns.py
+    consumer: template/kubernetes/infrastructure/configs/{% if dns_backend == 'cloudflare' %}cloudflare-ddns{% endif %}/cloudflare-ddns.py
   - lib: scripts/check-alertmanager-behaviour.py
     consumer: template/scripts/check-alertmanager-behaviour.py
   - lib: scripts/check-backup-artifact-apps.py
@@ -42,22 +46,36 @@ vendored:
     consumer: template/scripts/check-ci-include-job-names.py
   - lib: scripts/check-comment-length.py
     consumer: template/scripts/check-comment-length.py
+  - lib: scripts/check-crd-stage-order.py
+    consumer: template/scripts/check-crd-stage-order.py
   - lib: scripts/check-dashboards.py
     consumer: template/scripts/check-dashboards.py
   - lib: scripts/check-default-deny-coverage.py
     consumer: template/scripts/check-default-deny-coverage.py
   - lib: scripts/check-deploy-coverage.sh
     consumer: template/scripts/check-deploy-coverage.sh
+  # Imports ci_yaml.py and ci_playbook_invocations.py, registered below.
+  - lib: scripts/check-deploy-preflight.py
+    consumer: template/scripts/check-deploy-preflight.py
   - lib: scripts/check-doc-links.py
     consumer: template/scripts/check-doc-links.py
   - lib: scripts/check-ephemeral-storage-cap.py
     consumer: template/scripts/check-ephemeral-storage-cap.py
+  # Imports gate_common.py and inventory_tree.py, registered below.
+  - lib: scripts/check-guest-endpoint-parity.py
+    consumer: template/scripts/check-guest-endpoint-parity.py
   - lib: scripts/check-helm-repo-parity.py
     consumer: template/scripts/check-helm-repo-parity.py
   - lib: scripts/check-hpa-vpa-invariant.py
     consumer: template/scripts/check-hpa-vpa-invariant.py
+  - lib: scripts/check-image-gc-threshold.py
+    consumer: template/scripts/check-image-gc-threshold.py
+  - lib: scripts/check-internal-route-allowlist.py
+    consumer: template/scripts/check-internal-route-allowlist.py
   - lib: scripts/check-kubectl-version-pin.py
     consumer: template/scripts/check-kubectl-version-pin.py
+  - lib: scripts/check-kustomization.py
+    consumer: template/scripts/check-kustomization.py
   - lib: scripts/check-lib-pins.py
     consumer: template/scripts/check-lib-pins.py
   - lib: scripts/check-netpol-except-parity.py
@@ -66,22 +84,34 @@ vendored:
     consumer: template/scripts/check-nfs-tls.py
   - lib: scripts/check-pvc-storageclass.py
     consumer: template/scripts/check-pvc-storageclass.py
+  - lib: scripts/check-role-default-flips.py
+    consumer: template/scripts/check-role-default-flips.py
   - lib: scripts/check-role-inputs.py
     consumer: template/scripts/check-role-inputs.py
   - lib: scripts/check-scrape-netpol.py
     consumer: template/scripts/check-scrape-netpol.py
   - lib: scripts/check-scrape-wiring.py
     consumer: template/scripts/check-scrape-wiring.py
+  - lib: scripts/check-secret-rotation-coverage.py
+    consumer: template/scripts/check-secret-rotation-coverage.py
   - lib: scripts/check-secretstore-scope.py
     consumer: template/scripts/check-secretstore-scope.py
+  - lib: scripts/check-skill-refs.py
+    consumer: template/scripts/check-skill-refs.py
   - lib: scripts/check-taskfile.sh
     consumer: template/scripts/check-taskfile.sh
+  - lib: scripts/check-tenant-traefik-isolation.py
+    consumer: template/scripts/check-tenant-traefik-isolation.py
+  - lib: scripts/check-tenant-wiring.py
+    consumer: template/scripts/check-tenant-wiring.py
   - lib: scripts/check-version-checksums.py
     consumer: template/scripts/check-version-checksums.py
   - lib: scripts/check-versions.py
     consumer: template/scripts/check-versions.py
   - lib: scripts/ci-fetch-tools.py
     consumer: template/scripts/ci-fetch-tools.py
+  - lib: scripts/ci-run-check.sh
+    consumer: template/scripts/ci-run-check.sh
   # Companion modules: each is imported from the importing gate's own directory.
   - lib: scripts/ci_playbook_invocations.py
     consumer: template/scripts/ci_playbook_invocations.py
@@ -97,18 +127,20 @@ vendored:
     consumer: template/scripts/extract-prometheus-config.py
   - lib: scripts/find-reachable-host.sh
     consumer: template/scripts/find-reachable-host.sh
+  - lib: scripts/flux-child-kustomizations.py
+    consumer: template/scripts/flux-child-kustomizations.py
   - lib: scripts/flux-env.sh
     consumer: template/scripts/flux-env.sh
-  # flux-lint.sh runs flux-env.sh, kubeconform-skipped.py and the expected-skip
-  # baseline by path; all three are registered beside it.
+  # flux-lint.sh runs flux-env.sh and kubeconform-skipped.py by path; both are
+  # registered beside it. The expected-skip baseline is the cluster's own.
   - lib: scripts/flux-lint.sh
     consumer: template/scripts/flux-lint.sh
-  - lib: scripts/flux-render.sh
-    consumer: template/scripts/flux-render.sh
   - lib: scripts/flux-secret-consumers.py
     consumer: template/scripts/flux-secret-consumers.py
   - lib: scripts/gate_common.py
     consumer: template/scripts/gate_common.py
+  - lib: scripts/generate-host-log-staleness.py
+    consumer: template/scripts/generate-host-log-staleness.py
   - lib: scripts/generate-hosts-env.py
     consumer: template/scripts/generate-hosts-env.py
   - lib: scripts/generate-versions-configmap.py
@@ -135,38 +167,36 @@ vendored:
     consumer: template/scripts/supervised-apply-guard.sh
   - lib: scripts/taskfile_tree.py
     consumer: template/scripts/taskfile_tree.py
+  - lib: scripts/tenant_common.py
+    consumer: template/scripts/tenant_common.py
   - lib: scripts/validate-helm-values.py
     consumer: template/scripts/validate-helm-values.py
   - lib: scripts/version-bump-mr.py
     consumer: template/scripts/version-bump-mr.py
-  # No directory walk reaches this one: the ruleset this repository's own
-  # pipeline loads is byte-identical to the library's.
+  # No directory walk reaches the rulesets: this repository's own pipeline and
+  # every generated cluster's load the library's byte-identical.
   - lib: lint/secret-detection-ruleset.toml
     consumer: .gitlab/secret-detection-ruleset.toml
+  - lib: lint/secret-detection-ruleset.toml
+    consumer: template/.gitlab/secret-detection-ruleset.toml
+  # The lint profiles every generated cluster takes unchanged, held
+  # byte-identical so a tightened library rule cannot be left behind.
+  - lib: lint/gitattributes
+    consumer: template/.gitattributes
+  - lib: lint/ruff.toml
+    consumer: template/ruff.toml
   # Every generated cluster lints on this copy, held byte-identical so a
   # tightened library rule cannot be left behind.
   - lib: lint/yamllint-relaxed.yml
     consumer: template/lint/yamllint-relaxed.yml
+  - lib: lint/yamllint-relaxed.yml
+    consumer: lint/yamllint-relaxed.yml
 
 forked:
-  - lib: lint/ruff.toml
-    consumer: ruff.toml
-    reason: >-
-      Repo-scoped header only; target-version and rule selection are the
-      library's.
-    comment_only: true
-    reconciled_sha256: 17ffa1185a44dbc93e14f20bca60af1610702b1b03681691b6f602bd21ce9098
   - lib: lint/gitleaks.toml
     consumer: .gitleaks.toml
     reason: Allowlist paths and fixture anchors are per-repo.
     reconciled_sha256: a70051101f8045b94172594a0a89c5cf7e17aa6ad56c184843ffc5eac29891ec
-  - lib: lint/yamllint-relaxed.yml
-    consumer: lint/yamllint-relaxed.yml
-    reason: >-
-      Repo-scoped header, plus a document-start note for the Jinja sources under
-      template/. The rules are the library's. Kept at lint/, not the repo-root
-      `.yamllint` the library documents, to match the generated cluster.
-    reconciled_sha256: 27bcd61c2e64c949a4e3da41633beecc8c8ee3933d4c6c0ab175c2f0828585d7
   - lib: lint/editorconfig
     consumer: .editorconfig
     reason: Per-repo file-type sections on a shared base.
@@ -184,39 +214,13 @@ forked:
   - lib: scripts/check-flux-version-pin.py
     consumer: template/scripts/check-flux-version-pin.py
     reason: >-
-      Takes --root and --components where the library's takes --repo-root,
-      --ci-file, --versions-configmap, --gotk-glob and --runbook.
-    reconciled_sha256: 5353b33732feddc81d617138783f5fc65f09b13efc35a2f0dc0b878932e9d51c
-  - lib: scripts/check-guest-endpoint-parity.py
-    consumer: template/scripts/check-guest-endpoint-parity.py
-    reason: >-
-      Walks a fixed manifest tree and inventory directory, where the library's
-      takes --inventory, --manifest-tree and --scoped-group and additionally
-      requires an export to admit a scoped group whole.
-    reconciled_sha256: a7ab41e5de5ec07feb2a240b103b7ab24a96074da95e9e366cce0c03afd941c5
-  - lib: scripts/check-secret-rotation-coverage.py
-    consumer: template/scripts/check-secret-rotation-coverage.py
-    reason: >-
-      Hard-codes the rotation document and the manual-rotation map, where the
-      library's requires --doc and accepts --declared-manual.
-    reconciled_sha256: 12e1a976a246b8067aea3da8441dec1c2c0be18604fb9b585a72030bb24931c7
-  - lib: scripts/flux-child-kustomizations.py
-    consumer: template/scripts/flux-child-kustomizations.py
-    reason: >-
-      Prints a bare spec.path for --paths, globs *.yaml only, and exposes
-      child_kustomizations() rather than the library's name<TAB>path output,
-      --exclude/--allow-missing-paths flags and child_kustomization_paths().
-    reconciled_sha256: 965d08702267f3f03d3213fdb623038178d874f89ef0486fe8b03fe2a37ded4b
+      Reports every disagreeing pin rather than the first, and takes --root and
+      --components where the library's takes --repo-root, --ci-file,
+      --versions-configmap and --gotk-glob.
+    reconciled_sha256: 8176f8d86fd504c1077204d99feab584048fb331ed13ebdb65d7e9f246cf0052
   # The tenant-side lint profiles; the root copies above are what this
   # repository lints itself with. Both halves are listed so a library change
   # cannot reconcile one and leave generated clusters on the old profile.
-  - lib: lint/ruff.toml
-    consumer: template/ruff.toml
-    reason: >-
-      Same rule selection, tenant-scoped header — it documents that the
-      generated cluster relies on ruff's own config discovery.
-    comment_only: true
-    reconciled_sha256: 17ffa1185a44dbc93e14f20bca60af1610702b1b03681691b6f602bd21ce9098
   - lib: lint/pre-commit-config.yaml
     consumer: template/.pre-commit-config.yaml
     reason: >-
@@ -230,9 +234,3 @@ forked:
       Tenant file-type sections on a shared base — `[Dockerfile*]` rather than
       `[Dockerfile]`, to cover the per-app Dockerfile suffixes.
     reconciled_sha256: 9873966d0ce8a80d7ed84ecce449107b2a20387a146692ffb9aec28dd505fe02
-  - lib: lint/gitattributes
-    consumer: template/.gitattributes
-    reason: >-
-      Header wording, and no `*.j2` sections: nothing a generated cluster ships
-      is an Ansible template.
-    reconciled_sha256: 413609da908e54a6c037e041b595ed2e269afbcaa268671fd56094813154ff09

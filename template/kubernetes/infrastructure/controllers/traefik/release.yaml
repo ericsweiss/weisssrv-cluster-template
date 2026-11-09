@@ -10,9 +10,9 @@ metadata:
 spec:
   interval: 30m
   releaseName: traefik
-  # Repo rule: platform HelmReleases revert out-of-band edits. Off where a chart
-  # injects a webhook caBundle (cert-manager, external-secrets, metallb, vpa,
-  # kube-prometheus-stack) — a reconcile would wipe it.
+  # Repo rule: platform HelmReleases revert out-of-band edits. A release whose
+  # chart injects a webhook caBundle leaves drift detection off, since a
+  # reconcile would wipe the bundle.
   driftDetection:
     mode: enabled
   chart:
@@ -78,10 +78,10 @@ spec:
     # ipAllowList middlewares depend on. allocateLoadBalancerNodePorts: false drops
     # the data-plane NodePorts; MetalLB L2 announces the VIP, so nothing uses them.
     service:
-      type: LoadBalancer
       annotations:
         metallb.io/loadBalancerIPs: "${cluster_metallb_public_vip}"
       spec:
+        type: LoadBalancer
         externalTrafficPolicy: Local
         allocateLoadBalancerNodePorts: false
 
@@ -137,9 +137,9 @@ spec:
         port: 80
       websecure:
         port: 443
-        # The 60s chart default kills any request whose body takes longer,
-        # such as large image pushes. 30m fits multi-GB uploads on slow links
-        # while keeping a slowloris bound.
+        # TLS is on by default on websecure in Traefik v3. readTimeout bounds
+        # the whole request, headers included, on every VIP: 30m fits multi-GB
+        # uploads but lets a slow client hold a connection that long.
         transport:
           respondingTimeouts:
             readTimeout: 30m

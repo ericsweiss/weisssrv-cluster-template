@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from conftest import REPO, assert_all_parsed, k8s_documents
+from conftest import REPO, assert_all_parsed, helm_release, k8s_documents
 
 RELEASES = REPO / "scripts" / "helm-values-releases.yaml"
 SOURCES = REPO / "kubernetes/infrastructure/sources"
@@ -44,15 +44,6 @@ def uncovered(root: Path, listed: set[str], excluded: set[str]) -> list[str]:
     return sorted(helmrelease_manifests(root)[0] - listed - excluded)
 
 
-def _helm_release(relpath: str) -> dict:
-    """The HelmRelease document in a manifest that may hold siblings."""
-    path = REPO / relpath
-    for doc in yaml.safe_load_all(path.read_text()):
-        if isinstance(doc, dict) and doc.get("kind") == "HelmRelease":
-            return doc
-    raise AssertionError(f"{relpath} holds no HelmRelease")
-
-
 def _helmrepositories() -> dict[str, str]:
     """name -> url for every HelmRepository under infrastructure/sources/."""
     repos: dict[str, str] = {}
@@ -73,7 +64,7 @@ def test_every_entry_is_complete_and_names_a_real_manifest() -> None:
 def test_entries_agree_with_the_helmrelease_they_name() -> None:
     problems = []
     for rel in _entries():
-        doc = _helm_release(rel["manifest"])
+        doc = helm_release(REPO / rel["manifest"])
         chart_spec = (((doc.get("spec") or {}).get("chart") or {}).get("spec")) or {}
         # `name` is a logging label, not what the gate renders from, so it is not
         # compared: a release name can differ from the chart name.
@@ -156,11 +147,11 @@ def test_the_release_reader_handles_a_multi_document_manifest(tmp_path: Path) ->
         "apiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease\n"
         "metadata:\n  name: demo\nspec:\n  chart:\n    spec:\n      chart: demo\n"
     )
-    doc = _helm_release(str(pair))
+    doc = helm_release(pair)
     chart = (((doc.get("spec") or {}).get("chart") or {}).get("spec")) or {}
     assert chart.get("chart") == "demo"
 
     alone = tmp_path / "configmap.yaml"
     alone.write_text("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: demo\n")
     with pytest.raises(AssertionError, match="holds no HelmRelease"):
-        _helm_release(str(alone))
+        helm_release(alone)

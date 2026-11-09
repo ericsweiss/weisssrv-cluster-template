@@ -66,6 +66,7 @@ def test_an_emptied_except_list_fails(tmp_path):
     assert all(CANONICAL_LISTS), "the gate exposed an empty canonical list"
     result = _run(_write(tmp_path, _fenced([])))
     assert result.returncode == 1, result.stdout + result.stderr
+    assert "with no except-list" in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("canonical", CANONICAL_LISTS, ids=CANONICAL_IDS)
@@ -75,6 +76,7 @@ def test_a_shortened_except_list_fails(tmp_path, canonical):
     shortened = [c for c in canonical if c != "169.254.0.0/16"]
     result = _run(_write(tmp_path, _fenced(shortened)))
     assert result.returncode == 1, result.stdout + result.stderr
+    assert "non-canonical except-list" in result.stdout + result.stderr
 
 
 def test_a_directory_with_no_policies_is_an_operator_error(tmp_path):
@@ -130,3 +132,4 @@ def test_a_config_entry_without_a_reason_is_an_operator_error(tmp_path):
     directory = _write(tmp_path, _policy([{"ports": [{"port": 443}]}], name="wide-open"))
     result = _run(directory, _config(tmp_path, {"example-app/wide-open": ""}))
     assert result.returncode == 2, result.stdout + result.stderr
+    assert "example-app/wide-open] has no reason" in result.stdout + result.stderr

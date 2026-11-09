@@ -3,16 +3,15 @@
 # only, safe to `source` under a caller's `set -e`; each reads a kubectl list on
 # stdin and writes a verdict to stdout. Contract: docs/SCRIPTS.md.
 
-# Every helper here needs jq. The driver stays site-shaped; only the
-# classification lives in this file, so one implementation is tested once.
+# The classifiers need jq; the GitLab probe needs curl and the sibling
+# cluster-config-value.sh. The driver stays site-shaped; only the classification
+# and the probe live in this file, so one implementation is tested once.
 
 # jq fragment: list items whose Ready condition is missing or not True.
 JQ_NOT_READY='select((.status.conditions // []) | map(select(.type == "Ready")) | (length == 0 or .[0].status != "True"))'
 
-# CRITICAL: a swallowed jq error reads as "nothing is wrong". The name helpers
-# print to stderr and return non-zero so an empty list cannot pass for a clean
-# one; count_not_ready prints 999, which only a numeric caller can act on, so it
-# is not fail-closed on its own.
+# A swallowed jq error must not read as "nothing is wrong": the name helpers
+# print to stderr and return non-zero, so an empty list never passes for a clean one.
 
 # count_not_ready: read a `kubectl get <kind> -o json` list on stdin, print how
 # many items are not Ready. 999 only when jq errors; empty input prints nothing,
@@ -89,4 +88,44 @@ helmreleases_hard_failed() {
     echo "helmreleases_hard_failed: jq failed, hard-failure state is unknown" >&2
     return 1
   }
+}
+
+# gitlab_health_code <path>: one GitLab health probe over curl, git.<internal
+# domain> first and git.<external domain> only on a connection failure;
+# GITLAB_HEALTH_INTERNAL / GITLAB_HEALTH_EXTERNAL override the URLs.
+gitlab_health_code() {
+  local path="${1:-/-/health}" code="" domains lib_dir int_dom ext_dom
+  local internal="${GITLAB_HEALTH_INTERNAL:-}"
+  local external="${GITLAB_HEALTH_EXTERNAL:-}"
+  if [ -z "$internal" ] || [ -z "$external" ]; then
+    # Domains come from cluster-config.yaml, the single source, not a literal.
+    # An override that is set is probed even when the other cannot be resolved.
+    lib_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    if domains=$("$lib_dir/cluster-config-value.sh" \
+        cluster_internal_domain cluster_external_domain 2>&1); then
+      read -r int_dom ext_dom <<<"$domains"
+      internal="${internal:-https://git.${int_dom}}"
+      external="${external:-https://git.${ext_dom}}"
+    else
+      echo "cannot resolve the GitLab hostnames: $domains" >&2
+    fi
+  fi
+  if [ -n "$internal" ]; then
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -- "${internal}${path}" 2>/dev/null || true)
+  fi
+  if { [ -z "$code" ] || [ "$code" = "000" ]; } && [ -n "$external" ]; then
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -- "${external}${path}" 2>/dev/null || true)
+  fi
+  echo "${code:-000}"
+}
+
+# gitlab_health_verdict <code>: 1 healthy, 0 unhealthy, "unknown" when the code
+# says the endpoint is not probeable from here. The health paths are
+# monitoring_whitelist-gated, so 401/403/404 is the collector's position.
+gitlab_health_verdict() {
+  case "${1:-}" in
+    200) printf '1' ;;
+    401|403|404) printf 'unknown' ;;
+    *) printf '0' ;;
+  esac
 }

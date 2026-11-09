@@ -1,12 +1,7 @@
 ---
-# CRITICAL: INTERACTIVE. Brings a NAS with empty or missing datasets up to the
-# layout group_vars/nas.yml declares, then configures the storage services.
-# ZFS POOLS ARE NEVER CREATED HERE: the playbook stops and names the pools to
-# create by hand (docs/RUNBOOKS.md "Storage bootstrap"). Datasets are created
-# only after you confirm the list; existing datasets are left alone.
-# `task storage:deploy` is the day-2 path.
-#
-#   task disaster-recovery:storage-bootstrap
+# INTERACTIVE: creates the datasets group_vars/nas.yml declares, never a pool.
+# Run it with `task disaster-recovery:storage-bootstrap`; `task storage:deploy`
+# is the day-2 path. docs/RUNBOOKS.md "Storage bootstrap" has the procedure.
 
 - name: Detect existing storage
   hosts: nas
@@ -18,6 +13,16 @@
       register: existing_pools
       changed_when: false
       failed_when: false
+
+    # An unloaded ZFS module empties the pool list too; that is no reason to
+    # tell the operator to create pools.
+    - name: Assert the ZFS tools answered
+      ansible.builtin.assert:
+        that:
+          - existing_pools.rc == 0
+        fail_msg: >-
+          `zpool list` failed ({{ existing_pools.stderr | default('') | trim }}).
+          Load the ZFS module (`modprobe zfs`) and re-run.
 
     - name: Read existing datasets in each declared pool
       ansible.builtin.command: "zfs list -H -o name -r {{ item.name }}"
@@ -125,7 +130,6 @@
 
     # CRITICAL: a hard stop, not a notice. Continuing past a missing encrypted
     # dataset writes the exports onto the parent unencrypted filesystem.
-    # The loop shape mirrors the create task to satisfy ansible-lint.
     - name: Stop until encrypted datasets are created by hand
       ansible.builtin.fail:
         msg: >-
@@ -207,6 +211,12 @@
         name: weisssrv.infra.nas_storage
         tasks_from: samba.yml
       when: nas_storage_samba_shares | default([]) | length > 0
+
+    - name: Configure the media mover
+      ansible.builtin.include_role:
+        name: weisssrv.infra.nas_storage
+        tasks_from: media_mover.yml
+      when: nas_storage_media_mover_enabled | default(false)
 
 - name: Verify and report the storage result
   hosts: nas

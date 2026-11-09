@@ -54,21 +54,37 @@ def test_the_single_source_variables_exist() -> None:
     assert not missing, f".gitlab-ci.yml declares no {missing}"
 
 
+_VARIABLE_LINE = re.compile(r'^  (?P<name>[A-Z][A-Z0-9_]*): "(?P<value>[^"]*)"$', re.MULTILINE)
+
+
+def template_variables(text: str) -> dict[str, str]:
+    """The template pipeline's `variables:` entries this gate owns, read as text
+    because the file is Jinja and does not load as YAML."""
+    owned = set(VARIABLE_FOR.values())
+    return {m["name"]: m["value"] for m in _VARIABLE_LINE.finditer(text) if m["name"] in owned}
+
+
 def test_the_scan_finds_the_repeated_pins() -> None:
-    """Both pipelines carry at least one literal; a changed spelling is drift."""
-    for path in (CI_FILE, TEMPLATE_CI):
-        pins = [p for p, _v in literal_pins(path.read_text(encoding="utf-8"))]
-        assert [p for p in pins if p in VARIABLE_FOR], (
-            f"{path.name} spells no `<package>==<version>` literal this gate "
-            "knows — either the pins moved to variables, or the shape changed."
-        )
+    """The template's pipeline declares at least one pin this gate owns; a changed
+    spelling is drift."""
+    text = TEMPLATE_CI.read_text(encoding="utf-8")
+    pins = [p for p, _v in literal_pins(text) if p in VARIABLE_FOR]
+    assert pins or template_variables(text), (
+        f"{TEMPLATE_CI.name} spells no pin this gate knows, as a literal or a "
+        "variable — the shape changed."
+    )
 
 
-def test_literal_pip_pins_match_their_variable() -> None:
-    variables = pipeline_variables(CI_FILE)
-    stale = drifted(CI_FILE.read_text(encoding="utf-8"), variables)
-    assert not stale, ".gitlab-ci.yml literal pins disagree with variables:\n  " + "\n  ".join(
-        stale
+def test_this_pipeline_spells_no_literal_pin_a_variable_owns() -> None:
+    """Every pin here reads its variable, so none can drift from it."""
+    literals = [
+        f"{package}=={version}"
+        for package, version in literal_pins(CI_FILE.read_text(encoding="utf-8"))
+        if package in VARIABLE_FOR
+    ]
+    assert not literals, (
+        f".gitlab-ci.yml repeats {literals} as literals; spell them "
+        "`<package>==$<VARIABLE>` so the `variables:` entry stays the one source"
     )
 
 
@@ -76,7 +92,12 @@ def test_the_generated_pipeline_pins_the_same_tools() -> None:
     """The template's own pipeline installs the tools a render is tested with, so
     a generated cluster is not validated against a different ansible-core."""
     variables = pipeline_variables(CI_FILE)
-    stale = drifted(TEMPLATE_CI.read_text(encoding="utf-8"), variables)
+    text = TEMPLATE_CI.read_text(encoding="utf-8")
+    stale = drifted(text, variables) + [
+        f"{name} is {value} but this repository's is {variables[name]}"
+        for name, value in template_variables(text).items()
+        if name in variables and variables[name] != value
+    ]
     assert not stale, (
         "template/.gitlab-ci.yml.jinja literal pins disagree with this "
         "repository's variables:\n  " + "\n  ".join(stale)
@@ -125,7 +146,7 @@ def test_the_core_pin_tracks_the_renders_ansible_pin() -> None:
 @pytest.mark.parametrize(
     ("ansible_pin", "expected"),
     [("14.5.0", "2.21"), ("11.6.0", "2.18")],
-    ids=["current", "older-line"],
+    ids=["major-14", "major-11"],
 )
 def test_the_core_line_derivation_is_exercised(ansible_pin, expected) -> None:
     """Mutation case: a stale core line is only caught if the mapping holds."""

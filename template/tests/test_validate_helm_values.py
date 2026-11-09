@@ -1,102 +1,97 @@
-"""The post-render policy half of scripts/validate-helm-values.py.
+"""validate-helm-values.py's post-render policy, driven with stubbed helm.
 
-`helm template` is monkeypatched out, so the CPU-limit arm that gates every app
-added to this cluster is exercised here without the network.
+These pin the arms the library suite does not: the release identity helm
+renders with, a failed render, a bare-name allowlist entry and an unknown key.
 """
-
 from __future__ import annotations
 
 import subprocess
 from pathlib import Path
 
+import yaml
 from conftest import load_script
 
 vhv = load_script("validate-helm-values.py")
 
-HR_BODY = """apiVersion: helm.toolkit.fluxcd.io/v2
+VERSIONS = {"demo_version": "1.2.3", "k3s_version": "v1.36.2+k3s1"}
+
+MANIFEST = """\
+apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
-metadata: {name: app, namespace: ns}
+metadata:
+  name: demo
+  namespace: demo-ns
 spec:
-  chart: {spec: {version: 1.0.0}}
-  values: {}
-"""
-
-RENDERED = """apiVersion: apps/v1
-kind: Deployment
-metadata: {name: app, namespace: ns}
-spec:
-  template:
+  chart:
     spec:
-      containers:
-        - name: c
-          resources:
-            limits: {%s}
+      chart: demo
+      version: "${demo_version}"
+  values:
+    replicaCount: 1
 """
 
-
-class _FakeSubprocess:
-    """Stands in for the subprocess module validate_release renders through."""
-
-    def __init__(self, stdout: str, returncode: int = 0) -> None:
-        self._result = subprocess.CompletedProcess([], returncode, stdout, "render failed")
-
-    def run(self, *_args, **_kwargs):
-        return self._result
+REL = {"name": "demo", "manifest": "release.yaml",
+       "repo_name": "demo-repo", "chart": "demo"}
 
 
-def _release(tmp_path: Path) -> dict:
-    (tmp_path / "release.yaml").write_text(HR_BODY)
-    return {
-        "name": "app",
-        "manifest": "release.yaml",
-        "chart": "app",
-        "repo_name": "app",
-        "repo_url": "https://example.invalid/charts",
-    }
+def _workload(cpu_limit: str | None = None) -> str:
+    container: dict = {"name": "app", "image": "demo:1"}
+    if cpu_limit is not None:
+        container["resources"] = {"limits": {"cpu": cpu_limit}}
+    return yaml.safe_dump({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "demo", "namespace": "demo-ns"},
+        "spec": {"template": {"spec": {"containers": [container]}}},
+    })
 
 
-def _render(monkeypatch, limits: str, returncode: int = 0) -> None:
-    monkeypatch.setattr(vhv, "subprocess", _FakeSubprocess(RENDERED % limits, returncode))
+def _validate(monkeypatch, repo: Path, rendered: str, *, allowlist=None,
+              manifest: str = MANIFEST, helm_rc: int = 0):
+    """Run validate_release with `helm template` stubbed out. Returns (ok, cmd)."""
+    (repo / "release.yaml").write_text(manifest)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, helm_rc, stdout=rendered, stderr="boom")
+
+    monkeypatch.setattr(vhv.subprocess, "run", fake_run)
+    ok = vhv.validate_release(REL, VERSIONS, str(repo), False, "1.36.2", allowlist)
+    return ok, (calls[0] if calls else [])
 
 
-def test_the_shared_cpu_limit_scanner_is_loaded():
-    """The kustomize-side gate and this one must use one scanner and allowlist."""
-    assert callable(vhv._hpa.cpu_limit_violations)
-    assert isinstance(vhv._hpa.Policy().cpu_limit_allowlist, set)
+def test_helm_is_given_the_helmrelease_name_namespace_and_version(monkeypatch, tmp_path):
+    """Charts that key off .Release.Name/.Release.Namespace must render the
+    same object Flux applies."""
+    _, cmd = _validate(monkeypatch, tmp_path, _workload())
+    assert cmd[:3] == ["helm", "template", "demo"]
+    assert cmd[cmd.index("--namespace") + 1] == "demo-ns"
+    assert cmd[cmd.index("--version") + 1] == "1.2.3"
 
 
-def test_an_all_clean_render_passes(tmp_path, monkeypatch):
-    _render(monkeypatch, "memory: 128Mi")
-    assert vhv.validate_release(_release(tmp_path), {}, str(tmp_path), False, "1.30.0") is True
+def test_targetnamespace_wins_over_the_metadata_namespace(monkeypatch, tmp_path):
+    manifest = MANIFEST.replace(
+        "spec:\n  chart:", "spec:\n  targetNamespace: elsewhere\n  chart:")
+    _, cmd = _validate(monkeypatch, tmp_path, _workload(), manifest=manifest)
+    assert cmd[cmd.index("--namespace") + 1] == "elsewhere"
 
 
-def test_a_chart_rendered_cpu_limit_fails(tmp_path, monkeypatch, capsys):
-    """The policy's blind spot: the limit is a chart default, so it never appears
-    in the HelmRelease values the kustomize-side gate scans."""
-    _render(monkeypatch, "cpu: 500m")
-    assert vhv.validate_release(_release(tmp_path), {}, str(tmp_path), False, "1.30.0") is False
-    assert "chart-rendered pods set a CPU limit" in capsys.readouterr().out
+def test_a_failed_render_fails(monkeypatch, tmp_path):
+    ok, _ = _validate(monkeypatch, tmp_path, "", helm_rc=1)
+    assert not ok
 
 
-def test_the_allowlist_suppresses_a_deliberate_limit(tmp_path, monkeypatch):
-    _render(monkeypatch, "cpu: 500m")
-    assert vhv.validate_release(
-        _release(tmp_path), {}, str(tmp_path), False, "1.30.0",
-        cpu_limit_allowlist={"ns/Deployment/app"},
-    ) is True
+def test_a_bare_name_allowlist_entry_does_not_waive(monkeypatch, tmp_path):
+    """A bare name would waive the same workload in every namespace."""
+    ok, _ = _validate(monkeypatch, tmp_path, _workload("500m"), allowlist={"demo"})
+    assert not ok
 
 
-def test_a_failed_render_fails_the_release(tmp_path, monkeypatch, capsys):
-    _render(monkeypatch, "memory: 128Mi", returncode=1)
-    assert vhv.validate_release(_release(tmp_path), {}, str(tmp_path), False, "1.30.0") is False
-    assert "helm template failed" in capsys.readouterr().out
-
-
-def test_an_unknown_configmap_placeholder_is_refused(tmp_path, monkeypatch, capsys):
+def test_an_unknown_configmap_key_fails_before_helm_runs(monkeypatch, tmp_path):
     """Flux would substitute it; rendering with the literal validates an object
     the cluster never sees."""
-    _render(monkeypatch, "memory: 128Mi")
-    rel = _release(tmp_path)
-    (tmp_path / "release.yaml").write_text(HR_BODY.replace("1.0.0", "${app_version}"))
-    assert vhv.validate_release(rel, {}, str(tmp_path), False, "1.30.0") is False
-    assert "unknown configmap key" in capsys.readouterr().out
+    manifest = MANIFEST.replace("${demo_version}", "${not_a_key}")
+    ok, cmd = _validate(monkeypatch, tmp_path, _workload(), manifest=manifest)
+    assert not ok
+    assert cmd == []

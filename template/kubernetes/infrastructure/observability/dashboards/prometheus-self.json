@@ -3018,7 +3018,7 @@
           "uid": "prometheus"
         },
         "definition": "label_values(kube_node_info,cluster)",
-        "hide": 0,
+        "hide": 2,
         "includeAll": false,
         "multi": false,
         "name": "cluster",

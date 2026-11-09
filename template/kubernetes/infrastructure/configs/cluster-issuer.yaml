@@ -24,8 +24,8 @@ spec:
             - ${cluster_internal_domain}
 
 ---
-# Staging: same solver, far higher rate limits, untrusted certificates. Costs one unused
-# object while `cluster_issuer` names the production issuer.
+# Staging: same solver, far higher rate limits, untrusted certificates. Point
+# `cluster_issuer` here to test issuance without spending production limits.
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:

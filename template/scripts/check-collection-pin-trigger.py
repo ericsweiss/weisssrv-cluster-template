@@ -16,52 +16,27 @@ except ImportError:  # pragma: no cover - environment guard
     print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
     raise SystemExit(2) from None
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from ci_playbook_invocations import parse_invocations
+    from ci_yaml import Reference, load_ci, script_lines
+except ImportError:
+    print(
+        "ERROR: ci_yaml.py and ci_playbook_invocations.py must sit next to this "
+        "script; vendor them from weisssrv-lib.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2) from None
+
 REPO = Path(__file__).resolve().parent.parent
 CI_FILE = REPO / ".gitlab-ci.yml"
 PIN = "ansible/requirements.yml"
 
 
-class Reference:
-    """A `!reference [target, key, ...]` node, kept as data so it can be
-    resolved against the document instead of collapsing to None."""
-
-    def __init__(self, path: list):
-        self.path = [p for p in path if isinstance(p, str)]
-
-    def resolve(self, doc: dict):
-        node = doc
-        for step in self.path:
-            if not isinstance(node, dict) or step not in node:
-                return None
-            node = node[step]
-        return node
-
-
-class CILoader(yaml.SafeLoader):
-    """SafeLoader tolerating GitLab's !reference tags, subclassed so the
-    constructor is not registered on the global SafeLoader."""
-
-
-def _tag(loader, suffix, node):
-    if suffix == "reference" and isinstance(node, yaml.SequenceNode):
-        return Reference(loader.construct_sequence(node))
-    return None
-
-
-CILoader.add_multi_constructor("!", _tag)
-
-
 def _load_ci(path: Path) -> dict:
-    """The jobs document of a pipeline file.
-
-    GitLab's inputs syntax makes a pipeline file two documents, `spec:` then
-    the jobs, so the last mapping document is the one this gate wants.
-    """
-    docs = [
-        d for d in yaml.load_all(path.read_text(encoding="utf-8"), Loader=CILoader)
-        if isinstance(d, dict)
-    ]
-    return docs[-1] if docs else {}
+    """The jobs document of a pipeline file, `!reference` nodes kept as data."""
+    return load_ci(path)
 
 
 def _changes_of(rule, doc: dict) -> list:
@@ -105,33 +80,45 @@ def deploy_jobs(ci: dict) -> dict[str, dict]:
     }
 
 
-def _effective_rules(name: str, ci: dict, seen: tuple[str, ...] = ()):
-    """A job's `rules:` after `extends:` resolution, last-parent-wins.
+def _effective(name: str, ci: dict, key: str, seen: tuple[str, ...] = ()):
+    """A job's `key` after `extends:` resolution, last-parent-wins.
 
     A job's own key wins outright; otherwise parents are searched in reverse
-    declaration order. None means no ancestor declares rules."""
+    declaration order. None means no ancestor declares the key."""
     if name in seen:
         return None
     job = ci.get(name)
     if not isinstance(job, dict):
         return None
-    if "rules" in job:
-        return job.get("rules") or []
+    if key in job:
+        return job.get(key) or []
     parents = job.get("extends") or []
     if isinstance(parents, str):
         parents = [parents]
     for parent in reversed(parents):
-        inherited = _effective_rules(parent, ci, (*seen, name))
+        inherited = _effective(parent, ci, key, (*seen, name))
         if inherited is not None:
             return inherited
     return None
 
 
+def runs_a_playbook(name: str, ci: dict) -> bool:
+    """Whether the job's effective script or before_script calls ansible-playbook."""
+    lines: list[str] = []
+    for key in ("before_script", "script"):
+        lines += script_lines({key: _effective(name, ci, key) or []}, ci, key)
+    return bool(parse_invocations("\n".join(lines)))
+
+
 def jobs_missing_the_pin(ci: dict) -> list[str]:
+    """Deploy jobs that run a playbook, by script or by trigger path, without the pin."""
     missing = []
     for name, job in deploy_jobs(ci).items():
-        paths = rule_paths({**job, "rules": _effective_rules(name, ci) or []}, ci)
-        if any(p.startswith("ansible/playbooks/") for p in paths) and PIN not in paths:
+        paths = rule_paths({**job, "rules": _effective(name, ci, "rules") or []}, ci)
+        playbook = runs_a_playbook(name, ci) or any(
+            p.startswith("ansible/playbooks/") for p in paths
+        )
+        if playbook and PIN not in paths:
             missing.append(name)
     return sorted(missing)
 
