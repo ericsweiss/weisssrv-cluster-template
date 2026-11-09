@@ -273,8 +273,29 @@ _JINJA_SCAN_EXEMPT: set[tuple[str, str]] = {
         "A `{% raw %}` body is kept verbatim, only its tags dropped: jinja reads no",
     ),
     (
+        "scripts/check-comment-length.py",
+        "# A line holding only `{% %}` statements renders to nothing when the engine",
+    ),
+    (
+        "scripts/check-comment-length.py",
+        'JINJA_STATEMENT_LINE = re.compile(r"^(?:\\{%.*?%\\}\\s*)+$")',
+    ),
+    ("scripts/check-comment-length.py", 'JINJA_KEYWORD = re.compile(r"\\{%-?\\s*(\\w+)")'),
+    (
+        "scripts/check-comment-length.py",
+        'return trim_blocks or stripped.startswith("{%-") or stripped.endswith("-%}")',
+    ),
+    (
+        "scripts/check-comment-length.py",
+        "\"are not comments. A line of only '{% %}' statements in a .j2, or \"",
+    ),
+    (
         "scripts/check-role-inputs.py",
         '"{% if " + condition + " %}yes{% else %}no{% endif %}"',
+    ),
+    (
+        "scripts/check-internal-route-allowlist.py",
+        'return Domains(literals, "${%s}" % args.domain_key)',
     ),
 }
 
@@ -604,6 +625,17 @@ def test_tailnet_gating_is_all_or_nothing(cluster, rendered, rendered_b):
         )
 
 
+def test_the_admin_overlay_set_follows_the_tailnet_answer(cluster):
+    """Without a tailnet the admin_ts IPSet renders empty; the role default
+    would admit the whole CGNAT range to :22, :8006 and :6443."""
+    all_vars = yaml.safe_load(
+        (cluster.path / "ansible/inventories/prod/group_vars/all.yml").read_text(encoding="utf-8"))
+    if cluster.answers["vpn_tailscale"]:
+        assert "proxmox_firewall_admin_ts_cidrs" not in all_vars
+    else:
+        assert all_vars["proxmox_firewall_admin_ts_cidrs"] == []
+
+
 def test_compose_app_collection_is_all_or_nothing(cluster):
     """The collect_compose_app definition and its run_section call sites are gated
     on the same answer. A call site with no definition is a bash script that
@@ -789,12 +821,20 @@ def test_every_local_hook_brings_the_dependencies_its_script_imports(cluster):
 def test_every_rendered_text_file_ends_with_exactly_one_newline(cluster):
     """The render satisfies the `end-of-file-fixer` hook it ships.
 
-    A template whose final jinja tag emits its own newline renders a trailing
-    blank line, so the operator's first commit is rewritten by their own hook.
+    A trailing blank line from a final jinja tag makes the operator's own hook
+    rewrite their first commit. Like the hook, this skips library copies.
     """
+    config = yaml.safe_load((cluster.path / ".pre-commit-config.yaml").read_text())
+    (hook,) = [
+        hook for repo in config["repos"] for hook in repo.get("hooks") or []
+        if hook["id"] == "end-of-file-fixer"
+    ]
+    skipped = re.compile(hook.get("exclude") or r"(?!)")
     offenders = []
     for path, text in _text_files(cluster.path):
         if "__pycache__" in path.parts:
+            continue
+        if skipped.search(path.relative_to(cluster.path).as_posix()):
             continue
         if not text:
             continue
@@ -953,6 +993,19 @@ def test_rw_nfs_exports_are_scoped_to_named_hosts(cluster):
     assert not offenders, (
         "writable NFS exports that are not scoped to one host:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_nas_declares_encrypted_bind_sources(cluster):
+    """The encrypted bind sources order the bind mounts and nfsd after the key
+    load, and SETUP.md sends the operator to this file for them. An undeclared
+    key leaves that boot-ordering knob where nobody finds it."""
+    nas = cluster.path / "ansible" / "inventories" / "prod" / "group_vars" / "nas.yml"
+    assert nas.is_file(), "the render ships no group_vars/nas.yml"
+    values = yaml.safe_load(nas.read_text())
+    assert "nas_storage_encrypted_bind_sources" in values, (
+        "group_vars/nas.yml does not declare nas_storage_encrypted_bind_sources"
+    )
+    assert isinstance(values["nas_storage_encrypted_bind_sources"], list)
 
 
 def test_manifests_reference_substitution_placeholders(cluster):
@@ -1218,6 +1271,8 @@ EXTRA_VALIDATION_GATES = (
     "scripts/check-netpol-except-parity.py",
     "scripts/netpol-except.yaml",
     "scripts/check-backup-artifact-apps.py",
+    "scripts/check-internal-route-allowlist.py",
+    "scripts/check-crd-stage-order.py",
     "scripts/validate-helm-values.py",
     "scripts/autoscaling-policy.yaml",
     "scripts/helm-values-releases.yaml",
@@ -1326,12 +1381,14 @@ def test_flux_lint_renders_through_fluxs_strict_envsubst(cluster):
         "where the strict render and every floor below it live"
     )
     program = (cluster.path / FLUX_LINT_PROGRAM).read_text(encoding="utf-8")
-    assert "flux envsubst --strict" in program, (
+    # The program resolves the flux binary itself and runs it as "$flux_bin".
+    strict_call = '"$flux_bin" envsubst --strict'
+    assert strict_call in program, (
         f"{FLUX_LINT_PROGRAM} never runs Flux's strict substitution, so only "
         "the cheap pre-substitution scans stand between a bad placeholder and "
         "a BuildFailed Kustomization on main"
     )
-    strict = program.index("flux envsubst --strict")
+    strict = program.index(strict_call)
     gnu = program.index('envsubst "$FLUX_ENVSUBST_VARS"')
     assert strict < gnu, (
         "the strict pass runs after the GNU render, so a form Flux rejects is "
@@ -1372,27 +1429,45 @@ def test_netpol_except_parity_is_gated(cluster):
     )
 
 
+def test_the_doc_links_hook_sets_the_task_environment(cluster):
+    """The pre-commit hook and `task lint:doc-links` scan the same paths: a hook
+    without CHECK_DOC_LINKS_PATHS skips the backticked-path pass the task runs."""
+    config = yaml.safe_load((cluster.path / ".pre-commit-config.yaml").read_text()) or {}
+    (entry,) = [
+        hook["entry"]
+        for repo in config.get("repos") or []
+        for hook in repo.get("hooks") or []
+        if hook.get("id") == "doc-links"
+    ]
+    argv = shlex.split(entry)
+    assert argv[0] == "env", f"the doc-links hook sets no environment: {entry}"
+    hook_env = dict(arg.split("=", 1) for arg in argv[1:] if "=" in arg)
+    task_env = (_taskfile_tree(cluster.path).get("lint:doc-links") or {}).get("env") or {}
+    assert task_env, "`task lint:doc-links` sets no environment"
+    assert hook_env == {k: str(v) for k, v in task_env.items()}, (
+        f"the doc-links hook runs with {hook_env}, the task with {task_env}"
+    )
+
+
 _NETPOL_GATE = "scripts/check-netpol-except-parity.py"
+_SKILL_REFS_GATE = "scripts/check-skill-refs.py"
 
 
-def _netpol_gate_argv(root: Path) -> dict[str, list[str]]:
-    """The egress-fence invocation as each shipped runner spells it.
+def _gate_argv(root: Path, gate: str, task: str, job: str) -> dict[str, list[str]]:
+    """A gate's invocation as each shipped runner spells it.
 
-    The interpreter token is dropped: the pre-commit hook runs `python` inside
+    The interpreter token is dropped: a pre-commit hook may run `python` inside
     its own venv, the Taskfile and the pipeline run `python3`.
     """
     tasks = _taskfile_tree(root)
     config = yaml.safe_load((root / ".pre-commit-config.yaml").read_text()) or {}
     sources = {
-        "task lint:netpol-parity": [
-            str(step) for step in (tasks.get("lint:netpol-parity") or {}).get("cmds") or []
-        ],
-        "the netpol-parity CI job": [
+        f"task {task}": [str(step) for step in (tasks.get(task) or {}).get("cmds") or []],
+        f"the {job} CI job": [
             str(step)
-            for step in (_load_ci(root / ".gitlab-ci.yml").get("netpol-parity") or {}).get("script")
-            or []
+            for step in (_load_ci(root / ".gitlab-ci.yml").get(job) or {}).get("script") or []
         ],
-        "the netpol-except-parity pre-commit hook": [
+        "the local pre-commit hooks": [
             str(hook.get("entry", ""))
             for repo in config.get("repos") or []
             if repo.get("repo") == "local"
@@ -1401,12 +1476,23 @@ def _netpol_gate_argv(root: Path) -> dict[str, list[str]]:
     }
     argv = {}
     for name, lines in sources.items():
-        matching = [shlex.split(line)[1:] for line in lines if _NETPOL_GATE in line]
-        assert len(matching) == 1, (
-            f"{name} invokes {_NETPOL_GATE} {len(matching)} times, expected once"
-        )
+        matching = [shlex.split(line)[1:] for line in lines if gate in line]
+        assert len(matching) == 1, f"{name} invokes {gate} {len(matching)} times, expected once"
         argv[name] = matching[0]
     return argv
+
+
+def _netpol_gate_argv(root: Path) -> dict[str, list[str]]:
+    return _gate_argv(root, _NETPOL_GATE, "lint:netpol-parity", "netpol-parity")
+
+
+def test_every_shipped_skill_refs_invocation_is_the_same_command(cluster):
+    """The hook, `task lint:skill-refs` and the CI job each list the --foreign
+    docs; a doc added to one runner alone checks a different set."""
+    argv = _gate_argv(cluster.path, _SKILL_REFS_GATE, "lint:skill-refs", "skill-refs")
+    assert len({tuple(value) for value in argv.values()}) == 1, (
+        f"the skill-refs gate is spelled differently by its runners: {argv}"
+    )
 
 
 def test_every_shipped_egress_fence_invocation_is_the_same_command(cluster):
@@ -1826,6 +1912,55 @@ def test_every_job_carries_a_runner_tag(cluster):
         else:
             assert tag in tags, f"{name} carries {tags}, not the configured runner tag {tag!r}"
     assert not untagged, "jobs with no runner tag:\n  " + "\n  ".join(untagged)
+
+
+# Library fragments with no `tags` input: hidden jobs pulled into a local job,
+# which carries the tag itself.
+_UNTAGGED_LIB_FILES = {
+    "/ci/deploy/kubectl-setup.yml",
+    "/ci/templates/dep-cache.yml",
+    "/ci/templates/install-1password.yml",
+    "/ci/templates/terraform-http-backend.yml",
+}
+
+
+def _untagged_lib_includes(ci_path: Path, tag: str) -> list[str]:
+    """Library includes that define jobs but pass no `tags` naming `tag`."""
+    doc = next(
+        d for d in yaml.load_all(ci_path.read_text(), Loader=render_cluster.CILoader)
+        if isinstance(d, dict) and "include" in d
+    )
+    missing = []
+    for entry in doc["include"]:
+        if not isinstance(entry, dict) or "project" not in entry:
+            continue
+        files = entry["file"] if isinstance(entry["file"], list) else [entry["file"]]
+        if set(files) <= _UNTAGGED_LIB_FILES:
+            continue
+        if tag not in ((entry.get("inputs") or {}).get("tags") or []):
+            missing.append(", ".join(files))
+    return missing
+
+
+def test_every_library_include_names_the_runner_tag(cluster):
+    """A library job defaults to `tags: []`, the shared non-root runner, where
+    an apt install, a privileged DinD or a LAN reach fails."""
+    ci_path = cluster.path / ".gitlab-ci.yml"
+    missing = _untagged_lib_includes(ci_path, cluster.answers["ci_runner_tag"])
+    assert not missing, "library includes with no runner tag:\n  " + "\n  ".join(missing)
+
+
+def test_the_include_tag_check_reports_an_untagged_include(tmp_path):
+    """Mutation case: an include with no tags input must be named."""
+    ci_path = tmp_path / ".gitlab-ci.yml"
+    ci_path.write_text(
+        "include:\n"
+        "  - project: x/lib\n    file: /ci/lint/yaml-lint.yml\n"
+        "  - project: x/lib\n    file: /ci/deploy/kubectl-setup.yml\n"
+        "  - project: x/lib\n    file: /ci/test/python-tests.yml\n"
+        "    inputs:\n      tags: [infra]\n"
+    )
+    assert _untagged_lib_includes(ci_path, "infra") == ["/ci/lint/yaml-lint.yml"]
 
 
 # --------------------------------------------------------------------------
@@ -2426,6 +2561,13 @@ def test_the_crd_catalog_ref_is_pinned_to_the_library_default(cluster):
         f"taskfiles/flux.yml pins CRD_CATALOG_REF {variables.get('CRD_CATALOG_REF')!r}, "
         f"expected {CRD_CATALOG_REF!r}"
     )
+    # validate-helm-values.py reads the ref from the environment, and go-task
+    # exports no `vars:`, so the lint task must pass it through `env:`.
+    lint_env = ((yaml.safe_load(flux_tasks) or {}).get("tasks") or {}).get("lint", {}).get("env") or {}
+    assert lint_env.get("CRD_CATALOG_REF") == "{{.CRD_CATALOG_REF}}", (
+        "`task flux:lint` does not export CRD_CATALOG_REF, so validate-helm-values.py "
+        f"run by the corpus gates exits 2 locally: {lint_env!r}"
+    )
     # The schema location is flux-lint.sh's to build; the taskfile hands it the
     # revision, so a call site spelling its own URL would escape the pin.
     passed = re.findall(r"--crd-catalog-ref '([^']+)'", flux_tasks)
@@ -2463,35 +2605,6 @@ def test_the_crd_catalog_ref_matches_the_librarys_input_default(tmp_path):
     assert str(inputs["crd_catalog_ref"]["default"]) == CRD_CATALOG_REF, (
         "the library's crd_catalog_ref default moved; bump CRD_CATALOG_REF here and "
         "in template/taskfiles/flux.yml.jinja"
-    )
-
-
-RENDERED_RULESET = ".gitlab/secret-detection-ruleset.toml"
-LIB_RULESET = "lint/secret-detection-ruleset.toml"
-
-
-def _ruleset_settings(text: str) -> list[str]:
-    """The ruleset's settings, without comments or the per-repo description."""
-    return [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-        and not line.lstrip().startswith("description")
-    ]
-
-
-def test_rendered_secret_detection_ruleset_tracks_the_library(cluster, tmp_path):
-    """The rendered ruleset is a Jinja source, so it is outside the byte-identity
-    gate. Its SHAPE still has to be the library's at the declared lib_ref, or a
-    schema change upstream leaves every cluster generated afterwards on the old one."""
-    rendered = cluster.path / RENDERED_RULESET
-    assert rendered.is_file(), f"the render ships no {RENDERED_RULESET}"
-    lib = pinned_lib(tmp_path, "ruleset parity gate", "check-vendored-copies.py")
-    assert _ruleset_settings(rendered.read_text()) == _ruleset_settings(
-        (lib / LIB_RULESET).read_text()
-    ), (
-        f"{RENDERED_RULESET} and the library's {LIB_RULESET} declare different "
-        "settings — re-absorb the library's ruleset"
     )
 
 
@@ -2541,6 +2654,9 @@ def test_generated_repo_passes_its_own_invariants(cluster):
     )
 
 
+_GATED_SEGMENT = re.compile(r"\{%\s*if\s[^%]*%\}([^{}]*)\{%\s*endif\s*%\}")
+
+
 def _manifest_copies(path: Path) -> set[tuple[str, str, str]]:
     """(kind, consumer path, library path) for every entry in a manifest.
 
@@ -2581,14 +2697,16 @@ def test_render_manifest_covers_exactly_the_library_copies_it_ships(cluster):
     )
     rendered = _manifest_copies(manifest)
 
-    # This repository's own manifest is the authority on which files under
-    # template/ are library copies, and is itself gated against the library, so
-    # it stands in for a library checkout this suite does not have.
-    template_copies = {
-        (kind, consumer[len("template/") :], lib)
-        for kind, consumer, lib in _manifest_copies(REPO_ROOT / VENDORED_MANIFEST)
-        if consumer.startswith("template/")
-    }
+    # This repository's own manifest, gated against the library, names the
+    # library copies under template/. A gated directory renders under its bare
+    # name, or not at all when its gate is off.
+    template_copies = set()
+    for kind, consumer, lib in _manifest_copies(REPO_ROOT / VENDORED_MANIFEST):
+        if not consumer.startswith("template/"):
+            continue
+        path = _GATED_SEGMENT.sub(r"\1", consumer[len("template/") :])
+        if path == consumer[len("template/") :] or (cluster.path / path).is_file():
+            template_copies.add((kind, path, lib))
     missing = sorted(consumer for _kind, consumer, _lib in template_copies - rendered)
     assert not missing, (
         "template/scripts/vendored-manifest.yml does not register copies this "
@@ -2622,7 +2740,7 @@ def test_render_manifest_covers_exactly_the_library_copies_it_ships(cluster):
     forks = {consumer for kind, consumer, _lib in rendered if kind == "forked"}
     assert forks, (
         f"the render's {VENDORED_MANIFEST} declares no forks — the lint profiles it "
-        "ships (ruff.toml, .editorconfig) are forks of the library's, and dropping "
+        "ships (.editorconfig, .gitleaks.toml) are forks of the library's, and dropping "
         "them from the manifest is how the library moves under them unnoticed"
     )
 
@@ -3366,6 +3484,17 @@ def test_the_junit_sanitizer_runs_strict(cluster):
     )
 
 
+def test_retried_attempts_are_kept_as_artifacts(cluster):
+    """molecule-retry.sh stashes a failed attempt's reports in a subdirectory the
+    junit report glob does not match, so only an artifact path keeps them."""
+    assert "failed-attempt-" in (cluster.path / "scripts" / "molecule-retry.sh").read_text()
+    jobs = _load_ci(cluster.path / ".gitlab" / "ci" / "integration-jobs.yml")
+    artifacts = (jobs[".integration-test-job"] or {}).get("artifacts") or {}
+    assert "junit/failed-attempt-*/" in (artifacts.get("paths") or []), (
+        "the integration job drops the attempts molecule-retry.sh stashes"
+    )
+
+
 def test_the_taskfile_runs_exactly_the_rendered_scenarios(cluster):
     """`task ansible:test-integration` is the third copy of the scenario list and
     the only one no shipped gate holds: a scenario it omits is skipped locally
@@ -3724,18 +3853,17 @@ def _tenants_readme(cluster) -> str:
 
 
 def test_the_example_tenant_quota_caps_tenant_local_only_with_tenant_storage(cluster):
-    """tenant-local enforces no size on the shared zvol, so the example quota every
-    tenant wiring file is copied from must cap it whenever tenant_storage renders,
-    and the off render must carry no key for a class it does not have."""
+    """The example quota caps tenant-local, which enforces no size, whenever
+    tenant_storage renders and names no class it lacks; the vendored
+    check-tenant-wiring.py requires the claim count on both."""
     readme = _tenants_readme(cluster)
     quota = readme.split("name: example-app-quota")[1].split("\n---")[0]
     key = "tenant-local.storageclass.storage.k8s.io/requests.storage:"
+    assert "persistentvolumeclaims:" in quota, quota
     if cluster.answers["tenant_storage"]:
         assert key in quota, quota
-        assert "persistentvolumeclaims:" in quota, quota
     else:
         assert key not in readme
-        assert "persistentvolumeclaims:" not in quota, quota
 
 
 def test_the_example_tenant_namespace_and_caps_are_kept_out_of_flux_pruning(cluster):

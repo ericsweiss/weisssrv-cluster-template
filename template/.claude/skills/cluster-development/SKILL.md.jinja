@@ -37,6 +37,7 @@ Open the one the decision tree names rather than reading them all.
 | `references/debugging.md` | symptom to entry point, and the local gates that reproduce a CI failure |
 | `references/maintenance-upgrades.md` | the version-bump and library-pin flows, patching and reboots |
 | `references/cluster-access.md` | kubeconfig, secret references, SSH, the local toolchain |
+| `references/alert-triage.md` | a firing alert: the runbook, the rule, the live state, then the fix |
 
 ## Template first
 
@@ -118,7 +119,8 @@ Violating one of these breaks production or fails review.
 | A version pin or an upgrade | `references/maintenance-upgrades.md`, `docs/RUNBOOKS.md` § Upgrades | `task maintenance:check-versions`, then bump, `task flux:sync-versions`, commit both files |
 | An incident | `references/debugging.md`, `docs/RUNBOOKS.md` § Where to look first, then the service's dashboard and logs | `task flux:status`, `task infra:verify`, `task k3s:status` |
 | Cluster access or a credential | `references/cluster-access.md`, `docs/RUNBOOKS.md` § Rotating a secret | `task flux:rotate-secret -- <ns>/<name>`, or re-run the task that injects it host-side |
-| An alert or a dashboard | `references/add-k8s-app.md` § Alert rules, `kubernetes/infrastructure/observability/README.md` | an app's rules are a standalone `PrometheusRule` in that app's directory, not an addition to the platform map; every rule carries a `runbook_url` anchoring a heading that exists in `docs/RUNBOOKS.md`; validate with `task lint:prometheus-config` |
+| An alert is firing | `references/alert-triage.md`, then its `runbook_url` in `docs/RUNBOOKS.md` | fix the cause through an MR; silence only for planned maintenance |
+| An alert rule or a dashboard | `references/add-k8s-app.md` § Alert rules, `kubernetes/infrastructure/observability/README.md` | an app's rules are a standalone `PrometheusRule` in that app's directory, not an addition to the platform map; every rule carries a `runbook_url` anchoring a heading that exists in `docs/RUNBOOKS.md`; validate with `task lint:prometheus-config` |
 | A tenant: an application deployed from its own repository | `kubernetes/clusters/{{ cluster_name }}/tenants/README.md` | it is the canonical wiring and the operator's onboarding steps; the ONBOARDING page in the tenant's own repository renders its values into that shape |
 | A platform (role / CI / Terraform-module) change | [weisssrv-lib]({{ links.lib_home() }}) | it changes upstream and this repo bumps `lib_ref`; never vendor a role here |
 
@@ -177,9 +179,9 @@ cross-namespace call carries a leading colon (`:flux:sync-versions`).
 - **Run one review round before raising the merge request**: self-review, then
   the AI reviewer and any requested reviewer. Fix every valid finding and
   re-run the gates. When only medium or lower findings remain, fix them, run
-  the targeted checks and stop rather than starting another full round. Fold
-  any available version bumps into the same revision rather than opening a
-  separate one.
+  the targeted checks and stop rather than starting another full round. AI
+  reviewer rounds follow the same rule. Fold any available version bumps into
+  the same revision rather than opening a separate one.
 - Merge request descriptions state what was tested, in the past tense — not a
   checklist of intentions.
 - **Merges are serialized per deploy target, not per pipeline.** Let a

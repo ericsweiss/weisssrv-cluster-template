@@ -114,7 +114,6 @@
         url: "http://127.0.0.1:{{ adguard_home_http_port }}/control/status"
         method: GET
         status_code: [200, 401]
-        validate_certs: false
 
     - name: Verify AdGuard Home answers on :53
       ansible.builtin.command: dig @127.0.0.1 -p 53 example.com +short

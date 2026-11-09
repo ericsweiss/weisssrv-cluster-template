@@ -16,14 +16,15 @@ components:
   - ../../components/netpol-egress-dns
   - ../../components/netpol-egress-apiserver
 
-# The CronJob's program. It sits beside this kustomization because kustomize
-# refuses generator sources outside the kustomization root.
-# Unit tests: tests/test_gitlab_runner_reaper.py.
+# The CronJob's program and the vendored kube_reaper.py it imports from its own
+# directory. Both sit here because kustomize refuses generator sources outside
+# the kustomization root.
 configMapGenerator:
   - name: gitlab-runner-reaper-script
     namespace: gitlab-runner-reaper
     files:
       - gitlab-runner-reaper.py
+      - kube_reaper.py
 
 patches:
   # No namespace transformer here (see above), so namespace the component-shipped

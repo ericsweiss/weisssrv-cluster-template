@@ -159,8 +159,8 @@
         timeout: 5
       register: samba_port
 
-    # Anonymous access is hardened off (restrict anonymous); the listing
-    # contract is now: -N is DENIED, authenticated as nas succeeds.
+    # Anonymous access is hardened off: a -N listing is denied and an
+    # authenticated listing as `nas` succeeds.
     - name: Anonymous share listing is denied
       ansible.builtin.command: smbclient -L localhost -N
       register: anon_samba_shares
@@ -188,12 +188,12 @@
     - name: Assert local Samba shares are visible
       ansible.builtin.assert:
         that:
-          - "'media' in local_samba_shares.stdout"
-          - "'share' in local_samba_shares.stdout"
+          - local_samba_shares.stdout is search('^\s+media\s+Disk', multiline=True)
+          - local_samba_shares.stdout is search('^\s+share\s+Disk', multiline=True)
         fail_msg: "Expected Samba shares not visible locally"
         success_msg: "Samba shares are visible locally"
 
-    # Service Status Summary
+    # NFS needs kernel modules Docker lacks, so its state is logged only.
     - name: Check NFS service status (informational only)
       ansible.builtin.systemd:
         name: nfs-kernel-server
@@ -203,10 +203,9 @@
     - name: Log NFS service status
       ansible.builtin.debug:
         msg: |
-          NFS Server Status (may not be running in Docker - expected):
+          NFS server status:
           - LoadState: {{ nfs_status.status.LoadState | default('unknown') }}
           - ActiveState: {{ nfs_status.status.ActiveState | default('unknown') }}
-          Note: NFS requires kernel modules which may not work in Docker
 
 - name: Verify - Storage Stack (Samba Client Connectivity)
   hosts: smb_clients
@@ -244,8 +243,8 @@
       ansible.builtin.assert:
         that:
           - smb_list.rc == 0
-          - "'media' in smb_list.stdout"
-          - "'share' in smb_list.stdout"
+          - smb_list.stdout is search('^\s+media\s+Disk', multiline=True)
+          - smb_list.stdout is search('^\s+share\s+Disk', multiline=True)
         fail_msg: "Cannot list Samba shares from client"
         success_msg: "Can list Samba shares from client"
 
@@ -287,8 +286,7 @@
         fail_msg: "Cannot read from share"
         success_msg: "Can read from share"
 
-    # The media share is read-write for `nas`, so a failed put is a regression,
-    # not an expected outcome — assert it rather than tolerating any rc.
+    # The media share is read-write for `nas`, so a failed put is a regression.
     - name: Test writing to media share
       ansible.builtin.command: >
         smbclient //nas-server/media -U nas -c "put /etc/hostname client_test.txt"

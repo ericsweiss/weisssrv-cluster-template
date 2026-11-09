@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Pure-logic helpers a consumer's collect-state.sh sources: secret redaction,
-# the tri-state health classifiers, the section emitters. Functions and patterns
-# only. Contract: weisssrv-lib docs/SCRIPTS.md - collect-state-lib.sh.
+# Pure-logic helpers a consumer's collect-state.sh sources: secret redaction, the
+# alert and event policy, the tri-state classifiers and the section helpers.
+# Functions and patterns only. Contract: weisssrv-lib docs/SCRIPTS.md - collect-state-lib.sh.
 
 # secret redaction
 
-# POSIX classes ([[:space:]], not \s) keep these portable across BSD and GNU
-# sed. The (^|[^[:alnum:]]) prefix matches at line start OR after a separator.
+# A keyed secret's value: a double-quoted string with backslash escapes, a
+# single-quoted string, or a run of non-space. Leftmost-longest takes a quoted one whole.
+REDACT_VALUE='("([^"\\]|\\.)*"|'\''[^'\'']*'\''|[^[:space:]]+)'
+
+# POSIX classes keep these portable across BSD and GNU sed. (^|[^[:alnum:]]) is
+# line start or a separator, and `"?` admits a JSON-quoted key.
 # shellcheck disable=SC2016 # All patterns are sed-quoted regexes; $-escapes are intentional literals
 REDACT_PATTERNS=(
-    's/password[[:space:]]*[:=][[:space:]]*[^[:space:]]+/password: <REDACTED>/gi'
-    's/(^|[^[:alnum:]])token[[:space:]]*[:=][[:space:]]*[^[:space:]]+/\1token: <REDACTED>/gi'
-    's/access_token[[:space:]]*[:=][[:space:]]*[^[:space:]]+/access_token: <REDACTED>/gi'
-    's/refresh_token[[:space:]]*[:=][[:space:]]*[^[:space:]]+/refresh_token: <REDACTED>/gi'
-    's/id_token[[:space:]]*[:=][[:space:]]*[^[:space:]]+/id_token: <REDACTED>/gi'
+    's/password"?[[:space:]]*[:=][[:space:]]*'"$REDACT_VALUE"'/password: <REDACTED>/gi'
+    's/(^|[^[:alnum:]])token"?[[:space:]]*[:=][[:space:]]*'"$REDACT_VALUE"'/\1token: <REDACTED>/gi'
+    's/access_token"?[[:space:]]*[:=][[:space:]]*'"$REDACT_VALUE"'/access_token: <REDACTED>/gi'
+    's/refresh_token"?[[:space:]]*[:=][[:space:]]*'"$REDACT_VALUE"'/refresh_token: <REDACTED>/gi'
+    's/id_token"?[[:space:]]*[:=][[:space:]]*'"$REDACT_VALUE"'/id_token: <REDACTED>/gi'
     's/bearer[[:space:]]+[A-Za-z0-9._~+\/=-]+/Bearer <REDACTED>/gi'
     's/authorization:[[:space:]]*basic[[:space:]]+[A-Za-z0-9+\/=]+/authorization: Basic <REDACTED>/gi'
-    's/(^|[^[:alnum:]])secret[[:space:]]*[:=][[:space:]]*[^[:space:]]+/\1secret: <REDACTED>/gi'
-    's/(^|[^[:alnum:]])api_?key[[:space:]]*[:=][[:space:]]*[^[:space:]]+/\1api_key: <REDACTED>/gi'
+    's/(^|[^[:alnum:]])secret"?[[:space:]]*[:=][[:space:]]*'"$REDACT_VALUE"'/\1secret: <REDACTED>/gi'
+    's/(^|[^[:alnum:]])api_?key"?[[:space:]]*[:=][[:space:]]*'"$REDACT_VALUE"'/\1api_key: <REDACTED>/gi'
     's/CF_Token=[^[:space:]]+/CF_Token=<REDACTED>/g'
     's/CF_Account_ID=[^[:space:]]+/CF_Account_ID=<REDACTED>/g'
     's/SAVED_CF_Token=[^[:space:]]+/SAVED_CF_Token=<REDACTED>/g'
@@ -29,16 +33,16 @@ REDACT_PATTERNS=(
     's/OPENVPN_USER=[^[:space:]]+/OPENVPN_USER=<REDACTED>/g'
     's/OPENVPN_PASSWORD=[^[:space:]]+/OPENVPN_PASSWORD=<REDACTED>/g'
     's/WIREGUARD_(PRIVATE_KEY|PRESHARED_KEY)=[^[:space:]]+/WIREGUARD_\1=<REDACTED>/g'
-    's/openvpn-user:[[:space:]]*[^[:space:]]+/openvpn-user: <REDACTED>/g'
-    's/openvpn-password:[[:space:]]*[^[:space:]]+/openvpn-password: <REDACTED>/g'
-    's/api-token:[[:space:]]*[^[:space:]]+/api-token: <REDACTED>/g'
-    's/oidc_client_id:[[:space:]]*[^[:space:]]+/oidc_client_id: <REDACTED>/g'
-    's/oidc_client_secret:[[:space:]]*[^[:space:]]+/oidc_client_secret: <REDACTED>/g'
-    's/client_id:[[:space:]]*[^[:space:]]+/client_id: <REDACTED>/g'
-    's/client_secret:[[:space:]]*[^[:space:]]+/client_secret: <REDACTED>/g'
+    's/openvpn-user"?:[[:space:]]*'"$REDACT_VALUE"'/openvpn-user: <REDACTED>/g'
+    's/openvpn-password"?:[[:space:]]*'"$REDACT_VALUE"'/openvpn-password: <REDACTED>/g'
+    's/api-token"?:[[:space:]]*'"$REDACT_VALUE"'/api-token: <REDACTED>/g'
+    's/oidc_client_id"?:[[:space:]]*'"$REDACT_VALUE"'/oidc_client_id: <REDACTED>/g'
+    's/oidc_client_secret"?:[[:space:]]*'"$REDACT_VALUE"'/oidc_client_secret: <REDACTED>/g'
+    's/client_id"?:[[:space:]]*'"$REDACT_VALUE"'/client_id: <REDACTED>/g'
+    's/client_secret"?:[[:space:]]*'"$REDACT_VALUE"'/client_secret: <REDACTED>/g'
     's/glrt-[A-Za-z0-9_-]+/<GITLAB_RUNNER_TOKEN>/g'
-    # The rest of the GitLab token family (PAT, deploy, CI build) — shaped like
-    # glrt- but distinct prefixes, so the pattern above never matched them.
+    # The rest of the GitLab token family (glpat, gldt, glcbt, glsoat, glft,
+    # glimt): at least 16 token characters after the prefix.
     's/gl(pat|dt|cbt|soat|ft|imt)-[A-Za-z0-9_-]{16,}/<GITLAB_TOKEN>/g'
     's/gh[oprsu]_[A-Za-z0-9]{30,}/<GITHUB_TOKEN>/g'
     # Model-provider API keys. sk-ant- and sk-proj- are longer forms of sk-, so
@@ -49,8 +53,8 @@ REDACT_PATTERNS=(
     's/(AKIA|ASIA|AIDA|AROA)[A-Z0-9]{16}/<AWS_ACCESS_KEY_ID>/g'
     # B2 native credentials, named by key rather than by shape — the master
     # application key is high-entropy but has no recognisable prefix.
-    's/[A-Za-z_]*application_key[[:space:]]*[:=][[:space:]]*[^[:space:]]+/application_key: <REDACTED>/gi'
-    's/[A-Za-z_]*key_id[[:space:]]*[:=][[:space:]]*[^[:space:]]+/key_id: <REDACTED>/gi'
+    's/[A-Za-z_]*application_key"?[[:space:]]*[:=][[:space:]]*'"$REDACT_VALUE"'/application_key: <REDACTED>/gi'
+    's/[A-Za-z_]*key_id"?[[:space:]]*[:=][[:space:]]*'"$REDACT_VALUE"'/key_id: <REDACTED>/gi'
     's/ops_[A-Za-z0-9_.-]{40,}/<OP_SA_TOKEN>/g'
     's/xox[abprs]-[A-Za-z0-9-]{10,}/<SLACK_TOKEN>/g'
     's/eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/<JWT>/g'
@@ -106,25 +110,223 @@ cs_emit() {
     cs_capped 0 "$1"
 }
 
+# cs_journal_error_sources: `journalctl -o json` on stdin -> the 15 commonest
+# sources as "<count> <name>" (a container by name), then "<count> (unparseable)".
+# Non-zero when every non-blank line is unparseable.
+cs_journal_error_sources() {
+    python3 -c '
+import collections, json, sys
+counts = collections.Counter()
+bad = 0
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    try:
+        entry = json.loads(line)
+        names = [entry.get(k) for k in ("CONTAINER_NAME", "SYSLOG_IDENTIFIER", "_COMM")]
+    except (ValueError, AttributeError):
+        bad += 1
+        continue
+    counts[next((n for n in names if isinstance(n, str) and n), "?")] += 1
+for name, count in counts.most_common(15):
+    print(f"{count:7d} {name}")
+if bad:
+    print(f"{bad:7d} (unparseable)")
+sys.exit(1 if bad and not counts else 0)
+'
+}
+
+# cs_tailscale_status: the first five lines of `tailscale status`, the local
+# node first, or why there are none.
+# A failed sudo or tailscale call is reported with its first line.
+cs_tailscale_status() {
+    local out
+    if ! command -v tailscale >/dev/null 2>&1; then
+        echo "Tailscale not installed"
+        return 0
+    fi
+    if ! out=$(sudo -n tailscale status 2>&1); then
+        echo "Tailscale status FAILED: $(printf '%s\n' "$out" | head -1)"
+    elif [ -z "$out" ]; then
+        echo "Tailscale connected, no peers"
+    else
+        printf '%s\n' "$out" | head -5
+    fi
+}
+
+# cs_head_tail <head> <tail> <fallback>: the first <head> and last <tail> (>= 1)
+# stdin lines with an omission marker between, so a time-sorted listing shows
+# both ends. <fallback> for empty input; the whole stream is consumed.
+cs_head_tail() {
+    awk -v h="$1" -v t="$2" -v fb="$3" '
+        { n++; if (n <= h) print; else buf[n % t] = $0 }
+        END {
+            if (n == 0) { print fb; exit }
+            start = (n - t > h) ? n - t + 1 : h + 1
+            if (start > h + 1) printf "  ... (%d lines omitted)\n", start - h - 1
+            for (i = start; i <= n; i++) print buf[i % t]
+        }'
+}
+
+# cs_smart_ata_attrs: read `smartctl -A` on stdin and print the raw value of
+# each attribute that predicts a failing disk, as "Name=raw" pairs on one line.
+cs_smart_ata_attrs() {
+    awk '
+        $2 ~ /^(Reallocated_Sector_Ct|Current_Pending_Sector|Offline_Uncorrectable|Reported_Uncorrect|Command_Timeout|Temperature_Celsius)$/ {
+            printf "%s=%s ", $2, $10
+        }'
+}
+
+# cs_zpool_leaf_paths: read `zpool status -P` on stdin and print
+# "<pool>\t<device path>" for every leaf device of every pool.
+cs_zpool_leaf_paths() {
+    awk '
+        $1 == "pool:" { pool = $2; next }
+        pool != "" && $1 ~ /^\/dev\// { printf "%s\t%s\n", pool, $1 }'
+}
+
+# cs_pool_map: read "<pool>\t<leaf path>" lines on stdin and print
+# "<whole-disk device>\t<pool>", walking a stacked leaf (dm-crypt, LVM) up to its
+# disk. Returns 1, naming the path on stderr, when a leaf does not resolve.
+cs_pool_map() {
+    local pool path dev parent resolved rc=0
+    while IFS=$'\t' read -r pool path; do
+        resolved=false
+        if dev=$(readlink -f "$path"); then
+            for _ in 1 2 3 4 5 6 7 8; do
+                parent=$(lsblk -no PKNAME "$dev") || break
+                parent=${parent%%$'\n'*}
+                if [ -z "$parent" ]; then
+                    resolved=true
+                    break
+                fi
+                dev="/dev/$parent"
+            done
+        fi
+        if [ "$resolved" != true ]; then
+            echo "  cannot resolve zpool leaf $path" >&2
+            rc=1
+            continue
+        fi
+        printf '%s\t%s\n' "$dev" "$pool"
+    done
+    return "$rc"
+}
+
+# cs_disk_pool <device> <map-rc>: read "<device>\t<pool>" lines on stdin and
+# print the device's pool, "-" when it is in no pool, or "unknown" when the map
+# is incomplete (map-rc non-zero).
+cs_disk_pool() {
+    awk -F'\t' -v d="$1" -v rc="$2" '
+        p == "" && $1 == d { p = $2 }
+        END { print (rc != 0 ? "unknown" : (p == "" ? "-" : p)) }'
+}
+
+# cs_snapshot_report: stdin is "D<TAB>dataset<TAB>usedbysnapshots<TAB>auto-snapshot"
+# and "S<TAB>dataset@snap<TAB>creation" lines, oldest first. Prints each dataset's newest
+# snapshot, count and space, flagging zfs-auto-snap ones auto-snapshot=false never prunes.
+cs_snapshot_report() {
+    awk -F'\t' '
+        $1 == "D" { used[$2] = $3; auto[$2] = $4; next }
+        $1 == "S" {
+            split($2, a, "@")
+            if (!(a[1] in count)) order[++n] = a[1]
+            count[a[1]]++
+            newest[a[1]] = $3
+            if (a[2] ~ /^zfs-auto-snap/) autosnaps[a[1]]++
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                d = order[i]
+                line = sprintf("  %s: newest %s, %d snapshots, usedbysnapshots %s", d, newest[d], count[d], (d in used) ? used[d] : "?")
+                if (auto[d] == "false" && autosnaps[d] > 0)
+                    line = line sprintf(" [auto-snapshot=false yet %d zfs-auto-snap kept: never pruned]", autosnaps[d])
+                print line
+            }
+        }' | sort
+}
+
+# cs_retry_ssh <command...>: run an ssh command line once more when it exits
+# 255, the code ssh reserves for its own failure. A one-off agent or network
+# hiccup then does not read as an unreachable host. Never for a piped body.
+cs_retry_ssh() {
+    local rc=0
+    "$@" || rc=$?
+    if [ "$rc" -eq 255 ]; then
+        rc=0
+        sleep 1
+        "$@" || rc=$?
+    fi
+    return "$rc"
+}
+
 # warning-event policy
 
-# The jq program behind probe_warning_events, kept here so the counting rule is
-# readable and unit-tested rather than a single line inside a remote body.
+# The jq program behind probe_warning_events. `excluded` is the consumer's jq
+# filter over one event, false by default; an event it maps to true never counts.
 # shellcheck disable=SC2016 # $cutoff is a jq --arg, not a shell variable
 WARNING_EVENTS_JQ='
 [ .items[]
   # Events-API events often carry only eventTime (lastTimestamp null), and jq
   # compares null >= $cutoff as false, so the timestamp is coalesced.
   | select(((.lastTimestamp // .eventTime // .metadata.creationTimestamp) // "") >= $cutoff)
+  | select(excluded | not)
 ] | length'
 
-# warning_events_filter <cutoff> — read `kubectl get events -A
-# --field-selector type=Warning -o json` on stdin and echo the number of Warning
-# events at or after <cutoff> (RFC3339), or "unknown" when jq could not parse it.
+# warning_events_filter <cutoff> [exclude] — count the stdin Warning events at or
+# after <cutoff> (RFC3339) that [exclude] does not match, or echo "unknown" with
+# jq's first error line on stderr when jq rejects the input or the filter.
 warning_events_filter() {
-    local cutoff="$1" out
-    out=$(jq --arg cutoff "$cutoff" "$WARNING_EVENTS_JQ" 2>/dev/null) || out="unknown"
+    local cutoff="$1" exclude="${2:-false}" out err
+    err=$(mktemp) || { echo "unknown"; return 0; }
+    if ! out=$(jq --arg cutoff "$cutoff" "def excluded: ${exclude}; ${WARNING_EVENTS_JQ}" 2>"$err"); then
+        echo "warning_events_filter: jq failed: $(head -1 "$err")" >&2
+        out="unknown"
+    fi
+    rm -f "$err"
     echo "${out:-unknown}"
+}
+
+# alert policy
+
+# firing_alerts_counts' jq: Watchdog, InfoInhibitor and severity=none never count,
+# tenant-namespace alerts count apart, and a non-list input errors rather than reading 0.
+# shellcheck disable=SC2016 # $tenants is a jq --arg, not a shell variable
+FIRING_ALERTS_JQ='
+(if type == "array" then . elif . == null then [] else error("not an alert list") end) as $alerts
+| ($tenants | split(" ") | map(select(length > 0))) as $t
+| [ $alerts[]
+    | select(.labels.alertname != "Watchdog" and .labels.alertname != "InfoInhibitor")
+    | select((.labels.severity // "") != "none")
+    | (.labels.namespace // "") as $ns
+    | ($t | index([$ns])) != null ]
+| "\(map(select(. | not)) | length) \(map(select(.)) | length)"'
+
+# firing_alerts_counts <tenant namespaces>: read `amtool alert query -o json` on
+# stdin and echo "<platform> <tenant>" firing counts, or "unknown" when jq could
+# not parse it. The namespaces are space-joined.
+firing_alerts_counts() {
+    local out
+    out=$(jq -r --arg tenants "$1" "$FIRING_ALERTS_JQ" 2>/dev/null) || out="unknown"
+    echo "${out:-unknown}"
+}
+
+# The jq program behind alerts_render: one line per alert, firing first.
+# Input other than an array or null is an error.
+# shellcheck disable=SC2016 # jq string interpolation, not shell
+ALERTS_RENDER_JQ='
+(if type == "array" then . elif . == null then [] else error("not an alert list") end)
+| sort_by(((.status.state // "active") != "active"), (.labels.severity // ""), .labels.alertname)
+| .[]
+| "  \(.labels.alertname) [\(.labels.severity // "-")] \(.labels.namespace // .labels.instance // "-") since \(.startsAt // "?")"
+  + (if (.status.state // "active") == "active" then ""
+     else " (\(.status.state): \(((.status.silencedBy // []) + (.status.inhibitedBy // [])) | join(",")))" end)'
+
+# alerts_render: read `amtool alert query -o json` on stdin and print one line
+# per alert with name, severity, namespace or instance, start and silence or
+# inhibit state. Non-zero when jq could not parse it or it is not an alert list.
+alerts_render() {
+    jq -r "$ALERTS_RENDER_JQ"
 }
 
 # coerce_int <value> <fallback> — echo <value> when it is all digits, else the

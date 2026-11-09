@@ -2,12 +2,13 @@
 """Schema-validate the value-heavy Flux HelmReleases via `helm template`.
 
 Renders each release's pinned chart with its substituted values and applies the
-shared pod policies to the result. Contract: docs/SCRIPTS.md.
+shared pod policies to the result. Contract: weisssrv-lib docs/SCRIPTS.md.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import os
 import re
@@ -38,11 +39,6 @@ _hpa_spec = importlib.util.spec_from_file_location("check_hpa_vpa_invariant", st
 _hpa = importlib.util.module_from_spec(_hpa_spec)
 _hpa_spec.loader.exec_module(_hpa)
 
-# Kubernetes version for capability-gated rendering, shared by `helm template`
-# (--kube-version) and kubeconform. Derived from k3s_version by
-# derive_kube_version(); this fallback applies only when that key is missing.
-KUBE_VERSION_FALLBACK = "1.36.0"
-
 # Charts gate on .Capabilities.APIVersions, commonly in the kind-qualified form
 # (".../v1/ServiceMonitor"), so declare both forms - otherwise an offline
 # `helm template` of a serviceMonitor-enabled release fails.
@@ -59,8 +55,11 @@ DEFAULT_SOURCES_DIR = "kubernetes/infrastructure/sources"
 # repo_name/repo_url are optional per-release OVERRIDES: the chart repo is
 # normally resolved from the manifest's own sourceRef, the way the version is.
 REQUIRED_RELEASE_KEYS = ("name", "manifest", "chart")
-# Branch of datreeio/CRDs-catalog kubeconform reads schemas from.
-DEFAULT_CRD_CATALOG_REF = os.environ.get("CRD_CATALOG_REF", "main")
+# The env var naming the datreeio/CRDs-catalog ref kubeconform reads schemas
+# from. It has no default, so a local run names the same pinned ref as CI.
+CRD_CATALOG_ENV = "CRD_CATALOG_REF"
+# Helm's release-name limit; Flux shortens a longer default name with a hash.
+RELEASE_NAME_MAX = 53
 PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # Flux also accepts ${var:=default}, ${var:position} and ${var/a/b}. This gate
 # resolves none of them, so it refuses rather than render what Flux would not.
@@ -160,13 +159,32 @@ def resolve_chart_repo(rel: dict, manifest_text: str, repos: dict):
 
 
 def derive_kube_version(versions: dict) -> str:
-    """Cluster Kubernetes version (X.Y.Z) for helm/kubeconform, from k3s_version.
+    """Cluster Kubernetes version (X.Y.Z) for helm and kubeconform, from k3s_version.
 
-    e.g. "v1.36.2+k3s1" -> "1.36.2". Falls back to KUBE_VERSION_FALLBACK when the
-    key is absent or unparseable so a malformed pin can't break flux:lint.
+    e.g. "v1.36.2+k3s1" -> "1.36.2". An absent or unparseable pin is an error:
+    rendering against a guessed version validates a cluster that does not exist.
     """
     m = re.match(r"v?(\d+\.\d+\.\d+)", str(versions.get("k3s_version", "")))
-    return m.group(1) if m else KUBE_VERSION_FALLBACK
+    if not m:
+        raise SystemExit(
+            f"ERROR: k3s_version {versions.get('k3s_version')!r} in the versions "
+            "ConfigMap is absent or not vX.Y.Z, so the render has no Kubernetes version"
+        )
+    return m.group(1)
+
+
+def flux_release_name(spec: dict, meta: dict, fallback: str) -> str:
+    """The Helm release name Flux installs: `releaseName`, else
+    `[<targetNamespace>-]<name>`, hashed down to Helm's limit as Flux does."""
+    if spec.get("releaseName"):
+        return str(spec["releaseName"])
+    name = str(meta.get("name") or fallback)
+    if spec.get("targetNamespace"):
+        name = f"{spec['targetNamespace']}-{name}"
+    if len(name) <= RELEASE_NAME_MAX:
+        return name
+    digest = hashlib.sha256(name.encode()).hexdigest()[:12]
+    return f"{name[:RELEASE_NAME_MAX - 13]}-{digest}"
 
 
 def unsupported_substitution(text: str) -> str | None:
@@ -214,6 +232,10 @@ def extract_helmrelease_from_text(text: str, source: str) -> dict:
     return docs[0]
 
 
+class UnreadableSibling(Exception):
+    """A manifest beside the release that will not read, so its VPAs are unknown."""
+
+
 def release_vpas(manifest_path: str, namespace: str, versions: dict) -> list[dict]:
     """VerticalPodAutoscalers declared beside a release manifest.
 
@@ -227,12 +249,13 @@ def release_vpas(manifest_path: str, namespace: str, versions: dict) -> list[dic
     for entry in sorted(os.listdir(directory)):
         if not entry.endswith((".yaml", ".yml")):
             continue
+        path = os.path.join(directory, entry)
         try:
-            with open(os.path.join(directory, entry)) as f:
+            with open(path, encoding="utf-8") as f:
                 text, _missing = substitute(f.read(), versions)
             docs = list(yaml.safe_load_all(text))
-        except (OSError, yaml.YAMLError):
-            continue
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise UnreadableSibling(f"{path}: {exc}") from exc
         for doc in docs:
             if not isinstance(doc, dict) or doc.get("kind") != "VerticalPodAutoscaler":
                 continue
@@ -253,7 +276,7 @@ def _stamp_namespace(doc: dict, namespace: str) -> None:
 def validate_release(rel: dict, versions: dict, repo_root: str, run_kubeconform: bool,
                      kube_version: str, cpu_limit_allowlist: set | None = None,
                      vpa_cap_allowlist: set | None = None,
-                     crd_catalog_ref: str = DEFAULT_CRD_CATALOG_REF) -> bool:
+                     crd_catalog_ref: str = "") -> bool:
     """Template one release; return True on success."""
     manifest = os.path.join(repo_root, rel["manifest"])
     # Substitute ${placeholders} in the raw manifest text first, as Flux's
@@ -288,8 +311,6 @@ def validate_release(rel: dict, versions: dict, repo_root: str, run_kubeconform:
         print(f"ERROR [{rel['name']}]: could not determine chart version")
         return False
 
-    # Values are already resolved (with their original YAML types preserved)
-    # from the text substitution above; just dump .spec.values for helm.
     values = spec.get("values", {})
     values_yaml = yaml.safe_dump(values, default_flow_style=False, sort_keys=False)
 
@@ -298,11 +319,10 @@ def validate_release(rel: dict, versions: dict, repo_root: str, run_kubeconform:
         values_file = vf.name
 
     try:
-        # Render with the HelmRelease's actual release identity so charts that
-        # key off .Release.Name/.Release.Namespace validate the same output Flux
-        # produces (falls back to the registry name / "default").
+        # Charts key off .Release.Name and .Release.Namespace, so the render takes
+        # the identity Flux installs the release under.
         meta = hr.get("metadata", {})
-        release_name = spec.get("releaseName") or meta.get("name") or rel["name"]
+        release_name = flux_release_name(spec, meta, rel["name"])
         namespace = spec.get("targetNamespace") or meta.get("namespace") or "default"
         cmd = [
             "helm", "template", release_name,
@@ -347,9 +367,13 @@ def validate_release(rel: dict, versions: dict, repo_root: str, run_kubeconform:
 
         # VPA memory caps against the CHART-RENDERED limits: the kustomize-side
         # gate has no limit to compare against for a chart-rendered workload.
-        cap_viol = _hpa.vpa_cap_violations(
-            rendered_docs + release_vpas(manifest, namespace, versions), vpa_cap_allowlist
-        )
+        try:
+            vpas = release_vpas(manifest, namespace, versions)
+        except UnreadableSibling as exc:
+            print(f"ERROR [{rel['name']}]: a manifest beside the release is unreadable, "
+                  f"so its VPA caps cannot be judged: {exc}")
+            return False
+        cap_viol = _hpa.vpa_cap_violations(rendered_docs + vpas, vpa_cap_allowlist)
         if cap_viol:
             print(
                 f"ERROR [{rel['name']}]: a VPA caps memory at or above the "
@@ -414,10 +438,6 @@ def main(argv: list[str] | None = None) -> int:
         "--sources-dir", default=DEFAULT_SOURCES_DIR,
         help="HelmRepository dir the chart repo is resolved from, relative to --repo-root",
     )
-    parser.add_argument(
-        "--crd-catalog-ref", default=DEFAULT_CRD_CATALOG_REF,
-        help="datreeio/CRDs-catalog ref kubeconform reads schemas from",
-    )
     args = parser.parse_args(argv)
 
     if shutil.which("helm") is None:
@@ -426,6 +446,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.kubeconform and shutil.which("kubeconform") is None:
         print("ERROR: kubeconform not found on PATH (--kubeconform given)")
         return 1
+    crd_catalog_ref = os.environ.get(CRD_CATALOG_ENV, "")
+    if args.kubeconform and not crd_catalog_ref:
+        print(f"ERROR: --kubeconform needs ${CRD_CATALOG_ENV}, the pinned CRDs-catalog ref")
+        return 2
 
     releases = load_releases(
         args.releases or os.path.join(args.repo_root, DEFAULT_RELEASES_FILE)
@@ -460,12 +484,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         rel["repo_name"], rel["repo_url"] = resolved
 
-    # Add/refresh the chart repos once (network).
+    # --force-update keeps a repeated local `repo add` idempotent and refreshes a
+    # changed URL; the update names only these repos, not the operator's others.
     for rel in releases:
         add = _run_tool(
-            # --force-update keeps repeated local runs idempotent (a plain
-            # `repo add` errors when the repo already exists) and refreshes a
-            # changed URL.
             ["helm", "repo", "add", rel["repo_name"], rel["repo_url"], "--force-update"],
             REPO_TIMEOUT_SECONDS, rel["name"],
         )
@@ -475,7 +497,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: failed to add/update Helm repo {rel['repo_name']}:")
             print(add.stderr.strip())
             return 1
-    upd = _run_tool(["helm", "repo", "update"], REPO_TIMEOUT_SECONDS, "helm repo update")
+    names = sorted({rel["repo_name"] for rel in releases})
+    upd = _run_tool(["helm", "repo", "update", *names], REPO_TIMEOUT_SECONDS, "helm repo update")
     if upd is None:
         return 1
     if upd.returncode != 0:
@@ -487,7 +510,7 @@ def main(argv: list[str] | None = None) -> int:
     for rel in releases:
         if not validate_release(rel, versions, args.repo_root, args.kubeconform, kube_version,
                                 policy.cpu_limit_allowlist, policy.vpa_cap_allowlist,
-                                args.crd_catalog_ref):
+                                crd_catalog_ref):
             failed += 1
     if failed:
         print(f"\n{failed} release(s) failed helm-values validation")

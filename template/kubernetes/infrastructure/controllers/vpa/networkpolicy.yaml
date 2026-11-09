@@ -1,13 +1,17 @@
 ---
-# Admission webhook only (apiserver call, post-DNAT, so the source cannot be
-# pinned). VPA exposes no scraped metrics endpoint.
+# The admission-controller webhook on container port 8000, open from anywhere:
+# the apiserver call arrives post-DNAT and the webhook's own TLS is the gate.
+# VPA exposes no scraped metrics endpoint.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-webhook-ingress
   namespace: vpa-system
 spec:
-  podSelector: {}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: vpa
+      app.kubernetes.io/component: admission-controller
   policyTypes:
     - Ingress
   ingress:

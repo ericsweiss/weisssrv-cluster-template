@@ -325,7 +325,7 @@ def _configmap_paths(render: Path) -> list[str]:
 
 
 def _render_script(render: Path) -> str:
-    return str(_flux_lint_inputs(render).get("flux_render_script", "scripts/flux-render.sh"))
+    return str(_flux_lint_inputs(render).get("flux_render_script", "scripts/flux-env.sh"))
 
 
 def _substitutions(render: Path, configmaps: list[str]) -> dict[str, str]:

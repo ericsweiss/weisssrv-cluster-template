@@ -50,6 +50,12 @@ _REQUIRED_BY_OPT_IN_GATE = {
     "vfio_passthrough_enabled",
 }
 
+# Boot-ordering knobs the setup guide sends the operator to the inventory for.
+# The declaration is where the operator finds the knob, so it stays.
+_DOCUMENTED_IN_SETUP = {
+    "nas_storage_encrypted_bind_sources",
+}
+
 # (inventory file relative to ansible/inventories/prod, variable) pairs where the
 # starter inventory restates the role default. Debt, not configuration: delete the
 # inventory line and the entry together.
@@ -185,7 +191,7 @@ def derived_exemptions() -> set[str]:
         if service.get("checksum_var"):
             tracked.add(service["checksum_var"])
     mirrors = {var_name for _file, var_name in CONFIGMAP_INVENTORY_MIRROR.values()}
-    return tracked | mirrors | _ANSWER_DRIVEN | _REQUIRED_BY_OPT_IN_GATE
+    return tracked | mirrors | _ANSWER_DRIVEN | _REQUIRED_BY_OPT_IN_GATE | _DOCUMENTED_IN_SETUP
 
 
 def restatements(inventory: Path, defaults, exempt: set[str]) -> list[tuple[str, str, str]]:

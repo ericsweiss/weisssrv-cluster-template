@@ -4,14 +4,11 @@ real commands print, not matched as text."""
 
 from __future__ import annotations
 
-import base64
-
 import pytest
 import yaml
 from conftest import REPO, ansible_templar, trust_as_template
 
 PLAYBOOKS = REPO / "ansible" / "playbooks"
-RESEED_TASK = "tasks/_reseed-cert-target.yml"
 GATE = "playbook expressions"
 
 
@@ -147,34 +144,94 @@ def test_the_vm_play_walks_the_appliances_with_the_cli_of_their_type(guest_type,
         assert str(_task(tasks, name)["ansible.builtin.command"]).startswith("{{ vm_guest_cli }} ")
 
 
-@pytest.mark.parametrize("rel", ["base.yml", "mail.yml"])
-def test_base_playbooks_reseed_through_the_shared_task(rel):
+def _reseed_hosts(rel: str, variables: dict) -> list:
     play = _play(rel, "Re-seed the cert-distribution key")
-    assert play["hosts"] == "dns_primary"
-    includes = [t for t in _tasks(play) if t.get("ansible.builtin.include_tasks") == RESEED_TASK]
-    assert len(includes) == 1, f"{rel}: the re-seed play does not include {RESEED_TASK}"
+    includes = [t for t in _tasks(play) if "ansible.builtin.include_role" in t]
+    assert len(includes) == 1, f"{rel}: the re-seed play includes {len(includes)} roles"
+    assert includes[0]["ansible.builtin.include_role"] == {
+        "name": "weisssrv.infra.acme_certs", "tasks_from": "reseed"}
+    return list(render(includes[0]["vars"]["acme_certs_reseed_hosts"], variables))
+
+
+TARGETS = [{"host": "relay"}, {"host": "nas"}, {"host": "legacy", "ssh_no_sudo": True},
+           {"host": "opted-in", "ssh_no_sudo": False}]
+
+
+def test_base_reseeds_every_sudo_target_the_probe_reached():
+    assert _play("base.yml", "Re-seed").get("hosts") == "dns_primary:!deploy_skipped"
+    variables = {"acme_certs_distribution_targets": TARGETS,
+                 "groups": {"deploy_skipped": ["nas"]}}
+    assert sorted(_reseed_hosts("base.yml", variables)) == ["opted-in", "relay"]
 
 
 @pytest.mark.parametrize(
-    ("env_key", "slurped", "want"),
-    [
-        ("ssh-ed25519 ENV", {"skipped": True}, "ssh-ed25519 ENV"),
-        ("", {"content": base64.b64encode(b"ssh-ed25519 FILE\n").decode()}, "ssh-ed25519 FILE"),
-        ("", {"failed": True}, ""),
-    ],
-    ids=["env-wins", "file-fallback", "both-empty"],
+    ("targets", "want"),
+    [(TARGETS, ["relay"]), (TARGETS[1:], [])],
+    ids=["pinned", "unpinned"],
 )
-def test_the_reseed_pubkey_prefers_the_env_then_the_key_file(env_key, slurped, want):
-    tasks = list(_tasks(_load(RESEED_TASK)))
-    select = _task(tasks, "Select the pubkey to re-seed with")["ansible.builtin.set_fact"]
-    key = render(select["reseed_cert_public_key"], {
-        "acme_certs_ssh_public_key": env_key, "reseed_cert_authority_pubkey": slurped,
-    }).strip()
-    assert key == want
-    report = _task(tasks, "for want of the distribution pubkey")
-    facts = {"acme_certs_enabled": True, "reseed_cert_target": {"host": "a"},
-             "reseed_cert_public_key": key}
-    assert all(holds(c, facts) for c in report["when"]) is (want == "")
+def test_mail_reseeds_the_relay_once_it_is_pinned(targets, want):
+    variables = {"acme_certs_distribution_targets": targets,
+                 "groups": {"mail": ["relay"]}}
+    assert _reseed_hosts("mail.yml", variables) == want
+
+
+REPLICATION_HOSTVARS = {
+    "a": {"inventory_hostname": "a", "replication_probe": {"ping": "pong"}},
+    "b": {"inventory_hostname": "b", "replication_probe": {"unreachable": True}},
+    "c": {"inventory_hostname": "c", "replication_probe": {"unreachable": True}},
+}
+
+
+def _whens(node) -> list:
+    when = node.get("when", [])
+    return when if isinstance(when, list) else [when]
+
+
+def _replication_report(name_part: str, variables: dict) -> bool:
+    """Whether a replication post_task fires, its block's `when:` and its own
+    read as Ansible does."""
+    play = _play("proxmox-ha.yml", "storage replication")
+    (block,) = play["post_tasks"]
+    task = _task(block["block"], name_part)
+    scope = {"ansible_play_hosts_all": list(REPLICATION_HOSTVARS),
+             "hostvars": REPLICATION_HOSTVARS, **variables}
+    for key, expr in play["vars"].items():
+        scope[key] = render(expr, scope)
+    return all(holds(c, scope) for c in _whens(block) + _whens(task))
+
+
+def test_the_replication_play_names_every_node_it_could_not_reach():
+    play = _play("proxmox-ha.yml", "storage replication")
+    assert play.get("ignore_unreachable") is True
+    missed = render(play["vars"]["replication_missed"],
+                    {"ansible_play_hosts_all": list(REPLICATION_HOSTVARS),
+                     "hostvars": REPLICATION_HOSTVARS})
+    assert list(missed) == ["b", "c"]
+    (block,) = play["post_tasks"]
+    assert block.get("tags") == ["always"]
+    assert "ansible.builtin.fail" in _task(block["block"], "Fail because")
+    assert "task proxmox:ha" in _task(block["block"], "Fail because")["ansible.builtin.fail"]["msg"]
+
+
+@pytest.mark.parametrize(("jobs", "enabled"), [([{"id": "100-0"}], True), ([], False)],
+                         ids=["jobs", "no-jobs"])
+def test_replication_probe_runs_only_with_jobs(jobs, enabled):
+    variables = {"proxmox_ha_replication_jobs": jobs}
+    assert _replication_report("Probe the connection", variables) is enabled
+
+
+@pytest.mark.parametrize(
+    ("jobs", "absent", "fails", "warns"),
+    [([{"id": "100-0"}], [], True, False),
+     ([{"id": "100-0"}], ["b"], True, True),
+     ([{"id": "100-0"}], ["b", "c"], False, True),
+     ([], [], False, False)],
+    ids=["undeclared-fails", "one-declared", "all-declared-warns", "no-jobs-silent"],
+)
+def test_an_unreached_replication_node_fails_unless_declared_absent(jobs, absent, fails, warns):
+    variables = {"proxmox_ha_replication_jobs": jobs, "deploy_expected_absent_hosts": absent}
+    assert _replication_report("Fail because", variables) is fails
+    assert _replication_report("declared-absent", variables) is warns
 
 
 def test_zpool_failure_stops_before_missing_pools_are_computed():

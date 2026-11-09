@@ -195,6 +195,30 @@ After a pod delete, wait on the new pod with
 `kubectl wait --for=condition=ready -l <selector>`. Run against the old pods it
 passes immediately, so give the delete a moment to take effect first.
 
+### Moving an object between Kustomizations
+
+Every Flux Kustomization here prunes. An object that moves from one
+Kustomization's path to another's is deleted by the first and recreated by the
+second. The second runs only after its `dependsOn` chain is Ready, so the
+object is absent for that whole wait. An ExternalSecret with
+`creationPolicy: Owner` takes its Secret down with it.
+
+Hand the object over without a prune pass:
+
+1. Before the merge, mark each live object as exempt from pruning.
+
+   ```bash
+   kubectl -n <namespace> annotate <kind>/<name> kustomize.toolkit.fluxcd.io/prune=disabled
+   ```
+
+2. Merge the move. The old Kustomization drops the object from its inventory
+   and leaves it in place. The new one adopts it on its next reconcile.
+3. Once the new Kustomization is Ready, remove the annotation.
+
+   ```bash
+   kubectl -n <namespace> annotate <kind>/<name> kustomize.toolkit.fluxcd.io/prune-
+   ```
+
 ### A changed PV mountOption that nothing picked up
 
 The kubelet reads `mountOptions` at mount time only. Flux reconciles the PV and
@@ -299,6 +323,15 @@ against the host once it is back:
 task infra:deploy -- --limit <host>
 ```
 
+The storage-replication play in `proxmox-ha.yml` fails instead. An unreachable
+compute node fails the deploy unless `deploy_expected_absent_hosts` lists it,
+because a failover to it would find no replica. Re-run the play once the node is
+back:
+
+```bash
+task proxmox:ha -- --tags proxmox_ha_replication
+```
+
 ---
 
 ## Upgrades
@@ -334,12 +367,14 @@ recovers it with `reset-failed` then `start` — never `restart`, which waits on
 the same stop.
 
 Silence the alerts a planned restart will trip **before** starting, or the next
-real incident arrives in a channel everyone has learned to ignore. There is no
-task for this; go through Alertmanager directly:
+real incident arrives in a channel everyone has learned to ignore. Run
+`task observability:silence ALERT=<name> DURATION=<n>H`, one call per alert.
+
+The task matches on the alert name only. A silence that needs another matcher
+goes through the Alertmanager UI:
 
 ```bash
-kubectl get svc -n observability                     # find the Alertmanager service
-kubectl -n observability port-forward svc/<alertmanager-svc> 9093:9093
+kubectl -n observability port-forward svc/kube-prometheus-stack-alertmanager 9093:9093
 # then http://localhost:9093 → Silences → New Silence
 ```
 
@@ -394,8 +429,10 @@ fails. Raise them together.
 
 ### Kubernetes nodes
 
+Bump `k3s_version` in `group_vars/all.yml` on a branch and merge it through an
+MR. Then, from main:
+
 ```bash
-# bump k3s_version in group_vars/all.yml, then:
 task maintenance:update-k3s-nodes         # cordons, upgrades and uncordons node by node
 task k3s:status
 ```
@@ -404,7 +441,10 @@ It cordons rather than drains: containerd keeps running pods alive across the
 kubelet restart, and draining would evict the CI executor pod running the job.
 Servers first, one at a time, watching the etcd quorum. Rolling back is a
 version bump in the other direction plus the same task.
-`task maintenance:update-cluster` chains the node upgrade and the pin sweep.
+`task maintenance:update-cluster` bumps every outdated pin on a feature branch
+and stops for the MR. Flux rolls the in-cluster pins after the merge. If
+`k3s_version` moved, run `task maintenance:update-k3s-nodes` from main after the
+merge.
 
 ### The platform library
 
@@ -510,6 +550,10 @@ than from any band written down elsewhere.
 4. `task k3s:deploy -- --limit <vm>`
 5. `kubectl get nodes` — the new node is `Ready` and carries its labels.
 
+A create that stopped part way leaves the VM tagged
+`weisssrv-create-incomplete`, and the next run refuses it. Run `qm destroy <id>`
+on its host and re-run step 3. The data zvols survive the destroy and reattach.
+
 Adding a **server** additionally changes the etcd quorum: go from three to five,
 never to four, and verify `kubectl get nodes -l node-role.kubernetes.io/etcd`
 before and after. Server addresses also feed
@@ -547,6 +591,11 @@ proxmox_ha_replication_jobs:
 
 Add the replication job before the resource: a guest that fails over to a node
 holding no copy of its disk does not start there.
+
+`paused: true` on a job holds it disabled and keeps the replica, for maintenance
+on the target node. `enabled: false` deletes the job and its replica. A job,
+rule or resource dropped from these lists is reported as an orphan and never
+deleted. The `proxmox_ha` role README names the cleanup commands.
 
 ---
 
@@ -841,7 +890,7 @@ that looks like an app fault from one network and works fine from the other.
 | Alert | Means | First move |
 |---|---|---|
 | `UnboundDown` | Unbound does not answer its control socket, so that resolver cannot recurse | `systemctl status unbound` on the guest |
-| `UnboundExporterDown` | Prometheus cannot scrape `unbound_exporter` on a resolver | `systemctl status unbound_exporter` on the guest |
+| `UnboundExporterDown` | Prometheus cannot scrape `unbound_exporter` on a resolver | `systemctl status unbound-exporter` on the guest |
 | `UnboundSERVFAILRatioHigh` | over 5% of answers are SERVFAIL | `journalctl -u unbound`; the upstreams, their certificates or DNSSEC |
 
 `UnboundSERVFAILRatioHigh` reads the rcode counters, which Unbound exports only
@@ -958,8 +1007,16 @@ automatic. This is a one-time step per cluster, not a runbook you return to.
 task flux:suspend -- <ns>/<kind>/<name>        # stop reconciling one resource
 task flux:resume  -- <ns>/<kind>/<name>        # same arguments
 
-git revert <commit> && git push                # the normal rollback
 helm history <release> -n <ns>                 # while suspended, if you must
+```
+
+The normal rollback is a revert merged through an MR. Flux reconciles once the
+merge lands:
+
+```bash
+git switch -c revert-<topic> origin/main
+git revert <commit>
+git push -u origin revert-<topic>              # then merge the MR
 ```
 
 Suspend from leaf to root so no stage reconciles into a half-suspended state.
@@ -1048,9 +1105,18 @@ scrub has completed in 35 days, or none ever has.
 
 ```bash
 zpool status -v <pool>          # which device, which errors
-zpool replace <pool> <old> /dev/disk/by-id/<new>
+zpool replace <pool> /dev/disk/by-id/<old> /dev/disk/by-id/<new>
 zpool status 1                  # watch the resilver
 ```
+
+To replace a disk:
+
+1. Insert the new disk with the old one still attached when a bay is free, so
+   the pool keeps its redundancy during the resilver.
+2. Run the `zpool replace` above. Do not start a scrub until the resilver ends.
+3. Swap the serial in the `nas_storage_smartd_<pool>_disks` list in
+   `group_vars/nas.yml` and run `task storage:deploy`.
+4. Confirm the SMART metrics carry the new serial, then pull the old disk.
 
 Always reference disks by `/dev/disk/by-id/`. Check SMART on the surviving
 members before assuming the failure is isolated; drives bought together fail
@@ -1516,9 +1582,13 @@ nas_storage_archive_backup_sources:
   - ssd/appdata      # every app's live data, including the zvols
   - tank/backups     # the logical dumps + etcd snapshot copies
   - tank/share
+  - tank/proxmox     # the tier 2 vzdump target
 # The dataset receiving cluster-wide vzdump writes over NFS. Snapshotted only
 # once those writes quiesce, so a half-written .vma is never captured.
-nas_storage_archive_backup_vzdump_target: ""
+nas_storage_archive_backup_vzdump_target: tank/proxmox
+# The vzdump target's prune-backups keeps its own monthly dumps, so no monthlies.
+nas_storage_archive_backup_keep_monthly_overrides:
+  tank/proxmox: 0
 ```
 
 In the **same change**, flip `cluster_archive_backup_probe_metric` in
@@ -1570,6 +1640,50 @@ ssh {{ admin_user }}@{{ nas_host }} 'zfs list -t snapshot'   # local snapshots
 ssh {{ admin_user }}@<host> 'sudo pvesm list <backup-storage> --content backup'  # guest backups
 ```
 
+### Restoring from the archive pool
+
+`archive-backupctl` on the storage host restores a replicated dataset. A target
+is the basename of a `nas_storage_archive_backup_sources` entry.
+
+`sudo archive-backupctl restore <target>` is the safe default. It receives the
+newest archive snapshot into `<dataset>-restore-<timestamp>` and mounts it under
+`/mnt/restore/<target>/<timestamp>/`. The live dataset is not touched. Copy what
+you need out of it, then destroy it.
+
+`sudo archive-backupctl restore-force <target>` replaces the live dataset. It
+renames the live tree to `<dataset>-pre-restore-<timestamp>`, unmounts it and
+receives the copy under the original name. A failed receive destroys the
+partial tree and renames the old one back. The old tree keeps its space until
+you destroy it.
+
+The tool checks every target before it touches any of them. It refuses when:
+
+- a zvol or mounted filesystem in the subtree is held open by a guest, a
+  container or a process;
+- a filesystem in the subtree is exported over NFS;
+- it cannot run that check, for example because `fuser` is missing;
+- the subtree holds a child listed in `nas_storage_archive_backup_exclude`.
+
+`--force-held` overrides the first three. `--force-excluded` overrides the last.
+Neither is part of a normal restore. Stop the guests and NFS consumers instead.
+A Kubernetes pod scaled to zero does not release a zvol, because its VM holds
+it.
+
+1. Stop the guests and consumers holding the dataset.
+2. Run `sudo archive-backupctl restore-force <target>`.
+3. An encrypted backup comes back without its key. Run the `zfs load-key`
+   command the tool prints, and confirm the data reads before restarting
+   anything.
+4. Re-run `task storage:deploy` to re-assert the dataset properties.
+5. Destroy `<dataset>-pre-restore-<timestamp>` once the restore is trusted.
+
+To restore one child of a subtree that holds an excluded child, restore it on
+its own. Receive its newest archive snapshot under a new name, then swap it in
+with `zfs rename`.
+
+Never load a key on, or mount, a dataset under the archive pool. It breaks the
+raw incremental chain and forces a full re-seed.
+
 ### Restoring etcd from a snapshot
 
 k3s takes the snapshot on the server nodes, and `task k3s:backup` takes one on
@@ -1585,6 +1699,21 @@ demand. Restoring is a whole-control-plane operation, in this order:
 Step 3 is the one that gets skipped, and skipping it leaves a divergent control
 plane: the reset node is a single-member cluster while the others still hold
 their own etcd data.
+
+When every server is rebuilt and no local snapshot survives, restore from the
+off-node copy. It needs the original cluster token, the `credential` field of
+the `K3s Cluster Token` item. Without it k3s cannot decrypt the snapshot.
+
+1. Fetch the newest copy from `/mnt/tank/backups/k3s-etcd/<node>/` on the
+   storage host, or from the offsite repository.
+2. Rebuild the servers with `task k3s:deploy`, then stop k3s on every server.
+3. Copy the snapshot into `/var/lib/rancher/k3s/server/db/snapshots/` on one
+   server and run
+   `sudo k3s server --cluster-reset --cluster-reset-restore-path=<file> --token <token>`.
+   Start k3s and wait for Ready.
+4. On each other server, run `sudo rm -rf /var/lib/rancher/k3s/server/db/etcd`
+   and `sudo systemctl start k3s`, so it rejoins the restored member. Never run
+   `--cluster-reset` on more than one server.
 
 Rehearse restores on a schedule, not after an incident:
 
@@ -1631,6 +1760,10 @@ LAN peer.
 
 metrics-server's allow is label-scoped to `app.kubernetes.io/name: metrics-server`,
 the chart's label. The k3s AddOn is off through `metrics-server` in `k3s_disable`.
+The AddOn and the chart share object names, so Helm refuses the chart's install
+while the AddOn exists. On a cluster still running the AddOn, `task k3s:deploy`
+deletes it and the Resource Metrics API is down until the chart installs. Run
+`flux reconcile helmrelease metrics-server -n kube-system` right after it.
 
 Current residents and their ingress: CoreDNS `53/udp`+`53/tcp` from everything
 and `9153` from observability; metrics-server `10250` from the aggregation

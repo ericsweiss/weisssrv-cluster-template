@@ -25,20 +25,20 @@
   roles:
     - weisssrv.infra.proxmox_firewall
 
-# A re-provisioned relay comes back without its pinned cert-distribution key,
-# and the loss only shows at the next renewal. Re-seed it from the cert
-# authority here (ansible/README.md).
+# weisssrv.infra.base above rewrites the relay's authorized_keys, which drops
+# the pinned cert-distribution key. Re-seed it once its host_key is pinned;
+# until then postflight.yml reports the relay as an unpinned target.
 - name: Re-seed the cert-distribution key on the relay
   hosts: dns_primary
   become: true
   gather_facts: false
   ignore_unreachable: true
   tasks:
-    - name: Re-seed each mail cert-distribution target
-      ansible.builtin.include_tasks: tasks/_reseed-cert-target.yml
-      loop: >-
-        {{ acme_certs_distribution_targets | default([])
-           | selectattr('host', 'in', groups['mail'] | default([]))
-           | map(attribute='host') | list }}
-      loop_control:
-        loop_var: reseed_cert_target_host
+    - name: Re-seed the relay
+      ansible.builtin.include_role:
+        name: weisssrv.infra.acme_certs
+        tasks_from: reseed
+      vars:
+        acme_certs_reseed_hosts: >-
+          {{ acme_certs_distribution_targets | default([]) | map(attribute='host')
+             | select('in', groups['mail'] | default([])) | list }}

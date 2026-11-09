@@ -55,10 +55,13 @@ class OperatorError(Exception):
 
 
 def lib_root(explicit: str | None = None, collection: str = COLLECTION) -> Path:
-    path = Path(explicit or os.environ.get("WEISSSRV_LIB_PATH") or REPO.parent / "weisssrv-lib")
-    if not (path / collection).is_dir():
-        raise OperatorError(f"{path} carries no {collection} collection")
-    return path
+    """The named checkout, else `.weisssrv-lib` from `task lib:sync`, else a sibling `../weisssrv-lib`."""
+    named = explicit or os.environ.get("WEISSSRV_LIB_PATH")
+    candidates = [Path(named)] if named else [REPO / ".weisssrv-lib", REPO.parent / "weisssrv-lib"]
+    for path in candidates:
+        if (path / collection).is_dir():
+            return path
+    raise OperatorError(f"no {collection} collection in {' or '.join(map(str, candidates))}")
 
 
 class _Removed:
@@ -71,14 +74,14 @@ class _Removed:
 REMOVED = _Removed()
 
 
-def _git(lib: Path, *args: str) -> str:
+def _git(lib: Path, *args: str, ok: tuple[int, ...] = (0,)) -> str:
     try:
         done = subprocess.run(
             ["git", "-C", str(lib), *args], capture_output=True, text=True, check=False
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise OperatorError(f"git {' '.join(args)} in {lib} could not run: {exc}") from exc
-    if done.returncode != 0:
+    if done.returncode not in ok:
         raise OperatorError(f"git {' '.join(args)} in {lib}: {done.stderr.strip()}")
     return done.stdout
 
@@ -96,12 +99,21 @@ def _role_files(lib: Path, ref: str, collection: str) -> list[tuple[str, str, st
     return out
 
 
-def _show_mapping(lib: Path, ref: str, relpath: str, what: str) -> dict:
+def role_names(lib: Path, ref: str, collection: str = COLLECTION) -> set[str]:
+    """Every role the ref ships, with or without defaults."""
+    return {role for role, _, _ in _role_files(lib, ref, collection)}
+
+
+def _show_yaml(lib: Path, ref: str, relpath: str):
     text = _git(lib, "show", f"{ref}:{relpath}")
     try:
-        parsed = yaml.safe_load(text) or {}
+        return yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise OperatorError(f"{ref}:{relpath}: {exc}") from exc
+
+
+def _show_mapping(lib: Path, ref: str, relpath: str, what: str) -> dict:
+    parsed = _show_yaml(lib, ref, relpath) or {}
     if not isinstance(parsed, dict):
         raise OperatorError(f"{ref}:{relpath}: {what} are not a mapping")
     return parsed
@@ -137,22 +149,59 @@ def role_defaults(lib: Path, ref: str, collection: str = COLLECTION) -> dict[str
 
 
 def role_dependencies(lib: Path, ref: str, collection: str = COLLECTION) -> dict[str, set[str]]:
-    """{role: collection roles its meta dependencies pull in}, short names."""
+    """{role: collection roles it pulls in}, short names.
+
+    Meta dependencies count, and so does every include_role or import_role with a
+    literal name in the role's own task files, through blocks.
+    """
     prefix = collection_prefix(collection)
+    including = _files_naming_roles(lib, ref, collection)
     out: dict[str, set[str]] = {}
     for role, tail, line in _role_files(lib, ref, collection):
-        if tail not in META_FILES:
+        if tail in META_FILES:
+            deps = _show_mapping(lib, ref, line, "meta").get("dependencies") or []
+            if not isinstance(deps, list):
+                raise OperatorError(f"{ref}:{line}: dependencies are not a list")
+            names = [
+                dep if isinstance(dep, str) else (
+                    (dep.get("role") or dep.get("name")) if isinstance(dep, dict) else None
+                )
+                for dep in deps
+            ]
+        elif line in including and tail.startswith("tasks/") and tail.endswith(YAML_SUFFIXES):
+            names = _included_roles(_show_yaml(lib, ref, line))
+        else:
             continue
-        deps = _show_mapping(lib, ref, line, "meta").get("dependencies") or []
-        if not isinstance(deps, list):
-            raise OperatorError(f"{ref}:{line}: dependencies are not a list")
-        for dep in deps:
-            name = dep if isinstance(dep, str) else (
-                (dep.get("role") or dep.get("name")) if isinstance(dep, dict) else None
-            )
+        for name in names:
             if isinstance(name, str) and "{{" not in name:
                 out.setdefault(role, set()).add(name.removeprefix(prefix))
     return out
+
+
+def _files_naming_roles(lib: Path, ref: str, collection: str) -> set[str]:
+    """Role files at `ref` that mention include_role or import_role: one git call."""
+    # git grep exits 1 when nothing matches.
+    out = _git(lib, "grep", "-l", "-E", "(include|import)_role", ref, "--", f"{collection}/roles/",
+               ok=(0, 1))
+    return {line.removeprefix(f"{ref}:") for line in out.splitlines()}
+
+
+def _role_includes(tasks):
+    """Yield `(name, task)` for every include_role or import_role in a task list, through blocks."""
+    for task in tasks if isinstance(tasks, list) else []:
+        if not isinstance(task, dict):
+            continue
+        for key in BLOCK_KEYS:
+            yield from _role_includes(task.get(key))
+        for key in ROLE_TASKS:
+            if key in task:
+                spec = task[key]
+                yield (spec.get("name") if isinstance(spec, dict) else spec), task
+
+
+def _included_roles(tasks) -> list:
+    """The `name:` of every include_role or import_role in a task list, through blocks."""
+    return [name for name, _task in _role_includes(tasks)]
 
 
 def collection_prefix(collection: str) -> str:
@@ -162,19 +211,23 @@ def collection_prefix(collection: str) -> str:
 
 
 def flipped_defaults(
-    old: dict[str, dict], new: dict[str, dict]
+    old: dict[str, dict], new: dict[str, dict], shipped: set[str] | None = None
 ) -> list[tuple[str, str, object, object]]:
     """(role, key, old, new) for every default of a role the new ref ships that changes.
 
     Null, type and mapping changes count, and a key the new ref drops flips to
-    REMOVED. A key only the new ref ships does not count.
+    REMOVED, as does every key of a `shipped` role whose defaults are gone.
     """
     flips = []
-    for role, after in sorted(new.items()):
+    for role in sorted(old.keys() | new.keys()):
+        if role in new:
+            after = new[role]
+        elif shipped is not None and role in shipped:
+            after = {}
+        else:
+            continue
         before = old.get(role) or {}
-        for key in sorted(before.keys() | after.keys(), key=str):
-            if key not in before:
-                continue
+        for key in sorted(before, key=str):
             was, value = before[key], after.get(key, REMOVED)
             if was != value or type(was) is not type(value):
                 flips.append((role, key, was, value))
@@ -195,12 +248,22 @@ def describe(was: object, now: object) -> str:
     return f"flips {was!r} -> {now!r}"
 
 
-def _load(path: Path):
+def _read(path: Path) -> str:
     try:
-        with path.open(encoding="utf-8") as handle:
-            return yaml.safe_load(handle)
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
         raise OperatorError(f"{path}: {exc}") from exc
+
+
+def _parse(text: str, path: Path):
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise OperatorError(f"{path}: {exc}") from exc
+
+
+def _load(path: Path):
+    return _parse(_read(path), path)
 
 
 def _vars_files(base: Path) -> list[tuple[str, Path]]:
@@ -371,16 +434,20 @@ class _Walk:
     def tasks(self, tasks, base: Path, seen: tuple[Path, ...]) -> dict[str, set[str]]:
         """{role: keys its `vars:` pass} for a task list, through static includes."""
         roles: dict[str, set[str]] = {}
+        for name, task in _role_includes(tasks):
+            if isinstance(name, str):
+                _merge(roles, {name: _mapping_keys(task.get("vars"))})
+        _merge(roles, self._task_files(tasks, base, seen))
+        return roles
+
+    def _task_files(self, tasks, base: Path, seen: tuple[Path, ...]) -> dict[str, set[str]]:
+        """The roles of every static task-file include in a task list, through blocks."""
+        roles: dict[str, set[str]] = {}
         for task in tasks if isinstance(tasks, list) else []:
             if not isinstance(task, dict):
                 continue
             for key in BLOCK_KEYS:
-                _merge(roles, self.tasks(task.get(key), base, seen))
-            for key in ROLE_TASKS:
-                spec = task.get(key)
-                name = spec.get("name") if isinstance(spec, dict) else spec
-                if isinstance(name, str):
-                    _merge(roles, {name: _mapping_keys(task.get("vars"))})
+                _merge(roles, self._task_files(task.get(key), base, seen))
             for key in TASK_FILES:
                 spec = task.get(key)
                 target = spec.get("file") if isinstance(spec, dict) else spec
@@ -403,7 +470,7 @@ def _merge(into: dict[str, set[str]], more: dict[str, set[str]]) -> None:
 
 
 def _closure(roles: set[str], dependencies: dict[str, set[str]]) -> set[str]:
-    """`roles` and every role their meta dependencies pull in, transitively."""
+    """`roles` and every role their dependencies pull in, transitively."""
     out, todo = set(roles), list(roles)
     while todo:
         for dep in dependencies.get(todo.pop(), set()) - out:
@@ -428,7 +495,7 @@ def role_targets(
     collection: str = COLLECTION,
     dependencies: dict[str, set[str]] | None = None,
 ) -> dict[str, set[str]]:
-    """{role: hosts the playbooks run it on}, short names, meta dependencies included.
+    """{role: hosts the playbooks run it on}, short names, dependencies included.
 
     An unplaceable role targets every host. Play vars cover the play's roles and
     their dependencies, role vars that role only, and a narrowed play covers none.
@@ -443,8 +510,9 @@ def role_targets(
     task_files: dict[Path, set[str]] = {}
     plays = 0
     for path in sorted(f for f in playbooks.rglob("*") if f.is_file() and f.suffix in YAML_SUFFIXES):
-        parsed = _load(path)
-        mentioned = set(mention.findall(path.read_text(encoding="utf-8")))
+        text = _read(path)
+        mentioned = set(mention.findall(text))
+        parsed = _parse(text, path)
         entries = [p for p in parsed if isinstance(p, dict)] if isinstance(parsed, list) else []
         if not any("hosts" in p or "import_playbook" in p or "ansible.builtin.import_playbook" in p
                    for p in entries):
@@ -492,15 +560,10 @@ def role_targets(
 
 
 def _spread_dependencies(targets: dict[str, set[str]], dependencies: dict[str, set[str]]) -> None:
-    """A role's meta dependencies run on every host the role runs on."""
-    changed = True
-    while changed:
-        changed = False
-        for role, deps in dependencies.items():
-            for dep in deps:
-                before = len(targets.get(dep, set()))
-                targets.setdefault(dep, set()).update(targets.get(role, set()))
-                changed = changed or len(targets[dep]) != before
+    """A role's dependencies run on every host the role runs on."""
+    for role, hosts in list(targets.items()):
+        for dep in _closure({role}, dependencies) - {role}:
+            targets.setdefault(dep, set()).update(hosts)
 
 
 def unadopted(
@@ -544,7 +607,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--from", dest="old", required=True, metavar="REF", help="installed tag")
     ap.add_argument("--to", dest="new", required=True, metavar="REF", help="new tag")
-    ap.add_argument("--lib", default=None, help="weisssrv-lib checkout (default $WEISSSRV_LIB_PATH)")
+    ap.add_argument(
+        "--lib",
+        default=None,
+        help="weisssrv-lib checkout (default $WEISSSRV_LIB_PATH, then .weisssrv-lib, "
+        "then a sibling weisssrv-lib)",
+    )
     ap.add_argument("--collection", default=COLLECTION, help="collection path inside the checkout")
     ap.add_argument("--inventory", type=Path, default=INVENTORY)
     ap.add_argument("--playbooks", type=Path, default=PLAYBOOKS)
@@ -568,6 +636,7 @@ def main(argv: list[str] | None = None) -> int:
         flips = flipped_defaults(
             role_defaults(lib, args.old, args.collection),
             role_defaults(lib, args.new, args.collection),
+            role_names(lib, args.new, args.collection),
         )
         decl = inventory_declarations(args.inventory)
         targets = role_targets(

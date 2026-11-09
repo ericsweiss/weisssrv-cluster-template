@@ -252,6 +252,54 @@ class TestRequireEnvsubstVars:
         assert "if ! require_envsubst_vars; then\n  EXIT=1" in SCRIPT.read_text()
 
 
+class TestDryRunLoop:
+    """The helper prints `name<TAB>path`; only the path may reach kustomize."""
+
+    BLOCK = block("  if ! KS_PATHS=", "fi")
+
+    def _drive(self, tmp_path: Path, lines: str) -> tuple:
+        (tmp_path / "flux-child-kustomizations.py").write_text(f"print({lines!r}, end='')\n")
+        built = tmp_path / "built"
+        stubs = {
+            "kustomize": f'#!/bin/sh\necho "$2" >> "{built}"\necho "kind: ConfigMap"\n',
+            "envsubst": "#!/bin/sh\ncat\n",
+            "kubectl": "#!/bin/sh\ncat > /dev/null\n",
+        }
+        for name, body in stubs.items():
+            (tmp_path / name).write_text(body)
+            (tmp_path / name).chmod(0o755)
+        res = bash(
+            f'PATH="{tmp_path}:$PATH"\n_SCRIPT_DIR="{tmp_path}"\n'
+            "EXIT=0\nFLUX_ENVSUBST_VARS='${x}'\n"
+            f"{self.BLOCK}\n"
+            'echo "exit=$EXIT"\n'
+        )
+        return res, built.read_text().split() if built.exists() else []
+
+    def test_each_stage_path_is_built_and_named(self, tmp_path):
+        res, built = self._drive(tmp_path, "configs\t./kubernetes/configs\napps\t./kubernetes/apps\n")
+        assert built == ["./kubernetes/configs", "./kubernetes/apps"], res.stdout + res.stderr
+        assert "dry-run: apps (./kubernetes/apps)" in res.stdout
+        assert "exit=0" in res.stdout
+
+    def test_no_stage_path_fails_the_verify(self, tmp_path):
+        res, built = self._drive(tmp_path, "")
+        assert built == []
+        assert "yielded no stage paths" in res.stdout
+        assert "exit=1" in res.stdout
+
+    def test_a_line_without_the_pair_fails_the_verify(self, tmp_path):
+        res, built = self._drive(tmp_path, "./kubernetes/configs\napps\t./kubernetes/apps\n")
+        assert built == ["./kubernetes/apps"], res.stdout + res.stderr
+        assert "printed './kubernetes/configs' without a name<TAB>path pair" in res.stdout
+        assert "exit=1" in res.stdout
+
+    def test_a_blank_line_is_skipped(self, tmp_path):
+        res, built = self._drive(tmp_path, "\napps\t./kubernetes/apps\n\n")
+        assert built == ["./kubernetes/apps"], res.stdout + res.stderr
+        assert "exit=0" in res.stdout
+
+
 def test_the_gated_stage_list_is_derived_not_hand_written():
     """A hand-listed stage set is the drift flux-child-kustomizations.py exists
     to prevent."""

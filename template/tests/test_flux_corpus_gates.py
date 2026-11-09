@@ -47,6 +47,8 @@ GATE_HEADERS = (
     "Checking PVC storageClassName",
     "Checking sized emptyDir vs ephemeral-storage limits",
     "Checking NFS PersistentVolume TLS",
+    "Checking internal-domain route allowlists",
+    "Checking CRD stage order",
     "Checking backup-artifact apps against their alert arms",
 )
 
@@ -195,7 +197,7 @@ spec:
     kind: Deployment
     name: app
   updatePolicy:
-    updateMode: "Off"
+    updateMode: Auto
   resourcePolicy:
     containerPolicies:
       - containerName: app
@@ -366,6 +368,15 @@ def test_a_gates_operator_error_is_not_collapsed_into_a_finding(tmp_path: Path) 
     assert result.returncode == 2, f"{result.stdout}{result.stderr}"
     assert "check-pvc-storageclass.py exited 2" in result.stderr
     assert "OPERATOR ERROR" in result.stderr
+
+
+def test_a_per_cluster_gates_operator_error_names_the_cluster(tmp_path: Path) -> None:
+    """The CRD stage-order gate runs once per cluster, so its label must carry
+    the cluster an operator has to fix."""
+    corpus = _stub_tree(tmp_path, "check-crd-stage-order.py", 2)
+    result = _run_in(tmp_path, corpus)
+    assert result.returncode == 2, f"{result.stdout}{result.stderr}"
+    assert "check-crd-stage-order.py kubernetes/clusters/demo exited 2" in result.stderr
 
 
 def test_a_gates_finding_still_exits_one(tmp_path: Path) -> None:

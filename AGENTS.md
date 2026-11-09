@@ -37,7 +37,8 @@ three renders.
 
 ## House rules
 
-- Never push to `main`; every change is a branch and a merge request.
+- Never push to `main`; every change is a branch and a merge request. Keep the
+  branch local until the merge request is ready.
 - No secrets in the tree — `op://` references and item titles only.
 - No AI or assistant attribution anywhere: commits, MRs, code or docs.
 - Comments state the current rule and why it holds. No history, no narration, no

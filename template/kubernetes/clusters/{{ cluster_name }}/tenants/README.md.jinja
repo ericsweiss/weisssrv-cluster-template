@@ -385,11 +385,12 @@ spec:
     # there. check-tenant-wiring requires both keys.
     requests.ephemeral-storage: 4Gi
     limits.ephemeral-storage: 8Gi
-{%- if tenant_storage %}
-    # check-tenant-wiring requires both keys: tenant-local sizes are not
-    # enforced, so this bounds declared requests only. Use "0" for a tenant
-    # that runs no database.
+    # check-tenant-wiring requires the claim count. Use "0" for a tenant that
+    # runs no database.
     persistentvolumeclaims: "4"
+{%- if tenant_storage %}
+    # tenant-local sizes are not enforced, so this bounds declared requests
+    # only. check-tenant-wiring requires it beside the claim count.
     tenant-local.storageclass.storage.k8s.io/requests.storage: 40Gi
 {%- endif %}
 ---

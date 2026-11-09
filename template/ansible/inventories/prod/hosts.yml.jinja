@@ -314,6 +314,13 @@ all:
         dns:
         mail:
 
+    # Runtime ledger groups, populated by playbooks/_reachability-probe.yml and
+    # _reachability-gate.yml and read by the `:!deploy_skipped` play patterns.
+    # Declared empty so those patterns do not warn; never add a host by hand.
+    deploy_skipped:
+    deploy_reached:
+    deploy_lost:
+
     # Application guests Ansible logs into, enrolled in the host roles and rolling
     # OS patching. Add each app's group as a child; an LXC's group also goes under
     # lxc_containers. Appliances Ansible cannot log into belong in services.

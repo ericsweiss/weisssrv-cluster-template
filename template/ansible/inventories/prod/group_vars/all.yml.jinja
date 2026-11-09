@@ -82,6 +82,12 @@ proxmox_startup_delay: 0
 # VPN and jump-host ranges here too; proxmox_firewall asserts it is non-empty.
 proxmox_firewall_admin_lan_cidrs:
   - {{ lan_cidr }}
+{%- if not vpn_tailscale %}
+
+# No tailnet, so no admin overlay: the role's default is the whole Tailscale
+# CGNAT range, which would open the admin ports to 100.64.0.0/10.
+proxmox_firewall_admin_ts_cidrs: []
+{%- endif %}
 
 # Host-network exporters Prometheus scrapes over the LAN. A new one without an
 # entry here is a permanently down target; sg-metrics covers the roles' own.

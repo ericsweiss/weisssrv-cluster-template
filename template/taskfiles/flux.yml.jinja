@@ -328,7 +328,7 @@ tasks:
     desc: Regenerate the per-host log-shipping alerts from the alloy_host play
     preconditions: *pyyaml_precondition
     cmds:
-      - python3 scripts/generate-host-log-staleness.py
+      - python3 scripts/generate-host-log-staleness.py --runbook "RUNBOOKS.md#per-host-log-shipping-alerts"
 
   dev-apply:
     desc: "Dev helper: render one path and apply it (Flux reverts it on the next reconcile)"
@@ -384,13 +384,14 @@ tasks:
         RENDER_ALL=$(mktemp)
         trap 'rm -f "$RENDER_ALL"' EXIT
 
-        # The render/scan/kubeconform loop is scripts/flux-lint.sh, run with the
-        # flags the CI flux-lint job passes — one implementation, so a floor
-        # cannot reach only one of them. require-cluster-root: see that include.
+        # scripts/flux-lint.sh is the loop the CI flux-lint job runs, so a floor
+        # reaches both. Local-only: the dependsOn enumerator, which the job has no
+        # input for. require-cluster-root: see that include.
         scripts/flux-lint.sh \
           --cluster-dir "{{.CLUSTER_DIR}}" \
           --versions-configmap "{{.VERSIONS_CM}}" \
           --render-script scripts/flux-env.sh \
+          --child-kustomizations scripts/flux-child-kustomizations.py \
           --skipped-script scripts/kubeconform-skipped.py \
           --expected-skipped scripts/kubeconform-expected-skipped.txt \
           --require-cluster-root false \

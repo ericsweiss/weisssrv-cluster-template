@@ -68,17 +68,10 @@ spec:
     logFormat: json
     interval: 5m
     triggerLoopOnEvent: true
+    # The chart grants the traefik.io IngressRoute reads itself, since sources
+    # lists traefik-proxy.
     rbac:
       create: true
-      additionalPermissions:
-        - apiGroups:
-            - traefik.io
-          resources:
-            - ingressroutes
-          verbs:
-            - get
-            - list
-            - watch
     serviceMonitor:
       enabled: true
     resources:

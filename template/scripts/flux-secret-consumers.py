@@ -2,7 +2,7 @@
 """The workloads in one namespace that consume a named Secret.
 
 Reads `kubectl get deployment,statefulset,daemonset -o json` on stdin and prints
-one TSV row per consumer: `<kind>/<name>`, `kustomize` or `other`, its selector.
+one TSV row per consumer: `<kind>/<name>`, `kustomize` or `other`, its `-l` selector.
 """
 from __future__ import annotations
 
@@ -43,10 +43,34 @@ def _secret_names(pod_spec: dict) -> set:
     return names
 
 
+def _expression(entry: object) -> str | None:
+    """One matchExpressions entry in kubectl's set-based syntax, None when unreadable."""
+    if not isinstance(entry, dict) or not entry.get("key"):
+        return None
+    key, operator, values = entry["key"], entry.get("operator"), entry.get("values") or []
+    if operator in ("In", "NotIn") and isinstance(values, list) and values:
+        return f"{key} {operator.lower()} ({','.join(map(str, values))})"
+    if operator == "Exists":
+        return str(key)
+    if operator == "DoesNotExist":
+        return f"!{key}"
+    return None
+
+
 def _selector(workload: dict) -> str:
-    """The workload's matchLabels as a `k=v,k=v` selector, or "" when absent."""
-    labels = ((workload.get("spec") or {}).get("selector") or {}).get("matchLabels") or {}
-    return ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
+    """The workload's whole selector in kubectl `-l` syntax, or "" when a term is
+    unreadable or no equality or `In` term bounds it, so no delete reaches other pods."""
+    selector = (workload.get("spec") or {}).get("selector") or {}
+    labels = selector.get("matchLabels") or {}
+    terms = [f"{k}={v}" for k, v in sorted(labels.items())]
+    bounded = bool(terms)
+    for entry in selector.get("matchExpressions") or []:
+        term = _expression(entry)
+        if term is None:
+            return ""
+        bounded = bounded or entry.get("operator") == "In"
+        terms.append(term)
+    return ",".join(terms) if bounded else ""
 
 
 def consumers(items: list, secret: str) -> list:
@@ -81,8 +105,10 @@ def main(argv: list) -> int:
     unscopable = [obj for obj, _manager, selector in rows if not selector]
     if unscopable:
         print(
-            "ERROR: no matchLabels on " + ", ".join(unscopable) + " — a pod delete "
-            "cannot be scoped to it; restart it by hand",
+            "ERROR: the selector of " + ", ".join(unscopable)
+            + " cannot be written as a bounded `-l` selector: it has no matchLabels"
+            " or In term, or a matchExpressions term kubectl cannot take."
+            " A pod delete cannot be scoped to it; restart it by hand",
             file=sys.stderr,
         )
         return 2

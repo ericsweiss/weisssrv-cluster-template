@@ -19,20 +19,27 @@
     - role: weisssrv.infra.nic_tuning
       tags: [nic_tuning, network]
 
-# A re-provisioned guest comes back without its pinned cert-distribution key,
-# and the loss only shows at the next renewal. Re-seed every target from the
-# cert authority here (ansible/README.md).
+# weisssrv.infra.base above rewrites each guest's authorized_keys, which drops
+# the pinned cert-distribution key. Re-seed every sudo target the probe reached;
+# the gate below reports a skipped one, and any other miss fails here.
 - name: Re-seed the cert-distribution key on every cert target
-  hosts: dns_primary
+  hosts: dns_primary:!deploy_skipped
   become: true
   gather_facts: false
   ignore_unreachable: true
   tasks:
-    - name: Re-seed each cert-distribution target
-      ansible.builtin.include_tasks: tasks/_reseed-cert-target.yml
-      loop: "{{ acme_certs_distribution_targets | default([]) | map(attribute='host') | list }}"
-      loop_control:
-        loop_var: reseed_cert_target_host
+    - name: Re-seed the cert-distribution targets
+      ansible.builtin.include_role:
+        name: weisssrv.infra.acme_certs
+        tasks_from: reseed
+      vars:
+        acme_certs_reseed_hosts: >-
+          {{ acme_certs_distribution_targets | default([])
+             | map(attribute='host')
+             | reject('in', acme_certs_distribution_targets | default([])
+                 | selectattr('ssh_no_sudo', 'defined')
+                 | selectattr('ssh_no_sudo') | map(attribute='host') | list)
+             | difference(groups['deploy_skipped'] | default([])) }}
 
 - name: Gate on the reachability ledger
   ansible.builtin.import_playbook: _reachability-gate.yml

@@ -106,6 +106,9 @@ external_domain:
     {% elif external_domain == internal_domain %}
     external_domain must differ from internal_domain. Use a subdomain for the
     internal zone (lan.example.com) if you only own one domain.
+    {% elif external_domain.endswith('.' ~ internal_domain) %}
+    external_domain must not sit inside internal_domain: tenant admission holds
+    every host under internal_domain to the LAN-only middleware.
     {% endif %}
 
 # --------------------------------------------------------------------------
@@ -429,7 +432,7 @@ upstream_dns_servers:
   validator: >-
     {% set _addrs = upstream_dns_servers.split() %}
     {% set _vips = vip_labels %}
-    {% set ns = namespace(taken=[], outside=[]) %}
+    {% set ns = namespace(taken=[], outside=[], edge=[]) %}
     {% for a in _addrs %}
     {% set _o = a.split('.')[-1] | int %}
     {% if a | regex_search('^' ~ ipv4_octets_re ~ '$') %}
@@ -437,6 +440,8 @@ upstream_dns_servers:
     {% set _v = _a[0] * 16777216 + _a[1] * 65536 + _a[2] * 256 + _a[3] %}
     {% if _v < lan_address_range[0] or _v > lan_address_range[1] %}
     {% set ns.outside = ns.outside + [a] %}
+    {% elif _v == lan_address_range[0] or _v == lan_address_range[1] %}
+    {% set ns.edge = ns.edge + [a] %}
     {% endif %}
     {% endif %}
     {% if a in _vips %}
@@ -459,6 +464,9 @@ upstream_dns_servers:
     upstream_dns_servers must sit inside lan_cidr ({{ lan_cidr }}), and
     {{ ns.outside | join(', ') }} does not. Each address becomes a resolver
     guest on the flat LAN, not an existing server to forward to.
+    {% elif ns.edge %}
+    upstream_dns_servers names {{ ns.edge | join(', ') }}, the network or
+    broadcast address of lan_cidr ({{ lan_cidr }}), which no guest can take.
     {% elif ns.taken %}
     upstream_dns_servers collides with the addresses the starter inventory
     composes: {{ ns.taken | join('; ') }}. A resolver's vmid is 100 + its last
@@ -553,7 +561,7 @@ git_host:
   help: >-
     Hostname of the git server, without scheme or path — the Flux GitRepository
     URL, the CI include refs and the container registry host are built from it.
-  # No default: git_backend has one implemented value.
+  # No default: the forge hostname is site data.
   placeholder: "git.example.com"
   validator: >-
     {% if not (git_host | regex_search('^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$')) %}
@@ -568,9 +576,9 @@ git_namespace:
     repository name. THE REPOSITORY MUST BE NAMED cluster_name: every path the
     template composes — the Flux bootstrap target, the GitLab-managed Terraform
     state project, the README's repository row and the runbook_url prefix on
-    every alert — is `git_namespace/cluster_name`. There is deliberately no
-    separate repository-name answer. `flux bootstrap` creates the repository it
-    is pointed at, so a mismatched name surfaces as a second, empty repository.
+    every alert — is `git_namespace/cluster_name`. `flux bootstrap` creates the
+    repository it is pointed at, so a mismatched name surfaces as a second,
+    empty repository.
     Subgroups are allowed.
   placeholder: "homelab"
   validator: >-
@@ -1001,14 +1009,14 @@ lib_ref:
     Never answer a tag OLDER than the default below: the generated playbooks are
     written against the role contracts of the release the template pins, and an
     older pin takes the role defaults silently rather than failing.
-  default: "v0.23.0"
+  default: "v0.24.1"
   validator: >-
     {% if not (lib_ref | regex_search('^v\\d+\\.\\d+\\.\\d+$')) %}
     lib_ref must be a release TAG of the form vX.Y.Z (e.g. v1.2.3). A branch is
     never a valid pin: the generated repo's scripts/check-lib-pins.py enforces
     the same shape on the declared `lib_ref` input every `include:` entry reads,
     so a branch answered here fails the very first pipeline.
-    {% elif (lib_ref[1:].split('.') | map('int') | list) < [0, 23, 0] %}
+    {% elif (lib_ref[1:].split('.') | map('int') | list) < [0, 24, 1] %}
     lib_ref must be the release this template pins or newer. The generated
     playbooks are written against that release's role contracts: an older pin
     takes the role defaults silently rather than failing.

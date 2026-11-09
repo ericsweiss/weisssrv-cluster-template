@@ -22,7 +22,6 @@
         'ansible/inventories/prod/host_vars/**/*',
         'ansible/playbooks/base.yml',
         'ansible/playbooks/site.yml',
-        'ansible/playbooks/tasks/_reseed-cert-target.yml',
         'ansible/requirements.yml',
       ],
       'dns': [
@@ -38,7 +37,6 @@
       'mail': [
         'ansible/inventories/prod/group_vars/mail.yml',
         'ansible/playbooks/mail.yml',
-        'ansible/playbooks/tasks/_reseed-cert-target.yml',
         'ansible/requirements.yml',
       ],
       'k3s': [
@@ -135,8 +133,6 @@ variables:
   # cluster actually resolves (a fork or mirror answers lib_project).
   LIB_PROJECT: "{{ lib_project }}"
   PYYAML_VERSION: "6.0.3"
-  # Turns on check-doc-links' backticked-path pass.
-  CHECK_DOC_LINKS_PATHS: "1"
   # fnmatch exceptions for cited paths that are not files here: the library's own
   # docs, the forge-hosted terraform states, a gitignored plan file, and the
   # vendored-copy checker that lives in the library.
@@ -154,9 +150,9 @@ variables:
   # goes through it rather than naming a backend CLI, so `secrets_backend` has
   # one runtime half here and one render-time half in the secret_ref macro.
   SECRET_RUNNER: "{{ secret_runner() }}"
-  # One exact patch tag for every terraform job, lint and credentialed alike.
-  # The plan/apply and drift jobs hold vault credentials, so append
-  # @sha256:<digest> here when you resolve one.
+  # One exact patch tag for every terraform validate, fmt, plan and apply job;
+  # tflint runs its own image. The plan/apply and drift jobs hold vault
+  # credentials, so append @sha256:<digest> here when you resolve one.
   TF_JOB_IMAGE: "{{ terraform_image }}"
   # The Python image for jobs that have already been handed vault credentials or
   # a kubeconfig, so a repointed upstream tag would execute there. Append
@@ -266,7 +262,7 @@ include:
 
   # tests/ + scripts/ = cluster invariants, the gate suites, the library-pin
   # gate. `changes:` must name every file they read — docs/ci-pipeline.md.
-  # test_vendored_byte_identity.py reads the library from the clone below.
+  # The vendored-copy suite reads the library clone below; GIT_CONFIG_* authenticates it.
   - project: {{ lib_project }}
     ref: $[[ inputs.lib_ref ]]
     file: /ci/test/python-tests.yml
@@ -279,7 +275,7 @@ include:
       apt_packages: "jq"
       pip_packages: "ansible-core==2.21.5"
       test_dir: "tests scripts"
-      setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}/{{ lib_project }}.git" "$WEISSSRV_LIB_PATH"'
+      setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "https://${CI_SERVER_HOST}/{{ lib_project }}.git" "$WEISSSRV_LIB_PATH"'
       changes:
         - "tests/**/*"
         - "kubernetes/**/*"
@@ -306,8 +302,6 @@ include:
         - ".pre-commit-config.yaml"
         - ".gitattributes"
         - "ansible/molecule/**/*"
-        # tests/test_check_skill_refs.py reads the agent skill tree.
-        - ".claude/**/*"
         - ".gitlab-ci.yml"
 
   - project: {{ lib_project }}
@@ -380,9 +374,8 @@ include:
         export TF_VAR_unifi_api_url TF_VAR_unifi_api_key TF_VAR_wlan_passphrase_iot TF_VAR_wlan_passphrase_guest
 {%- endif %}
 
-  # flux-lint in substitute mode. flux_render_script is scripts/flux-env.sh, the
-  # wrapper that adds the second ConfigMap this cluster substitutes from;
-  # flux-render.sh parses one file — docs/ci-pipeline.md § flux-lint.
+  # flux-lint in substitute mode: scripts/flux-env.sh exports both substitution
+  # ConfigMaps, cluster-versions and cluster-config — docs/ci-pipeline.md § flux-lint.
   - project: {{ lib_project }}
     ref: $[[ inputs.lib_ref ]]
     file: /ci/validate/flux-lint.yml
@@ -395,6 +388,7 @@ include:
       require_cluster_root: false
       cluster_dir: "{{ cluster_dir }}"
       versions_configmap: "{{ versions_cm }}"
+      # Spelled although it is the default: `task flux:lint` passes it as --render-script.
       flux_render_script: "scripts/flux-env.sh"
       skipped_script: "scripts/kubeconform-skipped.py"
       # The revision taskfiles/flux.yml pins as CRD_CATALOG_REF, so `task
@@ -421,6 +415,8 @@ include:
         - "scripts/check-netpol-except-parity.py"
         - "scripts/netpol-except.yaml"
         - "scripts/check-nfs-tls.py"
+        - "scripts/check-internal-route-allowlist.py"
+        - "scripts/check-crd-stage-order.py"
         - "scripts/gate_common.py"
         - "scripts/validate-helm-values.py"
         - "scripts/flux-corpus-gates.sh"
@@ -440,6 +436,8 @@ include:
     inputs:
       job_name: lint-docs-links
       tags: ["{{ runner_tag }}"]
+      # The backticked repo-path pass, as `task lint:doc-links` runs it.
+      check_paths: true
       changes:
         - "**/*.md"
         - "scripts/check-doc-links.py"
@@ -526,11 +524,9 @@ include:
       # library ANDs `gate` into that rule too.
       gate: '$VERSION_BUMP_BOT_TOKEN && ($SCHEDULE_TYPE == "version-bump" || $CI_PIPELINE_SOURCE == "web")'
       setup_command: "pip install --user --quiet pyyaml==$PYYAML_VERSION"
-      # CRITICAL: the soft-fail codes apply to the WHOLE check_command, so only
-      # the report step may reach rc 1 ("updates available"). Every later step
-      # remaps its failure to 2: on the soft-fail list a crashed step reads as
-      # "updates found", the bot then runs with an unmodified tree and the MR
-      # manager closes the standing bot MR.
+      # The soft-fail codes cover the WHOLE check_command, so only the report step
+      # may reach rc 1. Later steps remap failure to 2, or a crash reads as updates
+      # found and the MR manager closes the standing bot MR.
       check_soft_fail_exit_codes: "1"
       check_command: >-
         RC=0;
@@ -720,22 +716,8 @@ check-generated-files:
       # errexit explicit here so run_check's `set +e`/`set -e` pair restores a
       # known state rather than whatever the runner preamble left.
       set -euo pipefail
-      overall=0; failed=""
+      . scripts/ci-run-check.sh
       OUT=$(mktemp -d)
-
-      run_check() {
-        name="$1"; shift
-        printf 'section_start:%s:%s[collapsed=true]\r\033[0K== %s\n' "$(date +%s)" "$name" "$name"
-        # Not `"$@" || rc=$?`: bash suppresses errexit throughout an AND-OR
-        # list, so a check's own `set -e` never fires and a crashed generator
-        # reads as a pass. `set +e` is what lets the driver report every check.
-        set +e
-        ( set -eo pipefail; "$@" )
-        rc=$?
-        set -e
-        printf 'section_end:%s:%s\r\033[0K\n' "$(date +%s)" "$name"
-        if [ "$rc" -ne 0 ]; then overall=1; failed="$failed $name"; echo "FAILED: $name (rc=$rc)"; fi
-      }
 
       # Generated to a temp path rather than in place: the workspace stays clean
       # for the other checks, and the argv (which the generated header embeds)
@@ -768,14 +750,15 @@ check-generated-files:
 
       run_check hosts-env-sync check_hosts_env
       run_check flux-versions-sync check_versions_configmap
-      run_check host-log-staleness python3 scripts/generate-host-log-staleness.py --check
-      [ "$overall" -eq 0 ] || echo "Failed sync checks:$failed"
-      exit "$overall"
+      # --runbook: the vendored generator takes the rules' runbook as site data.
+      run_check host-log-staleness python3 scripts/generate-host-log-staleness.py --check --runbook "RUNBOOKS.md#per-host-log-shipping-alerts"
+      run_check_summary "sync checks"; exit $?
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes: &repo_sync_paths
+        - "scripts/ci-run-check.sh"
         - "ansible/inventories/prod/hosts.yml"
         - "ansible/inventories/prod/group_vars/all.yml"
         - "ansible/playbooks/site.yml"
@@ -849,6 +832,50 @@ kustomization-coverage:
       changes: *kustomization_coverage_paths
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
+# check-doc-links' path arm skips a token whose top directory is gone and has
+# no floor; this gate resolves every skill citation and fails a vacuous scan.
+# Every MR. Mirrors `task lint:skill-refs`.
+skill-refs:
+  extends: .lint-gate
+  script:
+    - >-
+      python3 scripts/check-skill-refs.py
+      --skill-dir .claude/skills/cluster-development
+      --foreign docs/INCLUDE-CONTRACT.md
+      --foreign docs/VERSIONING.md
+      --foreign docs/EXTENSIBILITY.md
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# KubeletImageGCIneffective must fire above the kubelet's image-gc high
+# watermark, offset and capped as the rule's comment says. Mirrors
+# `task lint:image-gc-threshold`.
+image-gc-threshold:
+  extends: .pyyaml-gate
+  script:
+    - >-
+      python3 scripts/check-image-gc-threshold.py
+      --rules kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml
+      --alert-offset 5 --alert-cap 79 --min-prose-mentions 1
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &image_gc_threshold_paths
+        - "ansible/inventories/prod/group_vars/k3s.yml"
+        - "kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml"
+        - "kubernetes/infrastructure/observability/kube-prometheus-stack/alertmanager-config.yaml"
+        - "scripts/check-image-gc-threshold.py"
+        - "scripts/gate_common.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *image_gc_threshold_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
 # A scenario directory with no `parallel:matrix` entry never runs, and reads as
 # green because nothing executed it. Mirrors `task lint:integration-matrix`.
 check-integration-matrix:
@@ -870,7 +897,7 @@ check-integration-matrix:
 
 # tflint over every root, mirroring `task terraform:tflint`. It catches what
 # fmt/validate do not: deprecated syntax, unused declarations and
-# provider-specific rules. No .tflint.hcl today, so --init fetches no plugins.
+# provider-specific rules. No .tflint.hcl ships, so --init fetches no plugins.
 terraform-tflint:
   stage: lint
   needs: []
@@ -1132,6 +1159,10 @@ validation-gate:
     - job: netpol-parity
       optional: true
     - job: kustomization-coverage
+      optional: true
+    - job: skill-refs
+      optional: true
+    - job: image-gc-threshold
       optional: true
     - job: cluster-literals
       optional: true
@@ -1499,8 +1530,8 @@ deploy-verify:
 {%- endfor %}
 
 # The in-cluster half of verification: server-side dry-run of the rendered
-# manifests, a forced Flux reconcile, then Ready gates. Read-only, and separate
-# from deploy-verify so a missing kubeconfig spares the host-side checks.
+# manifests, a forced Flux reconcile, then Ready gates. The reconcile request is
+# its only write; a missing kubeconfig here spares deploy-verify's host checks.
 cluster-verify:
   stage: verify
   when: always
@@ -1522,12 +1553,10 @@ cluster-verify:
       # queries Flux CRs. Version and sha256 are one pin, so bump both;
       # check-flux-version-pin.py holds it equal to the ConfigMap and gotk.
       FLUX_VERSION="2.9.6"
-      # Per-job download dir: a fixed /tmp path collides when two jobs share /tmp.
-      dl=$(mktemp -d)
-      curl -fsSL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_amd64.tar.gz" -o "$dl/flux.tar.gz"
-      echo "b4d22673e9246cbd628881f1a9ef3b090085dced291e42d804555cee8e8d42c5  $dl/flux.tar.gz" | sha256sum -c -
-      tar xzf "$dl/flux.tar.gz" -C /usr/local/bin flux
-      rm -rf "$dl"
+      TOOL_FLUX_VERSION="$FLUX_VERSION" \
+        TOOL_FLUX_SHA256="b4d22673e9246cbd628881f1a9ef3b090085dced291e42d804555cee8e8d42c5" \
+        python3 scripts/ci-fetch-tools.py flux
+      export PATH="$CI_PROJECT_DIR/.bin:$PATH"
       flux --version
     - bash scripts/deploy-verify.sh
   environment:

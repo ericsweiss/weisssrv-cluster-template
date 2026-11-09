@@ -23,11 +23,6 @@ fi
 # Set where a PrometheusRule tree is a rule source: an absent tree then reds
 # the gate instead of linting a subset.
 [ -n "${REQUIRE_RULES_DIR:-}" ] && rules_args+=(--require-rules-dir)
-# Extractor flags for a shape neither variable covers.
-if [ -n "${EXTRACT_ARGS:-}" ]; then
-    read -ra extract_args <<<"$EXTRACT_ARGS"
-    rules_args+=("${extract_args[@]}")
-fi
 am_args=()
 [ -n "${AM_CONFIG:-}" ] && am_args=(--am-config "$AM_CONFIG")
 

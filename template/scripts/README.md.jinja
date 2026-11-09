@@ -23,8 +23,7 @@ the diff.
 
 | Script | Used by |
 |---|---|
-| `flux-render.sh` | `flux-env.sh` — extracts postBuild vars from one ConfigMap |
-| `flux-env.sh` | `task flux:lint` + the CI flux-lint job (`flux_render_script`) — merges the cluster's **two** substitution ConfigMaps behind one interface (see below) |
+| `flux-env.sh` | `task flux:lint` + the CI flux-lint job (`flux_render_script`) — exports the variables of the cluster's **two** substitution ConfigMaps behind one interface (see below) |
 | `flux-lint.sh` | `task flux:lint` + the CI flux-lint job (`flux_lint_script`) — the whole render/scan/kubeconform loop: stage iteration, the `${` shape scan, the missing and empty-key scans, `flux envsubst --strict`, kubeconform and skip tracking. One implementation, so a floor cannot reach only one caller |
 | `kubeconform-skipped.py` | `task flux:lint` + the CI flux-lint job (`skipped_script`) — fails on a kind validated against no schema unless `kubeconform-expected-skipped.txt` lists it |
 | `check-hpa-vpa-invariant.py` | `task flux:lint` + the CI flux-lint job (`extra_validation`) — no HPA and a CPU-controlling VPA on one workload |
@@ -54,8 +53,8 @@ the diff.
 | `maintenance-run-with-verify.sh` | the `maintenance:*` tasks that must report cluster health whatever the command's outcome — runs the command, then the verify script, and exits with the command's status if it failed. `VERIFY_SCRIPT` overrides the verify script |
 | `supervised-apply-guard.sh` | the supervised `terraform:*-apply` tasks — requires a terminal, refuses `-auto-approve`, and makes the operator type the confirm word |
 | `check-flux-version-pin.py` | `task lint:flux-version-pin` and the CI flux-version-pin job — the CI flux CLI pin, `flux_version` in the versions ConfigMap and the committed `gotk-components.yaml` are one version. A declared fork: it takes `--root` and `--components` |
-| `check-secret-rotation-coverage.py` | `tests/test_check_secret_rotation_coverage.py` — so `task lint:invariants` and the CI python-tests job — every ExternalSecret and every `remoteRef.key` is named in `docs/RUNBOOKS.md` § Rotating a secret. A declared fork: the document and the manual-rotation map are in the file, not on the command line |
-| `flux-child-kustomizations.py` | `deploy-verify.sh` and `task flux:lint` — the cluster's child Kustomizations in `dependsOn` order (`--paths` prints one `spec.path` per line; a Kustomization that declares none is omitted, and the `KS_TOTAL`/`KS_BUILT` check in `taskfiles/flux.yml` is what fails on it). A declared fork: the library's prints `name<TAB>path` |
+| `check-secret-rotation-coverage.py` | `tests/test_check_secret_rotation_coverage.py`, with `--doc docs/RUNBOOKS.md --section 'Rotating a secret'`, so `task lint:invariants` and the CI python-tests job run it — every ExternalSecret and every `remoteRef.key` is named in that section. The manual-rotation map lives in that test |
+| `flux-child-kustomizations.py` | `deploy-verify.sh`, `task flux:lint` and `flux-lint.sh` — the cluster's child Kustomizations in `dependsOn` order. `--paths` prints `name<TAB>spec.path` and fails on a stage that declares no path |
 | `check-guest-endpoint-parity.py` | `tests/test_check_guest_endpoint_parity.py` — so `task lint:invariants` and the CI python-tests job — every LAN address a hand-written EndpointSlice names is a real `ansible_host`, or the LAN gateway; every NFS export client inside the host CIDR covers an `ansible_host`, and an export admits each k3s group whole. Its flag defaults are this repository's paths |
 | `flux-secret-consumers.py` | `task flux:rotate-secret` — the workloads in one namespace that actually reference a Secret, each tagged kustomize-managed or not, so the rotation restarts those and nothing else |
 | `taskfile_tree.py` | `scripts/test_taskfile_tree.py` — flattens the `Taskfile.yml` `includes:` tree into one `{name: definition}` map with `- task:` references fully qualified, so a suite that walks task names sees the namespace files too |
@@ -78,6 +77,16 @@ the diff.
 | `find-reachable-host.sh`, `shell-lib.sh` | the Taskfile, to pick a live SSH entry point |
 | `semantic-release.py` | the CI release job |
 | `version-bump-mr.py` | the CI version-bump bot |
+| `check-role-default-flips.py` | an operator, at every `lib_ref` bump — diffs the scalar and list role defaults between two weisssrv.infra refs. Role variables are `default()`-guarded, so a flipped default changes this cluster's behaviour with no inventory edit and no other gate failing |
+| `check-tenant-traefik-isolation.py` | `task lint:tenant-traefik-isolation` and `tests/test_check_tenant_traefik_isolation.py` — `tenant-crd-editor` grants a tenant full `traefik.io` write, so the gate fails, with or without a tenant wired (a torn-down tenant's labelled Namespace stays live), whatever `providers.kubernetesCRD.allowCrossNamespace` says, unless the configs kustomization applies `tenant-traefik-policy.yaml` with bindings whose whole spec is `Deny` over every tenant namespace (no `paramRef`, no narrowed match) and each of its twelve policies keeps its pinned `failurePolicy: Fail`, `paramKind`, resource rules, variables and validation expressions (whitespace-normalized, in order); `tenant-traefik-hostnames` and `tenant-certificates` are bound per tenant instead, so every tenant namespace a listed tenant file declares needs a binding of each whose whole spec is `Deny` on that namespace alone with `paramRef` `flux-system/tenant-routing-<ns>` and `parameterNotFoundAction: Deny`, and that ConfigMap in the tenants tree granting at least one hostname |
+| `check-tenant-wiring.py` | `tests/test_check_tenant_wiring.py` — so `task lint:invariants` and the CI python-tests job — every tenant file carries its `serviceAccountName`, `prune`, `targetNamespace`, `dependsOn`, labels on every Namespace, a LimitRange with no CPU under `default` or `max`, both RoleBindings, its `kustomization.yaml` entry, `kustomize.toolkit.fluxcd.io/prune: disabled` on every Namespace, ResourceQuota, LimitRange, hostname grant ConfigMap and both per-tenant policy bindings, database or not, and `deletionPolicy: Orphan` on a database Kustomization |
+| `tenant_common.py` | `check-tenant-traefik-isolation.py` and `check-tenant-wiring.py`, imported from this directory — the tenant file and namespace readers both gates share |
+| `check-skill-refs.py` | `task lint:skill-refs` and the CI skill-refs job — every backticked repo path the `cluster-development` skill cites resolves, which `check-doc-links.py` cannot see because they are not Markdown links |
+| `generate-host-log-staleness.py` | `task flux:sync-host-log-staleness`, and `--check` in `task lint:repo-sync` + the CI check-generated-files job, each with `--runbook "RUNBOOKS.md#per-host-log-shipping-alerts"` — one `absent_over_time` alert per `alloy_host` host |
+| `check-internal-route-allowlist.py` | `scripts/flux-corpus-gates.sh` over the substituted corpus, so both `task flux:lint` and the CI flux-lint job run it — every Traefik route to an internal-domain host names a source-allowlist middleware, because both VIPs serve the same entrypoints |
+| `check-crd-stage-order.py` | `scripts/flux-corpus-gates.sh`, once per cluster directory, so both `task flux:lint` and the CI flux-lint job run it — every custom resource's CRD is installed by a stage its own stage waits on, or a fresh cluster's first reconcile fails with `no matches for kind` |
+| `check-image-gc-threshold.py` | `task lint:image-gc-threshold` and the CI image-gc-threshold job — `KubeletImageGCIneffective` fires above the kubelet's image-gc high watermark, offset and capped as the rule's comment says |
+| `ci-run-check.sh` | the CI check-generated-files job, which sources it — the `run_check` driver that runs each check, records a failure and carries on, so one red check never hides the rest |
 
 Everything a task or a CI job runs is here rather than pulled from a checkout at
 run time: a CI job has only this repository, and a gate that depends on cloning
@@ -99,24 +108,22 @@ because NetworkPolicies are additive. A peer with an empty `podSelector` and no
 `namespaceSelector` is the exception: it is scoped to the policy's own namespace,
 so it narrows and the namespace stays fenced.
 
-It ships one built-in exemption
-(`flux-system`, universal to a Flux cluster), and a freshly generated cluster
-adds none. `scripts/flux-corpus-gates.sh` is the single invocation, shared by
-`task flux:lint` and the CI flux-lint job's `extra_validation`, and it passes no
-flags. When this cluster does need an exemption, the mechanism is a
-`--exempt NS=REASON` flag there, never an edit to the script, which the next
-refresh would revert.
+It ships one built-in exemption, `flux-system`, which every Flux cluster needs.
+A freshly generated cluster adds none. `scripts/flux-corpus-gates.sh` is the
+single invocation, shared by `task flux:lint` and the CI flux-lint job's
+`extra_validation`, and it passes no flags. When this cluster does need an
+exemption, add an `--exempt NS=REASON` flag there. Never edit the script: the
+next refresh reverts it.
 
 Note on `flux-env.sh`: it ships from the library like the rest, and is compared
-like the rest. What it adds over `flux-render.sh` is the second ConfigMap — this
-cluster substitutes from **two** (`cluster-versions` for pins, `cluster-config`
-for domains, VIPs and CIDRs) while the render helper takes one file per call.
-`flux-env.sh` merges them behind the same `export-versions` / `k8s-version`
-interface, so the local lint and the CI job see identical variables, which is
-why `task flux:lint` and the CI flux-lint job's `flux_render_script` input both
-point at THIS file, never at `flux-render.sh` directly. Extra ConfigMaps can
-also come from `$FLUX_EXTRA_CONFIGMAPS`; `merged-configmap` emits the union as
-one document for the tools that accept a single ConfigMap path.
+like the rest. This cluster substitutes from **two** ConfigMaps:
+`cluster-versions` for pins, and `cluster-config` for domains, VIPs and CIDRs.
+`flux-env.sh` exports both behind one `export-versions` / `k8s-version`
+interface. The local lint and the CI job therefore see identical variables, and
+`task flux:lint` and the CI flux-lint job's `flux_render_script` input both
+point at this file. Extra ConfigMaps can also come from
+`$FLUX_EXTRA_CONFIGMAPS`. `merged-configmap` emits the union as one document for
+the tools that accept a single ConfigMap path.
 
 ## Local helpers
 
@@ -131,10 +138,6 @@ Not vendored at the pinned ref — this repository owns them.
 | `flux-corpus-gates.sh` | `task flux:lint` and the CI flux-lint job (`extra_validation`) — the one list of gates that read the whole rendered corpus |
 | `check-grafana-sidecar-init.py` | `task flux:lint` and the CI flux-lint job (`extra_validation`), plus `tests/test_check_grafana_sidecar_init.py` — every k8s-sidecar container the Grafana chart renders runs the `METHOD` its position requires: `LIST` in an init container, so it lists once and exits instead of hanging the pod in PodInitializing, and `WATCH` in a long-running one, where `LIST` exits at once and restarts in a loop |
 | `check-unmanaged-secrets.py` | `task lint:unmanaged-secrets`, against a live cluster — every Secret has a controller owner (ESO, Flux, Helm, cert-manager), with an `ALLOWLIST` naming the out-of-band ones and why |
-| `check-role-default-flips.py` | an operator, at every `lib_ref` bump — diffs the scalar and list role defaults between two weisssrv.infra refs. Role variables are `default()`-guarded, so a flipped default changes this cluster's behaviour with no inventory edit and no other gate failing |
-| `check-tenant-traefik-isolation.py` | `task lint:tenant-traefik-isolation` and `tests/test_check_tenant_traefik_isolation.py` — `tenant-crd-editor` grants a tenant full `traefik.io` write, so the gate fails, with or without a tenant wired (a torn-down tenant's labelled Namespace stays live), whatever `providers.kubernetesCRD.allowCrossNamespace` says, unless the configs kustomization applies `tenant-traefik-policy.yaml` with bindings whose whole spec is `Deny` over every tenant namespace (no `paramRef`, no narrowed match) and each of its twelve policies keeps its pinned `failurePolicy: Fail`, `paramKind`, resource rules, variables and validation expressions (whitespace-normalized, in order); `tenant-traefik-hostnames` and `tenant-certificates` are bound per tenant instead, so every tenant namespace a listed tenant file declares needs a binding of each whose whole spec is `Deny` on that namespace alone with `paramRef` `flux-system/tenant-routing-<ns>` and `parameterNotFoundAction: Deny`, and that ConfigMap in the tenants tree granting at least one hostname |
-| `check-tenant-wiring.py` | `tests/test_check_tenant_wiring.py` — so `task lint:invariants` and the CI python-tests job — every tenant file carries its `serviceAccountName`, `prune`, `targetNamespace`, `dependsOn`, labels on every Namespace, a LimitRange with no CPU under `default` or `max`, both RoleBindings, its `kustomization.yaml` entry, `kustomize.toolkit.fluxcd.io/prune: disabled` on every Namespace, ResourceQuota, LimitRange, hostname grant ConfigMap and both per-tenant policy bindings, database or not, and `deletionPolicy: Orphan` on a database Kustomization |
-| `check-skill-refs.py` | `tests/test_check_skill_refs.py` — so `task lint:invariants` and the CI python-tests job — every backticked repo path the `cluster-development` skill cites resolves, which `check-doc-links.py` cannot see because they are not Markdown links |
 {%- if vpn_tailscale %}
 | `check-tailscale-policy.py` | `task lint:tailscale-policy`, and `terraform:tailscale-apply` right after its confirmation. Ships only with the tailnet: `policy.hujson` parses, every `tag:` it references has a `tagOwners` entry, and `autoApprovers.routes` matches the inventory's `tailscale_advertise_routes` |
 {%- endif %}
@@ -146,7 +149,6 @@ Not vendored at the pinned ref — this repository owns them.
 | `check-deploy-host-coverage.py` | `task lint:coverage-checks` and `scripts/test_check_deploy_host_coverage.py` — every host a role's plays declare is reached by some CI deploy job, so no host sits un-converged with nothing reporting it |
 | `check-ansible-service-names.py` | `task lint:coverage-checks` and `scripts/test_check_ansible_service_names.py` — a service/systemd task names a real unit, not a role FQCN, which ansible-lint cannot see because it checks module arguments |
 | `diagnose-network-issues.sh` | an operator, by hand, from a workstation with SSH to every node, plus `scripts/test_diagnose_network_issues.py` — per-host link, bond, bridge and NIC-error sections, each SSH bounded by a wall-clock `timeout` |
-| `generate-host-log-staleness.py` | `task flux:sync-host-log-staleness`, and `--check` in `task lint:repo-sync` + the CI check-generated-files job — one `absent_over_time` alert per `alloy_host` host |
 | `check-integration-matrix-coverage.py` | `task lint:integration-matrix` and the CI check-integration-matrix job — every integration-test directory has a CI matrix entry |
 | `check-upstream-rule-mirror.py` | `task lint:upstream-rule-mirror` — every rule `defaultRules.disabled` turns off has an in-tree replacement, and each replacement names the chart version it was taken at, matching the `helm_chart_versions` pin |
 | `collect-state.sh` | `task collect-state` — a redacted snapshot of every host into `CLUSTER_STATUS.txt`, headed with a tri-state verdict |

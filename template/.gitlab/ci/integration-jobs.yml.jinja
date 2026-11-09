@@ -102,6 +102,10 @@
     - mkdir -p "$CI_PROJECT_DIR/junit"
   artifacts:
     when: always
+    # The junit report glob does not match a subdirectory, so the attempts
+    # molecule-retry.sh stashes survive only as an artifact path.
+    paths:
+      - junit/failed-attempt-*/
     reports:
       junit: junit/*.xml
   # Above MOL_MAX x worst-case attempt, not at it: with no headroom a retry

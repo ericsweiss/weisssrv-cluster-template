@@ -11,17 +11,43 @@ import re
 import sys
 from pathlib import Path
 
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
 try:
-    import yaml
-except ImportError:  # pragma: no cover - environment guard
-    print("ERROR: PyYAML required: pip install pyyaml", file=sys.stderr)
+    from gate_common import (  # noqa: E402  (resolved from this script's own directory)
+        NAME_LABEL,
+        OperatorError,
+    )
+    from tenant_common import (  # noqa: E402  (resolved from this script's own directory)
+        AGGREGATOR,
+        CERTIFICATE_POLICY,
+        FLUX_NAMESPACE,
+        GRANT_POLICIES,
+        GRANT_PREFIX,
+        HOSTNAME_POLICY,
+        SHARED,
+        TENANT_LABEL,
+        TENANT_STORAGE_CLASS,
+        Targets,
+        add_target_arguments,
+        discover_tenants_dir,
+        label,
+        kustomization_resources,
+        listed_resources,
+        load_mappings,
+        metadata,
+        of_kind,
+        resolve_targets,
+    )
+except ImportError as exc:  # pragma: no cover - environment guard
+    print(
+        f"ERROR: {exc}: tenant_common.py and gate_common.py must be vendored "
+        "beside this gate (see scripts/vendorable-paths.yml)",
+        file=sys.stderr,
+    )
     raise SystemExit(2) from None
-
-REPO = Path(__file__).resolve().parent.parent
-TENANTS_KUSTOMIZATION = "kubernetes/clusters/{{ cluster_name }}/tenants/kustomization.yaml"
-
-# The one resource that is always present: the shared tenant RBAC, not a tenant.
-BASELINE = {"tenant-crd-editor.yaml"}
 
 # The tenant policies, pinned whole: fail closed, these resources, and exactly
 # these match conditions, variables and validation expressions (whitespace-normalized),
@@ -67,7 +93,9 @@ PLATFORM_MIDDLEWARES = (
     "'authentik/authentik-auth']"
 )
 INTERNAL_ALLOWLISTS = "['lan-tailscale-only', 'lan-tailscale-strict']"
+# Lowered like the host it is compared with, so a mixed-case domain still matches.
 INTERNAL_DOMAIN = "'${cluster_internal_domain}'.lowerAscii()"
+# A quoted internal hostname ends in one of these; a domain merely containing it does not.
 INTERNAL_HOST_ENDS = (
     "['.' + variables.internalDomain + '`', '`' + variables.internalDomain + '`', "
     "'.' + variables.internalDomain + '\"', '\"' + variables.internalDomain + '\"']"
@@ -583,7 +611,7 @@ REQUIRED_POLICIES = {
         "validations": [
             (
                 "has(object.spec.storageClassName) && "
-                "(object.spec.storageClassName == 'tenant-local' || "
+                f"(object.spec.storageClassName == '{TENANT_STORAGE_CLASS}' || "
                 "(object.spec.storageClassName == '' && has(object.spec.volumeName) && "
                 "object.spec.volumeName.startsWith(object.metadata.namespace + '-')))"
             ),
@@ -591,15 +619,6 @@ REQUIRED_POLICIES = {
         ],
     },
 }
-# Bound once per tenant, in its wiring file, to the hostnames the platform
-# granted that namespace in flux-system/tenant-routing-<ns>; every other
-# required policy is bound once, here, on the tenant label.
-HOSTNAME_POLICY = "tenant-traefik-hostnames"
-CERTIFICATE_POLICY = "tenant-certificates"
-PER_TENANT_POLICIES = (HOSTNAME_POLICY, CERTIFICATE_POLICY)
-FLUX_NAMESPACE = "flux-system"
-ROUTING_PREFIX = "tenant-routing-"
-TENANT_LABEL = "fluxcd.io/tenant"
 # CEL int() reads only plain ASCII decimals; anything else errors the policy.
 MAX_PRIORITY = re.compile(r"[0-9]+", re.ASCII)
 MAX_PRIORITY_CEILING = 2147483647
@@ -610,82 +629,62 @@ TENANT_MATCH = {
 }
 
 
-class Vacuous(Exception):
-    """The gate could not inspect its subject — exit 2, never a silent pass."""
-
-
-def _read(path: Path, root: Path) -> str:
-    """Read one of the gate's inputs, or exit 2 through Vacuous."""
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise Vacuous(f"{path.relative_to(root)}: {exc}") from exc
-
-
-def tenant_resources(path: Path, root: Path) -> list[str]:
-    try:
-        doc = yaml.safe_load(_read(path, root)) or {}
-    except yaml.YAMLError as exc:
-        raise Vacuous(f"{path.relative_to(root)}: {exc}") from exc
-    return [str(r) for r in doc.get("resources") or []]
-
-
 def _cel(text: object) -> str:
     """A CEL expression with its whitespace normalized: YAML folding is not a change."""
     return " ".join(str(text).split())
 
 
 def _entries(items: object) -> list[dict] | None:
+    """The items when they are a list of mappings, else None."""
     if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
         return None
     return items
 
 
-def enforces(spec: object, required: dict) -> bool:
-    """Fails closed on exactly the required paramKind and resources, under exactly
-    the required match conditions (for most policies none), with exactly the
-    required variables and validation expressions, in order."""
+def drift(spec: object, required: dict) -> list[str]:
+    """The parts of a policy spec that differ from the pinned shape: fail closed on
+    exactly the required paramKind and resources, under exactly the required match
+    conditions, with exactly the required variables and validations, in order."""
     if not isinstance(spec, dict):
-        return False
+        return ["spec is not a mapping"]
     conditions = _entries(spec.get("matchConditions") or [])
     variables = _entries(spec.get("variables") or [])
     validations = _entries(spec.get("validations"))
-    if conditions is None or variables is None or validations is None:
-        return False
-    return (
-        spec.get("failurePolicy") == "Fail"
-        and spec.get("paramKind") == required["paramKind"]
-        and spec.get("matchConstraints") == {"resourceRules": required["resourceRules"]}
+    parts = {
+        "failurePolicy": spec.get("failurePolicy") == "Fail",
+        "paramKind": spec.get("paramKind") == required["paramKind"],
+        "matchConstraints": spec.get("matchConstraints")
+        == {"resourceRules": required["resourceRules"]},
+        "matchConditions": conditions is not None
         and [(c.get("name"), _cel(c.get("expression"))) for c in conditions]
-        == required.get("matchConditions", [])
+        == required.get("matchConditions", []),
+        "variables": variables is not None
         and [(v.get("name"), _cel(v.get("expression"))) for v in variables]
-        == required["variables"]
-        and [_cel(v.get("expression")) for v in validations] == required["validations"]
-    )
+        == required["variables"],
+        "validations": validations is not None
+        and [_cel(v.get("expression")) for v in validations] == required["validations"],
+    }
+    return [part for part, pinned in parts.items() if not pinned]
 
 
-def policies_pin_tenants(path: Path, root: Path) -> bool:
-    """True when the configs kustomization applies the policy file, every
-    required policy exists in its pinned shape, and each but the per-tenant
-    grant policies has a binding whose whole spec is Deny on the tenant label."""
-    if not path.is_file():
-        return False
+def policy_gaps(path: Path, root: Path) -> list[str]:
+    """Why the tenant policies do not hold, or nothing: the configs kustomization
+    applies the policy file, each required policy has its pinned shape, and each but
+    the grant policies, bound in each tenant's wiring file, has a Deny tenant binding."""
     configs = root / CONFIGS_KUSTOMIZATION
-    if not configs.is_file() or path.name not in tenant_resources(configs, root):
-        return False
-    try:
-        docs = [d for d in yaml.safe_load_all(_read(path, root)) if isinstance(d, dict)]
-    except yaml.YAMLError as exc:
-        raise Vacuous(f"{path.relative_to(root)}: {exc}") from exc
+    if not path.is_file():
+        return [f"{label(path, root)} is missing"]
+    if not configs.is_file():
+        return [f"{label(configs, root)} is missing, so nothing applies the policies"]
+    if path.name not in kustomization_resources(configs, label(configs, root)):
+        return [f"{label(configs, root)} does not list {path.name}"]
+    docs = load_mappings(path, label(path, root))
     policies: dict[str, list[object]] = {}
-    for doc in docs:
-        if doc.get("kind") == "ValidatingAdmissionPolicy":
-            name = (doc.get("metadata") or {}).get("name")
-            policies.setdefault(name, []).append(doc.get("spec"))
+    for doc in of_kind(docs, "ValidatingAdmissionPolicy"):
+        name = metadata(doc).get("name")
+        policies.setdefault(name, []).append(doc.get("spec"))
     bound = set()
-    for doc in docs:
-        if doc.get("kind") != "ValidatingAdmissionPolicyBinding":
-            continue
+    for doc in of_kind(docs, "ValidatingAdmissionPolicyBinding"):
         spec = doc.get("spec")
         if not isinstance(spec, dict):
             continue
@@ -698,12 +697,18 @@ def policies_pin_tenants(path: Path, root: Path) -> bool:
             "matchResources": TENANT_MATCH,
         }:
             bound.add(name)
-    return all(
-        (name in bound or name in PER_TENANT_POLICIES)
-        and len(policies.get(name, [])) == 1
-        and enforces(policies[name][0], required)
-        for name, required in REQUIRED_POLICIES.items()
-    )
+    gaps = []
+    for name, required in REQUIRED_POLICIES.items():
+        if name not in bound and name not in GRANT_POLICIES:
+            gaps.append(
+                f"{name}: no binding whose whole spec is Deny on the {TENANT_LABEL} label"
+            )
+        defined = policies.get(name, [])
+        if len(defined) != 1:
+            gaps.append(f"{name}: defined {len(defined)} times, not once")
+        elif parts := drift(defined[0], required):
+            gaps.append(f"{name}: {', '.join(parts)} differ from the pinned shape")
+    return gaps
 
 
 def routing_binding_spec(namespace: str, policy: str = HOSTNAME_POLICY) -> dict:
@@ -714,12 +719,12 @@ def routing_binding_spec(namespace: str, policy: str = HOSTNAME_POLICY) -> dict:
         "policyName": policy,
         "validationActions": ["Deny"],
         "paramRef": {
-            "name": ROUTING_PREFIX + namespace,
+            "name": GRANT_PREFIX + namespace,
             "namespace": FLUX_NAMESPACE,
             "parameterNotFoundAction": "Deny",
         },
         "matchResources": {
-            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": namespace}}
+            "namespaceSelector": {"matchLabels": {NAME_LABEL: namespace}}
         },
     }
 
@@ -746,41 +751,24 @@ def _grant_problem(data: object) -> str | None:
     return None
 
 
-def routing_problems(root: Path, tenants: list[str]) -> list[str]:
-    """Every tenant namespace a tenant file declares has its own Deny bindings of
+def routing_problems_for(files: dict[str, list[dict]]) -> list[str]:
+    """Every tenant namespace a wiring file declares has its own Deny bindings of
     the hostname and certificate policies and a non-empty hostname grant in
-    flux-system that both read."""
-    base = (root / TENANTS_KUSTOMIZATION).parent
-    docs: dict[str, list[dict]] = {}
-    problems = []
-    for tenant in tenants:
-        path = base / tenant
-        if not path.is_file():
-            problems.append(
-                f"{TENANTS_KUSTOMIZATION} lists {tenant}, which does not exist — "
-                "its hostname grant cannot be checked"
-            )
-            continue
-        try:
-            loaded = list(yaml.safe_load_all(_read(path, root)))
-        except yaml.YAMLError as exc:
-            raise Vacuous(f"{path.relative_to(root)}: {exc}") from exc
-        docs[tenant] = [d for d in loaded if isinstance(d, dict)]
-    every = [d for file_docs in docs.values() for d in file_docs]
-    specs = [
-        d.get("spec") for d in every if d.get("kind") == "ValidatingAdmissionPolicyBinding"
-    ]
+    flux-system that both read, all within the files given."""
+    every = [d for file_docs in files.values() for d in file_docs]
+    specs = [d.get("spec") for d in of_kind(every, "ValidatingAdmissionPolicyBinding")]
     grants = {
-        (d.get("metadata") or {}).get("name"): d
-        for d in every
-        if d.get("kind") == "ConfigMap"
-        and (d.get("metadata") or {}).get("namespace") == FLUX_NAMESPACE
+        metadata(d).get("name"): d
+        for d in of_kind(every, "ConfigMap")
+        if metadata(d).get("namespace") == FLUX_NAMESPACE
     }
-    for tenant, file_docs in docs.items():
+    problems = []
+    for tenant, file_docs in files.items():
+        # A nameless Namespace is no tenant name to grant; it never becomes "None".
         namespaces = [
-            (d.get("metadata") or {}).get("name")
-            for d in file_docs
-            if d.get("kind") == "Namespace"
+            name
+            for d in of_kind(file_docs, "Namespace")
+            if (name := metadata(d).get("name"))
         ]
         if not namespaces:
             problems.append(
@@ -788,7 +776,7 @@ def routing_problems(root: Path, tenants: list[str]) -> list[str]:
                 "cannot be checked"
             )
         for namespace in namespaces:
-            grant = ROUTING_PREFIX + str(namespace)
+            grant = GRANT_PREFIX + str(namespace)
             for policy, risk in (
                 (HOSTNAME_POLICY, "its routes could match any hostname"),
                 (CERTIFICATE_POLICY, "it could be issued a certificate for any hostname"),
@@ -810,18 +798,33 @@ def routing_problems(root: Path, tenants: list[str]) -> list[str]:
     return problems
 
 
-def check(root: Path = REPO) -> list[str]:
-    kustomization = root / TENANTS_KUSTOMIZATION
+def check(root: Path, tenants_dir: Path | None = None) -> list[str]:
+    """The tenants tree against the platform policies."""
+    base = tenants_dir or discover_tenants_dir(root)
+    kustomization = base / AGGREGATOR
     if not kustomization.is_file():
-        return [f"{TENANTS_KUSTOMIZATION} is missing — this gate no longer binds"]
+        return [f"{label(kustomization, root)} is missing — this gate no longer binds"]
+    where = label(kustomization, root)
 
-    resources = tenant_resources(kustomization, root)
+    resources = listed_resources(base)
     if not resources:
-        return [f"{TENANTS_KUSTOMIZATION} lists no resources — has the tenant wiring moved?"]
+        return [f"{where} lists no resources — has the tenant wiring moved?"]
 
-    tenants = [r for r in resources if r not in BASELINE]
-    problems = routing_problems(root, tenants) if tenants else []
-    if policies_pin_tenants(root / TENANT_POLICY, root):
+    tenants = sorted(resources - SHARED)
+    docs: dict[str, list[dict]] = {}
+    problems = []
+    for tenant in tenants:
+        path = base / tenant
+        if not path.is_file():
+            problems.append(
+                f"{where} lists {tenant}, which does not exist — "
+                "its hostname grant cannot be checked"
+            )
+            continue
+        docs[tenant] = load_mappings(path, label(path, root))
+    problems += routing_problems_for(docs)
+    gaps = policy_gaps(root / TENANT_POLICY, root)
+    if not gaps:
         return problems
 
     # The policies bind by label, and a torn-down tenant's Namespace stays live
@@ -831,31 +834,40 @@ def check(root: Path = REPO) -> list[str]:
         else "wires no tenant, but the labelled Namespaces it left live still need"
     )
     return [
-        f"{TENANTS_KUSTOMIZATION} {onboards} "
+        f"{where} {onboards} "
         f"the complete Deny-bound tenant policies in {TENANT_POLICY}. "
         "Those policies are required even when "
         "providers.kubernetesCRD.allowCrossNamespace is false: plain Ingress "
         "annotations, forwardAuth addresses, and Service endpoint resolution "
         "can otherwise make Traefik cross the tenant boundary."
+        + "".join(f"\n    - {gap}" for gap in gaps)
     ] + problems
+
+
+def check_files(targets: Targets) -> list[str]:
+    """Standalone wiring files: the per-tenant routing arm only, no platform files."""
+    docs = {
+        targets.label(path): load_mappings(path, targets.label(path))
+        for path in targets.files
+    }
+    return routing_problems_for(docs)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--repo", type=Path, default=REPO)
+    add_target_arguments(ap, Path(__file__).resolve().parent.parent)
     args = ap.parse_args(argv)
 
     try:
-        problems = check(args.repo)
-    except Vacuous as exc:
+        targets = resolve_targets(args)
+        if targets.files:
+            problems = check_files(targets)
+        else:
+            problems = check(targets.root, targets.tenants_dir)
+    except OperatorError as exc:
         print(f"check-tenant-traefik-isolation inspected nothing: {exc}", file=sys.stderr)
-        print(
-            "    Fix: Flux would reject the file — make it parse, or move it out "
-            "of the tree.",
-            file=sys.stderr,
-        )
         return 2
     if problems:
         print("check-tenant-traefik-isolation: FAILED", file=sys.stderr)

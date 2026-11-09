@@ -1,6 +1,6 @@
 ---
-# Certificate distribution integration test - verify.
-# acme_certs installation plus the SSH-delivered bundle on each receiver.
+# Asserts the acme_certs install on the cert server and the SSH-delivered bundle
+# on each receiver.
 
 - name: Verify - Certificate Server
   hosts: cert_servers
@@ -208,25 +208,6 @@
         fail_msg: "SSH service not running"
         success_msg: "SSH service is running"
 
-    # The role rewrites the key comment to "cert distribution (<authority>)".
-    # grep -F keeps the parentheses literal and the match exact, so a key with
-    # the wrong provenance cannot satisfy the assert.
-    - name: Check authorized_keys for cert distribution key
-      ansible.builtin.command: >-
-        grep -cF "cert distribution ({{ groups['cert_servers'] | first }})"
-        /home/{{ admin_user }}/.ssh/authorized_keys
-      register: authorized_key_check
-      changed_when: false
-      failed_when: false
-
-    - name: Assert cert distribution key is authorized
-      ansible.builtin.assert:
-        that:
-          - authorized_key_check.rc == 0
-          - authorized_key_check.stdout | int > 0
-        fail_msg: "cert-distribution pubkey missing from {{ admin_user }}'s authorized_keys"
-        success_msg: "cert-distribution key present in authorized_keys ({{ authorized_key_check.stdout }})"
-
     - name: Check the forced-command receiver was deployed
       ansible.builtin.stat:
         path: /usr/local/sbin/cert-receive
@@ -254,18 +235,21 @@
         fail_msg: "cert-receive sudoers drop-in missing or wrong perms"
         success_msg: "cert-receive sudoers drop-in present (0440)"
 
-    # The key must be pinned to the forced command and stripped of
-    # shell/pty/forwarding — never a login shell.
+    # The role comments the key "cert distribution (<authority>)"; grep -F keeps
+    # the match literal. The key must be pinned to the forced command and
+    # stripped of shell, pty and forwarding.
     - name: Read the cert-distribution authorized_keys line
       ansible.builtin.command: >-
         grep -F "cert distribution ({{ groups['cert_servers'] | first }})"
         /home/{{ admin_user }}/.ssh/authorized_keys
       register: authorized_key_line
       changed_when: false
+      failed_when: false
 
-    - name: Assert the key is locked to the forced-command receiver
+    - name: Assert the key is authorized and locked to the forced-command receiver
       ansible.builtin.assert:
         that:
+          - authorized_key_line.rc == 0
           - "'command=\"sudo /usr/local/sbin/cert-receive\"' in authorized_key_line.stdout"
           - "'restrict' in authorized_key_line.stdout"
         fail_msg: "cert-distribution key is NOT restricted to the forced-command receiver"

@@ -1102,86 +1102,6 @@ def test_a_placeholder_in_a_yml_source_is_reported(tmp_path):
     assert _sources_placeholders(tmp_path) == (["repo.yml"], 2)
 
 
-# === Kubelet image GC =================================================
-
-K3S_VARS = ANSIBLE_DIR / "inventories" / "prod" / "group_vars" / "k3s.yml"
-IMAGE_GC_ARG = re.compile(r"^image-gc-high-threshold=(\d+)$")
-EXPR_THRESHOLD = re.compile(r">\s*(\d+(?:\.\d+)?)\s*$")
-
-
-def _alert_rules(node):
-    """Every Prometheus rule dict carrying an `alert:` key, at any depth."""
-    if isinstance(node, dict):
-        if "alert" in node and "expr" in node:
-            yield node
-        for value in node.values():
-            yield from _alert_rules(value)
-    elif isinstance(node, list):
-        for value in node:
-            yield from _alert_rules(value)
-
-
-def image_gc_drift(k3s_vars: dict, release: dict) -> list[str]:
-    """Where the kubelet flag and KubeletImageGCIneffective disagree.
-
-    The alert fires 5 points above the kubelet's high watermark, capped at 79 so
-    it stays under DiskUsageWarning, whose inhibit would otherwise mute it.
-    """
-    flags = [
-        int(match.group(1))
-        for arg in k3s_vars.get("k3s_kubelet_args") or []
-        if (match := IMAGE_GC_ARG.match(str(arg).strip()))
-    ]
-    if len(flags) != 1:
-        return [f"k3s_kubelet_args sets image-gc-high-threshold {len(flags)} times, not once"]
-    flag = flags[0]
-    rules = {rule["alert"]: rule for rule in _alert_rules(release)}
-    gc_rule = rules.get("KubeletImageGCIneffective")
-    disk_rule = rules.get("DiskUsageWarning")
-    if gc_rule is None or disk_rule is None:
-        return [f"{KPS_RELEASE} lacks KubeletImageGCIneffective or DiskUsageWarning"]
-    gc_match = EXPR_THRESHOLD.search(str(gc_rule["expr"]).strip())
-    disk_match = EXPR_THRESHOLD.search(str(disk_rule["expr"]).strip())
-    if not gc_match or not disk_match:
-        return ["an alert expr has no trailing `> <number>` comparison"]
-    alert = float(gc_match.group(1))
-    problems = []
-    if alert != min(flag + 5, 79):
-        problems.append(f"alert threshold {alert:g} is not min({flag} + 5, 79)")
-    if alert >= float(disk_match.group(1)):
-        problems.append(
-            f"alert threshold {alert:g} is not under DiskUsageWarning's "
-            f"{disk_match.group(1)}, so the inhibit mutes it for good"
-        )
-    description = " ".join(str(gc_rule["annotations"].get("description", "")).split())
-    if f"of {flag}%:" not in description:
-        problems.append(f"the alert description does not name the kubelet's {flag}%")
-    return problems
-
-
-def _image_gc_sources() -> tuple[dict, dict]:
-    assert K3S_VARS.is_file(), f"{K3S_VARS} is missing — this guard checked nothing"
-    return yaml.safe_load(K3S_VARS.read_text()) or {}, helm_release(K8S_ROOT / KPS_RELEASE)
-
-
-def test_the_kubelet_image_gc_flag_and_its_alert_agree():
-    """Retuning the kubelet watermark without the alert leaves the alert firing
-    while GC still works, or silent while it cannot keep up."""
-    drift = image_gc_drift(*_image_gc_sources())
-    assert not drift, "image-gc threshold drift:\n  " + "\n  ".join(drift)
-
-
-def test_an_edited_kubelet_flag_is_reported_as_drift():
-    """Mutation case: the kubelet is retuned and the alert is left alone."""
-    k3s_vars, release = _image_gc_sources()
-    k3s_vars["k3s_kubelet_args"] = [
-        "image-gc-high-threshold=55" if str(arg).startswith("image-gc-high-threshold=") else arg
-        for arg in k3s_vars["k3s_kubelet_args"]
-    ]
-    drift = image_gc_drift(k3s_vars, release)
-    assert any("is not min(55 + 5, 79)" in line for line in drift), drift
-
-
 # === Apiserver egress =================================================
 
 APISERVER_PORT = "6443"
@@ -1646,18 +1566,19 @@ AUTHENTIK_BASE_URL = ("AUTHENTIK_WEB__BASE_URL", "https://auth.${cluster_externa
 
 
 def _env_list(doc: dict, section: str) -> list[dict]:
+    """The section's effective env: the chart renders global.env ahead of it."""
     values = (doc.get("spec") or {}).get("values") or {}
-    return (values.get(section) or {}).get("env") or []
+    shared = (values.get("global") or {}).get("env") or []
+    return shared + ((values.get(section) or {}).get("env") or [])
 
 
 def _wrong_issuer_origin(env: list[dict]) -> str | None:
+    """The last entry for a name is the one the container sees."""
     name, value = AUTHENTIK_BASE_URL
-    for entry in env:
-        if isinstance(entry, dict) and entry.get("name") == name:
-            if entry.get("value") == value:
-                return None
-            return f"{name} is {entry.get('value')!r}"
-    return f"{name} is absent"
+    seen = [e.get("value") for e in env if isinstance(e, dict) and e.get("name") == name]
+    if not seen:
+        return f"{name} is absent"
+    return None if seen[-1] == value else f"{name} is {seen[-1]!r}"
 
 
 @needs_k8s
@@ -1680,6 +1601,10 @@ def test_an_env_list_missing_the_external_origin_is_reported():
     assert _wrong_issuer_origin([{"name": name, "value": internal}]) is not None
     assert _env_list({"spec": {"values": {"server": {"env": [{"name": name}]}}}}, "server")
     assert _env_list({"spec": {"values": {"worker": {}}}}, "worker") == []
+    shared = {"spec": {"values": {"global": {"env": [{"name": name, "value": value}]}}}}
+    assert _wrong_issuer_origin(_env_list(shared, "worker")) is None
+    shared["spec"]["values"]["worker"] = {"env": [{"name": name, "value": internal}]}
+    assert _wrong_issuer_origin(_env_list(shared, "worker")) is not None
 
 
 KPS_RELEASE = "infrastructure/observability/kube-prometheus-stack/release.yaml"

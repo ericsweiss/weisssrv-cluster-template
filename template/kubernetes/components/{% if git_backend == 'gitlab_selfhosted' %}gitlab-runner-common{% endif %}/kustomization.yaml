@@ -24,8 +24,8 @@ patches:
         interval: 30m
         driftDetection:
           mode: enabled
-        # The liveness probe plus the GitLab connection handshake can take 6-8
-        # minutes on a cold start; the 5m default times out prematurely.
+        # Install and upgrade inherit this. A cold start's liveness probe and
+        # GitLab handshake outlast the 5m default.
         timeout: 15m
         chart:
           spec:
@@ -37,11 +37,9 @@ patches:
               namespace: flux-system
             interval: 12h
         install:
-          timeout: 15m
           remediation:
             retries: 3
         upgrade:
-          timeout: 15m
           remediation:
             retries: 3
             remediateLastFailure: true

@@ -12,7 +12,7 @@
           - groups['nas_servers'] | default([]) | length == 1
           - groups['smb_clients'] | default([]) | length == 1
         fail_msg: >-
-          molecule.yml no longer produces nas_servers and smb_clients, so the
+          molecule.yml does not produce nas_servers and smb_clients, so the
           plays in this scenario match no hosts.
       run_once: true
 
@@ -33,7 +33,7 @@
           - systemd
           - nfs-kernel-server
           - samba
-          - smbclient  # For local verification of shares
+          - smbclient
           - smartmontools
         state: present
 
@@ -57,8 +57,7 @@
       loop: "{{ mock_zfs_mounts }}"
 
   tasks:
-    # Apply nas_storage role with container-appropriate skip flags
-    # Skip flags are set in molecule.yml group_vars
+    # The container skip flags are set in molecule.yml group_vars.
     - name: Apply nas_storage role
       ansible.builtin.include_role:
         name: weisssrv.infra.nas_storage
@@ -79,8 +78,6 @@
         name:
           - smbclient
         state: present
-        # Note: cifs-utils not needed - we test with smbclient only
-        # Mounting CIFS shares doesn't work reliably in Docker containers
 
     - name: Wait for Samba server to be ready
       ansible.builtin.wait_for:

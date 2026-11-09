@@ -47,9 +47,8 @@ spec:
       config: |
         # TOML sections are positional: scalar keys first, sub-tables last.
         [[runners]]
-          # request_concurrency 1 serializes job acquisition behind GitLab's
-          # long-poll window and surfaces as runner_system_failure bursts; the
-          # runner's own startup warning recommends 2-4.
+          # Within the runner's recommended 2-4, so job acquisition does not
+          # stall behind GitLab's long-poll window.
           request_concurrency = 3
 
           # A [[runners]] scalar — must precede the [runners.kubernetes] sub-table.
@@ -64,6 +63,8 @@ spec:
             # Default CI job image, digest-pinned (the tag is kept for
             # readability; the digest is authoritative).
             image = "python:3.11@sha256:9800957d2a88867f853ce6072ae1669e37fa269cc6f76009fa1aef4757f62212"
+            # No pod security context: the DinD daemon needs root. Its isolation
+            # is the registration scope, README.md.
             privileged = true
 
             # ci-jobs ranks job pods below unclassed pods and never preempts. A

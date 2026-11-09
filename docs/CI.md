@@ -189,6 +189,11 @@ requests the largest limits in the pipeline and is the first job refused at
 pod-creation time when several pipelines overlap, which arrives as a system
 failure rather than a test failure.
 
+Library CI templates default to `tags: []`. This repository's jobs stay
+tag-less, so they land on the shared runner. The generated pipeline passes the
+`ci_runner_tag` answer to every include that defines a job, because its deploy
+and DinD jobs need the privileged runner.
+
 ## The two answer fixtures
 
 Both are complete answer sets, and every question must be answered in **both** —

@@ -171,16 +171,18 @@ someone else's addresses by accident.
 ├── ansible/
 │   ├── requirements.yml            weisssrv.infra pinned at lib_ref
 │   ├── inventories/prod/           hosts.yml + group_vars (yours to fill)
-│   └── playbooks/                  site, base, dns, storage, k3s, maintenance/
-├── terraform/                      DNS zone, tailnet ACL, SSO objects
+│   └── playbooks/                  site, base, dns, storage, k3s, proxmox-*, maintenance/
+├── terraform/                      DNS zone, tailnet ACL, SSO objects, gateway networks
 ├── kubernetes/
-│   ├── clusters/<cluster_name>/    Flux entrypoint + the five stage Kustomizations
+│   ├── clusters/<cluster_name>/    Flux entrypoint + the stage Kustomizations
 │   ├── infrastructure/             sources → crds → controllers → configs → observability
+│   ├── components/                 reusable kustomize components
 │   └── apps/                       one directory per application
 ├── scripts/                        verification, generators, version registry
 ├── docs/                           RUNBOOKS.md (what the alerts link to), ci-pipeline.md, security-posture.md
 ├── .claude/skills/                 the cluster-development agent skill; CLAUDE.md
 │                                   and AGENTS.md at the root point at it
+├── .copier-answers.yml             the template release and answers it was generated from
 ├── Taskfile.yml                    every operation, grouped by namespace
 ├── taskfiles/                      one file per namespace, included by Taskfile.yml
 └── .gitlab-ci.yml                  lint / validate / deploy, from the library templates
@@ -194,31 +196,15 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Backends
 
-| Seam | Implemented | Where it plugs in |
-|---|---|---|
-| Virtualization | Proxmox VE | `proxmox_*` roles, `vm_additional_disks` in the inventory |
-| Storage (`storage_backend`) | ZFS on the NAS node, NFS + zvol passthrough | `nas_storage`, `zvol_mount`, static PVs, the pool scrape |
-| Git / CI | Self-hosted GitLab | `.gitlab-ci.yml`, Flux `GitRepository`, runners, the Terraform HTTP state backend |
-| Secrets | 1Password (CLI + Connect) | `op://` refs, `ClusterSecretStore`, ExternalSecrets |
-| DNS | Cloudflare | Terraform zone module, external-dns, ACME DNS-01 |
-| Internal DNS | AdGuard Home + Unbound | `ansible/playbooks/dns.yml` (`adguard_home`, `unbound`, `unbound_exporter`, `adguard_sync`), the resolver guests, `upstream_dns_servers` |
-| Ingress | Traefik + cert-manager | `infrastructure/controllers`, `infrastructure/configs` |
-| Overlay VPN | Tailscale (`vpn_tailscale`) | host role, operator, ACL module |
-| GPU | NVIDIA (`gpu`) | VFIO host prep, node driver, `nvidia-device-plugin` — telemetry (DCGM) is operator-added |
-| Gateway / VLANs | UniFi (`use_unifi`) | `terraform/unifi`, the `unifi-drift-plan` job — off by default, and nothing in the cluster depends on it |
-| SSO | Authentik | `apps/authentik`, `terraform/authentik`, the tenant policy's Authentik literals |
-
-Where a seam is selectable it is a copier question that accepts only the values
-that are implemented, so an unimplemented choice fails during generation with a
-message naming what is missing rather than producing a repository that will not
-reconcile. Virtualization has no such question: nothing in the generated tree
-would be left to select.
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § Backend seams records what a new
-backend has to provide on the cluster side, and the library's
-[docs/EXTENSIBILITY.md](https://git.ericsweiss.com/eric/weisssrv-lib/-/blob/main/docs/EXTENSIBILITY.md)
-is the contract on the role side — the named variables whose default is today's
-behaviour, and the rule that a second backend is a sibling role family, never a
-fork.
+Proxmox, ZFS, self-hosted GitLab, 1Password, Cloudflare, AdGuard Home with
+Unbound, Traefik, Tailscale, NVIDIA, UniFi and Authentik are the implemented
+backends. A selectable seam is a copier question that accepts only implemented
+values, so an unimplemented choice fails during generation.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § Backend seams is the canonical
+table: where each seam plugs in and what a new backend has to provide. The
+library's
+[docs/EXTENSIBILITY.md](https://github.com/ericsweiss/weisssrv-lib/blob/main/docs/EXTENSIBILITY.md)
+is the contract on the role side.
 
 ## Documentation
 
@@ -236,12 +222,12 @@ fork.
 ```bash
 cd ~/src/mycluster
 copier update --vcs-ref <template-tag>   # replays .copier-answers.yml against a newer template
-task lint && task flux:lint
+task lib:sync && task lint                 # flux:lint included
 ```
 
 `<template-tag>` is a tag of **this** repository — not `lib_ref`, which is
 weisssrv-lib's own version and is answered separately. List what exists with
-`git ls-remote --tags https://git.ericsweiss.com/eric/weisssrv-cluster-template.git`.
+`git ls-remote --tags https://github.com/ericsweiss/weisssrv-cluster-template.git`.
 
 `copier update` produces a diff you review like any other change: it never
 touches files you rewrote beyond recognition without telling you. Bumping

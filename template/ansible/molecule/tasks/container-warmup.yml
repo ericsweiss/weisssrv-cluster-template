@@ -17,7 +17,7 @@
   when: dpkg_repair.rc != 0
 
 # lock_timeout is the bounded wait for a background apt run holding the dpkg
-# lock. The test image has no `fuser`, so a fuser wait loop exits immediately.
+# lock; the test image ships no `fuser` to probe the lock with.
 - name: Update apt cache
   ansible.builtin.apt:
     update_cache: true

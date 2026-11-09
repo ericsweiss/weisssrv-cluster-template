@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # Fail when a Taskfile references a scripts/<name>.{sh,py}, a `dotenv:` target or
 # a task that is not on disk, and when a fragment on disk no `includes:` reaches.
-# Contract + env: weisssrv-lib docs/SCRIPTS.md - check-taskfile.sh.
+# Contract: weisssrv-lib docs/SCRIPTS.md - check-taskfile.sh.
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$_SCRIPT_DIR/.." && pwd)"
-DOTENV_TARGETS="${CHECK_TASKFILE_DOTENV:-scripts/hosts.env}"
-MAX_DEPTH="${CHECK_TASKFILE_MAX_DEPTH:-10}"
-FRAGMENT_DIR="${CHECK_TASKFILE_FRAGMENT_DIR-taskfiles}"
-CHECK_REFS="${CHECK_TASKFILE_REFS:-1}"
+DOTENV_TARGET="scripts/hosts.env"
+MAX_DEPTH=10
+FRAGMENT_DIR="taskfiles"
 
 rc=0
 VISITED=""
@@ -139,7 +138,6 @@ qualify() {
 
 collect_tasks() {
     local taskfile="$1" ns="$2" kind name ref owner
-    [ "$CHECK_REFS" = "1" ] || return 0
     while IFS="$(printf '\t')" read -r kind owner ref; do
         case "$kind" in
             T)
@@ -159,7 +157,7 @@ collect_tasks() {
 }
 
 check_taskfile() {
-    local taskfile="$1" depth="$2" ns="${3:-}" dir ref target target_ere include includes resolved entry
+    local taskfile="$1" depth="$2" ns="${3:-}" dir ref target_ere include includes resolved entry
     local child_ns
 
     if [ ! -f "$taskfile" ]; then
@@ -186,14 +184,12 @@ check_taskfile() {
 
     # go-task fails hard loading a missing dotenv file. Match the bare path (not
     # just a same-line `dotenv:`) so the YAML multi-line list form is caught too.
-    for target in $DOTENV_TARGETS; do
-        target_ere="${target//./\\.}"
-        if grep -qE '(^|[[:space:]"'"'"'-])'"$target_ere"'([[:space:]"'"'"']|$)' "$taskfile" \
-            && [ ! -f "$REPO_ROOT/$target" ]; then
-            echo "ERROR: Taskfile dotenv target $target is missing" >&2
-            rc=1
-        fi
-    done
+    target_ere="${DOTENV_TARGET//./\\.}"
+    if grep -qE '(^|[[:space:]"'"'"'-])'"$target_ere"'([[:space:]"'"'"']|$)' "$taskfile" \
+        && [ ! -f "$REPO_ROOT/$DOTENV_TARGET" ]; then
+        echo "ERROR: Taskfile dotenv target $DOTENV_TARGET is missing" >&2
+        rc=1
+    fi
 
     # The cap bounds recursion, so it fires only when there is something left
     # to descend into: a leaf reached at the cap terminates the chain itself.
@@ -222,7 +218,6 @@ EOF
 # every task in it and no other gate fires.
 check_orphan_fragments() {
     local dir="$REPO_ROOT/$FRAGMENT_DIR" fragment
-    [ -n "$FRAGMENT_DIR" ] || return 0
     [ -d "$dir" ] || return 0
     for fragment in "$dir"/*.yml "$dir"/*.yaml; do
         [ -f "$fragment" ] || continue
@@ -239,7 +234,6 @@ check_orphan_fragments() {
 
 check_task_references() {
     local entry file owner ref
-    [ "$CHECK_REFS" = "1" ] || return 0
     for entry in $REFERENCED; do
         file="${entry%%|*}"
         owner="${entry#*|}"

@@ -654,13 +654,13 @@ def test_the_substitution_arm_fails_a_render_without_the_versions_configmap(tmp_
                 file: /ci/validate/flux-lint.yml
                 inputs:
                   versions_configmap: kubernetes/missing.yaml
-                  flux_render_script: scripts/flux-render.sh
+                  flux_render_script: scripts/flux-env.sh
             """
         )
     )
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    (scripts / "flux-render.sh").write_text(
+    (scripts / "flux-env.sh").write_text(
         'set -euo pipefail\ntest -f "$2" || { echo "no such ConfigMap: $2" >&2; exit 1; }\n'
     )
     with pytest.raises(validate_render.Failure, match="export-versions"):

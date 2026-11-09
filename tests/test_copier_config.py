@@ -780,6 +780,13 @@ def test_upstream_dns_servers_must_sit_inside_the_lan(answer, outside):
     assert "lan_cidr" in message and outside in message, message
 
 
+@pytest.mark.parametrize("edge", ["192.168.0.0", "192.168.0.255"])
+def test_upstream_dns_servers_rejects_the_network_and_broadcast_address(edge):
+    message = _dns_message(edge)
+    assert message, f"{edge} was accepted although no guest can take it"
+    assert edge in message and "broadcast" in message, message
+
+
 def test_upstream_dns_servers_rejects_a_repeated_address():
     assert _dns_message("192.168.0.21 192.168.0.21"), "the same address twice was accepted"
 
@@ -1341,6 +1348,15 @@ VALIDATOR_CASES = [
         {"internal_domain": "lan.example.com"},
         "must differ from internal_domain",
     ),
+    (
+        "external_domain",
+        "pub.example.com",
+        "the public zone inside the internal one: tenant admission holds every "
+        "host under internal_domain to the LAN-only middleware",
+        {"internal_domain": "example.com"},
+        "must not sit inside internal_domain",
+    ),
+    ("external_domain", "myexample.com", None, {"internal_domain": "example.com"}),
     ("admin_user", "ops", None, {}),
     (
         "admin_user",

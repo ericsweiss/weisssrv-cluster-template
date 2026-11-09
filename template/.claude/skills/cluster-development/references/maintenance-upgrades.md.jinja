@@ -25,32 +25,46 @@ rather than a local run, whose cache can be stale.
 ## Bumping the library pin
 
 The roles, CI job templates, Terraform modules and vendored gates all come from
-weisssrv-lib at `{{ lib_ref }}`. A behaviour change is a library merge request and
-a release tag, then a pin bump here.
+weisssrv-lib at `{{ lib_ref }}`. A behaviour change is a library merge request,
+then a pin bump here. The whole bump lands in one merge request.
 
-1. The change lands in the library and a release tag is cut.
-2. Here: `scripts/check-lib-pins.py --bump vX.Y.Z`. It moves the declared
-   `lib_ref` input in `.gitlab-ci.yml` and every pin derived from it — the
-   `include:` refs, `ansible/requirements.yml` and each Terraform `?ref=` the
+1. Merge the library MR. Its release job cuts the tag from the
+   conventional-commit subjects; nobody tags by hand. The library's
+   `docs/VERSIONING.md` § Releases are cut automatically owns that.
+2. `scripts/check-lib-pins.py --bump vX.Y.Z`. It moves the declared `lib_ref`
+   input in `.gitlab-ci.yml` and every pin derived from it: the `include:`
+   refs, `ansible/requirements.yml` and each Terraform `?ref=` the
    `scripts/lib-ref-sites.yml` list names.
-3. `task lib:sync` to refresh the local checkout, re-vendor the byte-identical
-   copies, and re-run the gates. A vendored copy edited here is reverted by the
-   next re-vendor and reds the byte-identity gate meanwhile.
-4. `task ansible:install-collections` reinstalls the collection at the new pin.
-   It passes `--force` itself, because the installer skips a collection that is
-   already installed.
-5. `scripts/check-role-default-flips.py --from <installed tag> --to <new tag>`
+3. `task lib:sync` refreshes `.weisssrv-lib/` at the new ref. Re-vendor every
+   file the manifest lists, which covers more than `scripts/`:
+
+   ```bash
+   python3 .weisssrv-lib/scripts/check-vendored-copies.py \
+     --repo-root . --lib-path .weisssrv-lib --list
+   python3 .weisssrv-lib/scripts/check-vendored-copies.py \
+     --repo-root . --lib-path .weisssrv-lib --ref vX.Y.Z --require-ref
+   ```
+
+   The first lists what to copy; the second reports what still drifts. A
+   declared fork absorbs the library's change, then its `reconciled_sha256` in
+   the manifest is re-taken. A vendored copy edited here is reverted by the
+   next re-vendor.
+4. `scripts/check-role-default-flips.py --from <installed tag> --to vX.Y.Z --lib .weisssrv-lib`
    reports role defaults that flip between the two tags with no inventory value
    pinning them, and fails on one declared for some hosts only. Declare each one
    in the inventory, or pass `--allow <key>` once the new default is adopted on
    purpose. `--allow-partial` accepts the partly declared ones after a review
    that the other hosts want the new default. No pipeline runs it, because it
    needs both tags side by side.
-6. Land the inventory changes a renamed or emptied variable needs in the SAME
+5. Land the inventory changes a renamed or emptied variable needs in the SAME
    merge request. Role variables are `| default(...)`-guarded, so a missed rename
-   does not fail: it silently takes the role default.
-7. Prove pipeline parity before merging. The library serves several consumers, so
-   a changed input default changes this pipeline too.
+   does not fail: it takes the role default.
+6. `task ansible:install-collections` reinstalls the collection at the new pin.
+   It passes `--force` itself, because the installer skips a collection that is
+   already installed.
+7. Run `task lint`, then prove pipeline parity before merging. The library
+   serves several consumers, so a changed input default changes this pipeline
+   too.
 
 ## OS patching and reboots
 

@@ -9,6 +9,7 @@ import importlib
 import importlib.util
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -500,8 +501,23 @@ TENANT_MATCH = {
 }
 
 
+def yaml_mappings(text: str) -> list[dict]:
+    """The mapping documents of a multi-document YAML text."""
+    return [d for d in yaml.safe_load_all(text) if isinstance(d, dict)]
+
+
 def _mappings(path: Path) -> list[dict]:
-    return [d for d in yaml.safe_load_all(path.read_text(encoding="utf-8")) if isinstance(d, dict)]
+    return yaml_mappings(path.read_text(encoding="utf-8"))
+
+
+def tenant_readme_example() -> str:
+    """The complete tenant wiring fence from the onboarding README."""
+    tenants = load_script("tenant_common.py").discover_tenants_dir(REPO)
+    readme = (tenants / "README.md").read_text(encoding="utf-8")
+    return next(
+        b for b in re.findall(r"```yaml\n(.*?)```", readme, re.S)
+        if "kind: Kustomization" in b and "serviceAccountName" in b
+    )
 
 
 def policy_spec(path: Path, kind: str, name: str) -> dict:
@@ -537,3 +553,24 @@ def copier_answers() -> dict:
     """The answers this cluster was rendered with; a render always carries them."""
     assert ANSWERS_FILE.is_file(), ".copier-answers.yml is missing — a render always carries it"
     return yaml.safe_load(ANSWERS_FILE.read_text()) or {}
+
+
+def wired_gate_argv(script: str, ci_job: str, task: str) -> list[str]:
+    """The flags the CI job `ci_job` and `task lint:<task>` pass to `script`.
+
+    The two copies are written out separately, so they are asserted equal first.
+    """
+    ci_yaml = load_script("ci_yaml.py")
+    doc = ci_yaml.load_ci(REPO / ".gitlab-ci.yml")
+    tasks = yaml.safe_load((REPO / "taskfiles" / "lint.yml").read_text(encoding="utf-8"))
+    callers = {
+        f".gitlab-ci.yml {ci_job}": ci_yaml.script_lines(doc[ci_job], doc),
+        f"lint:{task}": tasks["tasks"][task]["cmds"],
+    }
+    argvs = {}
+    for caller, cmds in callers.items():
+        calls = [shlex.split(c) for c in cmds if isinstance(c, str) and script in c]
+        assert len(calls) == 1, f"{caller}: expected one {script} call, found {len(calls)}"
+        argvs[caller] = calls[0][calls[0].index(f"scripts/{script}") + 1:]
+    assert len({tuple(a) for a in argvs.values()}) == 1, f"the callers disagree: {argvs}"
+    return next(iter(argvs.values()))

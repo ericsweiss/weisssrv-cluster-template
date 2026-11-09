@@ -20,7 +20,7 @@ Fix one upstream and re-copy it here; a local edit is lost on the next refresh.
 ## Prerequisites
 
 ```bash
-pip install -r ../requirements.txt   # molecule + molecule-plugins[docker], pinned
+pip install -r requirements.txt      # from the repo root: molecule + molecule-plugins[docker], pinned
 docker info                          # Docker must be running
 ```
 
@@ -74,16 +74,17 @@ would pass or fail depending on what DNS answers that day.
 `unbound` + `adguard_home` + `adguard_sync` across two servers (dns-01 primary,
 dns-02 replica) on a shared Docker network.
 
-Asserted: Unbound installs, runs and resolves over DoT; the converge-supplied
-`unbound_forwarders` reach the template (a negative check on a default-only
-forwarder catches a rename silently falling back); AdGuard Home installs, starts
-and answers on :3000; the codified `adguard_home_rewrites` are reconciled onto
-the primary through the role's API path; the sync unit and timer are configured
-and enabled on the primary.
+Asserted: Unbound installs, runs and resolves over DoT, so the scenario needs
+the internet. The converge-supplied `unbound_forwarders` reach the template, and
+a negative check on a default-only forwarder catches a renamed variable. AdGuard
+Home installs, starts and answers on :3000. The codified `adguard_home_rewrites`
+are reconciled onto the primary through the role's API path. The sync unit and
+timer are enabled on the primary, and one sync run delivers every codified
+rewrite to the replica.
 
-Not asserted: DNS on :53 through AdGuard, and full sync operation. The role
-skips the resolv.conf switch in-container, so AdGuard's own resolution path is
-not representative. `postflight.yml` covers both against the real resolvers.
+Not asserted: DNS on :53 through AdGuard. The role skips the resolv.conf switch
+in-container, so AdGuard's own resolution path is not representative.
+`postflight.yml` covers it against the real resolvers.
 
 ### Mail stack — `integration-tests/mail-stack/`
 
@@ -101,12 +102,12 @@ assertion keys on.
 ### Base infrastructure — `integration-tests/base-infrastructure/`
 
 `base` + `qol`{% if vpn_tailscale %} + `tailscale`{% endif %} on two hosts. Asserted: packages, admin user and
-sudoers, timezone, and the zsh/neovim configuration.
+sudoers, timezone, the zsh configuration and its theme, and the vim plugin manager.
 {%- if vpn_tailscale %}
 The Tailscale package lands and the unit is installed and enabled. `tailscale
 up` self-skips because the scenario sets no `TAILSCALE_AUTH_KEY`, which is what
-makes it runnable in a container; the daemon's runtime state is deliberately not
-asserted. The converge therefore sets `tailscale_require_authkey: false`, while
+makes it runnable in a container; the daemon's runtime state is not asserted.
+The converge therefore sets `tailscale_require_authkey: false`, while
 `group_vars/all.yml` sets it to `true` so a real deploy without the key fails
 rather than leaving the host off the tailnet.
 {%- endif %}

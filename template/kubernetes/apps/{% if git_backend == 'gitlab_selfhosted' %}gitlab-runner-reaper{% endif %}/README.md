@@ -38,8 +38,10 @@ lacks a parseable `finishedAt`, the pod is KEPT.
 
 Secrets get their own three guards: type is narrowed **server-side** to
 `kubernetes.io/dockercfg` (so the SA never lists runner tokens or SA tokens at
-all), the name must start with `runner-`, and the Secret must not be referenced
-by any live pod via `imagePullSecrets` or `ownerReferences`. Their age runs from
+all), the name must have the same `runner-*-project-*-concurrent-*` shape as the
+pods, and the Secret must not be referenced by any live pod via
+`imagePullSecrets` or `ownerReferences`. A bare `runner-` prefix is not enough,
+because a hand-created credential could carry it. Their age runs from
 `creationTimestamp` with a much longer floor (3h), which structurally protects
 any in-flight job's Secret and closes the create-Secret-then-create-pod race.
 
@@ -60,10 +62,12 @@ the fixed no-input script, and this dedicated single-purpose ServiceAccount.
 ## Where the code lives
 
 `gitlab-runner-reaper.py` sits beside the manifests because kustomize only
-accepts `configMapGenerator` sources inside the kustomization root. The CronJob
-mounts it read-only at `/opt/reaper`, and a script edit rolls a new hashed
-ConfigMap. Its unit tests are `tests/test_gitlab_runner_reaper.py`, which also
-holds the manifest and the code defaults to each other.
+accepts `configMapGenerator` sources inside the kustomization root. It imports
+`kube_reaper.py`, vendored byte-identical from weisssrv-lib, for the API client,
+paging, ages and deletes. The CronJob mounts both read-only at `/opt/reaper`,
+and a script edit rolls a new hashed ConfigMap. Its unit tests are
+`tests/test_gitlab_runner_reaper.py`, which also holds the manifest and the code
+defaults to each other.
 
 ## Operational shape
 
@@ -83,3 +87,7 @@ holds the manifest and the code defaults to each other.
 Remove the entry from `kubernetes/apps/kustomization.yaml`. Then watch the `pods`
 quota dimension in both runner namespaces — a leak backlog eventually 403s new
 job pods.
+
+Drop the `GitlabRunnerReaperPartialSweep` rule too. It lives in
+`kubernetes/infrastructure/observability/loki/runner-reaper.yaml`, with its
+`loki-rules-runner-reaper` entry in that directory's kustomization.

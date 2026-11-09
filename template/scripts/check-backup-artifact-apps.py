@@ -123,10 +123,6 @@ def main(argv: list[str] | None = None) -> int:
         "--rules", type=Path, required=True,
         help=f"manifest defining the {ALERT} rule",
     )
-    parser.add_argument(
-        "--allow-empty", action="store_true",
-        help="a consumer that collects no backup artefacts passes with nothing paired",
-    )
     args = parser.parse_args(argv)
 
     for path in (args.host_vars, args.rules):
@@ -137,44 +133,26 @@ def main(argv: list[str] | None = None) -> int:
     host_vars_text = args.host_vars.read_text()
     rules_text = args.rules.read_text()
     collector = collector_apps(host_vars_text)
-    stale_alert_present = True
     try:
         arms = alert_arm_apps(rules_text)
     except LookupError as exc:
-        # A consumer collecting no artefacts has no such alert by definition.
-        if not args.allow_empty:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            return 2
-        arms = set()
-        stale_alert_present = False
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     companion_problems = check_companions(host_vars_text, rules_text, args.host_vars, args.rules)
 
     if not collector and not arms:
-        if not args.allow_empty:
-            print(
-                f"ERROR: no app in {args.host_vars} declares "
-                f"nas_storage_backup_artifact_apps and {ALERT} has no absent() arm — "
-                f"the gate paired nothing; pass --allow-empty if this consumer "
-                f"collects no backup artefacts",
-                file=sys.stderr,
-            )
-            return 2
-        if stale_alert_present:
-            print(
-                f"ERROR: {ALERT} exists in {args.rules} but has no absent() arm, so "
-                f"it guards nothing; --allow-empty covers a consumer with no backup "
-                f"artefacts, which ships no such rule at all.\n"
-                f"    Fix: delete the rule, or declare the app(s) it must guard in "
-                f"{args.host_vars} and add the matching arm(s)",
-                file=sys.stderr,
-            )
-            return 2
+        print(
+            f"ERROR: no app in {args.host_vars} declares "
+            f"nas_storage_backup_artifact_apps and {ALERT} has no absent() arm — "
+            f"the gate paired nothing",
+            file=sys.stderr,
+        )
+        return 2
 
     if collector == arms and not companion_problems:
         declared = collector_companions(host_vars_text)
-        empty_note = " (--allow-empty)" if not collector else ""
         print(
-            f"backup-artifact apps in sync{empty_note}: {len(collector)} app(s) "
+            f"backup-artifact apps in sync: {len(collector)} app(s) "
             f"({', '.join(sorted(collector))}); "
             f"{sum(len(v) for v in declared.values())} companion(s) declared "
             f"across {len(declared)} app(s)"

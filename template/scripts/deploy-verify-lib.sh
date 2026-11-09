@@ -9,10 +9,8 @@
 # jq fragment: list items whose Ready condition is missing or not True.
 JQ_NOT_READY='select((.status.conditions // []) | map(select(.type == "Ready")) | (length == 0 or .[0].status != "True"))'
 
-# CRITICAL: a swallowed jq error reads as "nothing is wrong". The name helpers
-# print to stderr and return non-zero so an empty list cannot pass for a clean
-# one; count_not_ready prints 999, which only a numeric caller can act on, so it
-# is not fail-closed on its own.
+# A swallowed jq error must not read as "nothing is wrong": the name helpers
+# print to stderr and return non-zero, so an empty list never passes for a clean one.
 
 # count_not_ready: read a `kubectl get <kind> -o json` list on stdin, print how
 # many items are not Ready. 999 only when jq errors; empty input prints nothing,

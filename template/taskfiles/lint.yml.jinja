@@ -188,6 +188,32 @@ tasks:
     cmds:
       - python3 scripts/check-kustomization-coverage.py kubernetes/
 
+  skill-refs:
+    desc: Assert every repo path the cluster-development skill cites still exists
+    # The skill cites files as backticked paths, which check-doc-links.py never
+    # reads, so a rename rots them silently. Mirrors the CI skill-refs job.
+    preconditions:
+      - *needs_python3
+    cmds:
+      - >-
+        python3 scripts/check-skill-refs.py
+        --skill-dir .claude/skills/cluster-development
+        --foreign docs/INCLUDE-CONTRACT.md
+        --foreign docs/VERSIONING.md
+        --foreign docs/EXTENSIBILITY.md
+
+  image-gc-threshold:
+    desc: Assert KubeletImageGCIneffective fires above the kubelet's image-gc high watermark
+    # An alert at or below the watermark fires on every routine GC pass. Mirrors
+    # the CI image-gc-threshold job.
+    preconditions:
+      - *needs_pyyaml
+    cmds:
+      - >-
+        python3 scripts/check-image-gc-threshold.py
+        --rules kubernetes/infrastructure/observability/kube-prometheus-stack/release.yaml
+        --alert-offset 5 --alert-cap 79 --min-prose-mentions 1
+
   dashboards:
     desc: Assert every Grafana dashboard parses and points at a provisioned datasource
     # A dashboard imported in grafana.com's share form keeps its ${DS_*}
@@ -341,7 +367,7 @@ tasks:
           echo "{{.VERSIONS_CM}} is in sync with all.yml"
         fi
 
-        python3 scripts/generate-host-log-staleness.py --check || FAILED=1
+        python3 scripts/generate-host-log-staleness.py --check --runbook "RUNBOOKS.md#per-host-log-shipping-alerts" || FAILED=1
         exit $FAILED
 
   unmanaged-secrets:

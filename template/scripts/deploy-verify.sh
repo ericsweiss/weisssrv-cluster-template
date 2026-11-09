@@ -106,8 +106,8 @@ if [ ! -f "$VERSIONS_CONFIGMAP" ]; then
   echo "ERROR: $VERSIONS_CONFIGMAP not found"
   exit 1
 fi
-# flux-env.sh, not flux-render.sh: it merges BOTH substitution ConfigMaps
-# (cluster-versions and cluster-config), so ${cluster_*} resolves.
+# flux-env.sh merges both substitution ConfigMaps, cluster-versions and
+# cluster-config, so ${cluster_*} resolves as it does under Flux.
 VARS=$(bash scripts/flux-env.sh export-versions "$VERSIONS_CONFIGMAP") \
   || { echo "ERROR: failed to extract substitution keys for dry-run"; exit 1; }
 eval "$VARS"
@@ -131,9 +131,16 @@ else
     echo "ERROR: flux-child-kustomizations.py --paths yielded no stage paths; nothing was dry-run."
     EXIT=1
   fi
-  while IFS= read -r SRCPATH; do
-    [ -z "$SRCPATH" ] && continue
-    echo "  dry-run: $SRCPATH"
+  # `name<TAB>path` lines, so a failing stage is named in the job log. A line
+  # without the pair fails the verify: skipping it would leave that stage ungated.
+  while IFS=$'\t' read -r NAME SRCPATH; do
+    [ -z "$NAME$SRCPATH" ] && continue
+    if [ -z "$SRCPATH" ]; then
+      echo "ERROR: flux-child-kustomizations.py --paths printed '$NAME' without a name<TAB>path pair"
+      EXIT=1
+      continue
+    fi
+    echo "  dry-run: $NAME ($SRCPATH)"
     # `printf '%s\n'`, NEVER `echo`, when piping captured YAML: bash's echo
     # expands the `\n` literals inside the dashboard block scalars and breaks the
     # parser. kustomize stderr goes to a tmpfile so notices cannot contaminate it.

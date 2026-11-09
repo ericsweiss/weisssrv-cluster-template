@@ -1,7 +1,7 @@
 """Guards between the gitlab-runner-reaper CronJob and deleting a live CI job
-pod or an in-flight job's registry credential Secret. The program is loaded by
-path from kubernetes/apps/gitlab-runner-reaper/."""
-import json
+pod or an in-flight job's registry credential Secret. The vendored
+kube_reaper.py beside the program is covered by weisssrv-lib's suite."""
+import sys
 import urllib.error
 from datetime import datetime, timedelta, timezone
 
@@ -21,7 +21,13 @@ NOW = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _load():
-    return load_script(MODULE_PATH)
+    # The CronJob runs the program from its mount, where `import kube_reaper`
+    # resolves from the script's own directory.
+    sys.path.insert(0, str(MODULE_PATH.parent))
+    try:
+        return load_script(MODULE_PATH)
+    finally:
+        sys.path.remove(str(MODULE_PATH.parent))
 
 
 @pytest.fixture(scope="module")
@@ -55,8 +61,8 @@ def _schedule_period_seconds(schedule: str) -> int:
     return int(minute[2:]) * 60
 
 
-def pod(name, phase="Succeeded", uid="pod-uid", *, container_ages=(90,), init=None,
-        started_unfinished=False, bad_timestamp=False):
+def pod(name, phase="Succeeded", uid="pod-uid", *, container_ages=(90,),
+        started_unfinished=False):
     """A terminal executor pod as the list API returns it."""
     statuses = []
     for age in container_ages:
@@ -67,20 +73,12 @@ def pod(name, phase="Succeeded", uid="pod-uid", *, container_ages=(90,), init=No
         })
     if started_unfinished:
         statuses.append({"name": "svc", "containerID": "containerd://def", "state": {"running": {}}})
-    if bad_timestamp:
-        statuses.append({
-            "name": "helper",
-            "containerID": "containerd://ghi",
-            "state": {"terminated": {"finishedAt": "not-a-timestamp"}},
-        })
     doc = {
         "metadata": {"name": name, "namespace": "gitlab-runner", "uid": uid,
                      "creationTimestamp": _ts(240)},
         "spec": {},
         "status": {"phase": phase, "startTime": _ts(240), "containerStatuses": statuses},
     }
-    if init is not None:
-        doc["status"]["initContainerStatuses"] = init
     return doc
 
 
@@ -98,8 +96,11 @@ MANAGER = "gitlab-runner-privileged-7d9c8f5b64-2xqzt"
 
 
 def executor_secret(tag: str) -> str:
-    """A per-job credentials Secret name carrying the -project-/-concurrent-
-    markers the name guard requires."""
+    """A per-job credentials Secret name.
+
+    Named from the same ProjectUniqueName as the executor pod, so it carries the
+    -project-/-concurrent- markers the name guard requires.
+    """
     return f"runner-hz7ktcs-project-42-concurrent-0-{tag}"
 
 
@@ -107,7 +108,7 @@ class FakeApi:
     """Records requests; replays canned list pages and delete outcomes."""
 
     def __init__(self, pages=None, deletes=None):
-        # pages: {path fragment: [responses]}; the last response repeats.
+        # pages: {path fragment: [responses]}, served in order; the last repeats.
         self.pages = pages or {}
         self.deletes = deletes or {}
         self.calls = []
@@ -182,44 +183,6 @@ def test_is_runner_secret_name(reaper, name, expected):
     assert reaper.is_runner_secret_name(name) is expected
 
 
-# --- terminal_age_minutes: the four branches -------------------------------
-
-def test_age_is_taken_from_the_newest_termination(reaper):
-    p = pod(EXECUTOR, container_ages=(200, 45, 120))
-    assert reaper.terminal_age_minutes(p, NOW) == 45
-
-
-def test_age_spans_init_containers(reaper):
-    # An init-container failure leaves finishedAt only in initContainerStatuses
-    # and the regular containers never start.
-    p = pod(EXECUTOR, phase="Failed", container_ages=())
-    p["status"]["initContainerStatuses"] = [{
-        "name": "prepare",
-        "containerID": "containerd://init",
-        "state": {"terminated": {"exitCode": 1, "finishedAt": _ts(75)}},
-    }]
-    p["status"]["containerStatuses"] = [{"name": "build", "state": {"waiting": {}}}]
-    assert reaper.terminal_age_minutes(p, NOW) == 75
-
-
-def test_started_but_unfinished_container_keeps_the_pod(reaper):
-    assert reaper.terminal_age_minutes(pod(EXECUTOR, started_unfinished=True), NOW) is None
-
-
-def test_unparseable_timestamp_keeps_the_pod(reaper):
-    assert reaper.terminal_age_minutes(pod(EXECUTOR, bad_timestamp=True), NOW) is None
-
-
-def test_no_terminated_container_keeps_the_pod(reaper):
-    assert reaper.terminal_age_minutes(pod(EXECUTOR, container_ages=()), NOW) is None
-
-
-def test_age_never_falls_back_to_start_time(reaper):
-    # startTime is 240m old; only finishedAt (10m) may drive the decision, or a
-    # freshly-terminal long job would be deleted mid-flight.
-    assert reaper.terminal_age_minutes(pod(EXECUTOR, container_ages=(10,)), NOW) == 10
-
-
 # --- secret guards ---------------------------------------------------------
 
 def test_secret_referenced_by_image_pull_secret(reaper):
@@ -231,13 +194,6 @@ def test_secret_referenced_by_live_owner(reaper):
     s = secret("runner-a-dockercfg", owner_uid="pod-1")
     assert reaper.secret_referenced(s, {"pod-1"}, set()) is True
     assert reaper.secret_referenced(s, {"pod-2"}, set()) is False
-
-
-def test_creation_age_minutes(reaper):
-    assert reaper.creation_age_minutes(secret("runner-a", age=300), NOW) == 300
-    assert reaper.creation_age_minutes({"metadata": {}}, NOW) is None
-    assert reaper.creation_age_minutes(
-        {"metadata": {"creationTimestamp": "nope"}}, NOW) is None
 
 
 # --- config ----------------------------------------------------------------
@@ -275,11 +231,14 @@ def test_load_config_fails_closed_on_an_empty_namespace_list(reaper):
 
 
 def test_load_config_rejects_non_positive_values(reaper):
-    base = {"NAMESPACES": "a", "RUNNER_CLASS_LABEL": "example.test/runner-class"}
+    env = {"NAMESPACES": "a", "RUNNER_CLASS_LABEL": "example.test/runner-class",
+           "MAX_AGE_MINUTES": "-1"}
     with pytest.raises(SystemExit, match="MAX_AGE_MINUTES=-1"):
-        reaper.load_config(dict(base, MAX_AGE_MINUTES="-1"))
+        reaper.load_config(env)
+    env = {"NAMESPACES": "a", "RUNNER_CLASS_LABEL": "example.test/runner-class",
+           "PAGE_LIMIT": "0"}
     with pytest.raises(SystemExit, match="PAGE_LIMIT=0"):
-        reaper.load_config(dict(base, PAGE_LIMIT="0"))
+        reaper.load_config(env)
 
 
 def test_rotation_period_equals_the_cronjob_schedule():
@@ -292,7 +251,8 @@ def test_rotation_period_equals_the_cronjob_schedule():
 # --- pod reaping -----------------------------------------------------------
 
 def _cfg(reaper, **over):
-    base = {"NAMESPACES": "gitlab-runner", "RUNNER_CLASS_LABEL": "example.test/runner-class"}
+    base = {"NAMESPACES": "gitlab-runner",
+            "RUNNER_CLASS_LABEL": "example.test/runner-class"}
     base.update(over)
     return reaper.load_config(base)
 
@@ -461,35 +421,6 @@ def test_reap_secrets_counts_a_transport_error_on_delete(reaper):
     assert out.had_errors is True and out.deleted == 0
 
 
-def test_live_pod_refs_collects_uids_and_pull_secrets(reaper):
-    api = FakeApi(pages={"/pods": [{"items": [
-        {"metadata": {"uid": "a"}, "spec": {"imagePullSecrets": [{"name": "s1"}]}},
-        {"metadata": {"uid": "b"}, "spec": {}},
-    ]}]})
-    assert reaper.live_pod_refs(api, "gitlab-runner", 25,
-                                never_over_budget) == ({"a", "b"}, {"s1"})
-
-
-def test_live_pod_refs_gives_up_rather_than_return_a_partial_set(reaper):
-    # The ref set is what proves a Secret unreferenced; half of it proves
-    # nothing. None (not the partial set) is the only safe answer.
-    api = FakeApi(pages={"/pods": [
-        {"items": [{"metadata": {"uid": "a"}, "spec": {}}], "metadata": {"continue": "tok"}},
-        {"items": [{"metadata": {"uid": "b"}, "spec": {}}]},
-    ]})
-    assert reaper.live_pod_refs(api, "gitlab-runner", 25, lambda: True) is None
-    # And it stops BEFORE spending the next request, which is the point of the
-    # budget: one page listed, the second never asked for.
-    assert len(api.raw_paths) == 1
-
-
-def test_live_pod_refs_completes_when_the_budget_dies_on_the_last_page(reaper):
-    # No continue token -> the set is COMPLETE, so an over-budget clock must not
-    # cost the namespace its sweep; the per-secret budget check ends the run.
-    api = FakeApi(pages={"/pods": [{"items": [{"metadata": {"uid": "a"}, "spec": {}}]}]})
-    assert reaper.live_pod_refs(api, "gitlab-runner", 25, lambda: True) == ({"a"}, set())
-
-
 def test_reap_secrets_skips_the_whole_sweep_when_the_live_listing_is_cut_short(reaper):
     # An incomplete live-ref set must never feed deletions: the namespace's
     # secret sweep is abandoned entirely, not run against what was read.
@@ -531,7 +462,7 @@ def test_run_exits_zero_on_a_clean_budget_stop(reaper):
 def test_budget_stop_leaves_the_later_namespaces_untouched_and_says_so(reaper):
     # Exit 0 makes the log line the only evidence the sweep was partial.
     cfg = _cfg(reaper, NAMESPACES="gitlab-runner-privileged gitlab-runner")
-    order = reaper.rotate_namespaces(cfg.namespaces, NOW)
+    order = reaper.kube_reaper.rotate(cfg.namespaces, NOW, cfg.rotate_period_seconds)
     api = FakeApi(pages={"/pods": [{"items": [pod(EXECUTOR, uid="u1")]}],
                          "/secrets": [{"items": []}]})
     lines = []
@@ -548,7 +479,7 @@ def test_budget_stop_in_the_last_namespace_still_reports_a_partial_run(reaper):
     # only the namespaces AFTER the stop would log nothing and claim
     # budget_stop=no, and rotation reaches this shape on a schedule.
     cfg = _cfg(reaper, NAMESPACES="gitlab-runner-privileged gitlab-runner")
-    order = reaper.rotate_namespaces(cfg.namespaces, NOW, cfg.rotate_period_seconds)
+    order = reaper.kube_reaper.rotate(cfg.namespaces, NOW, cfg.rotate_period_seconds)
 
     class OnlyTheLastNamespaceHasWork(FakeApi):
         # The first namespace lists nothing, so over_budget is never consulted
@@ -605,88 +536,10 @@ def test_a_complete_run_reports_no_budget_stop(reaper):
     assert any("budget_stop=no" in line for line in lines)
 
 
-def test_namespace_start_rotates_between_scheduled_runs(reaper):
-    # Without rotation a namespace with a standing backlog starves every other
-    # one forever, because a budget stop always lands in the same place.
-    namespaces = ["ns-a", "ns-b", "ns-c"]
-    heads = [reaper.rotate_namespaces(namespaces, NOW + timedelta(minutes=15 * i))[0]
-             for i in range(len(namespaces))]
-    assert set(heads) == set(namespaces)
-    for i in range(len(namespaces)):
-        rotated = reaper.rotate_namespaces(namespaces, NOW + timedelta(minutes=15 * i))
-        assert sorted(rotated) == sorted(namespaces)
-    assert reaper.rotate_namespaces([], NOW) == []
-
-
-class _FakeResponse:
-    def __init__(self, body: bytes):
-        self._body = body
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
-
-class TestKubeApi:
-    """The only place the HTTP method, body and headers reach the wire."""
-
-    def _capture(self, reaper, monkeypatch, body: bytes = b'{"items": []}'):
-        seen = {}
-
-        def fake_urlopen(req, timeout=None, context=None):
-            seen["req"] = req
-            seen["timeout"] = timeout
-            return _FakeResponse(body)
-
-        monkeypatch.setattr(reaper.urllib.request, "urlopen", fake_urlopen)
-        monkeypatch.setattr(reaper.ssl, "create_default_context", lambda cafile=None: "ctx")
-        return seen
-
-    def test_a_get_carries_the_bearer_token_and_no_body(self, reaper, monkeypatch):
-        seen = self._capture(reaper, monkeypatch)
-        api = reaper.KubeApi("tok", "/dev/null", 5)
-        assert api.request("GET", "/api/v1/pods") == {"items": []}
-        req = seen["req"]
-        assert req.get_method() == "GET"
-        assert req.full_url == reaper.API + "/api/v1/pods"
-        assert req.headers["Authorization"] == "Bearer tok"
-        assert "Content-type" not in req.headers
-        assert req.data is None
-        assert seen["timeout"] == 5
-
-    def test_a_body_is_sent_as_json(self, reaper, monkeypatch):
-        seen = self._capture(reaper, monkeypatch)
-        api = reaper.KubeApi("tok", "/dev/null", 5)
-        api.request("DELETE", "/api/v1/namespaces/ns/pods/p", {"preconditions": {"uid": "u"}})
-        req = seen["req"]
-        assert req.get_method() == "DELETE"
-        assert req.headers["Content-type"] == "application/json"
-        assert json.loads(req.data.decode()) == {"preconditions": {"uid": "u"}}
-
-    def test_an_empty_response_body_is_an_empty_mapping(self, reaper, monkeypatch):
-        self._capture(reaper, monkeypatch, body=b"")
-        api = reaper.KubeApi("tok", "/dev/null", 5)
-        assert api.request("DELETE", "/api/v1/namespaces/ns/pods/p") == {}
-
-    def test_from_service_account_reads_the_mounted_token(self, reaper, monkeypatch, tmp_path):
-        (tmp_path / "token").write_text("mounted-token\n", encoding="utf-8")
-        (tmp_path / "ca.crt").write_text("", encoding="utf-8")
-        seen = self._capture(reaper, monkeypatch)
-        api = reaper.KubeApi.from_service_account(5, sa_dir=str(tmp_path))
-        api.request("GET", "/api/v1/pods")
-        assert seen["req"].headers["Authorization"] == "Bearer mounted-token"
-
-    def test_an_unreachable_apiserver_propagates(self, reaper, monkeypatch):
-        def boom(req, timeout=None, context=None):
-            raise urllib.error.URLError("down")
-
-        monkeypatch.setattr(reaper.urllib.request, "urlopen", boom)
-        monkeypatch.setattr(reaper.ssl, "create_default_context", lambda cafile=None: "ctx")
-        api = reaper.KubeApi("tok", "/dev/null", 5)
-        with pytest.raises(urllib.error.URLError):
-            api.request("GET", "/api/v1/pods")
+def test_the_configmap_ships_kube_reaper_beside_the_program():
+    """The program imports kube_reaper from its own mount, so a generator that
+    drops the module fails every run with ModuleNotFoundError."""
+    kustomization = yaml.safe_load((MODULE_PATH.parent / "kustomization.yaml").read_text())
+    (generator,) = kustomization["configMapGenerator"]
+    assert set(generator["files"]) == {MODULE_PATH.name, "kube_reaper.py"}
+    assert (MODULE_PATH.parent / "kube_reaper.py").is_file()

@@ -13,11 +13,15 @@ vendored:
     consumer: ansible/molecule/tasks/prepare-apt-disable.yml
   - lib: ansible_collections/weisssrv/infra/molecule-shared/tasks/prepare-base.yml
     consumer: ansible/molecule/tasks/prepare-base.yml
+  # Imported by gitlab-runner-reaper.py from the CronJob's mounted ConfigMap.
+  - lib: kubernetes/reapers/kube_reaper.py
+    consumer: kubernetes/apps/gitlab-runner-reaper/kube_reaper.py
   - scripts/check-alertmanager-behaviour.py
   - scripts/check-backup-artifact-apps.py
   - scripts/check-cluster-invariants.py
   - scripts/check-ci-include-job-names.py
   - scripts/check-comment-length.py
+  - scripts/check-crd-stage-order.py
   - scripts/check-dashboards.py
   - scripts/check-default-deny-coverage.py
   - scripts/check-deploy-coverage.sh
@@ -27,19 +31,27 @@ vendored:
   - scripts/check-guest-endpoint-parity.py
   - scripts/check-helm-repo-parity.py
   - scripts/check-hpa-vpa-invariant.py
+  - scripts/check-image-gc-threshold.py
+  - scripts/check-internal-route-allowlist.py
   - scripts/check-kubectl-version-pin.py
   - scripts/check-lib-pins.py
   - scripts/check-netpol-except-parity.py
   - scripts/check-nfs-tls.py
   - scripts/check-pvc-storageclass.py
+  - scripts/check-role-default-flips.py
   - scripts/check-role-inputs.py
   - scripts/check-scrape-netpol.py
   - scripts/check-scrape-wiring.py
+  - scripts/check-secret-rotation-coverage.py
   - scripts/check-secretstore-scope.py
+  - scripts/check-skill-refs.py
   - scripts/check-taskfile.sh
+  - scripts/check-tenant-traefik-isolation.py
+  - scripts/check-tenant-wiring.py
   - scripts/check-version-checksums.py
   - scripts/check-versions.py
   - scripts/ci-fetch-tools.py
+  - scripts/ci-run-check.sh
   # Companion modules: each is imported from the importing gate's own directory.
   - scripts/ci_playbook_invocations.py
   - scripts/ci_yaml.py
@@ -48,13 +60,14 @@ vendored:
   - scripts/deploy-verify-lib.sh
   - scripts/extract-prometheus-config.py
   - scripts/find-reachable-host.sh
+  - scripts/flux-child-kustomizations.py
   - scripts/flux-env.sh
   # flux-lint.sh runs flux-env.sh and kubeconform-skipped.py by path; both are
   # registered beside it. The expected-skip baseline is this cluster's own.
   - scripts/flux-lint.sh
-  - scripts/flux-render.sh
   - scripts/flux-secret-consumers.py
   - scripts/gate_common.py
+  - scripts/generate-host-log-staleness.py
   - scripts/generate-hosts-env.py
   - scripts/generate-versions-configmap.py
   - scripts/inventory_tree.py
@@ -68,12 +81,21 @@ vendored:
   - scripts/shell-lib.sh
   - scripts/supervised-apply-guard.sh
   - scripts/taskfile_tree.py
+  - scripts/tenant_common.py
   # pre-commit, the yaml-lint job and `task lint` all point at this profile.
   # Kept at lint/, never as a repo-root `.yamllint`: ansible-lint discovers one
   # there and replaces its own yaml rule.
   - lint/yamllint-relaxed.yml
   - scripts/validate-helm-values.py
   - scripts/version-bump-mr.py
+  # The lint profiles this cluster takes unchanged. No directory walk reaches
+  # them, and their drift is quiet: a tightened library rule passes locally.
+  - lib: lint/gitattributes
+    consumer: .gitattributes
+  - lib: lint/ruff.toml
+    consumer: ruff.toml
+  - lib: lint/secret-detection-ruleset.toml
+    consumer: .gitlab/secret-detection-ruleset.toml
   # Only a path the library's scripts/vendorable-paths.yml offers at the pinned
   # ref may be registered here; anything else reds the byte-identity gate.
 
@@ -84,32 +106,12 @@ forked:
   - lib: scripts/check-flux-version-pin.py
     consumer: scripts/check-flux-version-pin.py
     reason: >-
-      Takes --root and --components where the library's takes --repo-root,
-      --ci-file, --versions-configmap, --gotk-glob and --runbook.
-    reconciled_sha256: 5353b33732feddc81d617138783f5fc65f09b13efc35a2f0dc0b878932e9d51c
-  - lib: scripts/check-secret-rotation-coverage.py
-    consumer: scripts/check-secret-rotation-coverage.py
-    reason: >-
-      Hard-codes the rotation document and the manual-rotation map, where the
-      library's requires --doc and accepts --declared-manual.
-    reconciled_sha256: 12e1a976a246b8067aea3da8441dec1c2c0be18604fb9b585a72030bb24931c7
-  - lib: scripts/flux-child-kustomizations.py
-    consumer: scripts/flux-child-kustomizations.py
-    reason: >-
-      Prints a bare spec.path for --paths, globs *.yaml only, and exposes
-      child_kustomizations() rather than the library's name<TAB>path output,
-      --exclude/--allow-missing-paths flags and child_kustomization_paths().
-    reconciled_sha256: 965d08702267f3f03d3213fdb623038178d874f89ef0486fe8b03fe2a37ded4b
+      Reports every disagreeing pin rather than the first, and takes --root and
+      --components where the library's takes --repo-root, --ci-file,
+      --versions-configmap and --gotk-glob.
+    reconciled_sha256: 8176f8d86fd504c1077204d99feab584048fb331ed13ebdb65d7e9f246cf0052
   # The lint profiles. No directory walk reaches these, and their drift is
   # quiet: the library tightens a rule and the local lint keeps passing.
-  - lib: lint/ruff.toml
-    consumer: ruff.toml
-    reason: >-
-      Same rule selection, cluster-scoped header — it documents that the
-      python-lint job relies on ruff's own config discovery finding this file at
-      the repository root.
-    comment_only: true
-    reconciled_sha256: 17ffa1185a44dbc93e14f20bca60af1610702b1b03681691b6f602bd21ce9098
   - lib: lint/editorconfig
     consumer: .editorconfig
     reason: >-
@@ -128,13 +130,3 @@ forked:
     consumer: .gitleaks.toml
     reason: Allowlist paths and this cluster's own false-positive anchors.
     reconciled_sha256: a70051101f8045b94172594a0a89c5cf7e17aa6ad56c184843ffc5eac29891ec
-  - lib: lint/secret-detection-ruleset.toml
-    consumer: .gitlab/secret-detection-ruleset.toml
-    reason: The passthrough names this cluster's gitleaks config and description.
-    reconciled_sha256: 778c939138d015867a1d0e42846994bd03a127c1ded1616eee7136b7e2ecfc75
-  - lib: lint/gitattributes
-    consumer: .gitattributes
-    reason: >-
-      Header wording, and no `*.j2` sections: no file in this cluster is an
-      Ansible template.
-    reconciled_sha256: 413609da908e54a6c037e041b595ed2e269afbcaa268671fd56094813154ff09

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
-import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
@@ -39,8 +38,6 @@ if _MISSING:
         file=sys.stderr,
     )
     raise SystemExit(2)
-
-_PLACEHOLDER = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
 
 DEFAULT_INVENTORY = "ansible/inventories/prod"
 DEFAULT_MANIFEST_TREE = "kubernetes"
@@ -219,43 +216,20 @@ def partial_group_exports(
     return problems
 
 
-def lan_networks(config: Dict[str, str], keys: List[str], extra: List[str]) -> List:
-    """Every network the gate scopes to, from cluster-config keys then literals.
-
-    A multi-VLAN site splits management from storage or a DMZ, so membership is
-    an ANY-match over this list rather than one flat CIDR.
-    """
-    found = []
-    for key in keys:
-        value = config.get(key)
-        if not value:
-            continue
-        try:
-            found.append(ipaddress.ip_network(value, strict=False))
-        except ValueError as exc:
-            raise Vacuous(f"{gate_common.CLUSTER_CONFIG} {key}={value!r}: {exc}") from exc
-    for value in extra:
-        try:
-            found.append(ipaddress.ip_network(value, strict=False))
-        except ValueError as exc:
-            raise Vacuous(f"--extra-lan-cidr {value!r}: {exc}") from exc
-    if not found:
+def lan_network(config: Dict[str, str]):
+    """The host CIDR the gate scopes to, from cluster-config."""
+    value = config.get(DEFAULT_LAN_CIDR_KEY)
+    if not value:
         raise Vacuous(
-            f"{gate_common.CLUSTER_CONFIG} declares none of {', '.join(keys)} and no "
-            "--extra-lan-cidr was passed — the gate has no LAN to scope to"
+            f"{gate_common.CLUSTER_CONFIG} declares no {DEFAULT_LAN_CIDR_KEY} — "
+            "the gate has no LAN to scope to"
         )
-    return found
-
-
-def substitute(address: str, config: Dict[str, str]) -> str:
-    """Resolve a `${cluster_*}` placeholder the way Flux's postBuild does.
-
-    An unknown placeholder is left alone and fails the IP parse below.
-    """
-    match = _PLACEHOLDER.fullmatch(address.strip())
-    if match and match.group(1) in config:
-        return config[match.group(1)]
-    return address
+    try:
+        return ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise Vacuous(
+            f"{gate_common.CLUSTER_CONFIG} {DEFAULT_LAN_CIDR_KEY}={value!r}: {exc}"
+        ) from exc
 
 
 def _endpoint_list(value, config: Dict[str, str]) -> Tuple[List, str]:
@@ -265,7 +239,7 @@ def _endpoint_list(value, config: Dict[str, str]) -> Tuple[List, str]:
     JSON list; a reason, not a bare empty list, keeps a dropped slice visible.
     """
     if isinstance(value, str):
-        resolved = substitute(value, config)
+        resolved = gate_common.substitute(value, config)
         if resolved == value.strip():
             return [], f"{value.strip()!r} names no cluster-config key"
         try:
@@ -326,17 +300,10 @@ def endpoint_addresses(root: Path, tree_name: str, config: Dict[str, str]) -> Tu
     return found, skipped
 
 
-def check(
-    root: Path,
-    lan_cidr_keys: Tuple[str, ...] = (DEFAULT_LAN_CIDR_KEY,),
-    extra_lan_cidrs: Tuple[str, ...] = (),
-    inventory_dir: str = DEFAULT_INVENTORY,
-    manifest_tree: str = DEFAULT_MANIFEST_TREE,
-    scoped_groups: Tuple[str, ...] = DEFAULT_SCOPED_GROUPS,
-) -> Tuple[List[str], int]:
+def check(root: Path) -> Tuple[List[str], int]:
     """(problems, number of in-LAN addresses compared against the inventory)."""
-    hosts_yml = f"{inventory_dir}/hosts.yml"
-    known, groups = inventory(root, hosts_yml, scoped_groups)
+    hosts_yml = f"{DEFAULT_INVENTORY}/hosts.yml"
+    known, groups = inventory(root, hosts_yml, DEFAULT_SCOPED_GROUPS)
     hosts, named_hosts = host_addresses(known)
     if not hosts:
         raise Vacuous(
@@ -347,13 +314,15 @@ def check(
         config = gate_common.load_cluster_config(root)
     except gate_common.OperatorError as exc:
         raise Vacuous(str(exc)) from exc
-    lans = lan_networks(config, list(lan_cidr_keys), list(extra_lan_cidrs))
+    lan = lan_network(config)
     # A cluster that declares no gateway key simply gets no gateway allowance.
     gateway = config.get(GATEWAY_KEY, "")
-    raw, skipped = endpoint_addresses(root, manifest_tree, config)
-    addresses = [(substitute(a, config), resource, rel) for a, resource, rel in raw]
+    raw, skipped = endpoint_addresses(root, DEFAULT_MANIFEST_TREE, config)
+    addresses = [(gate_common.substitute(a, config), resource, rel) for a, resource, rel in raw]
     if not addresses:
-        raise Vacuous(f"no EndpointSlice/Endpoints address found under {manifest_tree}/")
+        raise Vacuous(
+            f"no EndpointSlice/Endpoints address found under {DEFAULT_MANIFEST_TREE}/"
+        )
 
     problems = list(skipped)
     checked = 0
@@ -363,7 +332,7 @@ def check(
         except ValueError:
             problems.append(f"{rel}: {resource} address {address!r} is not an IP address")
             continue
-        if not any(parsed in lan for lan in lans) or address == gateway:
+        if parsed not in lan or address == gateway:
             continue
         checked += 1
         if address not in known:
@@ -373,26 +342,22 @@ def check(
                 + _name_caveat(named_hosts)
             )
 
-    exports, export_skipped = nfs_exports(root, inventory_dir)
+    exports, export_skipped = nfs_exports(root, DEFAULT_INVENTORY)
     problems.extend(export_skipped)
     for export, specs, rel in exports:
         for spec, network in _networks(specs):
             # An overlap either way is in scope: a spec CONTAINING a host CIDR
             # is the broadest client list an exports file can carry, and
             # containment in one direction alone never saw it.
-            in_lan = [
-                lan for lan in lans
-                if lan.version == network.version
-                and (network.subnet_of(lan) or network.supernet_of(lan))
-            ]
-            if not in_lan:
+            if lan.version != network.version or not (
+                network.subnet_of(lan) or network.supernet_of(lan)
+            ):
                 continue
             checked += 1
-            wider = [lan for lan in in_lan if lan.subnet_of(network) and lan != network]
-            if wider:
+            if network != lan and lan.subnet_of(network):
                 problems.append(
                     f"{rel}: export {export} admits {spec}, which is wider than "
-                    f"the host CIDR {wider[0]} — it admits every address in that "
+                    f"the host CIDR {lan} — it admits every address in that "
                     "CIDR and beyond, whatever the inventory holds"
                 )
                 continue
@@ -406,8 +371,7 @@ def check(
     problems.extend(partial_group_exports(exports, groups))
 
     if not checked:
-        scope = ", ".join(str(lan) for lan in lans)
-        raise Vacuous(f"no address inside {scope} reached the comparison")
+        raise Vacuous(f"no address inside {lan} reached the comparison")
     return problems, checked
 
 
@@ -416,40 +380,10 @@ def main(argv=None) -> int:
         description="Guest endpoint addresses and NFS export clients vs the inventory"
     )
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parent.parent))
-    parser.add_argument(
-        "--inventory", default=DEFAULT_INVENTORY, metavar="DIR",
-        help="inventory directory holding hosts.yml, group_vars/ and host_vars/ "
-             "(default: %(default)s)",
-    )
-    parser.add_argument(
-        "--manifest-tree", default=DEFAULT_MANIFEST_TREE, metavar="DIR",
-        help="tree walked for EndpointSlice/Endpoints objects (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--lan-cidr-key", action="append", default=None, metavar="KEY",
-        help="cluster-config key holding a host CIDR; repeatable for a cluster "
-             f"with several host VLANs (default: {DEFAULT_LAN_CIDR_KEY})",
-    )
-    parser.add_argument(
-        "--extra-lan-cidr", action="append", default=None, metavar="CIDR",
-        help="host CIDR cluster-config does not name; repeatable",
-    )
-    parser.add_argument(
-        "--scoped-group", action="append", default=None, metavar="GROUP",
-        help="inventory group an export must admit whole; repeatable "
-             f"(default: {', '.join(DEFAULT_SCOPED_GROUPS)})",
-    )
     args = parser.parse_args(argv)
 
     try:
-        problems, total = check(
-            Path(args.repo_root),
-            lan_cidr_keys=tuple(args.lan_cidr_key or (DEFAULT_LAN_CIDR_KEY,)),
-            extra_lan_cidrs=tuple(args.extra_lan_cidr or ()),
-            inventory_dir=args.inventory,
-            manifest_tree=args.manifest_tree,
-            scoped_groups=tuple(args.scoped_group or DEFAULT_SCOPED_GROUPS),
-        )
+        problems, total = check(Path(args.repo_root))
     except (Vacuous, OSError, UnicodeDecodeError) as exc:
         print(f"check-guest-endpoint-parity inspected nothing: {exc}", file=sys.stderr)
         return 2

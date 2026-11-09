@@ -419,8 +419,7 @@ never been performed is a plan, not a backup.
 
 The template is opinionated but not welded shut. Each seam below is isolated to
 a small number of touchpoints; the "provide" column is the contract a new
-implementation has to satisfy. [README.md](../README.md) § Backends is the same
-inventory in operator form, so the two are edited together.
+implementation has to satisfy.
 
 | Seam | Implemented | Touchpoints | A new backend must provide |
 |---|---|---|---|

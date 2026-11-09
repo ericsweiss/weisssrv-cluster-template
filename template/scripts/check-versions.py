@@ -2,11 +2,12 @@
 """Compare pinned versions against upstream releases, and write the new pins.
 
 Reads a consumer config and the vars file it names; exits 0 current, 1 outdated
-or unwritable, 2 on error. Contract: docs/SCRIPTS.md - check-versions.py.
+or unwritable, 2 on error. Contract: weisssrv-lib docs/SCRIPTS.md.
 """
 
 import argparse
 import gzip
+import hashlib
 import http.client
 import json
 import os
@@ -17,9 +18,9 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from io import BytesIO
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -41,21 +42,22 @@ UNTRACKED_ALLOWLIST: set[str] = set()
 REPORT_TITLE = "Version Check Report"
 
 CACHE_DIR = REPO_ROOT / ".version-cache"
-CACHE_TTL = 3600  # 1 hour cache
+CACHE_TTL = 3600
 
-# GitHub API rate limit handling
 GITHUB_API = "https://api.github.com"
+# Optional token: raises the GitHub API rate limit.
 GITHUB_TOKEN = os.environ.get("GH_API_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
 
-# Request timeout in seconds
 REQUEST_TIMEOUT = 15
+GIT_TIMEOUT = 60
 
 # Bounded retry on transient failures only (URLError, socket.timeout, HTTP 5xx)
 # — never on 4xx, so a 403 rate-limit is surfaced rather than masked as a blip.
 RETRY_ATTEMPTS = 3
+RETRY_BACKOFF = 0.5  # seconds; multiplied by attempt number for linear backoff
+
 # Releases a tag_filter scan covers, whatever page size the entry asks for.
 RELEASE_SCAN_HORIZON = 500
-RETRY_BACKOFF = 0.5  # seconds; multiplied by attempt number for linear backoff
 
 
 @dataclass
@@ -175,6 +177,11 @@ def load_config(path: Path, repo_root: Optional[Path] = None) -> dict:
     for svc in services:
         if not isinstance(svc, dict) or not svc.get("var_name") or not svc.get("name"):
             raise SystemExit(f"ERROR: {path}: service entry needs name + var_name: {svc!r}")
+        if not isinstance(svc.get("category"), str) or not svc["category"]:
+            raise SystemExit(
+                f"ERROR: {path}: service {svc['name']!r} needs a `category` "
+                f"(one of {', '.join(sorted(CATEGORIES))})"
+            )
 
     if repo_root is not None:
         REPO_ROOT = Path(repo_root)
@@ -215,34 +222,58 @@ def missing_registry_entries() -> list[str]:
     )
 
 
+def _pin_value(raw: str) -> str:
+    """A pin value with its inline comment and quotes stripped."""
+    val = raw.strip()
+    if "#" in val:
+        val = val[: val.index("#")]
+    return val.strip().strip('"').strip("'")
+
+
 def _top_level_pins(text: str) -> dict:
-    """Every top-level `key: value` in a vars file, comments and quotes stripped."""
+    """Every top-level `key: value` in a vars file, plus each
+    `helm_chart_versions.<chart>` entry, comments and quotes stripped."""
     pins = {}
+    in_helm = False
     for line in text.split("\n"):
+        if in_helm and line.startswith("  ") and ":" in line:
+            key, _, val = line.strip().partition(":")
+            if key and not key.startswith("#"):
+                pins[f"helm_chart_versions.{key.strip()}"] = _pin_value(val)
+            continue
         if not line[:1] or line[:1].isspace() or ":" not in line:
             continue
         key, _, val = line.partition(":")
         key = key.strip()
         if not key or key.startswith("#"):
             continue
-        val = val.strip()
-        if "#" in val:
-            val = val[: val.index("#")]
-        pins[key] = val.strip().strip('"').strip("'")
+        in_helm = key == "helm_chart_versions"
+        pins[key] = _pin_value(val)
     return pins
 
 
 def stale_partner_pins(base_text: str, head_text: str) -> list[str]:
-    """Registry pins whose value moved while a coupled partner stayed put."""
+    """Registry pins whose value moved while a coupled partner stayed put.
+
+    A coupled pin, or a partner, missing from the head revision is reported too.
+    """
     base = _top_level_pins(base_text)
     head = _top_level_pins(head_text)
     stale = []
     for svc in SERVICE_REGISTRY:
         coupled = svc.get("coupled_vars") or []
         var = svc.get("var_name")
-        if not coupled or not var or var not in base or var not in head:
+        if not coupled or not var:
             continue
-        if base[var] == head[var]:
+        if var not in head:
+            stale.append(f"{var}: declares coupled_vars but is not a pin in the vars file")
+            continue
+        missing = [c for c in coupled if c not in head]
+        if missing:
+            stale.append(
+                f"{var}: coupled pin(s) {', '.join(missing)} not found in the vars file"
+            )
+        if var not in base or base[var] == head[var]:
             continue
         unmoved = [c for c in coupled if c in base and c in head and base[c] == head[c]]
         if unmoved:
@@ -259,10 +290,14 @@ def resolve_tag_sha(repo: str, tag: str) -> str:
     An annotated tag's own object sha is not the commit: the peeled `^{}` line
     is. A bare `refs/tags/<tag>` query hides the peel, so the pattern keeps it.
     """
-    proc = subprocess.run(
-        ["git", "ls-remote", repo, f"{tag}*"],
-        capture_output=True, text=True,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", repo, f"{tag}*"],
+            capture_output=True, text=True, timeout=GIT_TIMEOUT,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"git ls-remote {repo} {tag} timed out after {GIT_TIMEOUT}s") from exc
     if proc.returncode != 0:
         raise RuntimeError(f"git ls-remote {repo} {tag} failed: {proc.stderr.strip()}")
     peeled = ""
@@ -349,18 +384,16 @@ def _run_check_partner_pins(base_ref: str) -> None:
 
 # --- HTTP helpers ---
 
-def _urlopen_with_retry_full(req, timeout: int = REQUEST_TIMEOUT) -> tuple[str, bytes]:
-    """urlopen with a bounded retry; returns (content_type, body).
+def _urlopen_with_retry(req, timeout: int = REQUEST_TIMEOUT) -> bytes:
+    """urlopen with a bounded retry; returns the body.
 
-    Retries URLError, socket.timeout and HTTP 5xx; 4xx re-raises at once. The
-    content type lets a caller tell a real payload from an HTML error page.
+    Retries URLError, socket.timeout and HTTP 5xx; 4xx re-raises at once.
     """
     last_exc: Exception
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                content_type = resp.headers.get("Content-Type", "")
-                return content_type, resp.read()
+                return resp.read()
         except urllib.error.HTTPError as e:
             # 4xx (incl. 403 rate-limit) is not transient — don't retry.
             if e.code < 500:
@@ -374,16 +407,6 @@ def _urlopen_with_retry_full(req, timeout: int = REQUEST_TIMEOUT) -> tuple[str, 
         if attempt < RETRY_ATTEMPTS:
             time.sleep(RETRY_BACKOFF * attempt)
     raise last_exc
-
-
-def _urlopen_with_retry(req, timeout: int = REQUEST_TIMEOUT) -> bytes:
-    """urlopen with a bounded retry on transient failures; return the body.
-
-    Thin wrapper over _urlopen_with_retry_full for callers that only need the
-    response body. See that function for retry semantics.
-    """
-    _content_type, body = _urlopen_with_retry_full(req, timeout=timeout)
-    return body
 
 
 def _make_request(url: str, headers: Optional[dict] = None) -> dict | list | str:
@@ -423,58 +446,6 @@ def github_api(path: str) -> dict | list:
     return _make_request(f"{GITHUB_API}{path}", headers)
 
 
-def fetch_apt_packages(base_url: str) -> str:
-    """Fetch the apt Packages file, falling back to Packages.gz.
-
-    Raises RuntimeError when neither can be fetched.
-    """
-    req_headers = {"User-Agent": "weisssrv-lib-version-check/1.0"}
-
-    def _is_valid_packages_response(content_type: str, content: str) -> bool:
-        """Check if response is a valid Packages file (not an HTML error page)."""
-        # A Packages file is text/plain or untyped; an error page is text/html.
-        if "text/html" in content_type.lower():
-            return False
-        if content.strip().startswith("<!DOCTYPE") or content.strip().startswith("<html"):
-            return False
-        if "Package:" not in content:
-            return False
-        return True
-
-    # Uncompressed first, through the bounded retry helper; it returns the
-    # Content-Type for the HTML-vs-payload sniff below.
-    try:
-        req = urllib.request.Request(base_url, headers=req_headers)
-        content_type, raw = _urlopen_with_retry_full(req, timeout=REQUEST_TIMEOUT)
-        content = raw.decode("utf-8")
-        if content.strip() and _is_valid_packages_response(content_type, content):
-            return content
-    except (urllib.error.HTTPError, urllib.error.URLError, socket.timeout, UnicodeDecodeError):
-        pass
-
-    gz_url = f"{base_url}.gz"
-    req = urllib.request.Request(gz_url, headers=req_headers)
-
-    try:
-        content_type, compressed_data = _urlopen_with_retry_full(req, timeout=REQUEST_TIMEOUT)
-        if "text/html" in content_type.lower():
-            raise RuntimeError(f"Received HTML error page instead of Packages.gz from {gz_url}")
-
-        with gzip.GzipFile(fileobj=BytesIO(compressed_data)) as gz:
-            content = gz.read().decode("utf-8")
-            if not content.strip() or "Package:" not in content:
-                raise RuntimeError(f"Invalid or empty Packages file from {gz_url}")
-            return content
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Failed to fetch {base_url} or {gz_url}: HTTP {e.code}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Connection error fetching apt Packages: {e.reason}") from e
-    except socket.timeout as e:
-        raise RuntimeError(f"Timeout fetching apt Packages from {gz_url}") from e
-    except gzip.BadGzipFile as e:
-        raise RuntimeError(f"Invalid gzip data from {gz_url}") from e
-
-
 # --- Cache helpers ---
 
 def _cache_key(service_name: str) -> Path:
@@ -483,13 +454,25 @@ def _cache_key(service_name: str) -> Path:
     return CACHE_DIR / f"{safe_name}.json"
 
 
-def _read_cache(service_name: str) -> Optional[str]:
-    """Read cached version if still valid."""
+def cache_fingerprint(svc_def: dict, current: str) -> str:
+    """A digest of the registry entry and the current pin.
+
+    A cached lookup is reused only while both are unchanged, so an edited entry
+    or a moved pin is checked live again.
+    """
+    payload = json.dumps([svc_def, current], sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _read_cache(service_name: str, fingerprint: str = "") -> Optional[str]:
+    """Read cached version if still valid and recorded for the same fingerprint."""
     cache_file = _cache_key(service_name)
     if not cache_file.exists():
         return None
     try:
         data = json.loads(cache_file.read_text())
+        if data.get("fingerprint", "") != fingerprint:
+            return None
         if time.time() - data.get("timestamp", 0) < CACHE_TTL:
             return data.get("version")
     except (json.JSONDecodeError, KeyError, OSError) as e:
@@ -506,7 +489,7 @@ def _read_cache(service_name: str) -> Optional[str]:
     return None
 
 
-def _write_cache(service_name: str, version: str) -> None:
+def _write_cache(service_name: str, version: str, fingerprint: str = "") -> None:
     """Write version to cache."""
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -515,6 +498,7 @@ def _write_cache(service_name: str, version: str) -> None:
             "version": version,
             "timestamp": time.time(),
             "service": service_name,
+            "fingerprint": fingerprint,
         }))
     except OSError as e:
         print(f"Warning: failed to write cache for {service_name}: {e}", file=sys.stderr)
@@ -716,23 +700,22 @@ def _collect_apt_versions(text: str, package: str) -> list[str]:
 
 
 def _fetch_packages_index(url: str) -> str:
-    """Text of one Debian Packages index, gunzipped when the payload is gzip.
+    """Text of one Debian Packages index; a body with no stanza tries `<url>.gz`.
 
-    The payload is sniffed for gzip magic, not the URL suffix, because mirrors
-    redirect. A response that is not a Packages file falls back to `<url>.gz`.
+    Gzip is sniffed from the payload, not the URL suffix, because mirrors redirect.
     """
-    req = urllib.request.Request(url, headers={"User-Agent": "weisssrv-lib-version-check/1.0"})
-    raw = _urlopen_with_retry(req, timeout=30)
-    text = (
-        gzip.decompress(raw).decode("utf-8", errors="replace")
-        if raw[:2] == b"\x1f\x8b"
-        else raw.decode("utf-8", errors="replace")
-    )
-    if "Package:" in text:
-        return text
-    if url.endswith(".gz"):
-        raise RuntimeError(f"no Packages stanzas in {url}")
-    return fetch_apt_packages(url)
+    candidates = [url] if url.endswith(".gz") else [url, f"{url}.gz"]
+    for candidate in candidates:
+        req = urllib.request.Request(
+            candidate, headers={"User-Agent": "weisssrv-lib-version-check/1.0"}
+        )
+        raw = _urlopen_with_retry(req, timeout=30)
+        if raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+        text = raw.decode("utf-8", errors="replace")
+        if "Package:" in text:
+            return text
+    raise RuntimeError(f"no Packages stanzas in {' or '.join(candidates)}")
 
 
 def fetch_apt_repo_version(svc: dict) -> str:
@@ -777,8 +760,8 @@ def fetch_apt_repo_version(svc: dict) -> str:
 def fetch_github_release(svc: dict) -> str:
     """Latest GitHub release version for `github_repo`.
 
-    With tag_filter the highest matching version wins, not the most recently
-    published, so a patch on an older branch cannot win. Paginates 5 pages.
+    With tag_filter the highest matching version wins, not the newest, across
+    up to RELEASE_SCAN_HORIZON releases.
     """
     repo = svc["github_repo"]
     tag_filter = svc.get("tag_filter")
@@ -823,12 +806,9 @@ def fetch_github_release(svc: dict) -> str:
             raise RuntimeError(f"No release matching {tag_filter}")
         return best
     else:
-        # Use latest release endpoint
         release = github_api(f"/repos/{repo}/releases/latest")
         version = release.get("tag_name", "")
-        # Fail loud on a missing tag_name, matching the tag_filter branch above.
-        # Returning "" here would have the service silently report up-to-date
-        # with a blank Latest column (version_greater("", current) is False).
+        # A release with no tag_name is an error, never an up-to-date report.
         if not version:
             raise RuntimeError(f"latest release for {repo} has no tag_name")
         if strip_prefix and prefix and version.startswith(prefix):
@@ -1089,8 +1069,6 @@ def fetch_helm_version(svc: dict) -> str:
                 chart_indent = len(line) - len(line.lstrip())
                 continue
         else:
-            if not line or line.isspace():
-                continue
             line_indent = len(line) - len(line.lstrip())
 
             # Same indent as the chart name = the next chart entry.
@@ -1196,7 +1174,6 @@ def read_pinned_image_versions() -> dict[str, str]:
 def read_current_versions() -> dict[str, str]:
     """Pinned versions read out of the vars file, without a YAML parser."""
     content = VARS_FILE.read_text()
-    versions = {}
 
     # Registered pins whose var_name breaks the `*_version` convention (an
     # lxc_template filename, say) are read by exact top-level key match.
@@ -1205,43 +1182,10 @@ def read_current_versions() -> dict[str, str]:
         if s.get("var_name") and "_version" not in s["var_name"] and not s.get("version_file")
     }
 
-    in_helm = False
-
-    for line in content.split("\n"):
-        stripped = line.strip()
-
-        if not stripped or stripped.startswith("#"):
-            continue
-
-        if stripped == "helm_chart_versions:":
-            in_helm = True
-            continue
-
-        if in_helm:
-            if line.startswith("  ") and ":" in stripped:
-                key, _, val = stripped.partition(":")
-                key = key.strip()
-                val = val.strip().strip('"').strip("'")
-                if "#" in val:
-                    val = val[:val.index("#")].strip().strip('"').strip("'")
-                versions[f"helm_chart_versions.{key}"] = val
-            elif not line.startswith(" "):
-                in_helm = False
-
-        # Only column-0 keys are pins; an indented `*_version:` belongs to some
-        # other mapping and must not be read (or later rewritten) as top level.
-        at_top_level = not line[:1].isspace()
-        _key = stripped.split(":")[0].strip()
-        if not in_helm and at_top_level and ":" in stripped and (
-            _key.endswith("_version") or _key in extra_keys
-        ):
-            key, _, val = stripped.partition(":")
-            key = key.strip()
-            val = val.strip().strip('"').strip("'")
-            # Remove inline comments
-            if "#" in val:
-                val = val[:val.index("#")].strip().strip('"').strip("'")
-            versions[key] = val
+    versions = {
+        key: val for key, val in _top_level_pins(content).items()
+        if key.startswith("helm_chart_versions.") or key.endswith("_version") or key in extra_keys
+    }
 
     # Digest-locked image pins (version_file entries) live outside the vars file.
     versions.update(read_pinned_image_versions())
@@ -1272,6 +1216,28 @@ def _rewrite_pin_line(line: str, key: str, new_version: str, *, always_quote: bo
     return f"{rewritten}  {comment}" if comment else rewritten
 
 
+def version_file_display(version_file) -> str:
+    """Where a `version_file` pin lives, aliases resolved, repo-relative."""
+    if isinstance(version_file, str) and version_file in VERSION_FILE_ALIASES:
+        path = VERSION_FILE_ALIASES[version_file]
+        try:
+            return path.relative_to(REPO_ROOT).as_posix()
+        except ValueError:
+            return str(path)
+    if isinstance(version_file, str):
+        return version_file
+    return ", ".join(version_file)
+
+
+def digest_pinned_entry(var_name: str) -> Optional[dict]:
+    """The registry entry for `var_name` when its pin lives in a `version_file`."""
+    return next(
+        (s for s in SERVICE_REGISTRY
+         if s.get("var_name") == var_name and s.get("version_file")),
+        None,
+    )
+
+
 def update_version_in_file(var_name: str, new_version: str) -> bool:
     """Rewrite a pin in the vars file, keeping its formatting and comment.
 
@@ -1280,17 +1246,9 @@ def update_version_in_file(var_name: str, new_version: str) -> bool:
     # version_file entries are digest-locked outside the vars file: flag the
     # update but never auto-rewrite the @sha256 pin — bumping a supply-chain
     # pinned image is a reviewed manual step.
-    pinned_svc = next(
-        (s for s in SERVICE_REGISTRY
-         if s.get("var_name") == var_name and s.get("version_file")),
-        None,
-    )
+    pinned_svc = digest_pinned_entry(var_name)
     if pinned_svc:
-        vf = pinned_svc["version_file"]
-        if vf == "ci":
-            where = ".gitlab-ci.yml"
-        else:
-            where = ", ".join(vf) if isinstance(vf, list) else vf
+        where = version_file_display(pinned_svc["version_file"])
         print(
             f"  ↳ {pinned_svc['name']} is digest-pinned in {where} — update "
             f"manually: bump the tag to {new_version} and re-pin its @sha256 "
@@ -1347,13 +1305,29 @@ CATEGORIES: dict[str, tuple[str, str]] = {
 
 
 def is_actionable(result: "ServiceVersion") -> bool:
-    """An update a consumer can act on: not errored, held or current-unreadable."""
-    return (
-        result.update_available
-        and not result.error
-        and not result.held
-        and not result.unreadable_current
-    )
+    """An update a consumer can act on: the "update" summary bucket."""
+    return status_of(result) == "update"
+
+
+def status_of(result: "ServiceVersion") -> str:
+    """The one summary bucket a result counts in."""
+    if result.error:
+        return "error"
+    if result.unreadable_current:
+        return "unreadable"
+    if result.update_available and result.held:
+        return "held"
+    if result.update_available:
+        return "update"
+    return "current"
+
+
+def summary_counts(results: list["ServiceVersion"]) -> dict[str, int]:
+    """Results per bucket; the buckets partition the results."""
+    counts = {"current": 0, "update": 0, "held": 0, "unreadable": 0, "error": 0}
+    for r in results:
+        counts[status_of(r)] += 1
+    return counts
 
 
 def fetcher_for(category: str) -> Optional[Callable[[dict], str]]:
@@ -1408,8 +1382,11 @@ def check_service(svc_def: dict, current_versions: dict[str, str], use_cache: bo
     elif "ghcr_image" in svc_def:
         # owner/name form resolves for both user- and org-owned packages;
         # github.com/orgs/<owner>/packages 404s for user-owned ones.
-        owner, _, name = svc_def["ghcr_image"].partition("/")
-        result.source_url = f"https://github.com/{owner}/{name}/pkgs/container/{name}"
+        ghcr_owner, _, ghcr_package = svc_def["ghcr_image"].partition("/")
+        result.source_url = (
+            f"https://github.com/{ghcr_owner}/{ghcr_package.split('/', 1)[0]}"
+            f"/pkgs/container/{urllib.parse.quote(ghcr_package, safe='')}"
+        )
     if svc_def.get("source_url"):
         result.source_url = svc_def["source_url"]
 
@@ -1418,8 +1395,9 @@ def check_service(svc_def: dict, current_versions: dict[str, str], use_cache: bo
         result.notes = notes or "Manual version management"
         return result
 
+    fingerprint = cache_fingerprint(svc_def, current)
     if use_cache:
-        cached = _read_cache(name)
+        cached = _read_cache(name, fingerprint)
         if cached:
             result.latest_version = cached
             result.update_available = (
@@ -1442,7 +1420,7 @@ def check_service(svc_def: dict, current_versions: dict[str, str], use_cache: bo
         latest = fetcher(svc_def_with_current)
 
         result.latest_version = latest
-        _write_cache(name, latest)
+        _write_cache(name, latest, fingerprint)
 
         if current == "latest":
             _annotate_latest_resolution(result, current)
@@ -1533,8 +1511,9 @@ def format_table(results: list[ServiceVersion]) -> str:
 
     # Counted over every result, not only the printed ones, so an unrecognised
     # category cannot skew the summary.
-    updates_available = sum(1 for r in results if is_actionable(r))
-    errors = sum(1 for r in results if r.error)
+    counts = summary_counts(results)
+    updates_available = counts["update"]
+    errors = counts["error"]
 
     groups = [(k, n, [r for r in results if r.category == k]) for k, n in categories.items()]
     other = [r for r in results if r.category not in categories]
@@ -1559,14 +1538,15 @@ def format_table(results: list[ServiceVersion]) -> str:
         for r in cat_results:
             latest_str = r.latest_version or "error"
 
-            if r.error:
+            bucket = status_of(r)
+            if bucket == "error":
                 status = c(RED, "ERROR")
                 latest_str = "?"
-            elif r.unreadable_current:
+            elif bucket == "unreadable":
                 status = c(DIM, "CURRENT UNREADABLE")
-            elif r.update_available and r.held:
+            elif bucket == "held":
                 status = c(DIM, "HELD")
-            elif r.update_available:
+            elif bucket == "update":
                 status = c(YELLOW, "UPDATE AVAILABLE")
             elif r.current_version == "latest":
                 status = c(DIM, "tracking latest")
@@ -1585,9 +1565,9 @@ def format_table(results: list[ServiceVersion]) -> str:
 
     lines.append(c(BOLD, "--- Summary ---"))
     total = len(results)
-    held = sum(1 for r in results if r.update_available and r.held and not r.error)
-    unreadable = sum(1 for r in results if r.unreadable_current and not r.error)
-    up_to_date = total - updates_available - held - unreadable - errors
+    held = counts["held"]
+    unreadable = counts["unreadable"]
+    up_to_date = counts["current"]
     lines.append(f"  Total services: {total}")
     lines.append(f"  Up to date:     {c(GREEN, str(up_to_date))}")
     if updates_available > 0:
@@ -1620,24 +1600,21 @@ def format_table(results: list[ServiceVersion]) -> str:
 def format_json(results: list[ServiceVersion]) -> str:
     """Format results as JSON.
 
-    `updates_available` counts actionable updates only; held ones are counted
-    in `updates_held` and report `update_available: false` per service.
+    The summary buckets partition the results, the same ones the table
+    counts; a held update reports `update_available: false` per service.
     """
+    counts = summary_counts(results)
     data = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "source_file": str(VARS_FILE),
         "services": [],
         "summary": {
             "total": len(results),
-            "up_to_date": sum(
-                1
-                for r in results
-                if not r.update_available and not r.error and not r.unreadable_current
-            ),
-            "updates_available": sum(1 for r in results if is_actionable(r)),
-            "updates_held": sum(1 for r in results if r.update_available and r.held),
-            "updates_current_unreadable": sum(1 for r in results if r.unreadable_current),
-            "errors": sum(1 for r in results if r.error),
+            "up_to_date": counts["current"],
+            "updates_available": counts["update"],
+            "updates_held": counts["held"],
+            "updates_current_unreadable": counts["unreadable"],
+            "errors": counts["error"],
         },
     }
 
@@ -1685,12 +1662,7 @@ def get_deploy_command(result: ServiceVersion) -> str:
             return svc["deploy_command"]
         version_file = svc.get("version_file")
         if version_file:
-            if isinstance(version_file, str) and version_file in VERSION_FILE_ALIASES:
-                files = str(VERSION_FILE_ALIASES[version_file])
-            elif isinstance(version_file, str):
-                files = version_file
-            else:
-                files = ", ".join(version_file)
+            files = version_file_display(version_file)
             return (
                 f"edit the image tag + @sha256 digest in {files}, then commit + push"
             )
@@ -1704,7 +1676,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Compare pinned versions against their upstream releases.",
         epilog=(
             "Environment:\n"
-            "  GITHUB_TOKEN           GitHub token for higher API rate limits\n"
+            "  GH_API_TOKEN           GitHub token for higher API rate limits\n"
+            "  GITHUB_TOKEN           Used when GH_API_TOKEN is unset\n"
             "  CHECK_VERSIONS_CONFIG  Consumer config path\n"
             "  NO_COLOR               Disable coloured output"
         ),
@@ -1774,7 +1747,11 @@ def _run_update(service_name: str) -> None:
     if result.held:
         print(f"{result.name} is held back: {result.notes or 'documented hold'}")
         print(f"Not updating (would write {result.latest_version} into {VARS_FILE.name}).")
-        print("Remove the 'held' flag in SERVICE_REGISTRY to override.")
+        print("Remove the 'held' flag from the registry entry to override.")
+        sys.exit(0)
+
+    if digest_pinned_entry(result.var_name):
+        update_version_in_file(result.var_name, result.latest_version)
         sys.exit(0)
 
     print(f"Updating {result.name}: {result.current_version} -> {result.latest_version}")
@@ -1816,8 +1793,11 @@ def _run_update_all() -> None:
     # hand edit this script cannot compute, so it is flagged loudly instead.
     # --check-partner-pins reds the MR while a partner is still stale.
     paired = []
+    manual = []
     for r in results:
-        if is_actionable(r):
+        if is_actionable(r) and digest_pinned_entry(r.var_name):
+            manual.append(r)
+        elif is_actionable(r):
             print(f"Updating {r.name}: {r.current_version} -> {r.latest_version}")
             if update_version_in_file(r.var_name, r.latest_version):
                 try:
@@ -1852,6 +1832,12 @@ def _run_update_all() -> None:
         for r in held_skipped:
             print(f"  - {r.name}: {r.current_version} -> {r.latest_version} "
                   f"({r.notes or 'documented hold'})")
+
+    if manual:
+        print(f"\nNOTE: {len(manual)} digest-pinned update(s) need a manual edit (not written):")
+        for r in manual:
+            print(f"  - {r.name}: {r.current_version} -> {r.latest_version} in "
+                  f"{version_file_display(digest_pinned_entry(r.var_name)['version_file'])}")
 
     if unreadable_skipped:
         print(f"\nNOTE: {len(unreadable_skipped)} pin(s) live outside this repo and were not written:")
@@ -1888,7 +1874,7 @@ def _run_update_all() -> None:
 
         print("\n  3. Commit the change:")
         print(f"     git add {VARS_FILE} && git commit")
-    elif not errored:
+    elif not errored and not manual:
         print("\nAll services are up to date!")
 
     # 2 — something errored or could not be written; 0 — everything succeeded,
@@ -1897,6 +1883,23 @@ def _run_update_all() -> None:
 
 
 def main():
+    """Run the CLI; an unexpected failure exits 2, never 1 ("updates available")."""
+    try:
+        _main()
+    except SystemExit as exc:
+        if isinstance(exc.code, str):
+            print(exc.code, file=sys.stderr)
+            raise SystemExit(2) from None
+        raise
+    except Exception as exc:  # noqa: BLE001 - any crash is an operator error
+        print(f"ERROR: check-versions.py failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        if os.environ.get("DEBUG"):
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+        sys.exit(2)
+
+
+def _main():
     args = build_parser().parse_args()
 
     repo_root = Path(args.repo_root) if args.repo_root else None
@@ -1957,9 +1960,12 @@ def main():
             or service_filter in s["var_name"].lower()
         ]
         if not services:
-            print(f"Error: No services matching '{service_filter}'")
-            print("Run with --list to see available services")
-            sys.exit(1)
+            print(
+                f"Error: No services matching '{service_filter}'. "
+                "Run with --list to see available services.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
     try:
         results = check_all(services=services, category_filter=category_filter, use_cache=use_cache)

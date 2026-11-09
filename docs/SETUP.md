@@ -66,7 +66,9 @@ release tag**, falling back to the branch tip only if the template has cut none.
 Add the flag from the table to pin an older release, and only with a tag that
 exists — a ref the template has not cut fails at clone time, before a single
 question is asked. Whichever ref is used is recorded as `_commit` in
-`.copier-answers.yml` and is what the next `copier update` diffs from.
+`.copier-answers.yml` and is what the next `copier update` diffs from. The
+source URL is recorded as `_src_path`, and every later `copier update` fetches
+from it.
 
 The library marks `new-cluster` **EXPERIMENTAL** and reserves the right to
 change its flags. Plain `copier copy` is the stable path; use the wrapper only
@@ -421,8 +423,13 @@ in whatever vault its Connect server was granted, and that token sits on the
 host's disk. Re-vaulting order is grant the Connect *server* the new vault, mint
 the token, set the variable, converge, prove a real key load, then revoke the
 old token — a token cannot reach a vault its server was not granted. The
-[`zfs_encryption` role README](https://git.ericsweiss.com/eric/weisssrv-lib/-/tree/main/ansible_collections/weisssrv/infra/roles/zfs_encryption)
+[`zfs_encryption` role README](https://github.com/ericsweiss/weisssrv-lib/tree/main/ansible_collections/weisssrv/infra/roles/zfs_encryption)
 documents the rest of the variables.
+
+List every NFS export `bind_source` that sits on an encrypted dataset in
+`nas_storage_encrypted_bind_sources` in `group_vars/nas.yml`. Those bind mounts
+and nfsd then wait for the key load. A source left off the list is exported as
+an empty directory at boot.
 
 ---
 

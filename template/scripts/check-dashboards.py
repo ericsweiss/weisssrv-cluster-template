@@ -26,6 +26,9 @@ BUILTIN_UIDS = {"-- Grafana --", "-- Mixed --", "-- Dashboard --", "grafana"}
 DEFAULT_ALLOWED = ("prometheus", "loki")
 IMPORT_PLACEHOLDER = re.compile(r"\$\{?DS_[A-Z0-9_]+\}?")
 TEMPLATE_VAR = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
+# The Grafana chart's sidecar defaults.
+SIDECAR_LABEL, SIDECAR_LABEL_VALUE = "grafana_dashboard", "1"
+FOLDER_ANNOTATION = "grafana_folder"
 
 
 class OperatorError(Exception):
@@ -92,17 +95,15 @@ def _effective(entry: dict, generator_options: dict, slot: str) -> dict:
     return merged
 
 
-def check_dir(directory: Path, allowed: set, label: str, label_value: str,
-              annotation: str,
-              check_registration: bool = True) -> Tuple[List[str], int]:
+def check_dir(directory: Path, allowed: set) -> Tuple[List[str], int]:
     findings: List[str] = []
     on_disk = {path.relative_to(directory).as_posix()
                for path in directory.glob("*.json")}
     kustomization = directory / "kustomization.yaml"
     registered: dict = {}
     generator_options: dict = {}
-    unshipped = check_registration and not kustomization.is_file()
-    if check_registration and not unshipped:
+    unshipped = not kustomization.is_file()
+    if not unshipped:
         registered, generator_options = _registered(kustomization)
 
     # A dashboard registered from a subdirectory is content-checked too, or it
@@ -164,9 +165,6 @@ def check_dir(directory: Path, allowed: set, label: str, label_value: str,
                     % (where, value, ", ".join(sorted(allowed)))
                 )
 
-    if not check_registration:
-        return findings, len(dashboards)
-
     if unshipped:
         findings.append("%s: no kustomization.yaml, so nothing ships these files"
                         % directory.as_posix())
@@ -187,17 +185,17 @@ def check_dir(directory: Path, allowed: set, label: str, label_value: str,
         entry = registered[name]
         labels = _effective(entry, generator_options, "labels")
         annotations = _effective(entry, generator_options, "annotations")
-        if str(labels.get(label, "")) != label_value:
+        if str(labels.get(SIDECAR_LABEL, "")) != SIDECAR_LABEL_VALUE:
             findings.append(
                 "%s/%s: neither the generator entry nor `generatorOptions` sets "
                 "`%s: \"%s\"` — the Grafana sidecar never picks the ConfigMap up"
-                % (directory.as_posix(), name, label, label_value)
+                % (directory.as_posix(), name, SIDECAR_LABEL, SIDECAR_LABEL_VALUE)
             )
-        if not annotations.get(annotation):
+        if not annotations.get(FOLDER_ANNOTATION):
             findings.append(
                 "%s/%s: neither the generator entry nor `generatorOptions` sets "
                 "the `%s` annotation — the dashboard lands in the sidecar's "
-                "default folder" % (directory.as_posix(), name, annotation)
+                "default folder" % (directory.as_posix(), name, FOLDER_ANNOTATION)
             )
     return findings, len(dashboards)
 
@@ -213,17 +211,6 @@ def main(argv=None) -> int:
         help="datasource uid the cluster provisions; repeatable "
              "(default: prometheus loki)",
     )
-    parser.add_argument(
-        "--skip-registration", action="store_true",
-        help="do not require a kustomization.yaml, for a directory that holds "
-             "dashboards as source rather than shipping them",
-    )
-    parser.add_argument("--dashboard-label", default="grafana_dashboard")
-    parser.add_argument(
-        "--dashboard-label-value", default="1",
-        help="label value the sidecar matches (default: 1)",
-    )
-    parser.add_argument("--folder-annotation", default="grafana_folder")
     args = parser.parse_args(argv)
 
     if args.dirs:
@@ -248,11 +235,7 @@ def main(argv=None) -> int:
     scanned = 0
     for directory in directories:
         try:
-            found, count = check_dir(
-                directory, allowed, args.dashboard_label,
-                args.dashboard_label_value, args.folder_annotation,
-                check_registration=not args.skip_registration,
-            )
+            found, count = check_dir(directory, allowed)
             findings.extend(found)
             scanned += count
         except OperatorError as exc:

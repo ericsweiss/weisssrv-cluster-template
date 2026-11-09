@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Assert every weisssrv-lib pin derives from one declared release tag.
 
-The tag is `spec.inputs.lib_ref.default` in the pipeline's header document and
-every other pin reads it; `--fix`/`--bump` rewrite them. docs/INCLUDE-CONTRACT.md.
+The tag is the header's `spec.inputs.lib_ref.default`; every other pin reads it
+and `--fix`/`--bump` rewrite them. Contract: weisssrv-lib docs/INCLUDE-CONTRACT.md.
 """
 
 from __future__ import annotations
@@ -39,18 +39,19 @@ def _header(text: str) -> str:
 
 def print_declared_ref(argv: list[str]) -> int:
     """`--print` without PyYAML: the header's input default, or exit 2."""
-    ci = Path(".gitlab-ci.yml")
+    if any(a in ("--fix", "--bump") or a.startswith("--bump=") for a in argv):
+        print("ERROR: --print reads the declared ref; it takes no --fix or --bump",
+              file=sys.stderr)
+        return 2
+    if argv and argv[-1] == "--ci-file":
+        print(f"ERROR: {argv[-1]} needs a value", file=sys.stderr)
+        return 2
+    ci = Path(__file__).resolve().parent.parent / ".gitlab-ci.yml"
     for i, a in enumerate(argv):
         if a == "--ci-file" and i + 1 < len(argv):
             ci = Path(argv[i + 1])
         elif a.startswith("--ci-file="):
             ci = Path(a.split("=", 1)[1])
-    want = "lib_ref"
-    for i, a in enumerate(argv):
-        if a == "--input" and i + 1 < len(argv):
-            want = argv[i + 1]
-        elif a.startswith("--input="):
-            want = a.split("=", 1)[1]
     try:
         text = ci.read_text(encoding="utf-8")
     except OSError as exc:
@@ -58,14 +59,17 @@ def print_declared_ref(argv: list[str]) -> int:
         return 2
     block = _INPUTS_RE.search(_header(text))
     for stanza in _STANZA_RE.finditer(block.group(1) if block else ""):
-        if stanza.group(1) != want:
+        if stanza.group(1) != "lib_ref":
             continue
         found = _DEFAULT_RE.search(stanza.group(2))
         if found:
             print(found.group(2))
             return 0
         break
-    print(f"ERROR: {ci}: no spec.inputs.{want}.default release tag in the header", file=sys.stderr)
+    print(
+        f"ERROR: {ci}: spec.inputs.lib_ref.default in the header is not a release tag (vX.Y.Z)",
+        file=sys.stderr,
+    )
     return 2
 
 
@@ -106,9 +110,8 @@ class OperatorError(Exception):
     """A malformed site list or a bad invocation: exit 2, not a pin finding."""
 
 
-def interpolation(input_name: str = INPUT_NAME) -> str:
-    """The one string every pin inside the pipeline file is allowed to be."""
-    return f"$[[ inputs.{input_name} ]]"
+# The one string every pin inside the pipeline file is allowed to be.
+MARKER = f"$[[ inputs.{INPUT_NAME} ]]"
 
 
 def load_ci(path: Path) -> dict:
@@ -133,7 +136,7 @@ def parse_ci(text: str) -> dict:
     doc = mappings[-1]
     variables = doc.get("variables")
     if variables is not None and not isinstance(variables, dict):
-        # A non-mapping `variables:` would reach .get(ref_var) on a scalar.
+        # A non-mapping `variables:` would reach .get(REF_VAR) on a scalar.
         raise yaml.YAMLError("`variables:` must be a mapping")
     return doc
 
@@ -153,12 +156,12 @@ def lib_includes(doc: dict, project: str = LIB_PROJECT) -> list[dict]:
     ]
 
 
-def declared_ref(text: str, input_name: str = INPUT_NAME):
-    """The single source: the header's `spec.inputs.<input_name>.default`.
+def declared_ref(text: str):
+    """The single source: the header's `spec.inputs.lib_ref.default`.
 
     None when the file has no header, no such input, or no default on it.
     """
-    entry = ci_yaml.spec_inputs(text, _LOADER).get(input_name)
+    entry = ci_yaml.spec_inputs(text, _LOADER).get(INPUT_NAME)
     return entry.get("default") if isinstance(entry, dict) else None
 
 
@@ -194,12 +197,7 @@ def _rewrite_scalar_line(line: str, key: str, want: str) -> str | None:
     return f"{m.group(1)}{key}: {want}{m.group(3)}{newline}"
 
 
-def check(
-    path: Path,
-    project: str = LIB_PROJECT,
-    ref_var: str = REF_VAR,
-    input_name: str = INPUT_NAME,
-) -> list[str]:
+def check(path: Path, project: str = LIB_PROJECT) -> list[str]:
     """Return a list of problems; empty means every pin reads the one source."""
     text = path.read_text(encoding="utf-8")
     doc = parse_ci(text)
@@ -212,35 +210,34 @@ def check(
         # rather than passing an empty set.
         return [f"{path}: no `{project}` include entries found"]
 
-    want = declared_ref(text, input_name)
+    want = declared_ref(text)
     if want is None:
         return [
-            f"{path}: spec.inputs.{input_name}.default is not set — the library "
+            f"{path}: spec.inputs.{INPUT_NAME}.default is not set — the library "
             "ref is declared in the pipeline's `spec:` header document"
         ]
     # fullmatch, not match: Python's `$` also matches before a trailing
     # newline, so a multiline scalar like "v0.5.1\n" would pass the tag gate.
     if not isinstance(want, str) or TAG_RE.fullmatch(want) is None:
         problems.append(
-            f"{path}: spec.inputs.{input_name}.default is {want!r}, which is not "
+            f"{path}: spec.inputs.{INPUT_NAME}.default is {want!r}, which is not "
             "a release tag (vX.Y.Z). The include contract forbids pinning a branch."
         )
 
-    marker = interpolation(input_name)
     for entry in entries:
         ref = entry.get("ref")
-        if ref == marker:
+        if ref == MARKER:
             continue
         for name in files_of(entry):
             problems.append(
                 f"{path}: {name} pins ref {ref!r}; every library include ref "
-                f"reads the input as {marker!r}"
+                f"reads the input as {MARKER!r}"
             )
-    got = (doc.get("variables") or {}).get(ref_var)
-    if got != marker:
+    got = (doc.get("variables") or {}).get(REF_VAR)
+    if got != MARKER:
         problems.append(
-            f"{path}: variables.{ref_var} is {got!r}; it reads the input as "
-            f"{marker!r}"
+            f"{path}: variables.{REF_VAR} is {got!r}; it reads the input as "
+            f"{MARKER!r}"
         )
     return problems
 
@@ -284,11 +281,11 @@ def _spec_node(text: str) -> yaml.MappingNode | None:
     return None
 
 
-def _header_default_line(text: str, input_name: str = INPUT_NAME) -> int | None:
-    """0-based line of the header's `default:` KEY for `input_name`."""
+def _header_default_line(text: str) -> int | None:
+    """0-based line of the header's `lib_ref.default:` KEY."""
     entry = _mapping_value(
         _mapping_value(_mapping_value(_spec_node(text), "spec"), "inputs"),
-        input_name,
+        INPUT_NAME,
     )
     if not isinstance(entry, yaml.MappingNode):
         return None
@@ -298,9 +295,7 @@ def _header_default_line(text: str, input_name: str = INPUT_NAME) -> int | None:
     return None
 
 
-def _header_default_span(
-    text: str, input_name: str = INPUT_NAME
-) -> tuple[int, int] | None:
+def _header_default_span(text: str) -> tuple[int, int] | None:
     """(start, end) columns of the header default's VALUE, on its key's line.
 
     None unless the value is a scalar written entirely on that line, the one
@@ -308,7 +303,7 @@ def _header_default_span(
     """
     entry = _mapping_value(
         _mapping_value(_mapping_value(_spec_node(text), "spec"), "inputs"),
-        input_name,
+        INPUT_NAME,
     )
     if not isinstance(entry, yaml.MappingNode):
         return None
@@ -351,41 +346,15 @@ def _header_default_rewrite(
     return updated + ("\n" if line.endswith("\n") else "")
 
 
-def _variable_line(text: str, ref_var: str = REF_VAR) -> int | None:
-    """0-based line of the `variables:` entry holding `ref_var`."""
+def _variable_line(text: str) -> int | None:
+    """0-based line of the `variables:` entry holding the ref variable."""
     variables = _mapping_value(_document_node(text, "variables", _LOADER), "variables")
     if not isinstance(variables, yaml.MappingNode):
         return None
     for key, _value in variables.value:
-        if isinstance(key, yaml.ScalarNode) and key.value == ref_var:
+        if isinstance(key, yaml.ScalarNode) and key.value == REF_VAR:
             return key.start_mark.line
     return None
-
-
-def _first_document_start(text: str) -> tuple[int, bool]:
-    """(character index, whether it opens with an explicit `---`) of document 1."""
-    for event in yaml.parse(text, Loader=_LOADER):
-        if isinstance(event, yaml.DocumentStartEvent):
-            return event.start_mark.index, bool(event.explicit)
-    return 0, False
-
-
-def _insert_header(text: str, want: str, input_name: str = INPUT_NAME) -> str:
-    """Prepend the `spec:` header document that declares the ref.
-
-    An existing leading `---` separates the two documents already; without one
-    the separator is added, or the header would merge into the body.
-    """
-    header = (
-        "spec:\n"
-        "  inputs:\n"
-        f"    {input_name}:\n"
-        f"      default: {want}\n"
-    )
-    index, explicit = _first_document_start(text)
-    if explicit:
-        return text[:index] + header + text[index:]
-    return header + "---\n" + text
 
 
 def _ref_key_lines(text: str, project: str) -> set[int]:
@@ -409,7 +378,7 @@ def _ref_key_lines(text: str, project: str) -> set[int]:
         # YAML keeps the LAST duplicate key, which is the one check() reads.
         # Rewriting a different block would leave the verification passing
         # against the wrong one, so refuse instead.
-        raise SystemExit(
+        raise OperatorError(
             "multiple top-level `include:` keys make the rewrite ambiguous "
             "(YAML keeps the last, so the others are silently ignored); "
             "merge them into one block and retry"
@@ -443,7 +412,7 @@ def _ref_key_lines(text: str, project: str) -> set[int]:
         # An anchor defined here can be referenced from outside the block.
         defines_anchor = not is_alias and getattr(event, "anchor", None)
         if is_alias or defines_anchor:
-            raise SystemExit(
+            raise OperatorError(
                 "the `include:` block contains a YAML anchor or alias, which "
                 "may share configuration with the rest of the file; refusing "
                 "to rewrite it. Update the pins by hand."
@@ -477,94 +446,73 @@ def _ref_key_lines(text: str, project: str) -> set[int]:
 
 
 def plan_fix(
-    path: Path,
-    project: str = LIB_PROJECT,
-    ref_var: str = REF_VAR,
-    input_name: str = INPUT_NAME,
-    want: str | None = None,
+    path: Path, project: str = LIB_PROJECT, want: str | None = None
 ) -> tuple[str, int]:
     """The pipeline file in the header layout, at `want` or at the ref it
     already declares, computed with NOTHING written -> (text, rewrites)."""
     text = path.read_text(encoding="utf-8")
-    doc = parse_ci(text)
-    target = want if want is not None else declared_ref(text, input_name)
-    if target is None:
-        # The conversion reads the layout being replaced: the literal variable.
-        target = (doc.get("variables") or {}).get(ref_var)
-    if target is None:
-        raise SystemExit(
-            f"{path}: neither spec.inputs.{input_name}.default nor "
-            f"variables.{ref_var} names a ref to convert from; nothing to sync"
+    default_line = _header_default_line(text)
+    if default_line is None:
+        raise OperatorError(
+            f"{path}: declares no spec.inputs.{INPUT_NAME}.default; add the "
+            "header by hand and re-run"
         )
+    target = want if want is not None else declared_ref(text)
     # Validated BEFORE anything is written: a branch ref would otherwise be
     # propagated to every pin and only then reported.
     if not isinstance(target, str) or TAG_RE.fullmatch(target) is None:
-        raise SystemExit(
+        raise OperatorError(
             f"{path}: the declared ref must be a release tag (vX.Y.Z), got "
             f"{target!r}; file left unchanged"
         )
 
-    has_header = _spec_node(text) is not None
-    default_line = _header_default_line(text, input_name)
-    if has_header and default_line is None:
-        raise SystemExit(
-            f"{path}: the `spec:` header declares no `{input_name}:` input with a "
-            "`default:`; add it by hand and re-run"
-        )
-
     # Textual rewrite so comments and formatting survive, but the lines to
     # touch come from the parsed tree rather than a scan.
-    marker = interpolation(input_name)
     lines = text.splitlines(keepends=True)
     changed = 0
-    targets = {(n, "ref", marker) for n in _ref_key_lines(text, project)}
-    var_line = _variable_line(text, ref_var)
+    targets = {(n, "ref", MARKER) for n in _ref_key_lines(text, project)}
+    var_line = _variable_line(text)
     if var_line is not None:
-        targets.add((var_line, ref_var, marker))
+        targets.add((var_line, REF_VAR, MARKER))
     for line_no, key, value in sorted(targets):
         rewritten = _rewrite_scalar_line(lines[line_no], key, value)
         if rewritten is not None:
             lines[line_no] = rewritten
             changed += 1
-    if default_line is not None:
-        rewritten = _header_default_rewrite(
-            lines[default_line], target, _header_default_span(text, input_name)
-        )
-        if rewritten is not None:
-            lines[default_line] = rewritten
-            changed += 1
-    updated = "".join(lines)
-    if not has_header:
-        updated = _insert_header(updated, target, input_name)
+    rewritten = _header_default_rewrite(
+        lines[default_line], target, _header_default_span(text)
+    )
+    if rewritten is not None:
+        lines[default_line] = rewritten
         changed += 1
+    updated = "".join(lines)
 
     # Re-parsed and required to have landed as the exact strings intended, so a
     # refusal is never a half-edited file.
     try:
         reparsed = parse_ci(updated)
-        landed_ref = declared_ref(updated, input_name)
+        landed_ref = declared_ref(updated)
     except yaml.YAMLError as exc:
-        raise SystemExit(
+        raise OperatorError(
             f"{path}: rewrite would produce invalid YAML ({exc}); "
             "file left unchanged"
         ) from exc
     # Checked even when nothing changed: a `--bump` the line rewriter could not
     # reach would otherwise report a clean 0 over the old tag.
     if landed_ref != target:
-        where = f"{path}:{default_line + 1}" if default_line is not None else str(path)
         raise OperatorError(
-            f"{where}: the declared ref is still {landed_ref!r}, not {target!r} — "
+            f"{path}:{default_line + 1}: the declared ref is still {landed_ref!r}, not {target!r} — "
             "this `default:` is in a shape the line rewriter cannot reach, such "
             "as a flow mapping spanning lines or a multi-line scalar. Write it "
             f"as `default: {target}` on the input's own line; file left unchanged"
         )
     if not changed:
-        remaining = check(path, project, ref_var, input_name)
+        remaining = check(path, project)
         if remaining:
             # --fix cannot add an absent ref or variable, or reach a pin outside
             # `include:`; reporting 0 for either would hand the caller a clean
             # result over an unrepaired file.
-            raise SystemExit(
+            raise OperatorError(
                 f"{path}: --fix could not repair this file; fix it by hand:\n  "
                 + "\n  ".join(remaining)
             )
@@ -576,24 +524,18 @@ def plan_fix(
             "no pin for the declared ref to feed; file left unchanged"
         )
     landed = [entry.get("ref") for entry in project_includes]
-    landed.append((reparsed.get("variables") or {}).get(ref_var))
-    if any(ref != marker for ref in landed):
-        raise SystemExit(
+    landed.append((reparsed.get("variables") or {}).get(REF_VAR))
+    if any(ref != MARKER for ref in landed):
+        raise OperatorError(
             f"{path}: rewrite did not land cleanly (pins parsed back as "
-            f"{landed!r}, wanted {marker!r}); file left unchanged"
+            f"{landed!r}, wanted {MARKER!r}); file left unchanged"
         )
     return updated, changed
 
 
-def fix(
-    path: Path,
-    project: str = LIB_PROJECT,
-    ref_var: str = REF_VAR,
-    input_name: str = INPUT_NAME,
-    want: str | None = None,
-) -> int:
+def fix(path: Path, project: str = LIB_PROJECT, want: str | None = None) -> int:
     """Plan the pipeline rewrite and write it -> the number of rewrites made."""
-    updated, changed = plan_fix(path, project, ref_var, input_name, want)
+    updated, changed = plan_fix(path, project, want)
     if changed:
         path.write_text(updated, encoding="utf-8")
     return changed
@@ -669,8 +611,20 @@ def _collection_version(text: str, project: str) -> tuple[int, str] | None:
     return None
 
 
+def _requirements_text(req: Path) -> str:
+    """requirements.yml's text, or an OperatorError that names that file."""
+    try:
+        text = req.read_text(encoding="utf-8")
+        _collection_entries(text)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise OperatorError(f"could not read {req}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise OperatorError(f"{req} is not valid YAML: {exc}") from exc
+    return text
+
+
 def check_requirements(
-    ci_file: Path, want: str, project: str = LIB_PROJECT, ref_var: str = REF_VAR
+    ci_file: Path, want: str, project: str = LIB_PROJECT
 ) -> list[str]:
     """The collection pin in the sibling requirements.yml must equal the single
     source. Empty when there is no requirements.yml or it does not install the
@@ -678,7 +632,7 @@ def check_requirements(
     req = requirements_path(ci_file)
     if not req.is_file():
         return []
-    text = req.read_text(encoding="utf-8")
+    text = _requirements_text(req)
     found = _collection_version(text, project)
     if found is None:
         entries = _collection_entries(text)
@@ -702,7 +656,7 @@ def check_requirements(
         return []
     return [
         f"{req}: the {project} collection pins version {current!r}, "
-        f"but {ref_var} is {want!r}"
+        f"but {REF_VAR} is {want!r}"
     ]
 
 
@@ -717,7 +671,7 @@ def plan_fix_requirements(
     req = requirements_path(ci_file)
     if not req.is_file():
         return None
-    text = req.read_text(encoding="utf-8")
+    text = _requirements_text(req)
     found = _collection_version(text, project)
     if found is None or found[1] == want:
         return None
@@ -725,7 +679,7 @@ def plan_fix_requirements(
     lines = text.splitlines(keepends=True)
     rewritten = _rewrite_scalar_line(lines[line_no], "version", want)
     if rewritten is None:
-        raise SystemExit(
+        raise OperatorError(
             f"{req}: could not rewrite the {project} collection version: line; "
             "fix it by hand"
         )
@@ -733,7 +687,7 @@ def plan_fix_requirements(
     updated = "".join(lines)
     landed = _collection_version(updated, project)
     if landed is None or landed[1] != want:
-        raise SystemExit(
+        raise OperatorError(
             f"{req}: rewrite did not land cleanly (version parsed back as "
             f"{(landed[1] if landed else None)!r}, wanted {want!r}); file left unchanged"
         )
@@ -762,22 +716,31 @@ def sites_path(ci_file: Path) -> Path:
     return ci_file.parent / _SITES_REL
 
 
+def _site_doc(ci_file: Path) -> dict | None:
+    """The parsed site list, or None when the repo declares none."""
+    path = sites_path(ci_file)
+    if not path.is_file():
+        return None
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise OperatorError(f"{path}: {exc}") from exc
+    if doc is None:
+        return None
+    if not isinstance(doc, dict):
+        raise OperatorError(f"{path}: the document must be a mapping with `sites:`")
+    return doc
+
+
 def load_sites(ci_file: Path) -> list[tuple[str, re.Pattern]]:
     """[(glob, compiled pattern)] from the optional site list.
 
     Each pattern carries exactly ONE capture group: the ref it must hold.
     """
     path = sites_path(ci_file)
-    if not path.is_file():
-        return []
-    try:
-        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
-        raise OperatorError(f"{path}: {exc}") from exc
+    doc = _site_doc(ci_file)
     if doc is None:
         return []
-    if not isinstance(doc, dict):
-        raise OperatorError(f"{path}: the document must be a mapping with `sites:`")
     sites = doc.get("sites")
     if sites is None:
         return []
@@ -834,22 +797,37 @@ def site_files(root: Path, glob: str, where: str) -> Iterator[Path]:
         yield path
 
 
+class HandFix(str):
+    """A finding --fix refuses, so the report points at the site list instead."""
+
+
+def _unpinned(path: Path, glob: str) -> str:
+    return HandFix(
+        f"{path}: site {glob!r} finds no release-tag pin in this file — a branch "
+        "or sha ref, or a pin the pattern no longer matches"
+    )
+
+
 def check_sites(ci_file: Path, want: str) -> list[str]:
     """Every ref a declared site holds must equal the single source.
 
-    A site that matches nothing is reported too: the pin would go unchecked.
+    Each matched file must hold a pin, and a site matching no file is reported
+    too: in either case a pin would go unchecked.
     """
     root = ci_file.parent
     problems: list[str] = []
     for glob, pattern in load_sites(ci_file):
         seen = 0
         for path in site_files(root, glob, str(sites_path(ci_file))):
+            seen += 1
             try:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
                 raise OperatorError(f"{path}: {exc}") from exc
-            for match in pattern.finditer(text):
-                seen += 1
+            matches = list(pattern.finditer(text))
+            if not matches:
+                problems.append(_unpinned(path, glob))
+            for match in matches:
                 if match.group(1) != want:
                     line = text.count("\n", 0, match.start(1)) + 1
                     problems.append(
@@ -857,10 +835,10 @@ def check_sites(ci_file: Path, want: str) -> list[str]:
                         f"ref is {want!r}"
                     )
         if not seen:
-            problems.append(
-                f"{sites_path(ci_file)}: site {glob!r} matched no ref — the glob "
-                "or the pattern is stale, so that pin is going unchecked"
-            )
+            problems.append(HandFix(
+                f"{sites_path(ci_file)}: site {glob!r} matched no file — the glob "
+                "is stale, so that pin is going unchecked"
+            ))
     return problems
 
 
@@ -881,6 +859,8 @@ def plan_fix_sites(ci_file: Path, want: str) -> list[tuple[Path, str]]:
             except (OSError, UnicodeDecodeError) as exc:
                 raise OperatorError(f"{path}: {exc}") from exc
             before = sum(1 for _ in pattern.finditer(text))
+            if not before:
+                raise OperatorError(_unpinned(path, glob) + "; nothing written")
             seen += before
             updated = _sub_group(pattern, text, want)
             if updated != text:
@@ -898,8 +878,8 @@ def plan_fix_sites(ci_file: Path, want: str) -> list[tuple[Path, str]]:
                 writes.append((path, updated))
         if not seen:
             raise OperatorError(
-                f"{where}: site {glob!r} matched no ref — the glob or the "
-                "pattern is stale, so that pin would go unrewritten"
+                f"{where}: site {glob!r} matched no file — the glob is stale, "
+                "so that pin would go unrewritten"
             )
     return writes
 
@@ -937,20 +917,16 @@ def _sub_group(pattern: re.Pattern, text: str, want: str) -> str:
 
 
 def plan_writes(
-    ci_file: Path,
-    project: str = LIB_PROJECT,
-    ref_var: str = REF_VAR,
-    input_name: str = INPUT_NAME,
-    want: str | None = None,
+    ci_file: Path, project: str = LIB_PROJECT, want: str | None = None
 ) -> tuple[list[tuple[Path, str]], int, str]:
     """(writes, rewrite count, the ref every surface ends up at)."""
     writes: list[tuple[Path, str]] = []
-    pipeline, changed = plan_fix(ci_file, project, ref_var, input_name, want)
+    pipeline, changed = plan_fix(ci_file, project, want)
     if changed:
         writes.append((ci_file, pipeline))
     # plan_fix has already proved this is the target tag, so the other surfaces
     # read it from the planned text rather than from disk.
-    target = declared_ref(pipeline, input_name)
+    target = declared_ref(pipeline)
     requirements = plan_fix_requirements(ci_file, target, project)
     if requirements is not None:
         writes.append(requirements)
@@ -977,6 +953,9 @@ def _one_write_per_file(writes: list[tuple[Path, str]]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if "--print" in argv:
+        return print_declared_ref(argv)
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -991,19 +970,9 @@ def main(argv: list[str] | None = None) -> int:
         help=f"include project path to check (default {LIB_PROJECT})",
     )
     ap.add_argument(
-        "--ref-var",
-        default=REF_VAR,
-        help=f"variable that reads the input (default {REF_VAR})",
-    )
-    ap.add_argument(
-        "--input",
-        default=INPUT_NAME,
-        help=f"header input holding the declared ref (default {INPUT_NAME})",
-    )
-    ap.add_argument(
         "--fix",
         action="store_true",
-        help="rewrite every pin from the declared ref, adding the header if absent",
+        help="rewrite every pin from the declared ref",
     )
     ap.add_argument(
         "--bump",
@@ -1019,12 +988,12 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     # Unreadable or malformed input is operator error, not a pin finding: exit 2
-    # so CI can tell them apart. Wrapping the real calls, not a preflight read,
-    # keeps the guard around every read.
+    # so CI can tell them apart. Each message names the file that failed.
     try:
         return _run(args)
     except (OSError, UnicodeDecodeError) as exc:
-        print(f"ERROR: could not read {args.ci_file}: {exc}", file=sys.stderr)
+        where = getattr(exc, "filename", None) or args.ci_file
+        print(f"ERROR: could not read {where}: {exc}", file=sys.stderr)
         return 2
     except yaml.YAMLError as exc:
         print(f"ERROR: {args.ci_file} is not valid YAML: {exc}", file=sys.stderr)
@@ -1043,31 +1012,20 @@ def _report(problems: list[str], headline: str) -> int:
 
 def _run(args: argparse.Namespace) -> int:
     text = args.ci_file.read_text(encoding="utf-8")
-    want = declared_ref(text, args.input)
-
-    if args.print_ref:
-        if not isinstance(want, str) or TAG_RE.fullmatch(want) is None:
-            raise OperatorError(
-                f"{args.ci_file}: spec.inputs.{args.input}.default is {want!r}, "
-                "which is not a release tag (vX.Y.Z)"
-            )
-        print(want)
-        return 0
+    want = declared_ref(text)
 
     if args.bump is not None and TAG_RE.fullmatch(args.bump) is None:
         raise OperatorError(f"--bump takes a release tag (vX.Y.Z), got {args.bump!r}")
 
     if args.fix or args.bump is not None:
-        writes, changed, want = plan_writes(
-            args.ci_file, args.project, args.ref_var, args.input, args.bump
-        )
+        writes, changed, want = plan_writes(args.ci_file, args.project, args.bump)
         for path, updated in writes:
             path.write_text(updated, encoding="utf-8")
         # Verified rather than trusted: --fix cannot repair a flow-style include
         # entry, an absent include block, or a pin outside `include:`.
         problems = (
-            check(args.ci_file, args.project, args.ref_var, args.input)
-            + check_requirements(args.ci_file, want, args.project, args.ref_var)
+            check(args.ci_file, args.project)
+            + check_requirements(args.ci_file, want, args.project)
             + check_sites(args.ci_file, want)
         )
         if problems:
@@ -1078,18 +1036,26 @@ def _run(args: argparse.Namespace) -> int:
     # `want` is None when the header is absent; check() reports that, so the
     # requirements and site checks stay silent rather than adding a confusing
     # "pins vX but the ref is None" line.
-    problems = check(args.ci_file, args.project, args.ref_var, args.input)
+    problems = check(args.ci_file, args.project)
     if want:
-        problems += check_requirements(
-            args.ci_file, want, args.project, args.ref_var
-        ) + check_sites(args.ci_file, want)
+        problems += check_requirements(args.ci_file, want, args.project) + check_sites(
+            args.ci_file, want
+        )
     if problems:
         _report(problems, "check-lib-pins: FAILED")
-        print(
-            "\nFix with: scripts/check-lib-pins.py --fix  (or --bump vX.Y.Z to "
-            "move the declared ref)",
-            file=sys.stderr,
-        )
+        if any(not isinstance(p, HandFix) for p in problems):
+            print(
+                "\nFix with: scripts/check-lib-pins.py --fix  (or --bump vX.Y.Z to "
+                "move the declared ref)",
+                file=sys.stderr,
+            )
+        if any(isinstance(p, HandFix) for p in problems):
+            print(
+                f"\nFix by hand: {sites_path(args.ci_file)} names a site whose file "
+                "holds no release-tag pin or whose glob matches nothing. Restore the "
+                "pin, or narrow the glob to the files that carry one; --fix refuses it.",
+                file=sys.stderr,
+            )
         return 1
 
     doc = parse_ci(text)

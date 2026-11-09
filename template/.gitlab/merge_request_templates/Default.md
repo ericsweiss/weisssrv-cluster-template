@@ -1,6 +1,6 @@
 <!--
 Default merge-request template. Keep the Testing section as prose describing
-what you actually ran — not a checklist of intentions.
+what you actually ran, never a checklist of intentions.
 -->
 
 ## Summary
@@ -9,16 +9,17 @@ what you actually ran — not a checklist of intentions.
 
 ## Changes
 
-<!-- Bullet the notable changes. Group by area (ansible / kubernetes / terraform / CI / docs). -->
+<!-- Bullet the notable changes. Group by area (ansible / kubernetes / terraform / scripts / CI / docs). -->
 
 -
 
 ## Testing done
 
 <!--
-Describe the verification you performed, in prose. For example:
-"`task lint` clean; `task flux:lint` validated the Flux corpus; ran the
-playbook with `--check` against one host and the diff was empty."
+Prose, in the past tense, describing what was actually run and what it showed.
+Never a checklist. For example:
+"`task lint` was clean; `task flux:lint` validated the Flux corpus; the playbook
+ran with `--check` against one host and the diff was empty."
 -->
 
 ## Deploy notes

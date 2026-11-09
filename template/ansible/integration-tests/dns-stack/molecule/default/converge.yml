@@ -1,6 +1,6 @@
 ---
-# DNS stack integration test - converge.
-# unbound and adguard_home on both servers, adguard_sync on the primary.
+# Deploys unbound and adguard_home on both servers, then adguard_sync on the
+# primary.
 
 - name: Converge - DNS Stack
   hosts: all
@@ -10,8 +10,8 @@
     - ../../../../inventories/prod/group_vars/all.yml
 
   pre_tasks:
-    # molecule.yml platforms[].groups drive the `group_names` guards below; an
-    # empty group would skip them and still report a pass.
+    # molecule.yml platforms[].groups drive the dns_primary guard below; an empty
+    # group would skip the adguard_sync role and still report a pass.
     - name: Assert the molecule roster resolved
       ansible.builtin.assert:
         that:
@@ -36,9 +36,7 @@
         state: present
 
   tasks:
-    # TRAP: unbound settings must stay in molecule.yml group_vars, never in an
-    # include_role `vars:` block. adguard_home re-applies unbound as a dependency
-    # and include-scoped vars miss it, so the two runs flip-flop the config.
+    # Unbound settings live in molecule.yml group_vars; the TRAP there says why.
     - name: Apply unbound role
       ansible.builtin.include_role:
         name: weisssrv.infra.unbound
@@ -53,6 +51,7 @@
         adguard_home_upstream_dns:
           - "127.0.0.1:5335"
 
+    # The primary pushes its config to the replica.
     - name: Apply adguard_sync role
       ansible.builtin.include_role:
         name: weisssrv.infra.adguard_sync

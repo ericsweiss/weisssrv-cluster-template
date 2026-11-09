@@ -5,6 +5,8 @@ weisssrv-lib tests the guard's refusals; this suite holds the Taskfile wiring.
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,13 @@ ROOT_ANCHOR = "{{.ROOT_DIR}}/"
 APPLY_CMD = "terraform apply"
 # The DNS zone is the one apply CI runs on merge, so it carries no guard.
 UNGUARDED_APPLY = {"terraform:apply"}
+
+
+# A script path in exec position: a line start or `$(`, optionally root-anchored.
+EXEC_PATH = re.compile(
+    r"(?:^|\$\()\s*['\"]?(?:\{\{\.ROOT_DIR\}\}/|\./)?(scripts/[\w.-]+\.sh)\b",
+    re.MULTILINE,
+)
 
 
 def _cmd_strings(task: dict) -> list[str]:
@@ -77,6 +86,25 @@ def _root_anchor_violations(tasks: dict[str, dict]) -> list[str]:
             if GUARD_REF in cmd and ROOT_ANCHOR + GUARD_REF not in cmd:
                 violations.append(f"{name} calls {GUARD_REF} relative to its dir:")
     return violations
+
+
+def _exec_paths(tasks: dict[str, dict]) -> dict[str, set[str]]:
+    """Script path -> task names, for every scripts/*.sh a task runs by path."""
+    found: dict[str, set[str]] = {}
+    for name, body in tasks.items():
+        for cmd in _cmd_strings(body):
+            for rel in EXEC_PATH.findall(cmd):
+                found.setdefault(rel, set()).add(name)
+    return found
+
+
+def _not_executable(repo: Path, paths: dict[str, set[str]]) -> list[str]:
+    """Scripts run by path whose owner x bit is clear; go-task cannot exec them."""
+    return [
+        f"{rel} (run by {', '.join(sorted(names))}) is not executable"
+        for rel, names in sorted(paths.items())
+        if not (repo / rel).stat().st_mode & 0o100
+    ]
 
 
 def test_every_supervised_apply_runs_the_guard_first():
@@ -144,3 +172,28 @@ def test_the_root_anchor_check_can_fail():
     assert _root_anchor_violations({"terraform:x-apply": relative})
     assert not _root_anchor_violations({"terraform:x-apply": anchored})
     assert not _root_anchor_violations({"terraform:x-apply": {"cmds": relative["cmds"]}})
+
+
+def test_every_script_a_task_runs_by_path_is_executable():
+    paths = _exec_paths(taskfile_tree.load_tasks(REPO))
+    assert GUARD_REF in paths, "the guard is not run by path — this gate examines nothing"
+    missing = [rel for rel in paths if not (REPO / rel).is_file()]
+    assert not missing, f"tasks run scripts that do not exist: {missing}"
+    violations = _not_executable(REPO, paths)
+    assert not violations, "a task cannot start:\n  " + "\n  ".join(violations)
+
+
+def test_the_exec_bit_check_can_fail(tmp_path):
+    """Mutation case: a script run by path without its x bit is reported, and
+    one run through `bash` is not collected at all."""
+    script = tmp_path / GUARD_REF
+    script.parent.mkdir()
+    script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    os.chmod(script, 0o644)
+    tasks = {"t:apply": {"cmds": [f"'{ROOT_ANCHOR}{GUARD_REF} t:apply x'"]},
+             "t:other": {"cmds": ["bash scripts/other.sh"]}}
+    paths = _exec_paths(tasks)
+    assert set(paths) == {GUARD_REF}
+    assert _not_executable(tmp_path, paths)
+    os.chmod(script, 0o755)
+    assert not _not_executable(tmp_path, paths)

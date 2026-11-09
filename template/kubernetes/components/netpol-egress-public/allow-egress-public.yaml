@@ -1,7 +1,7 @@
 ---
-# Public-unicast HTTPS (:443) only. cert-manager's kustomization patches :53
-# in for the DNS-01 self-check. The except list is RFC-reserved and private
-# IPv4 space, a standards constant.
+# Public-unicast HTTPS (:443) only. cert-manager's kustomization patches :53 in
+# for the DNS-01 self-check. The except list is the reserved-full set, which
+# check-netpol-except-parity.py holds canonical.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

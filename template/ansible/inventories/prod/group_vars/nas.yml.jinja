@@ -137,8 +137,8 @@ nas_storage_zfs_scrub_schedule: "Sun *-*-1..7 04:00:00"   # first Sunday, monthl
 # leaves the ZFS default of about half of RAM. Example: 4294967296 (4 GiB).
 nas_storage_zfs_arc_max_bytes: ""
 
-# Datasets on encrypted pools whose bind mounts wait for the key load, so an
-# export does not publish an empty directory at boot.
+# Bind sources on encrypted datasets. Their bind mounts and nfsd wait for the
+# key load, so an export never publishes an empty directory at boot.
 nas_storage_encrypted_bind_sources: []
 
 # NAS-side "the dump landed" signal, one entry per app with a landing zone

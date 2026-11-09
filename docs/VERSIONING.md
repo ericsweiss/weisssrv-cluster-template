@@ -240,13 +240,12 @@ runs on itself; `template/`-prefixed ones are rendered into
 every generated cluster. The two sets drift separately, so re-vendoring one is
 not re-vendoring the other. An entry is a bare string when both repos use the
 same path, or a mapping with `lib:` and `consumer:` when they differ.
-`template/.gitleaks.toml.jinja` and
-`template/.gitlab/secret-detection-ruleset.toml.jinja` are Jinja sources rather
-than copies, so they are not listed.
+`template/.gitleaks.toml.jinja` is a Jinja source rather than a copy, so it is
+not listed.
 
 Absence from the manifest means template-local, not drift. Many gates under
 `template/scripts/` are written here and have no library counterpart, among
-them `check-cluster-literals.py`, `check-tenant-wiring.py` and
+them `check-cluster-literals.py`, `check-unmanaged-secrets.py` and
 `deploy-verify.sh`. The validator's orphan scan holds that line: a script with
 no library twin has to be declared in the render's own `scripts/README.md`
 under "Local helpers".
