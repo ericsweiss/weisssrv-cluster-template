@@ -17,6 +17,7 @@ if _HERE not in sys.path:
 
 try:
     from gate_common import (  # noqa: E402  (resolved from this module's own directory)
+        NAME_LABEL,
         OperatorError,
         load_docs,
     )
@@ -42,6 +43,24 @@ CLUSTERS_DIR = "kubernetes/clusters"
 TENANTS_SUBDIR = "tenants"
 # The one StorageClass a tenant claim may name.
 TENANT_STORAGE_CLASS = "tenant-local"
+
+
+def routing_binding_spec(namespace: str, policy: str = HOSTNAME_POLICY) -> dict:
+    """The whole spec of a tenant's binding of a grant policy: Deny, on that
+    namespace alone, reading its platform-owned grant and refusing when the
+    grant is gone."""
+    return {
+        "policyName": policy,
+        "validationActions": ["Deny"],
+        "paramRef": {
+            "name": GRANT_PREFIX + namespace,
+            "namespace": FLUX_NAMESPACE,
+            "parameterNotFoundAction": "Deny",
+        },
+        "matchResources": {
+            "namespaceSelector": {"matchLabels": {NAME_LABEL: namespace}}
+        },
+    }
 
 
 def label(path: Path, root: Path) -> str:

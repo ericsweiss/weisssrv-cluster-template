@@ -37,6 +37,7 @@ try:
         metadata,
         of_kind,
         resolve_targets,
+        routing_binding_spec,
     )
 except ImportError as exc:  # pragma: no cover - environment guard
     print(
@@ -71,6 +72,10 @@ READ_VERBS = frozenset({"get", "list", "watch"})
 # A tenant pins its own image versions, so only cluster identity is required.
 REQUIRED_SUBSTITUTE_SOURCES = ("cluster-config",)
 ALLOWED_SUBSTITUTE_SOURCES = (*REQUIRED_SUBSTITUTE_SOURCES, "cluster-versions")
+# The tenant contract's Pod Security levels: baseline enforced, restricted advised.
+PSS_PREFIX = "pod-security.kubernetes.io/"
+PSS_LEVELS = {f"{PSS_PREFIX}enforce": "baseline", f"{PSS_PREFIX}warn": "restricted",
+              f"{PSS_PREFIX}audit": "restricted"}
 REQUIRED_NS_LABELS = (
     TENANT_LABEL,
     "pod-security.kubernetes.io/enforce",
@@ -103,7 +108,25 @@ CLUSTER_SCOPED_KINDS = {
     "PriorityClass": "scheduling.k8s.io",
     "CustomResourceDefinition": "apiextensions.k8s.io",
     "ValidatingAdmissionPolicyBinding": "admissionregistration.k8s.io",
+    "ValidatingAdmissionPolicy": "admissionregistration.k8s.io",
+    "MutatingAdmissionPolicy": "admissionregistration.k8s.io",
+    "MutatingAdmissionPolicyBinding": "admissionregistration.k8s.io",
+    "ValidatingWebhookConfiguration": "admissionregistration.k8s.io",
+    "MutatingWebhookConfiguration": "admissionregistration.k8s.io",
+    "PersistentVolume": "",
+    "StorageClass": "storage.k8s.io",
+    "IngressClass": "networking.k8s.io",
+    "RuntimeClass": "node.k8s.io",
+    "APIService": "apiregistration.k8s.io",
 }
+# What a tenant file may declare outside its own namespaces, as (kind, API group);
+# anything else there is platform scope. The grant ConfigMap and bindings are
+# narrowed further by name and policy in _scope_problems.
+TENANT_CLUSTER_KINDS = (("Namespace", ""), (STORE_KIND, "external-secrets.io"),
+                        ("ValidatingAdmissionPolicyBinding", "admissionregistration.k8s.io"))
+FLUX_SYSTEM_KINDS = (("Kustomization", FLUX_KUSTOMIZE_GROUP),
+                     (SOURCE_KIND, "source.toolkit.fluxcd.io"), ("ServiceAccount", ""),
+                     ("Role", RBAC_GROUP), ("RoleBinding", RBAC_GROUP), ("ConfigMap", ""))
 # Fields the checks compare as names, per kind; a mapping or list there is a
 # malformed manifest, reported by field before any check reads the file.
 SCALAR_SPEC_FIELDS = {
@@ -423,6 +446,46 @@ def _placement_problems(docs: list, rel: str, namespaces: list[str]) -> list[str
     return problems
 
 
+def _scope_problems(docs: list, rel: str, namespaces: list[str]) -> list[str]:
+    """Outside its own namespaces a tenant file declares only its Namespaces, store and
+    grant bindings, and in flux-system only its Flux objects, their RBAC and its grant."""
+    problems = []
+    for doc in docs:
+        kind, group = str(doc.get("kind") or "?"), api_group(doc)
+        name = metadata(doc).get("name") or "?"
+        if _cluster_scoped(doc):
+            allowed = (kind, group) in TENANT_CLUSTER_KINDS
+            policy = as_mapping(doc.get("spec")).get("policyName")
+            if allowed and kind == "ValidatingAdmissionPolicyBinding" and policy in GRANT_POLICIES:
+                # Named and shaped for one of this file's namespaces, so it reaches no other.
+                if not any(name == f"{policy}-{ns}" and doc.get("spec") == routing_binding_spec(ns, policy)
+                           for ns in namespaces):
+                    problems.append(
+                        f"{rel}: ValidatingAdmissionPolicyBinding {name} of {policy} is not "
+                        f"{policy}-<namespace> with the Deny spec on one tenant namespace "
+                        f"of this file — it could bind {policy} beyond the tenant"
+                    )
+                continue
+            if not allowed or kind == "ValidatingAdmissionPolicyBinding":
+                problems.append(
+                    f"{rel}: cluster-scoped {kind} {name} is platform scope — a tenant "
+                    f"file declares only Namespace, {STORE_KIND} and bindings of "
+                    f"{', '.join(GRANT_POLICIES)} outside its namespaces"
+                )
+        elif metadata(doc).get("namespace") == FLUX_NAMESPACE:
+            allowed = (kind, group) in FLUX_SYSTEM_KINDS and (
+                kind != "ConfigMap" or name in {GRANT_PREFIX + ns for ns in namespaces}
+            )
+            if not allowed:
+                problems.append(
+                    f"{rel}: {kind} {name} in {FLUX_NAMESPACE} is platform scope — a "
+                    "tenant file places there only its Kustomizations, GitRepositories, "
+                    "ServiceAccounts, Role, RoleBinding and its "
+                    f"{GRANT_PREFIX}<namespace> ConfigMap"
+                )
+    return problems
+
+
 def _strings(value: object) -> list[str] | None:
     """A non-empty list of non-empty strings, else None."""
     if isinstance(value, list) and value and all(isinstance(v, str) and v for v in value):
@@ -457,13 +520,9 @@ def _rule_problem(rule: object, declared: dict[str, set[str]]) -> str | None:
 def _flux_system_rbac_problems(docs: list, rel: str, namespaces: list[str]) -> list[str]:
     """In flux-system a tenant reads its own Flux objects and nothing else: each Role
     reads this file's Kustomizations or GitRepositories, and each RoleBinding binds
-    such a Role to a ServiceAccount this file declares. A ClusterRoleBinding is never one."""
+    such a Role to a ServiceAccount this file declares."""
     rbac = [d for d in docs if api_group(d) == RBAC_GROUP]
-    problems = [
-        f"{rel}: ClusterRoleBinding {metadata(d).get('name') or '?'} grants across every "
-        "namespace — a tenant binds roles in its own namespaces alone"
-        for d in of_kind(rbac, "ClusterRoleBinding")
-    ]
+    problems = []
     declared = {
         group: {
             str(metadata(d).get("name"))
@@ -631,11 +690,28 @@ def check_file(path: Path, rel: str, listed: set[str] | None,
                 problems.append(
                     f"{rel}: namespace {metadata(doc).get('name')} has no {label} label"
                 )
+        for label, level in PSS_LEVELS.items():
+            if label in present and present[label] != level:
+                problems.append(
+                    f"{rel}: namespace {metadata(doc).get('name')} sets {label}: "
+                    f"{present[label]}, not {level} — the tenant contract pins Pod "
+                    "Security at enforce baseline, warn and audit restricted"
+                )
+        # A pinned version runs an older, weaker profile than the level names.
+        for label in sorted(present):
+            if (str(label).startswith(PSS_PREFIX) and str(label).endswith("-version")
+                    and present[label] != "latest"):
+                problems.append(
+                    f"{rel}: namespace {metadata(doc).get('name')} sets {label}: "
+                    f"{present[label]}, not latest — an older profile admits pods the "
+                    "current one refuses"
+                )
 
     problems += _collision_problems(namespaces, rel, platform or {})
     problems += _caps_problems(docs, rel, storage_quota_keys(storage_classes))
     problems += _prune_guard_problems(docs, rel)
     problems += _placement_problems(docs, rel, namespaces)
+    problems += _scope_problems(docs, rel, namespaces)
     problems += _flux_system_rbac_problems(docs, rel, namespaces)
     problems += _store_problems(docs, rel, namespaces, labels)
 

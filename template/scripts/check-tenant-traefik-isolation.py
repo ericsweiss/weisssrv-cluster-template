@@ -17,7 +17,6 @@ if _HERE not in sys.path:
 
 try:
     from gate_common import (  # noqa: E402  (resolved from this script's own directory)
-        NAME_LABEL,
         OperatorError,
     )
     from tenant_common import (  # noqa: E402  (resolved from this script's own directory)
@@ -27,6 +26,7 @@ try:
         GRANT_POLICIES,
         GRANT_PREFIX,
         HOSTNAME_POLICY,
+        routing_binding_spec,
         SHARED,
         TENANT_LABEL,
         TENANT_STORAGE_CLASS,
@@ -709,24 +709,6 @@ def policy_gaps(path: Path, root: Path) -> list[str]:
         elif parts := drift(defined[0], required):
             gaps.append(f"{name}: {', '.join(parts)} differ from the pinned shape")
     return gaps
-
-
-def routing_binding_spec(namespace: str, policy: str = HOSTNAME_POLICY) -> dict:
-    """The whole spec of a tenant's binding of a grant policy: Deny, on that
-    namespace alone, reading its platform-owned grant and refusing when the
-    grant is gone."""
-    return {
-        "policyName": policy,
-        "validationActions": ["Deny"],
-        "paramRef": {
-            "name": GRANT_PREFIX + namespace,
-            "namespace": FLUX_NAMESPACE,
-            "parameterNotFoundAction": "Deny",
-        },
-        "matchResources": {
-            "namespaceSelector": {"matchLabels": {NAME_LABEL: namespace}}
-        },
-    }
 
 
 def _grant_problem(data: object) -> str | None:
