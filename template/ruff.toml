@@ -1,4 +1,4 @@
-# The weisssrv family's ruff profile. A repo keeps it at the root, where ruff
+# The shared ruff profile. A repo keeps it at the root, where ruff
 # discovers it, or passes its path with `--config`. py39 is the lowest Python
 # any family repo supports.
 target-version = "py39"

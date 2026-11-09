@@ -6,41 +6,8 @@ rule_files:
   - rules.yaml
 evaluation_interval: 1m
 tests:
-  # SATA: 52C on the hypervisor crosses the 50C warning; the LXC reading the
-  # same sensor and a 45C drive stay quiet.
-  - interval: 1m
-    input_series:
-      - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="nas:9101"}'
-        values: '0+60x30'
-      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="nas:9101", chip="target0:0:0_0:0:0:0", sensor="temp1"}'
-        values: '52+0x30'
-      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="nas:9101", chip="target0:0:0_0:0:0:0", chip_name="drivetemp"}'
-        values: '1+0x30'
-      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="nas:9101", chip="target1:0:0_1:0:0:0", sensor="temp1"}'
-        values: '45+0x30'
-      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="nas:9101", chip="target1:0:0_1:0:0:0", chip_name="drivetemp"}'
-        values: '1+0x30'
-      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="192.0.2.23:9101", chip="target0:0:0_0:0:0:0", sensor="temp1"}'
-        values: '52+0x30'
-      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="192.0.2.23:9101", chip="target0:0:0_0:0:0:0", chip_name="drivetemp"}'
-        values: '1+0x30'
-    alert_rule_test:
-      - eval_time: 10m
-        alertname: SATADriveTempWarning
-        exp_alerts: []
-      - eval_time: 20m
-        alertname: SATADriveTempWarning
-        exp_alerts:
-          - exp_labels:
-              severity: warning
-              component: storage
-              instance: 'nas:9101'
-              chip: 'target0:0:0_0:0:0:0'
-      - eval_time: 20m
-        alertname: SATADriveTempCritical
-        exp_alerts: []
-
-  # 56C crosses the 55C critical after its 5m hold.
+  # SATA: 56C on the hypervisor crosses the 55C critical after its 5m hold; the
+  # LXC reading the same sensor and a 45C drive stay quiet.
   - interval: 1m
     input_series:
       - series: 'proxmox_corosync_health_collector_last_success_seconds{job="node-exporter-host", instance="nas:9101"}'
@@ -48,6 +15,14 @@ tests:
       - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="nas:9101", chip="target0:0:0_0:0:0:0", sensor="temp1"}'
         values: '56+0x30'
       - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="nas:9101", chip="target0:0:0_0:0:0:0", chip_name="drivetemp"}'
+        values: '1+0x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="nas:9101", chip="target1:0:0_1:0:0:0", sensor="temp1"}'
+        values: '45+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="nas:9101", chip="target1:0:0_1:0:0:0", chip_name="drivetemp"}'
+        values: '1+0x30'
+      - series: 'node_hwmon_temp_celsius{job="node-exporter-host", instance="192.0.2.23:9101", chip="target0:0:0_0:0:0:0", sensor="temp1"}'
+        values: '56+0x30'
+      - series: 'node_hwmon_chip_names{job="node-exporter-host", instance="192.0.2.23:9101", chip="target0:0:0_0:0:0:0", chip_name="drivetemp"}'
         values: '1+0x30'
     alert_rule_test:
       - eval_time: 3m

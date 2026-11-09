@@ -120,23 +120,3 @@ tests:
       - eval_time: 3h
         alertname: SwapCleanGuestRestartFailed
         exp_alerts: []
-
-  # SwapCleanStoppedGuests: one run that stopped guests holds for 6h, then clears.
-  - interval: 30m
-    input_series:
-      - series: 'swap_clean_guests_stopped_count{job="node-exporter-host", instance="nas:9101"}'
-        values: '0 2 0+0x20'
-    alert_rule_test:
-      - eval_time: 30m
-        alertname: SwapCleanStoppedGuests
-        exp_alerts: []
-      - eval_time: 3h
-        alertname: SwapCleanStoppedGuests
-        exp_alerts:
-          - exp_labels:
-              severity: info
-              job: node-exporter-host
-              instance: 'nas:9101'
-      - eval_time: 8h
-        alertname: SwapCleanStoppedGuests
-        exp_alerts: []

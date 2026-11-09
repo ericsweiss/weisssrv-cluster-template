@@ -78,10 +78,10 @@ spec:
     # ipAllowList middlewares depend on. allocateLoadBalancerNodePorts: false drops
     # the data-plane NodePorts; MetalLB L2 announces the VIP, so nothing uses them.
     service:
-      type: LoadBalancer
       annotations:
         metallb.io/loadBalancerIPs: "${cluster_metallb_public_vip}"
       spec:
+        type: LoadBalancer
         externalTrafficPolicy: Local
         allocateLoadBalancerNodePorts: false
 

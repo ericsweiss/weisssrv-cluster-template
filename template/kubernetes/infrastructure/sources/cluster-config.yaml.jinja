@@ -147,6 +147,7 @@ data:
 {%- if dns_backend == 'cloudflare' %}
 
   # WAN A records the cloudflare-ddns CronJob owns, as `label[:proxied]` pairs;
-  # `@` is the apex and proxied defaults to true.
-  cluster_ddns_records: "{{ external_domain }}:true"
+  # `@` is the apex. The value carries its own quotes: kustomize unquotes the
+  # placeholder before Flux substitutes, and a bare `@` cannot start a scalar.
+  cluster_ddns_records: '"@:true"'
 {%- endif %}

@@ -739,6 +739,19 @@ Once the platform is Ready:
    need a **root-capable** runner (`flux-lint` and every deploy job do), the CI/CD
    variables each job expects, and the node-selector regex a runner must allow.
 
+   Tags, untagged jobs and the protected-branch setting are registration
+   settings in GitLab; the `glrt-*` token carries them and the HelmRelease does
+   not. Register two runners:
+
+   | Runner | Registered as | Tags | Run untagged jobs |
+   |---|---|---|---|
+   | `gitlab-runner` (shared) | instance runner | none | yes |
+   | `gitlab-runner-privileged` | project runner on this repository, locked to current projects | the `ci_runner_tag` answer | no |
+
+   Enable the privileged runner on another project only when it needs root +
+   DinD, from that project's **Settings > CI/CD > Runners**, never on a group or
+   the instance: every developer who can push there runs root on it.
+
    > **Register the privileged runner as a PROJECT runner, never instance-wide.**
    > It runs Docker-in-Docker as root, so an instance runner hands every project
    > on your GitLab — including anything a friend later hosts there — a root

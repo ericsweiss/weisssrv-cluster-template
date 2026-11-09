@@ -1666,7 +1666,7 @@ spec:
             rules:
               # Replaces the chart's copy, which defaultRules.disabled turns off.
               # for: 15m rides out a transient receiver timeout.
-              # Taken from kube-prometheus-stack 92.14.1
+              # Taken from kube-prometheus-stack 93.1.0
               - alert: AlertmanagerClusterFailedToSendAlerts
                 expr: >-
                   min by (namespace, service, integration) (
@@ -2621,26 +2621,6 @@ spec:
               # hwmon from the hypervisors only: an LXC reads its host's sensors,
               # so an unscoped rule pages twice for one sensor. The corosync
               # sentinel marks a hypervisor.
-              - alert: SATADriveTempWarning
-                expr: >-
-                  max by (instance, chip) (
-                    node_hwmon_temp_celsius{job="node-exporter-host"}
-                    * on (instance, chip) group_left(chip_name)
-                    node_hwmon_chip_names{job="node-exporter-host", chip_name=~"drivetemp.*"}
-                  ) >= 50
-                  and on (instance) proxmox_corosync_health_collector_last_success_seconds
-                for: 15m
-                labels:
-                  severity: warning
-                  component: storage
-                annotations:
-                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#hardware-temperature-alerts'
-                  summary: 'SATA drive {{ $labels.chip }} on {{ $labels.instance }} at {{ $value | printf "%.0f" }}C'
-                  description: >-
-                    SATA drive {{ $labels.chip }} on {{ $labels.instance }} has
-                    been at {{ $value | printf "%.0f" }}C for 15 minutes,
-                    against a 50C warning.
-
               - alert: SATADriveTempCritical
                 expr: >-
                   max by (instance, chip) (
@@ -3085,19 +3065,4 @@ spec:
                   description: >-
                     swap-clean stopped {{ $value | printf "%.0f" }} guest(s) on
                     {{ $labels.instance }} that did not restart.
-
-              # A notice: ARC shrink alone no longer covers the swap. Exempted
-              # from InfoInhibitor by name; [6h] keeps it from latching.
-              - alert: SwapCleanStoppedGuests
-                expr: max_over_time(swap_clean_guests_stopped_count[6h]) > 0
-                for: 5m
-                labels:
-                  severity: info
-                annotations:
-                  runbook_url: '${cluster_runbook_base_url}/RUNBOOKS.md#host-memory-and-slab-alerts'
-                  summary: 'swap-clean stopped guests to reclaim swap on {{ $labels.instance }}'
-                  description: >-
-                    swap-clean stopped and restarted {{ $value | printf "%.0f"
-                    }} guest(s) in the last 6 hours to free RAM, so the host is
-                    short on RAM.
 {%- endraw %}{% endif %}

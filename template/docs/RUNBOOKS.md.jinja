@@ -1446,7 +1446,6 @@ the corosync collector, which runs on every hypervisor and nowhere else.
 | `NASSwapNotClearing` | swap stayed above 2 GiB for 2 days on a swap-clean host | `journalctl -t swap-clean` |
 | `NASSwapGone` | a swap-clean host has no swap at all | `swapon --show` and `/etc/fstab` |
 | `SwapCleanGuestRestartFailed` | swap-clean stopped a guest that did not come back | `qm start <vmid>`, then `journalctl -t swap-clean` |
-| `SwapCleanStoppedGuests` | swap-clean had to stop guests to free RAM | the host is short on RAM; trim guest memory |
 
 `HostSlabLeakSuspected` inhibits the warning tier of the memory and swap-clean
 alerts on its own host. `HostMemAvailableCritical` is never inhibited.
@@ -1471,13 +1470,13 @@ file has existed, a deleted file fires it for a week.
 
 | Alert | Means | First move |
 |---|---|---|
-| `SATADriveTempWarning` / `SATADriveTempCritical` | a SATA drive at 50C, or at 55C | the airflow for that bay |
+| `SATADriveTempCritical` | a SATA drive at 55C | the airflow for that bay |
 | `NVMeDriveTempHigh` / `NVMeDriveTempCritical` | an NVMe drive at 75C, which is null-routed, or at its 80C throttle point | the drive's airflow and heatsink |
 | `CPUTempWarning` / `CPUTempCritical` | a CPU sustained at 90C, or at 95C | load, fans and thermal paste |
 | `HostGpuTempWarning` / `HostGpuTempCritical` | a host GPU at 85C, or at 95C | the GPU's load and airflow |
 | `NICTempWarning` | a NIC at 90C for 10 minutes | the card's airflow |
 
-The SATA thresholds suit hard disks. Raise them in the release when a host's
+The SATA threshold suits hard disks. Raise it in the release when a host's
 SATA drives are all SSDs.
 
 ---

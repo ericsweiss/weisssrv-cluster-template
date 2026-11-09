@@ -11,7 +11,7 @@
 # the tag is only cooperative routing, so any project could otherwise claim root
 # + DinD on a runner with SSH reach to the hosts. Verify each registration:
 # GET /api/v4/runners/<id> -> "runner_type": "project_type" (README.md has the
-# reasoning and the tenant-build alternative).
+# reasoning and the per-project enablement).
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
@@ -30,17 +30,9 @@ spec:
 
       secret: gitlab-runner-privileged-token
 
-      # THE TAG THE RUNNER CLAIMS — must equal the `ci_runner_tag` answer every
-      # job in this pipeline declares. Drift does not error: tagged jobs sit
-      # "pending" until timeout. Both sides read the answer; hardcode neither.
-      tags: "{{ ci_runner_tag }}"
-      # ...and untagged jobs never do (they go to the shared runner).
-      runUntagged: false
-
-      # ACCEPTED RISK: lets this privileged runner execute MR pipelines from
-      # UNPROTECTED branches. protected:true would silently break MR CI. The
-      # isolation boundary is the registration scope, not the tag: README.md.
-      protected: false
+      # Tags, untagged jobs and the branch access level are registration
+      # settings of the runner token in GitLab (README.md): a locked project
+      # runner, tag {{ ci_runner_tag }}, enabled per trusted project.
 
       executor: kubernetes
 
@@ -63,8 +55,8 @@ spec:
             # Default CI job image, digest-pinned (the tag is kept for
             # readability; the digest is authoritative).
             image = "python:3.11@sha256:9800957d2a88867f853ce6072ae1669e37fa269cc6f76009fa1aef4757f62212"
-            # No pod security context: the DinD daemon needs root. Its isolation
-            # is the registration scope, README.md.
+            # No pod security context: the DinD daemon needs root. Its only
+            # isolation is the project-locked registration (README.md).
             privileged = true
 
             # ci-jobs ranks job pods below unclassed pods and never preempts. A

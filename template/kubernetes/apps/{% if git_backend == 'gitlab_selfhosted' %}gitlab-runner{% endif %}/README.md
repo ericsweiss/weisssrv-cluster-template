@@ -18,9 +18,9 @@ not an optimisation.
 | namespace-wide `default-deny-egress` | a pod without a runner-class label gets no egress at all, instead of unrestricted |
 | ResourceQuota + LimitRange | a job cannot starve resident workloads |
 
-`protected: false` is an accepted risk: it lets the runner accept jobs from
-unprotected branches, which is what makes MR pipelines work. The containment
-above is what makes that acceptable. In a team environment, set `protected: true`.
+Running jobs from unprotected branches is an accepted risk: it is what makes MR
+pipelines work, and the containment above is what makes it acceptable. In a
+team environment, restrict the runner to protected branches in GitLab.
 
 ## Sizing
 
@@ -50,7 +50,7 @@ the runner submits 403s the job rather than throttling it.
 | GitLab URL | `${cluster_git_host}` (use the internally-resolvable name) |
 | Runner token | secrets item **GitLab Runner** → field `runner-token` |
 | Job image | `runners.config` TOML, digest-pinned |
-| Tag | `k8s-deploy` (plus untagged) |
+| Tag | none (untagged jobs) |
 
 `managers-egress` assumes `${cluster_git_host}` resolves to this cluster's
 internal ingress, plus public `:443` for the callbacks GitLab redirects to. A
@@ -58,7 +58,9 @@ GitLab reached directly on the LAN needs its own `ipBlock` rule in
 `networkpolicy.yaml`, or the manager never registers and simply never appears
 connected.
 
-The token is a `glrt-*` authentication token. The chart's projected-secrets
+The token is a `glrt-*` authentication token. Tags, untagged jobs and the
+protected-branch setting live on the runner in GitLab, not in `release.yaml`:
+an instance runner with no tags that runs untagged jobs. The chart's projected-secrets
 volume needs BOTH `runner-token` and `runner-registration-token` keys even though
 the legacy registration flow is unused — the ExternalSecret templates the second
 one as an empty string so the mount succeeds.

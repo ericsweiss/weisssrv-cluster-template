@@ -231,7 +231,6 @@ TEMPLATE_OWNED = {
     "template/scripts/check-deploy-host-coverage.py",
     "template/scripts/check-grafana-sidecar-init.py",
     "template/scripts/check-integration-matrix-coverage.py",
-    "template/scripts/check-kustomization-coverage.py",
     "template/scripts/check-unmanaged-secrets.py.jinja",
     "template/scripts/check-upstream-rule-mirror.py",
     "template/scripts/flux-secret-consumers.py",

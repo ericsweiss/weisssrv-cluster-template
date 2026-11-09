@@ -294,3 +294,102 @@ class TestClassifiersNeverFailSilently:
         assert res.returncode != 0
         assert res.stdout.strip() == ""
         assert "jq failed" in res.stderr
+
+
+# gitlab_health_code: internal-first, external only on a connection-level 000
+# collect-state.sh reads its GitLab verdict through it, so a regression here
+# would silently change what the collector calls "GitLab healthy".
+
+def _gitlab_code(tmp_path: Path, responses: dict[str, str]) -> tuple[str, list[str]]:
+    """Drive gitlab_health_code with a stub `curl` that maps URL -> status code.
+
+    Returns (printed code, the list of URLs the stub was asked for).
+    """
+    calls = tmp_path / "calls.txt"
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    table = "\n".join(f'  {url!r}) echo "{code}" ;;' for url, code in responses.items())
+    (stub_dir / "curl").write_text(
+        "#!/usr/bin/env bash\n"
+        'url="${@: -1}"\n'
+        f'echo "$url" >> {calls}\n'
+        'case "$url" in\n'
+        f"{table}\n"
+        "  *) echo 000 ;;\n"
+        "esac\n"
+    )
+    (stub_dir / "curl").chmod(0o755)
+    script = (
+        f'export PATH="{stub_dir}:$PATH"\n'
+        "export GITLAB_HEALTH_INTERNAL=http://internal\n"
+        "export GITLAB_HEALTH_EXTERNAL=http://external\n"
+        f". {LIB}\ngitlab_health_code /-/readiness\n"
+    )
+    res = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    seen = calls.read_text().split() if calls.exists() else []
+    return res.stdout.strip(), seen
+
+
+class TestGitlabHealthCode:
+    def test_internal_200_short_circuits(self, tmp_path):
+        code, seen = _gitlab_code(tmp_path, {"http://internal/-/readiness": "200"})
+        assert code == "200"
+        assert seen == ["http://internal/-/readiness"]
+
+    def test_real_http_status_is_trusted_not_masked_by_external(self, tmp_path):
+        # A 503 means GitLab answered; falling through to an external 200 would
+        # hide an internal outage.
+        code, seen = _gitlab_code(
+            tmp_path,
+            {"http://internal/-/readiness": "503", "http://external/-/readiness": "200"},
+        )
+        assert code == "503"
+        assert seen == ["http://internal/-/readiness"]
+
+    def test_connection_level_000_falls_back_to_external(self, tmp_path):
+        code, seen = _gitlab_code(
+            tmp_path,
+            {"http://internal/-/readiness": "000", "http://external/-/readiness": "200"},
+        )
+        assert code == "200"
+        assert seen == ["http://internal/-/readiness", "http://external/-/readiness"]
+
+    def test_both_down_reports_000(self, tmp_path):
+        code, _ = _gitlab_code(tmp_path, {})
+        assert code == "000"
+
+
+# gitlab_health_verdict: the code -> verdict mapping collect-state.sh feeds to
+# coerce_int. "unknown" is the collector's position, so it must not read as a
+# GitLab fault; anything the server actually failed on must.
+
+class TestGitlabHealthVerdict:
+    def test_200_is_healthy(self):
+        assert _run("gitlab_health_verdict 200").stdout == "1"
+
+    @pytest.mark.parametrize("code", ["401", "403", "404"])
+    def test_whitelist_gated_codes_are_unknown(self, code):
+        # /-/health and /-/readiness are monitoring_whitelist-gated, so these
+        # say "not probeable from here", never "GitLab is unhealthy".
+        assert _run(f"gitlab_health_verdict {code}").stdout == "unknown"
+
+    @pytest.mark.parametrize("code", ["000", "500", "502", "503", "301", ""])
+    def test_everything_else_is_unhealthy(self, code):
+        assert _run(f"gitlab_health_verdict '{code}'").stdout == "0"
+
+    def test_a_missing_argument_is_unhealthy_not_unknown(self):
+        assert _run("gitlab_health_verdict").stdout == "0"
+
+    def test_unknown_coerces_to_an_undegraded_verdict_and_a_null_json(self):
+        # The contract collect-state.sh relies on: coerce_int turns the sentinel
+        # into 1 for the verdict and null for the JSON.
+        src = Path(__file__).resolve().parent / "collect-state-lib.sh"
+        out = subprocess.run(
+            ["bash", "-c",
+             f'. {LIB}\n. {src}\nv=$(gitlab_health_verdict 403)\n'
+             'printf "%s %s" "$(coerce_int "$v" 1)" "$(coerce_int "$v" null)"'],
+            capture_output=True, text=True,
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout == "1 null"

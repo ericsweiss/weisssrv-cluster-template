@@ -25,16 +25,9 @@ spec:
       # Secret created by ESO (externalsecret.yaml).
       secret: gitlab-runner-token
 
-      # Explicit routing tag, in addition to untagged jobs.
-      tags: "k8s-deploy"
-
-      # The default runner for projects that specify no tags.
-      runUntagged: true
-
-      # ACCEPTED RISK: protected:false lets this runner accept jobs from
-      # unprotected branches, which is what makes MR pipelines work. Acceptable
-      # only while it stays non-privileged and egress-contained (networkpolicy).
-      protected: false
+      # Tags, untagged jobs and the branch access level are registration
+      # settings of the runner token in GitLab (README.md): untagged jobs of
+      # every project, any branch; job pods are egress-contained.
 
       executor: kubernetes
 

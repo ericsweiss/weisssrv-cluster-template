@@ -50,7 +50,7 @@
     # Digest-pinned (multi-arch index), matching the library's molecule jobs.
     # --insecure-registry: the in-cluster pull-through cache is plaintext HTTP
     # and network-fenced, and every fresh DinD daemon needs the flag.
-    - name: docker:27.5.1-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce
+    - name: docker:29.9.2-dind@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
       # Required: a digest-bearing image name must still answer at the `docker`
       # host DOCKER_HOST points at.
       alias: docker

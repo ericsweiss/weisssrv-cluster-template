@@ -13,8 +13,8 @@ components:
   # write-capable DNS token.
   - ../../../components/netpol-egress-public
 
-# The CronJob's program. It lives beside this kustomization because kustomize
-# refuses generator sources outside the kustomization root.
+# The CronJob's program, vendored from weisssrv-lib. It lives beside this
+# kustomization because kustomize refuses generator sources outside its root.
 configMapGenerator:
   - name: cloudflare-ddns-script
     files:

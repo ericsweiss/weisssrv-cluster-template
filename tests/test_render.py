@@ -2846,22 +2846,26 @@ def test_ci_doc_stages_table_names_every_local_job(cluster):
     )
 
 
-def test_ansible_version_variable_matches_the_deploy_base_input(cluster):
-    """`variables.ANSIBLE_VERSION` is what check-deploy-playbooks pip-installs and the
-    `ansible_version` include input is what .deploy-base does. Includes resolve
-    before job variables exist, so the input repeats the literal.
+@pytest.mark.parametrize("variable,input_name", [
+    ("ANSIBLE_VERSION", "ansible_version"),
+    ("ANSIBLE_CORE_VERSION", "ansible_core_version"),
+])
+def test_ansible_version_variable_matches_the_deploy_base_input(cluster, variable, input_name):
+    """The variable is what check-deploy-playbooks pip-installs and the include
+    input is what .deploy-base does. Includes resolve before job variables
+    exist, so the input repeats the literal.
     """
     ci = _load_ci(cluster.path / ".gitlab-ci.yml")
-    declared = (ci.get("variables") or {}).get("ANSIBLE_VERSION")
-    assert declared, "the generated pipeline declares no ANSIBLE_VERSION variable"
+    declared = (ci.get("variables") or {}).get(variable)
+    assert declared, f"the generated pipeline declares no {variable} variable"
     inputs = [
-        entry["inputs"]["ansible_version"]
+        entry["inputs"][input_name]
         for entry in ci.get("include") or []
-        if isinstance(entry, dict) and "ansible_version" in (entry.get("inputs") or {})
+        if isinstance(entry, dict) and input_name in (entry.get("inputs") or {})
     ]
-    assert inputs, "no include passes an ansible_version input — the pair this gate holds is gone"
+    assert inputs, f"no include passes an {input_name} input — the pair this gate holds is gone"
     assert all(str(value) == str(declared) for value in inputs), (
-        f"ANSIBLE_VERSION is {declared!r} but an include pins {inputs!r}; check-deploy-playbooks "
+        f"{variable} is {declared!r} but an include pins {inputs!r}; check-deploy-playbooks "
         "and .deploy-base would install different Ansibles"
     )
 

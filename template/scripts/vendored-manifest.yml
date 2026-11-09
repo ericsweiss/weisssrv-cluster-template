@@ -16,6 +16,9 @@ vendored:
   # Imported by gitlab-runner-reaper.py from the CronJob's mounted ConfigMap.
   - lib: kubernetes/reapers/kube_reaper.py
     consumer: kubernetes/apps/gitlab-runner-reaper/kube_reaper.py
+  # Mounted by the cloudflare-ddns CronJob's configMapGenerator.
+  - lib: kubernetes/ddns/cloudflare-ddns.py
+    consumer: kubernetes/infrastructure/configs/cloudflare-ddns/cloudflare-ddns.py
   - scripts/check-alertmanager-behaviour.py
   - scripts/check-backup-artifact-apps.py
   - scripts/check-cluster-invariants.py
@@ -34,6 +37,7 @@ vendored:
   - scripts/check-image-gc-threshold.py
   - scripts/check-internal-route-allowlist.py
   - scripts/check-kubectl-version-pin.py
+  - scripts/check-kustomization.py
   - scripts/check-lib-pins.py
   - scripts/check-netpol-except-parity.py
   - scripts/check-nfs-tls.py

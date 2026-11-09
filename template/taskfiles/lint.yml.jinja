@@ -186,7 +186,7 @@ tasks:
     preconditions:
       - *needs_pyyaml
     cmds:
-      - python3 scripts/check-kustomization-coverage.py kubernetes/
+      - python3 scripts/check-kustomization.py kubernetes --walk --min-kustomizations 20 --exempt scripts/kustomization-exempt.yaml
 
   skill-refs:
     desc: Assert every repo path the cluster-development skill cites still exists

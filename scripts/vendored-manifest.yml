@@ -32,6 +32,9 @@ vendored:
   # Imported by gitlab-runner-reaper.py from the CronJob's mounted ConfigMap.
   - lib: kubernetes/reapers/kube_reaper.py
     consumer: template/kubernetes/apps/{% if git_backend == 'gitlab_selfhosted' %}gitlab-runner-reaper{% endif %}/kube_reaper.py
+  # Mounted by the cloudflare-ddns CronJob's configMapGenerator.
+  - lib: kubernetes/ddns/cloudflare-ddns.py
+    consumer: template/kubernetes/infrastructure/configs/{% if dns_backend == 'cloudflare' %}cloudflare-ddns{% endif %}/cloudflare-ddns.py
   - lib: scripts/check-alertmanager-behaviour.py
     consumer: template/scripts/check-alertmanager-behaviour.py
   - lib: scripts/check-backup-artifact-apps.py
@@ -71,6 +74,8 @@ vendored:
     consumer: template/scripts/check-internal-route-allowlist.py
   - lib: scripts/check-kubectl-version-pin.py
     consumer: template/scripts/check-kubectl-version-pin.py
+  - lib: scripts/check-kustomization.py
+    consumer: template/scripts/check-kustomization.py
   - lib: scripts/check-lib-pins.py
     consumer: template/scripts/check-lib-pins.py
   - lib: scripts/check-netpol-except-parity.py

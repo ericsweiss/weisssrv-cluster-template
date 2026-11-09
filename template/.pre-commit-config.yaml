@@ -29,6 +29,7 @@ repos:
           ansible/molecule/tasks/prepare-apt-disable\.yml |
           ansible/molecule/tasks/prepare-base\.yml |
           kubernetes/apps/gitlab-runner-reaper/kube_reaper\.py |
+          kubernetes/infrastructure/configs/cloudflare-ddns/cloudflare-ddns\.py |
           lint/yamllint-relaxed\.yml | scripts/(
           check-alertmanager-behaviour\.py | check-backup-artifact-apps\.py |
           check-ci-include-job-names\.py |
@@ -38,7 +39,7 @@ repos:
           check-deploy-preflight\.py | check-doc-links\.py |
           check-ephemeral-storage-cap\.py | check-guest-endpoint-parity\.py |
           check-helm-repo-parity\.py | check-image-gc-threshold\.py |
-          check-internal-route-allowlist\.py |
+          check-internal-route-allowlist\.py | check-kustomization\.py |
           check-hpa-vpa-invariant\.py | check-kubectl-version-pin\.py |
           check-lib-pins\.py |
           check-netpol-except-parity\.py | check-nfs-tls\.py | check-pvc-storageclass\.py |
@@ -100,10 +101,10 @@ repos:
         always_run: true
       - id: kustomization-coverage
         name: every manifest is listed, every kustomization lists one
-        entry: python scripts/check-kustomization-coverage.py kubernetes/
+        entry: python scripts/check-kustomization.py kubernetes --walk --min-kustomizations 20 --exempt scripts/kustomization-exempt.yaml
         language: python
         additional_dependencies: ["pyyaml==6.0.3"]
-        files: ^(kubernetes/|scripts/check-kustomization-coverage\.py)
+        files: ^(kubernetes/|scripts/check-kustomization\.py|scripts/kustomization-exempt\.yaml)
         pass_filenames: false
         always_run: true
       - id: flux-version-pin

@@ -136,13 +136,6 @@ spec:
                 - instance
                 - component
                 - chip_name
-            - source_matchers:
-                - alertname="SATADriveTempCritical"
-              target_matchers:
-                - alertname="SATADriveTempWarning"
-              equal:
-                - instance
-                - chip
             # The 75C step is null-routed, so this pair only tidies the UI.
             - source_matchers:
                 - alertname="NVMeDriveTempCritical"
@@ -159,12 +152,12 @@ spec:
               equal:
                 - instance
                 - pool
-            # One remedy, four alerts: a slab leak eats RAM and keeps swap-clean
+            # One remedy, three alerts: a slab leak eats RAM and keeps swap-clean
             # from completing. HostMemAvailableCritical is never on this list.
             - source_matchers:
                 - alertname="HostSlabLeakSuspected"
               target_matchers:
-                - alertname=~"HostMemAvailableLow|NASSwapNotClearing|SwapCleanFailed|SwapCleanStoppedGuests"
+                - alertname=~"HostMemAvailableLow|NASSwapNotClearing|SwapCleanFailed"
               equal:
                 - instance
 {% endraw %}{% endif %}{% if tenant_storage %}{% raw %}            - source_matchers:
@@ -199,7 +192,7 @@ spec:
                 - alertname="InfoInhibitor"
               target_matchers:
                 - severity="info"
-                - alertname!~"AlertmanagerNotificationsDropping{% endraw %}{% if storage_backend == 'zfs' %}|SwapCleanStoppedGuests{% endif %}{% raw %}"
+                - alertname!~"AlertmanagerNotificationsDropping"
               equal:
                 - namespace
             # While a node is down, NodeOutageStormControl suppresses per-pod

@@ -44,6 +44,10 @@ spec:
                 - python3
                 - /opt/ddns/cloudflare-ddns.py
               env:
+                # Unbuffered stdout keeps each record's context lines in order with
+                # the ERROR lines on stderr in the pod log.
+                - name: PYTHONUNBUFFERED
+                  value: "1"
                 - name: DDNS_ZONE
                   value: "${cluster_external_domain}"
                 - name: DDNS_RECORDS

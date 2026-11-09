@@ -49,6 +49,7 @@ def ci_variables() -> dict:
 
 @pytest.mark.parametrize("package,variable", [
     ("ansible", "ANSIBLE_VERSION"),
+    ("ansible-core", "ANSIBLE_CORE_VERSION"),
     ("pyyaml", "PYYAML_VERSION"),
 ])
 def test_the_requirements_pin_matches_the_ci_variable(package, variable):

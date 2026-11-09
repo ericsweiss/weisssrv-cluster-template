@@ -345,7 +345,7 @@ coerce_int() {
 
 # classify_regular <pve_reachable> <k3s_api_ok> <k3s_ready> <k3s_total>
 #   <hosts_ok> <hosts_total> <coverage_pct> <coverage_floor> <flux_not_ready>
-#   <zfs_degraded> <sections_ok> <sections_total> <alerts_firing>
+#   <zfs_degraded> <gitlab_ok> <sections_ok> <sections_total> <alerts_firing>
 
 # FAILED: no Proxmox host reachable, K3s API up with zero nodes Ready, or host
 # coverage below the floor. OK: every regular_failing_predicates entry holds.
@@ -364,14 +364,14 @@ classify_regular() {
     fi
 }
 
-# regular_failing_predicates — same 13 args as classify_regular. Prints the
-# space-separated names (with values) of the OK predicates that do NOT hold, so
-# the console summary names its cause. Empty output == all-OK.
+# regular_failing_predicates — same 14 args as classify_regular. Prints the OK
+# predicates that do NOT hold, with values; empty output == all-OK. gitlab_ok is
+# 1 healthy and 0 unhealthy; a cluster without GitLab passes 1.
 regular_failing_predicates() {
     local pve_reachable="$1" k3s_api_ok="$2" k3s_ready="$3" k3s_total="$4"
     local hosts_ok="$5" hosts_total="$6" coverage_pct="$7" coverage_floor="$8"
-    local flux_not_ready="$9" zfs_degraded="${10}"
-    local sections_ok="${11}" sections_total="${12}" alerts_firing="${13}"
+    local flux_not_ready="$9" zfs_degraded="${10}" gitlab_ok="${11}"
+    local sections_ok="${12}" sections_total="${13}" alerts_firing="${14}"
     local out=""
     _rfp_add() { out="${out:+$out }$1"; }
     [ "$pve_reachable" -gt 0 ] || _rfp_add "pve_reachable=0"
@@ -383,28 +383,31 @@ regular_failing_predicates() {
         || _rfp_add "k3s_nodes=${k3s_ready}/${k3s_total}"
     [ "$flux_not_ready" -eq 0 ] || _rfp_add "flux_not_ready=${flux_not_ready}"
     [ "$zfs_degraded" -eq 0 ] || _rfp_add "zfs_degraded=${zfs_degraded}"
+    [ "$gitlab_ok" -eq 1 ] || _rfp_add "gitlab=unhealthy"
     [ "$alerts_firing" -eq 0 ] || _rfp_add "alerts_firing=${alerts_firing}"
     unset -f _rfp_add
     echo "$out"
 }
 
 # classify_json <pve_up> <pve_total> <k3s_api_ok> <k3s_ready> <k3s_total>
-#   <flux_not_ready> <zfs_degraded> <alerts_firing>
+#   <flux_not_ready> <zfs_degraded> <gitlab_ok> <alerts_firing>
+#   gitlab_ok is 1 healthy and 0 unhealthy; a cluster without GitLab passes 1.
 
 # The --json verdict: healthy means full Proxmox coverage, no Flux or ZFS
-# imperfection and nothing firing; degraded means any imperfection with core
-# infra up; catastrophic is neither. Unknown arrives as 1 and counts as firing.
+# imperfection, GitLab healthy and nothing firing; degraded means any imperfection
+# with core infra up; catastrophic is neither. Unknown arrives as 1 and so fires.
 classify_json() {
     local pve_up="$1" pve_total="$2" k3s_api_ok="$3" k3s_ready="$4" k3s_total="$5"
-    local flux_not_ready="$6" zfs_degraded="$7" alerts_firing="${8:-0}"
+    local flux_not_ready="$6" zfs_degraded="$7" gitlab_ok="$8" alerts_firing="${9:-0}"
     if [ "$pve_up" -gt 0 ] && [ "$pve_up" -eq "$pve_total" ] \
        && [ "$k3s_total" -gt 0 ] && [ "$k3s_ready" -eq "$k3s_total" ] \
        && [ "$flux_not_ready" -eq 0 ] && [ "$zfs_degraded" -eq 0 ] \
-       && [ "$alerts_firing" -eq 0 ]; then
+       && [ "$gitlab_ok" -eq 1 ] && [ "$alerts_firing" -eq 0 ]; then
         echo "healthy"
     elif { [ "$pve_up" -lt "$pve_total" ] || [ "$k3s_ready" -lt "$k3s_total" ] \
            || [ "$k3s_api_ok" != true ] || [ "$flux_not_ready" -gt 0 ] \
-           || [ "$zfs_degraded" -gt 0 ] || [ "$alerts_firing" -gt 0 ]; } \
+           || [ "$zfs_degraded" -gt 0 ] || [ "$gitlab_ok" -eq 0 ] \
+           || [ "$alerts_firing" -gt 0 ]; } \
          && [ "$pve_up" -gt 0 ] \
          && { [ "$k3s_api_ok" != true ] || [ "$k3s_ready" -gt 0 ]; }; then
         echo "degraded"

@@ -60,6 +60,7 @@ the diff.
 | `taskfile_tree.py` | `scripts/test_taskfile_tree.py` — flattens the `Taskfile.yml` `includes:` tree into one `{name: definition}` map with `- task:` references fully qualified, so a suite that walks task names sees the namespace files too |
 | `check-ephemeral-storage-cap.py` | `scripts/flux-corpus-gates.sh`, so both `task flux:lint` and the CI flux-lint job run it — a container whose `ephemeral-storage` limit is below the sized emptyDirs it mounts, which the kubelet evicts before the volume it sized ever fills |
 | `check-kubectl-version-pin.py` | `task lint:kubectl-version-pin` and the CI kubectl-version-pin job — the CI kubectl pin is within Kubernetes' supported one-minor skew of `k3s_version` |
+| `check-kustomization.py` | `task lint:kustomization-coverage` and the CI kustomization-coverage job — every manifest beside a kustomization is listed by it, every listed name is on disk, no listed manifest is empty, and no kustomization renders nothing |
 | `check-alertmanager-behaviour.py` | `task lint:prometheus-config` and the CI prometheus-config-lint job (first shard) — resolves every declared route case with `amtool` and holds each inhibit pair bound, which `amtool check-config` cannot see. Site data: `scripts/alertmanager-behaviour.yaml` |
 | `check-backup-artifact-apps.py` | `scripts/flux-corpus-gates.sh`, so both `task flux:lint` and the CI flux-lint job run it — pairs `nas_storage_backup_artifact_apps` (group_vars/nas.yml) against the `BackupArtifactStale` arms in the kube-prometheus-stack release |
 | `generate-versions-configmap.py` | `task flux:sync-versions` and its CI drift gate |
@@ -133,7 +134,6 @@ Not vendored at the pinned ref — this repository owns them.
 |---|---|
 | `audit-tenant-admission.sh` | an operator, at rollout, before each tenant onboarding and on a `copier update` branch that changes the tenant policies, plus `tests/test_audit_tenant_admission.py` — lists every object in a `fluxcd.io/tenant` namespace that the tenant admission policies would refuse. The policies act on CREATE and UPDATE only, so they never revisit what exists. The "Audit what predates the policies" item in `kubernetes/clusters/<cluster_name>/tenants/README.md` names each check. Exit 1 while any remain |
 | `flux-rotate-db-password.sh` | `task flux:rotate-db-password` — an app's in-cluster Postgres role passwords rotated end to end: the 1Password item first, `ALTER USER` in the database pod, then `task flux:rotate-secret` for the refresh and restarts |
-| `check-kustomization-coverage.py` | `task lint:kustomization-coverage`, the CI kustomization-coverage job — every manifest beside a `kustomization.yaml` is listed in it and every `kustomization.yaml` names something, with an `EXEMPT` map for the files applied by hand |
 | `check-cluster-literals.py` | `task lint:cluster-literals`, the CI cluster-literals job — the substituted trees spell cluster identity as `${cluster_*}` placeholders, and cluster-config agrees with the Ansible inventory |
 | `flux-corpus-gates.sh` | `task flux:lint` and the CI flux-lint job (`extra_validation`) — the one list of gates that read the whole rendered corpus |
 | `check-grafana-sidecar-init.py` | `task flux:lint` and the CI flux-lint job (`extra_validation`), plus `tests/test_check_grafana_sidecar_init.py` — every k8s-sidecar container the Grafana chart renders runs the `METHOD` its position requires: `LIST` in an init container, so it lists once and exits instead of hanging the pod in PodInitializing, and `WATCH` in a long-running one, where `LIST` exits at once and restarts in a loop |
@@ -167,6 +167,7 @@ Not vendored at the pinned ref — this repository owns them.
 | `helm-values-releases.yaml` | `validate-helm-values.py` | Which HelmReleases are worth a `helm template` round-trip |
 | `deploy-coverage.conf` | `check-deploy-coverage.sh` | Playbooks deliberately not wired to a deploy job, each with a rationale |
 | `netpol-except.yaml` | `check-netpol-except-parity.py` | Egress rules that deliberately carry no peers, each with a rationale |
+| `kustomization-exempt.yaml` | `check-kustomization.py` | Manifests no kustomization lists because they are applied by hand, each with a reason |
 | `alertmanager-behaviour.yaml` | `check-alertmanager-behaviour.py` | The receiver each labelled alert must reach, the alertnames the chart ships rather than this repository, and the escalation pairs |
 | `lib-ref-sites.yml` | `check-lib-pins.py` | Every file beyond `.gitlab-ci.yml` and `ansible/requirements.yml` that repeats the library release tag — one entry per Terraform root. An entry matching no ref fails |
 | `comment-length.yaml` | `check-comment-length.py` | Scan scope, and the vendored copies the gate skips because their comments are the library's |

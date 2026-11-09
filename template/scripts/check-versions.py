@@ -7,6 +7,7 @@ or unwritable, 2 on error. Contract: weisssrv-lib docs/SCRIPTS.md.
 
 import argparse
 import gzip
+import importlib.util
 import hashlib
 import http.client
 import json
@@ -252,10 +253,15 @@ def _top_level_pins(text: str) -> dict:
     return pins
 
 
-def stale_partner_pins(base_text: str, head_text: str) -> list[str]:
+def stale_partner_pins(
+    base_text: str,
+    head_text: str,
+    checksum_ok: Optional[Callable[[dict], bool]] = None,
+) -> list[str]:
     """Registry pins whose value moved while a coupled partner stayed put.
 
-    A coupled pin, or a partner, missing from the head revision is reported too.
+    A missing coupled pin or partner is reported too. An unmoved `checksum_var`
+    is not stale when `checksum_ok(entry)` says the artefact still hashes to it.
     """
     base = _top_level_pins(base_text)
     head = _top_level_pins(head_text)
@@ -276,6 +282,9 @@ def stale_partner_pins(base_text: str, head_text: str) -> list[str]:
         if var not in base or base[var] == head[var]:
             continue
         unmoved = [c for c in coupled if c in base and c in head and base[c] == head[c]]
+        checksum = svc.get("checksum_var")
+        if checksum in unmoved and checksum_ok is not None and checksum_ok(svc):
+            unmoved.remove(checksum)
         if unmoved:
             stale.append(
                 f"{var}: {base[var]} -> {head[var]}, but {', '.join(unmoved)} "
@@ -346,6 +355,20 @@ def write_companion_pins(result: "ServiceVersion") -> list:
     return written
 
 
+def _checksum_still_matches(entry: dict) -> bool:
+    """check-version-checksums.py's rule for one entry: the pinned checksum hashes
+    the artefact at the pinned version. A fetch or config error counts as stale."""
+    spec = importlib.util.spec_from_file_location(
+        "check_version_checksums", Path(__file__).with_name("check-version-checksums.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return not module.violations([entry], module.yaml.safe_load(VARS_FILE.read_text()))
+    except (module.ConfigError, module.yaml.YAMLError, OSError, ValueError):
+        return False
+
+
 def _run_check_partner_pins(base_ref: str) -> None:
     """--check-partner-pins: fail while a coupled pin's partner is stale."""
     try:
@@ -364,7 +387,7 @@ def _run_check_partner_pins(base_ref: str) -> None:
         )
         sys.exit(2)
 
-    stale = stale_partner_pins(proc.stdout, VARS_FILE.read_text())
+    stale = stale_partner_pins(proc.stdout, VARS_FILE.read_text(), _checksum_still_matches)
     if stale:
         print(
             f"ERROR: {len(stale)} version pin(s) moved without their paired value:",

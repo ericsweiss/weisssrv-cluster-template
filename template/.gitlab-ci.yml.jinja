@@ -139,8 +139,11 @@ variables:
   CHECK_DOC_LINKS_IGNORE: "docs/[A-Z]* terraform/state/* */tfplan */check-vendored-copies.py"
   # Single source for the Ansible the local jobs pip-install. `include:` inputs
   # cannot read it (they resolve before this block exists), so the deploy-base
-  # entry below repeats the literal — bump the two together.
+  # entry below repeats it and ANSIBLE_CORE_VERSION — bump each pair together.
   ANSIBLE_VERSION: "14.5.0"
+  # ansible accepts any patch release of its core line; this holds the one the
+  # roles are tested on, installed beside it everywhere ansible is pip-installed.
+  ANSIBLE_CORE_VERSION: "2.21.5"
   # kustomize for the cluster-verify server-side dry-run, pinned with the
   # sha256 the script verifies the downloaded tarball against. Same pin as
   # scripts/ci-fetch-tools.py, so one kustomize version runs in every job.
@@ -270,10 +273,10 @@ include:
       tags: ["{{ runner_tag }}"]
       image: python:3.14
       # jq: test_collect_state_lib.py drives the collector's jq filters.
-      # ansible-core: the core line requirements.txt's `ansible==` resolves to,
-      # so a suite that reaches for ansible runs the deployed version.
+      # ansible via the ansible pin, so a suite that reaches for ansible runs the
+      # deployed version.
       apt_packages: "jq"
-      pip_packages: "ansible-core==2.21.5"
+      pip_packages: "ansible==$ANSIBLE_VERSION ansible-core==$ANSIBLE_CORE_VERSION"
       test_dir: "tests scripts"
       setup_command: 'python3 scripts/ci-fetch-tools.py jq kustomize kubeconform shellcheck && mkdir -p "$(dirname "$WEISSSRV_LIB_PATH")" && git clone --depth 1 --branch "$WEISSSRV_LIB_REF" "https://${CI_SERVER_HOST}/{{ lib_project }}.git" "$WEISSSRV_LIB_PATH"'
       changes:
@@ -569,6 +572,7 @@ include:
       tags: ["{{ runner_tag }}"]
       op_vault: "{{ secret_vault() }}"
       ansible_version: "14.5.0"
+      ansible_core_version: "2.21.5"
 
   - project: {{ lib_project }}
     ref: $[[ inputs.lib_ref ]]
@@ -819,14 +823,15 @@ cluster-literals:
 kustomization-coverage:
   extends: .pyyaml-gate
   script:
-    - python3 scripts/check-kustomization-coverage.py kubernetes/
+    - python3 scripts/check-kustomization.py kubernetes --walk --min-kustomizations 20 --exempt scripts/kustomization-exempt.yaml
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       changes: &kustomization_coverage_paths
         - "kubernetes/**/*"
-        - "scripts/check-kustomization-coverage.py"
+        - "scripts/check-kustomization.py"
+        - "scripts/kustomization-exempt.yaml"
         - ".gitlab-ci.yml"
     - if: '$CI_COMMIT_BRANCH == "main"'
       changes: *kustomization_coverage_paths
@@ -1049,7 +1054,7 @@ check-deploy-playbooks:
     # console scripts it installs (ansible-galaxy, ansible-playbook) on PATH,
     # which a --user install alone does not.
     - export PATH="$(python -m site --user-base)/bin:$PATH"
-    - pip install --user --quiet "ansible==$ANSIBLE_VERSION" "pyyaml==$PYYAML_VERSION"
+    - pip install --user --quiet "ansible==$ANSIBLE_VERSION" "ansible-core==$ANSIBLE_CORE_VERSION" "pyyaml==$PYYAML_VERSION"
     # --force: galaxy skips an already-installed collection, so a warm cache
     # would preflight against the previous release's roles after a pin bump.
     - for i in 1 2 3; do ansible-galaxy collection install --force -r ansible/requirements.yml && break; [ "$i" = 3 ] && exit 1; echo "galaxy install failed (attempt $i) - retrying in 20s"; sleep 20; done
@@ -1090,7 +1095,7 @@ check-role-inputs:
   before_script:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
     - export PATH="$(python -m site --user-base)/bin:$PATH"
-    - pip install --user --quiet "ansible==$ANSIBLE_VERSION" "pyyaml==$PYYAML_VERSION"
+    - pip install --user --quiet "ansible==$ANSIBLE_VERSION" "ansible-core==$ANSIBLE_CORE_VERSION" "pyyaml==$PYYAML_VERSION"
     - ansible-galaxy collection install --force -r ansible/requirements.yml -p .ansible-home/collections
   script:
     # --allow-empty: a starter cluster composes no opt-in role, and an arm with

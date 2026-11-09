@@ -477,3 +477,16 @@ class TestFluxCallSitesCoerce:
         assert 'coerce_int "$ALERTS_FIRING_REG" 1' in self.SRC
         assert 'coerce_int "$ALERTS_FIRING" 0' not in self.SRC
         assert 'coerce_int "$ALERTS_FIRING_REG" 0' not in self.SRC
+
+
+class TestGitlabOkCallSites:
+    """gitlab_ok sits after zfs_degraded in both classifiers; a call that drops
+    it shifts every later argument into the wrong slot."""
+
+    SRC = _code(COLLECT_STATE.read_text().splitlines())
+
+    def test_the_json_classifier_reads_gitlab_ok(self):
+        assert '"$ZFS_DEGRADED" "$GITLAB_OK_NUM"' in self.SRC
+
+    def test_both_regular_classifiers_read_gitlab_ok(self):
+        assert self.SRC.count('"$ZFS_DEGRADED_REG" "$GITLAB_OK_REG"') == 2

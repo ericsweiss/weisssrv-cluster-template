@@ -89,10 +89,12 @@ mask_flux_escapes() {
 }
 
 # Fails, naming the lines, on a `${` Flux's envsubst mishandles: `${1}` is eaten
-# silently in-cluster and `${ x}` fails the parse.
+# silently in-cluster, and `${ x}` or a `${` still open at the line end fails the
+# parse, since Flux refuses a reference across a line and kustomize folds at spaces.
 check_malformed_refs() {
     local where="$1" scan="$2" malformed
-    malformed=$(printf '%s\n' "$scan" | grep -nE '\$\{[^A-Za-z_]' || true)
+    malformed=$({ printf '%s\n' "$scan" | grep -nE '\$\{[^A-Za-z_]'
+        printf '%s\n' "$scan" | grep -nE '\$\{[^}]*$'; } | sort -t: -k1,1n -u || true)
     [ -z "$malformed" ] && return 0
     echo "ERROR: $where renders a \${ sequence Flux's envsubst mishandles (escape as \$\${ or assemble at runtime):"
     printf '%s\n' "$malformed" | head -5 | sed 's/^/  /'
