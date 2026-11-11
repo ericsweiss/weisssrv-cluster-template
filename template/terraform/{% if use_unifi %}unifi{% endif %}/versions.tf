@@ -12,7 +12,7 @@ terraform {
     unifi = {
       source = "ubiquiti-community/unifi"
       # Pre-1.0, pinned to the patch line (../README.md).
-      version = "~> 0.55.0"
+      version = "~> 0.65.0"
     }
   }
 }
