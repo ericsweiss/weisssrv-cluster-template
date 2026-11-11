@@ -408,6 +408,13 @@ tasks:
     cmds:
       - python3 scripts/check-upstream-rule-mirror.py
 
+  cloudflare-ips:
+    desc: Assert Traefik's trusted proxy ranges equal Cloudflare's published lists (network)
+    preconditions:
+      - *needs_pyyaml
+    cmds:
+      - python3 scripts/check-cloudflare-ips.py
+
   comment-length:
     desc: Fail a comment block over three content lines (eight when it opens "CRITICAL:")
     preconditions:

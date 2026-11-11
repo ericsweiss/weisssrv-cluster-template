@@ -226,6 +226,7 @@ def test_an_undeclared_baseline_file_is_caught(tmp_path):
 # holds it to nothing.
 TEMPLATE_OWNED = {
     "template/scripts/check-ansible-service-names.py",
+    "template/scripts/check-cloudflare-ips.py",
     "template/scripts/check-cluster-literals.py.jinja",
     "template/scripts/check-collection-pin-trigger.py",
     "template/scripts/check-deploy-host-coverage.py",
@@ -241,6 +242,7 @@ TEMPLATE_OWNED = {
     # The suites that ship into the generated repository and run there.
     "template/scripts/test_check_ansible_service_names.py",
     "template/scripts/test_check_ci_pin_parity.py",
+    "template/scripts/test_check_cloudflare_ips.py",
     "template/scripts/test_check_collection_pin_trigger.py",
     "template/scripts/test_check_deploy_host_coverage.py",
     "template/scripts/test_check_flux_version_pin.py",

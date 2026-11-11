@@ -36,6 +36,7 @@ it, so a stale row is worse than a missing one.
 |---|---|---|
 | Edge to origin | Confirm | Depends on the DNS and proxy answers. Record whether the public edge re-encrypts to the origin or terminates and forwards in the clear |
 | Client to ingress | Yes | Traefik terminates TLS for every published hostname on both the public and the internal VIP |
+| Client address behind the edge | n/a | The `websecure` entrypoint trusts `X-Forwarded-*` only from Cloudflare's published ranges (`forwardedHeaders.trustedIPs`; `check-cloudflare-ips.py` reds a drift), so apps see the visitor's address on proxied names and a direct client's own address otherwise |
 | Pod to pod | Mixed | `k3s_flannel_backend` is `wireguard-native`, which encrypts **cross-node** traffic only. Two pods on the same node talk over the local bridge in the clear |
 | Ingress to VM backends | Confirm | A route that fronts a guest leaves the cluster. Record whether each backend speaks TLS or plain HTTP on the LAN |
 | NFS | Yes | The exports set `xprtsec: tls` and reject plaintext. Clients mount **by hostname**: the wildcard certificate has no address SAN, so an IP mount fails the handshake. List any documented plaintext exception by host |

@@ -817,6 +817,25 @@ cluster-literals:
       changes: *cluster_literals_paths
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
+# Cloudflare's edge ranges move a few times a year; a stale trustedIPs list
+# drops the real client address from every proxied request. Mirrors
+# `task lint:cloudflare-ips`.
+cloudflare-ips:
+  extends: .pyyaml-gate
+  script:
+    - python3 scripts/check-cloudflare-ips.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: &cloudflare_ips_paths
+        - "kubernetes/infrastructure/controllers/traefik/release.yaml"
+        - "scripts/check-cloudflare-ips.py"
+        - ".gitlab-ci.yml"
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      changes: *cloudflare_ips_paths
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+
 # A manifest no kustomization.yaml lists is invisible to kubeconform, the corpus
 # gates and Flux; an emptied list prunes what it applied. Mirrors
 # `task lint:kustomization-coverage`.
@@ -1170,6 +1189,8 @@ validation-gate:
     - job: image-gc-threshold
       optional: true
     - job: cluster-literals
+      optional: true
+    - job: cloudflare-ips
       optional: true
     - job: prometheus-config-lint
       optional: true
