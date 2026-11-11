@@ -92,12 +92,9 @@ proxmox_firewall_admin_ts_cidrs: []
 # Host-network exporters Prometheus scrapes over the LAN. A new one without an
 # entry here is a permanently down target; sg-metrics covers the roles' own.
 proxmox_firewall_metrics_scrape_ports:
-  - port: 7472
+  - port: 9120
     sources: [k3s_nodes]
     comment: metallb speaker
-  - port: 7473
-    sources: [k3s_nodes]
-    comment: metallb speaker frr-metrics
 
 # Addresses that belong to an IPSet but are not inventory hosts.
 firewall_ipset_special_entries:
@@ -205,7 +202,7 @@ helm_chart_versions:
   cert_manager: "v1.21.3"
   external_dns: "1.23.0"
   external_secrets: "2.14.0"
-  metallb: "0.15.3"
+  metallb: "0.16.2"
   traefik: "42.3.1"
   # Owns the monitoring.coreos.com CRDs; bump in lockstep with
   # kube_prometheus_stack so the CRDs match the operator.

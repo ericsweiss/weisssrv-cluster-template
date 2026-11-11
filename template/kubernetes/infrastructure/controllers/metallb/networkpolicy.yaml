@@ -20,4 +20,4 @@ spec:
               kubernetes.io/metadata.name: observability
       ports:
         - protocol: TCP
-          port: 7472
+          port: 9120

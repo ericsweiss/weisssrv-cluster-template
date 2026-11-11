@@ -132,10 +132,10 @@ CONFIG = {
         ),
         _chart(
             "MetalLB", "metallb", "https://metallb.github.io/metallb", "metallb",
-            held=True,
             notes=(
-                "held at 0.15.x: 0.16.x carries an apiserver-flood regression "
-                "(metallb#3063). Confirm upstream has shipped the fix before unholding."
+                "L2-only: the release keeps frrk8s.enabled false, so a chart bump must "
+                "not reintroduce FRR; the speaker metrics port (9120) is a Proxmox "
+                "firewall scrape allow in all.yml."
             ),
         ),
         _chart("Traefik", "traefik", "https://traefik.github.io/charts", "traefik"),

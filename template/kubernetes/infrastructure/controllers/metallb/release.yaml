@@ -57,13 +57,10 @@ spec:
           memory: 64Mi
         limits:
           memory: 256Mi
-      frr:
-        resources:
-          requests:
-            cpu: 25m
-            memory: 64Mi
-          limits:
-            memory: 256Mi
+    # L2-only cluster: no BGP, so neither FRR mode runs and the speaker pod is
+    # the single speaker container.
+    frrk8s:
+      enabled: false
     controller:
       priorityClassName: platform
       nodeSelector: {}
@@ -92,29 +89,3 @@ spec:
                 name: placeholder
                 annotations:
                   helm.sh/resource-policy: keep
-          # The chart exposes no values key for the speaker's reloader and
-          # frr-metrics sidecars, so bound them here.
-          - target:
-              group: apps
-              version: v1
-              kind: DaemonSet
-              name: metallb-speaker
-            patch: |
-              apiVersion: apps/v1
-              kind: DaemonSet
-              metadata:
-                name: metallb-speaker
-              spec:
-                template:
-                  spec:
-                    containers:
-                      - name: reloader
-                        resources:
-                          limits:
-                            memory: 64Mi
-                      - name: frr-metrics
-                        resources:
-                          requests:
-                            memory: 64Mi
-                          limits:
-                            memory: 128Mi

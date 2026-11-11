@@ -37,19 +37,7 @@ spec:
     updateMode: Initial
   resourcePolicy:
     containerPolicies:
-      # A named entry takes precedence over "*", so each sidecar is held to the
-      # limit the release's postRenderer sets.
-      - containerName: reloader
-        minAllowed: {cpu: 10m, memory: 16Mi}
-        maxAllowed: {cpu: 100m, memory: 64Mi}
-        controlledResources: [cpu, memory]
-        controlledValues: RequestsOnly
-      - containerName: frr-metrics
-        minAllowed: {cpu: 10m, memory: 32Mi}
-        maxAllowed: {cpu: 100m, memory: 128Mi}
-        controlledResources: [cpu, memory]
-        controlledValues: RequestsOnly
-      # speaker and frr, each under a 256Mi limit.
+      # The speaker is the pod's only container (no FRR), under a 256Mi limit.
       - containerName: "*"
         minAllowed: {cpu: 10m, memory: 32Mi}
         maxAllowed: {cpu: 300m, memory: 256Mi}
