@@ -22,6 +22,12 @@ Fold every available bump into a revision you are already making rather than
 opening a revision just for bumps, and read the pipeline's version-check output
 rather than a local run, whose cache can be stale.
 
+A Docker Hub library image (`nextcloud`, `postgres`, `redis`, `valkey`) is
+rebuilt in place under the same tag, so pin it by digest beside the version and
+couple the two in `version-registry.py`; a release-tagged app image is pinned by
+tag alone. Traefik's Cloudflare trusted-proxy list is the same shape:
+`check-cloudflare-ips.py` reds the release when the published ranges move.
+
 ## Bumping the library pin
 
 The roles, CI job templates, Terraform modules and vendored gates all come from
