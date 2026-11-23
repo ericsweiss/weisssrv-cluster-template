@@ -1666,7 +1666,7 @@ spec:
             rules:
               # Replaces the chart's copy, which defaultRules.disabled turns off.
               # for: 15m rides out a transient receiver timeout.
-              # Taken from kube-prometheus-stack 93.1.0
+              # Taken from kube-prometheus-stack 93.9.0
               - alert: AlertmanagerClusterFailedToSendAlerts
                 expr: >-
                   min by (namespace, service, integration) (
